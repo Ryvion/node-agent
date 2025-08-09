@@ -1,0 +1,5 @@
+node-agent
+dist/
+bin/
+*.exe
+*.log
