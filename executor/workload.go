@@ -1,18 +1,22 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
-
-	"../storage"
 )
 
 type WorkloadType string
@@ -36,7 +40,7 @@ type WorkloadExecutor struct {
 	dockerClient    *client.Client
 	gpuCapabilities GPUCapabilities
 	activeJobs      map[string]*JobExecution
-	resultStorage   *storage.ResultStorage
+	hubBaseURL      string
 }
 
 type GPUCapabilities struct {
@@ -76,18 +80,11 @@ func NewWorkloadExecutor() (*WorkloadExecutor, error) {
 		return nil, fmt.Errorf("failed to create Docker client: %w", err)
 	}
 
-	// Initialize result storage (use hub upload as fallback if S3 not available)
-	resultStorage, err := storage.NewResultStorage("akatosh-results", "https://hub.akatosh.network")
-	if err != nil {
-		fmt.Printf("Warning: S3 storage unavailable, using hub upload: %v\n", err)
-		resultStorage = nil // Will use hub upload fallback
-	}
-
 	return &WorkloadExecutor{
 		dockerClient:    cli,
 		activeJobs:      make(map[string]*JobExecution),
 		gpuCapabilities: detectGPUCapabilities(),
-		resultStorage:   resultStorage,
+		hubBaseURL:      "https://hub.akatosh.network",
 	}, nil
 }
 
@@ -193,6 +190,18 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 			// Real GPU inference succeeded!
 			resultData, _ := json.Marshal(inferenceResult)
 
+			// Upload result if output file exists (check if Output contains a file path)
+			var uploadURL string
+			if inferenceResult.Output != "" && (filepath.Ext(inferenceResult.Output) != "" || len(inferenceResult.Output) > 100) {
+				// Assume it's a file path if it has an extension or is long (base64/binary data)
+				if url, uploadErr := e.uploadResultToHub(ctx, jobID, inferenceResult.Output, jobType); uploadErr == nil {
+					uploadURL = url
+					fmt.Printf("Result uploaded successfully: %s\n", uploadURL)
+				} else {
+					fmt.Printf("Warning: failed to upload result: %v\n", uploadErr)
+				}
+			}
+
 			result := &WorkResult{
 				JobID:      jobID,
 				ResultHash: hashOutput(resultData),
@@ -203,6 +212,14 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 					PowerUsage:     e.measurePowerUsage(),
 					TokensPerSec:   float64(inferenceResult.TokenCount) / inferenceResult.Duration,
 				},
+			}
+
+			// Add upload URL to result if available
+			if uploadURL != "" {
+				resultWithURL := make(map[string]interface{})
+				json.Unmarshal(resultData, &resultWithURL)
+				resultWithURL["upload_url"] = uploadURL
+				result.OutputData, _ = json.Marshal(resultWithURL)
 			}
 
 			delete(e.activeJobs, jobID)
@@ -584,4 +601,63 @@ type TrainingParams struct {
 	BatchSize    int     `json:"batch_size"`
 	LearningRate float64 `json:"learning_rate"`
 	MaxSteps     int     `json:"max_steps"`
+}
+
+// Upload result file to hub
+func (e *WorkloadExecutor) uploadResultToHub(ctx context.Context, jobID, resultPath, resultType string) (string, error) {
+	if _, err := os.Stat(resultPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("result file not found: %s", resultPath)
+	}
+
+	file, err := os.Open(resultPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open result file: %w", err)
+	}
+	defer file.Close()
+
+	// Create multipart form
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// Add job ID and type fields
+	writer.WriteField("job_id", jobID)
+	writer.WriteField("type", resultType)
+
+	// Add file field
+	part, err := writer.CreateFormFile("result", filepath.Base(resultPath))
+	if err != nil {
+		return "", fmt.Errorf("failed to create form file: %w", err)
+	}
+
+	_, err = io.Copy(part, file)
+	if err != nil {
+		return "", fmt.Errorf("failed to copy file to form: %w", err)
+	}
+
+	writer.Close()
+
+	// Create HTTP request
+	uploadURL := fmt.Sprintf("%s/api/results/upload", e.hubBaseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, &buf)
+	if err != nil {
+		return "", fmt.Errorf("failed to create upload request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	// Send request
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Return the uploaded file URL
+	return fmt.Sprintf("%s/api/results/%s", e.hubBaseURL, jobID), nil
 }
