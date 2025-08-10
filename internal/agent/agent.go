@@ -55,6 +55,18 @@ func (a *Agent) RegisterWithReferral(referral string) error {
     return nil
 }
 
+// CreateReferral requests a referral code from the hub for this node.
+func (a *Agent) CreateReferral() (string, error) {
+    // Signature over sha256("AKT1|referral|" + hex(pubkey))
+    msg := sha256.Sum256([]byte("AKT1|referral|" + hex.EncodeToString(a.PubKey)))
+    sig := ed25519.Sign(a.PrivKey, msg[:])
+    var out struct{ Code string `json:"code"` }
+    body := map[string]any{"pubkey": []byte(a.PubKey), "signature": sig}
+    if err := postJSON(a.HubBaseURL+"/api/v1/node/referral/create", body, &out); err != nil { return "", err }
+    if out.Code == "" { return "", fmt.Errorf("no code returned") }
+    return out.Code, nil
+}
+
 func (a *Agent) HeartbeatOnce() error {
     m := metrics.Sample()
     hbMsg := heartbeatMessage(a.PubKey, time.Now().UnixMilli(), m.CPUUtil, m.MemUtil, m.GPUUtil, m.PowerWatts)
