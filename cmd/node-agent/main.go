@@ -4,7 +4,9 @@ import (
     "crypto/ed25519"
     "encoding/hex"
     "flag"
+    "fmt"
     "log"
+    "net/http"
     "time"
 
     "github.com/akatosh/node-agent/internal/agent"
@@ -61,4 +63,4 @@ func main() {
     }
 }
 
-func itoa(n int) string { return string([]byte(fmt.Sprintf("%d", n))) }
+func itoa(n int) string { return fmt.Sprintf("%d", n) }
