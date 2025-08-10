@@ -29,7 +29,9 @@ type Agent struct {
     DeviceType string
 }
 
-func (a *Agent) Register() error {
+func (a *Agent) Register() error { return a.RegisterWithReferral("") }
+
+func (a *Agent) RegisterWithReferral(referral string) error {
     caps := metrics.Capabilities(a.DeviceType)
     // Build canonical message
     regMsg := registerMessage(a.PubKey, a.DeviceType, caps.GPUModel, caps.CPUCores, caps.RAMBytes, caps.VRAMBytes, caps.Sensors, caps.BandwidthMbps, 0, 0)
@@ -44,6 +46,7 @@ func (a *Agent) Register() error {
         "bandwidth_mbps":    caps.BandwidthMbps,
         "geohash_bucket":    uint64(0),
         "attestation_method": uint32(0),
+        "referral_code":     referral,
         "signature":         ed25519.Sign(a.PrivKey, regMsg),
     }
     if err := postJSON(a.HubBaseURL+"/api/v1/node/register", body, nil); err != nil { return err }

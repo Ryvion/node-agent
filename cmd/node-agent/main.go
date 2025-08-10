@@ -14,6 +14,7 @@ import (
 func main() {
     hub := flag.String("hub", "http://localhost:8080", "hub orchestrator base URL")
     deviceType := flag.String("type", "gpu", "device type: gpu|cpu|mobile|iot")
+    referral := flag.String("referral", "", "optional referral code")
     flag.Parse()
 
     pk, sk := crypto.LoadOrCreateKey()
@@ -25,7 +26,7 @@ func main() {
         PrivKey:    ed25519.PrivateKey(sk),
         DeviceType: *deviceType,
     }
-    if err := a.Register(); err != nil { log.Fatalf("register failed: %v", err) }
+    if err := a.RegisterWithReferral(*referral); err != nil { log.Fatalf("register failed: %v", err) }
     log.Printf("registered; starting heartbeats and work loop")
 
     ticker := time.NewTicker(10 * time.Second)
@@ -36,4 +37,3 @@ func main() {
         <-ticker.C
     }
 }
-
