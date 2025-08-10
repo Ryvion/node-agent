@@ -1,10 +1,9 @@
-//go:build ignore
-// +build ignore
-
 package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -12,7 +11,6 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
-	"github.com/akatosh/proto"
 )
 
 type WorkloadType string
@@ -24,6 +22,13 @@ const (
 	WorkloadTypeRendering    WorkloadType = "rendering"
 	WorkloadTypeMining       WorkloadType = "mining"
 )
+
+// Local WorkRequest type (simplified version of proto.WorkRequest)
+type WorkRequest struct {
+	JobId      string `json:"job_id"`
+	JobType    string `json:"job_type"`
+	Parameters []byte `json:"parameters"`
+}
 
 type WorkloadExecutor struct {
 	dockerClient    *client.Client
@@ -69,13 +74,13 @@ func NewWorkloadExecutor() (*WorkloadExecutor, error) {
 	}
 
 	return &WorkloadExecutor{
-		dockerClient: cli,
-		activeJobs:   make(map[string]*JobExecution),
+		dockerClient:    cli,
+		activeJobs:      make(map[string]*JobExecution),
 		gpuCapabilities: detectGPUCapabilities(),
 	}, nil
 }
 
-func (e *WorkloadExecutor) CanExecute(job *proto.WorkRequest) bool {
+func (e *WorkloadExecutor) CanExecute(job *WorkRequest) bool {
 	switch job.JobType {
 	case "inference":
 		return e.gpuCapabilities.VRAM >= 4096
@@ -88,7 +93,7 @@ func (e *WorkloadExecutor) CanExecute(job *proto.WorkRequest) bool {
 	}
 }
 
-func (e *WorkloadExecutor) ExecuteJob(ctx context.Context, job *proto.WorkRequest) (*WorkResult, error) {
+func (e *WorkloadExecutor) ExecuteJob(ctx context.Context, job *WorkRequest) (*WorkResult, error) {
 	execution := &JobExecution{
 		JobID:     job.JobId,
 		StartTime: time.Now(),
@@ -99,7 +104,7 @@ func (e *WorkloadExecutor) ExecuteJob(ctx context.Context, job *proto.WorkReques
 
 	switch WorkloadType(job.JobType) {
 	case WorkloadTypeInference:
-		return e.executeInference(ctx, job)
+		return e.executeInferenceJob(ctx, job)
 	case WorkloadTypeTranscoding:
 		return e.executeTranscoding(ctx, job)
 	case WorkloadTypeRendering:
@@ -109,7 +114,95 @@ func (e *WorkloadExecutor) ExecuteJob(ctx context.Context, job *proto.WorkReques
 	}
 }
 
-func (e *WorkloadExecutor) executeInference(ctx context.Context, job *proto.WorkRequest) (*WorkResult, error) {
+// Simplified execution method for node agent
+func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType, payloadURL string) (*WorkResult, error) {
+	// Use default parameters for simplified interface
+	params := InferenceParams{
+		ModelImage: "pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime",
+		ModelName:  "default",
+		BatchSize:  1,
+		InputData:  payloadURL,
+	}
+
+	config := &container.Config{
+		Image: params.ModelImage,
+		Env: []string{
+			fmt.Sprintf("MODEL_NAME=%s", params.ModelName),
+			fmt.Sprintf("BATCH_SIZE=%d", params.BatchSize),
+			"CUDA_VISIBLE_DEVICES=0",
+		},
+		Cmd: []string{
+			"python", "inference.py",
+			"--input", "/data/input.json",
+			"--output", "/data/output.json",
+		},
+	}
+
+	hostConfig := &container.HostConfig{
+		Resources: container.Resources{
+			DeviceRequests: []container.DeviceRequest{
+				{
+					Count:        1,
+					Capabilities: [][]string{{"gpu"}},
+				},
+			},
+			Memory:     8 * 1024 * 1024 * 1024, // 8GB
+			NanoCPUs:   4 * 1000000000,          // 4 CPUs
+		},
+		AutoRemove: true,
+	}
+
+	resp, err := e.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create container: %w", err)
+	}
+
+	e.activeJobs[jobID].ContainerID = resp.ID
+	e.activeJobs[jobID].Status = "running"
+
+	if err := e.dockerClient.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{}); err != nil {
+		return nil, fmt.Errorf("failed to start container: %w", err)
+	}
+
+	statusCh, errCh := e.dockerClient.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return nil, fmt.Errorf("container wait error: %w", err)
+		}
+	case status := <-statusCh:
+		if status.StatusCode != 0 {
+			return nil, fmt.Errorf("container exited with code %d", status.StatusCode)
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	output, err := e.getContainerOutput(ctx, resp.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := time.Since(e.activeJobs[jobID].StartTime)
+	
+	result := &WorkResult{
+		JobID:      jobID,
+		ResultHash: hashOutput(output),
+		OutputData: output,
+		Metrics: ExecutionMetrics{
+			Duration:       duration,
+			GPUUtilization: e.measureGPUUtilization(),
+			PowerUsage:     e.measurePowerUsage(),
+			TokensPerSec:   float64(params.BatchSize) / duration.Seconds(),
+		},
+	}
+
+	delete(e.activeJobs, jobID)
+	return result, nil
+}
+
+// Full workload job execution method
+func (e *WorkloadExecutor) executeInferenceJob(ctx context.Context, job *WorkRequest) (*WorkResult, error) {
 	var params InferenceParams
 	if err := json.Unmarshal(job.Parameters, &params); err != nil {
 		return nil, fmt.Errorf("invalid inference parameters: %w", err)
@@ -192,25 +285,14 @@ func (e *WorkloadExecutor) executeInference(ctx context.Context, job *proto.Work
 	return result, nil
 }
 
-func (e *WorkloadExecutor) executeTranscoding(ctx context.Context, job *proto.WorkRequest) (*WorkResult, error) {
+func (e *WorkloadExecutor) executeTranscoding(ctx context.Context, job *WorkRequest) (*WorkResult, error) {
 	var params TranscodingParams
 	if err := json.Unmarshal(job.Parameters, &params); err != nil {
 		return nil, fmt.Errorf("invalid transcoding parameters: %w", err)
 	}
 
-	config := &container.Config{
-		Image: "jrottenberg/ffmpeg:4.4-nvidia",
-		Cmd: []string{
-			"-hwaccel", "cuda",
-			"-i", params.InputURL,
-			"-c:v", params.OutputCodec,
-			"-preset", params.Preset,
-			"-b:v", params.Bitrate,
-			"/output/result.mp4",
-		},
-	}
-
-	// Similar container execution logic...
+	// TODO: Implement full transcoding execution when Docker issues are resolved
+	_ = params // Use params to avoid unused variable error
 	
 	return &WorkResult{
 		JobID:      job.JobId,
@@ -221,24 +303,14 @@ func (e *WorkloadExecutor) executeTranscoding(ctx context.Context, job *proto.Wo
 	}, nil
 }
 
-func (e *WorkloadExecutor) executeRendering(ctx context.Context, job *proto.WorkRequest) (*WorkResult, error) {
+func (e *WorkloadExecutor) executeRendering(ctx context.Context, job *WorkRequest) (*WorkResult, error) {
 	var params RenderingParams
 	if err := json.Unmarshal(job.Parameters, &params); err != nil {
 		return nil, fmt.Errorf("invalid rendering parameters: %w", err)
 	}
 
-	config := &container.Config{
-		Image: "blender/blender:3.6-gpu",
-		Cmd: []string{
-			"blender",
-			"-b", params.ProjectURL,
-			"-E", "CYCLES",
-			"-o", "/output/frame_####",
-			"-f", fmt.Sprintf("%d:%d", params.StartFrame, params.EndFrame),
-		},
-	}
-
-	// Similar container execution logic...
+	// TODO: Implement full rendering execution when Docker issues are resolved
+	_ = params // Use params to avoid unused variable error
 	
 	return &WorkResult{
 		JobID:      job.JobId,
@@ -304,13 +376,30 @@ func (e *WorkloadExecutor) measurePowerUsage() float64 {
 }
 
 func (e *WorkloadExecutor) getContainerOutput(ctx context.Context, containerID string) ([]byte, error) {
-	// Read output from container volumes or logs
-	return []byte("output_data"), nil
+	// Read container logs as output
+	logs, err := e.dockerClient.ContainerLogs(ctx, containerID, types.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Timestamps: false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get container logs: %w", err)
+	}
+	defer logs.Close()
+	
+	// Read the logs content
+	output := make([]byte, 1024*1024) // 1MB buffer
+	n, err := logs.Read(output)
+	if err != nil && err.Error() != "EOF" {
+		return nil, fmt.Errorf("failed to read container output: %w", err)
+	}
+	
+	return output[:n], nil
 }
 
 func hashOutput(data []byte) string {
-	// Implement proper hashing
-	return "output_hash_placeholder"
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
 }
 
 // Parameter structs
