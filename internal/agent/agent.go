@@ -2,17 +2,24 @@ package agent
 
 import (
     "bytes"
+    "context"
     "crypto/ed25519"
     crand "crypto/rand"
     "crypto/sha256"
+    "encoding/base64"
     "encoding/hex"
     "encoding/json"
     "fmt"
     "io"
     "net/http"
+    "os"
     "time"
 
     "github.com/akatosh/node-agent/internal/metrics"
+    execsim "github.com/akatosh/node-agent/internal/executor"
+    keyutil "github.com/akatosh/node-agent/internal/crypto"
+    solana "github.com/gagliardetto/solana-go"
+    "github.com/gagliardetto/solana-go/rpc"
 )
 
 type Agent struct {
@@ -39,7 +46,10 @@ func (a *Agent) Register() error {
         "attestation_method": uint32(0),
         "signature":         ed25519.Sign(a.PrivKey, regMsg),
     }
-    return postJSON(a.HubBaseURL+"/api/v1/node/register", body, nil)
+    if err := postJSON(a.HubBaseURL+"/api/v1/node/register", body, nil); err != nil { return err }
+    // Solve a challenge to earn initial reputation (optional)
+    _ = a.solveChallenge()
+    return nil
 }
 
 func (a *Agent) HeartbeatOnce() error {
@@ -69,25 +79,43 @@ func (a *Agent) FetchAndRunWork() error {
     }
     var wa struct{
         JobID string `json:"job_id"`
+        JobPubkey string `json:"job_pubkey"`
         Kind string `json:"kind"`
         PayloadURL string `json:"payload_url"`
+        Units uint32 `json:"units"`
     }
     if err := json.NewDecoder(resp.Body).Decode(&wa); err != nil { return err }
 
-    // v0: simulate doing the work
-    time.Sleep(3 * time.Second)
+    // Execute workload (simulated v0; pluggable executor)
+    start := time.Now()
+    resHashHex, units, execMeta := execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
+    if units == 0 { units = 1 }
 
-    resHash := hex.EncodeToString(metrics.RandomHash())
-    rcptMsg := receiptMessage(a.PubKey, wa.JobID, resHash, 1)
+    rcptMsg := receiptMessage(a.PubKey, wa.JobID, resHashHex, uint64(units))
+    elapsed := time.Since(start)
+    // Optional GPU util snapshot
+    gpu := metrics.GPUUtilSnapshot(context.Background())
     receipt := map[string]any{
         "job_id":              wa.JobID,
         "pubkey":              []byte(a.PubKey),
-        "result_hash":         resHash,
-        "metering_units":      uint64(1),
+        "result_hash":         resHashHex,
+        "metering_units":      uint64(units),
         "green_multiplier_bps": uint32(0),
         "signature":           ed25519.Sign(a.PrivKey, rcptMsg),
+        "metadata": map[string]any{
+            "duration_ms": elapsed.Milliseconds(),
+            "executor": execMeta["executor"],
+            "exit_code": execMeta["exit_code"],
+            "stderr_tail": execMeta["stderr_tail"],
+            "gpu_util": gpu,
+        },
     }
-    return postJSON(a.HubBaseURL+"/api/v1/node/receipt", receipt, nil)
+    if err := postJSON(a.HubBaseURL+"/api/v1/node/receipt", receipt, nil); err != nil { return err }
+    // Optional on-chain receipt for Explorer visibility (DEV/opt-in)
+    if getenvBool("AK_ONCHAIN_RECEIPTS") {
+        _ = a.submitOnchainReceipt(wa.JobID, wa.JobPubkey, resHashHex, uint64(units))
+    }
+    return nil
 }
 
 func (a *Agent) signRandom() []byte {
@@ -95,6 +123,18 @@ func (a *Agent) signRandom() []byte {
     _, _ = crand.Read(buf)
     sig := ed25519.Sign(a.PrivKey, buf)
     return sig
+}
+
+func (a *Agent) solveChallenge() error {
+    // Request a challenge
+    var resp struct{ Nonce string `json:"nonce"`; ExpiresMs int64 `json:"expires_ms"` }
+    if err := postJSON(a.HubBaseURL+"/api/v1/node/challenge/request", map[string]any{"pubkey": []byte(a.PubKey)}, &resp); err != nil { return err }
+    if resp.Nonce == "" { return fmt.Errorf("no nonce") }
+    // Sign
+    msg := challengeMessage(resp.Nonce)
+    sig := ed25519.Sign(a.PrivKey, msg)
+    // Submit
+    return postJSON(a.HubBaseURL+"/api/v1/node/challenge/solve", map[string]any{"pubkey": []byte(a.PubKey), "nonce": resp.Nonce, "signature": sig}, nil)
 }
 
 // Canonical message builders (must match server)
@@ -126,6 +166,69 @@ func receiptMessage(pub ed25519.PublicKey, jobID, resultHash string, units uint6
     s := "AKT1|receipt|" + jobID + "|" + hex.EncodeToString(pub) + "|" + resultHash + "|" + itoaU64(units)
     sum := sha256.Sum256([]byte(s))
     return sum[:]
+}
+
+func challengeMessage(nonce string) []byte {
+    s := "AKT1|challenge|" + nonce
+    sum := sha256.Sum256([]byte(s))
+    return sum[:]
+}
+
+func (a *Agent) submitOnchainReceipt(jobID, jobPubHex, resultHashHex string, units uint64) error {
+    rpcURL := os.Getenv("AK_SOL_RPC")
+    if rpcURL == "" { return nil }
+    payer := solana.PublicKeyFromBytes(a.PubKey)
+    // If an external Solana keypair is provided and matches the node pubkey, use it for signing.
+    var ext solana.PrivateKey
+    if kp := os.Getenv("AK_SOL_KEYPAIR"); kp != "" {
+        if sk, err := keyutil.LoadSolanaKeypair(kp); err == nil {
+            if sk.PublicKey().Equals(payer) { ext = sk }
+        }
+    }
+    // Ask orchestrator to prepare instruction (it knows program IDs)
+    var prep map[string]any
+    body := map[string]any{
+        "job_id": jobID,
+        "node_pubkey": payer.String(),
+        "result_hash_hex": resultHashHex,
+        "units": units,
+        "payer_pubkey": payer.String(),
+    }
+    if err := postJSON(a.HubBaseURL+"/api/v1/node/receipt/prepare", body, &prep); err != nil { return err }
+    progID, _ := solana.PublicKeyFromBase58(prep["program_id"].(string))
+    dataB64 := prep["data_base64"].(string)
+    data, _ := base64.StdEncoding.DecodeString(dataB64)
+    arr := prep["accounts"].([]any)
+    keys := make([]solana.AccountMeta, 0, len(arr))
+    for _, v := range arr {
+        m := v.(map[string]any)
+        pk, _ := solana.PublicKeyFromBase58(m["pubkey"].(string))
+        keys = append(keys, solana.AccountMeta{PublicKey: pk, IsSigner: m["is_signer"].(bool), IsWritable: m["is_writable"].(bool)})
+    }
+    ix := solana.NewInstruction(progID, keys, data)
+    bh := prep["recent_blockhash"].(string)
+    tx, err := solana.NewTransaction([]solana.Instruction{ix}, solana.HashFromBase58(bh), solana.TransactionPayer(payer))
+    if err != nil { return err }
+    if _, err := tx.Sign(func(pub solana.PublicKey) (solana.PrivateKey, bool) {
+        if !pub.Equals(payer) { return nil, false }
+        if ext != nil { return ext, true }
+        return solana.PrivateKey(a.PrivKey), true
+    }); err != nil { return err }
+    client := rpc.New(rpcURL)
+    var sig solana.Signature
+    var sendErr error
+    for attempt := 0; attempt < 3; attempt++ {
+        sig, sendErr = client.SendTransactionWithOpts(context.Background(), tx, rpc.TransactionOpts{SkipPreflight: false, PreflightCommitment: rpc.CommitmentProcessed})
+        if sendErr == nil { break }
+        time.Sleep(time.Duration(1<<attempt) * time.Second)
+    }
+    if sendErr != nil { return sendErr }
+    // Log explorer URL
+    cluster := ""
+    low := strings.ToLower(rpcURL)
+    if strings.Contains(low, "devnet") { cluster = "?cluster=devnet" } else if strings.Contains(low, "testnet") { cluster = "?cluster=testnet" }
+    fmt.Printf("on-chain receipt tx: https://explorer.solana.com/tx/%s%s\n", sig.String(), cluster)
+    return nil
 }
 
 func itoaU64(v uint64) string { return fmtUint64(v) }

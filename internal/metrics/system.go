@@ -2,8 +2,13 @@ package metrics
 
 import (
     crand "crypto/rand"
+    "context"
     "math/rand"
+    "os/exec"
     "runtime"
+    "strconv"
+    "strings"
+    "time"
 )
 
 type CapSet struct {
@@ -49,3 +54,24 @@ func RandomHash() []byte {
     return b
 }
 
+// GPUUtilSnapshot attempts to query instantaneous GPU utilization via nvidia-smi.
+// Returns -1 if unavailable.
+func GPUUtilSnapshot(ctx context.Context) float64 {
+    if _, err := exec.LookPath("nvidia-smi"); err != nil { return -1 }
+    cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+    defer cancel()
+    out, err := exec.CommandContext(cctx, "nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits").CombinedOutput()
+    if err != nil { return -1 }
+    lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+    if len(lines) == 0 { return -1 }
+    // Parse first GPU util, fallback to max across lines if multiple
+    var best float64 = -1
+    for _, ln := range lines {
+        ln = strings.TrimSpace(ln)
+        if ln == "" { continue }
+        if v, err := strconv.Atoi(ln); err == nil {
+            if float64(v) > best { best = float64(v) }
+        }
+    }
+    return best
+}
