@@ -20,27 +20,27 @@ type RenderingExecutor struct {
 }
 
 type RenderingRequest struct {
-	JobID       string `json:"job_id"`
-	ProjectURL  string `json:"project_url"`
-	StartFrame  int    `json:"start_frame"`
-	EndFrame    int    `json:"end_frame"`
-	Resolution  string `json:"resolution"`
-	Engine      string `json:"engine"`      // "CYCLES" or "EEVEE"
-	Samples     int    `json:"samples"`     // Ray-tracing samples
-	Quality     string `json:"quality"`     // "LOW", "MEDIUM", "HIGH"
+	JobID      string `json:"job_id"`
+	ProjectURL string `json:"project_url"`
+	StartFrame int    `json:"start_frame"`
+	EndFrame   int    `json:"end_frame"`
+	Resolution string `json:"resolution"`
+	Engine     string `json:"engine"`  // "CYCLES" or "EEVEE"
+	Samples    int    `json:"samples"` // Ray-tracing samples
+	Quality    string `json:"quality"` // "LOW", "MEDIUM", "HIGH"
 }
 
 type RenderingResult struct {
-	JobID         string   `json:"job_id"`
-	OutputFrames  []string `json:"output_frames"`
-	FramesCount   int      `json:"frames_count"`
-	Duration      float64  `json:"duration_seconds"`
-	AverageTime   float64  `json:"average_time_per_frame"`
-	RenderEngine  string   `json:"render_engine"`
-	GPUUsage      float64  `json:"gpu_usage_percent"`
-	TotalSamples  int      `json:"total_samples"`
-	Resolution    string   `json:"resolution"`
-	Error         string   `json:"error,omitempty"`
+	JobID        string   `json:"job_id"`
+	OutputFrames []string `json:"output_frames"`
+	FramesCount  int      `json:"frames_count"`
+	Duration     float64  `json:"duration_seconds"`
+	AverageTime  float64  `json:"average_time_per_frame"`
+	RenderEngine string   `json:"render_engine"`
+	GPUUsage     float64  `json:"gpu_usage_percent"`
+	TotalSamples int      `json:"total_samples"`
+	Resolution   string   `json:"resolution"`
+	Error        string   `json:"error,omitempty"`
 }
 
 func NewRenderingExecutor() (*RenderingExecutor, error) {
@@ -53,7 +53,7 @@ func NewRenderingExecutor() (*RenderingExecutor, error) {
 
 func (r *RenderingExecutor) ExecuteRendering(ctx context.Context, req *RenderingRequest) (*RenderingResult, error) {
 	startTime := time.Now()
-	
+
 	// Create work directory
 	workDir := filepath.Join("/tmp", fmt.Sprintf("render_%s", req.JobID))
 	if err := os.MkdirAll(workDir, 0755); err != nil {
@@ -72,7 +72,7 @@ func (r *RenderingExecutor) ExecuteRendering(ctx context.Context, req *Rendering
 	if engine == "" {
 		engine = "CYCLES"
 	}
-	
+
 	samples := req.Samples
 	if samples == 0 {
 		switch req.Quality {
@@ -149,7 +149,7 @@ print("Rendering completed successfully")
 	// Build Blender command
 	blenderArgs := []string{
 		"blender",
-		"-b", "/work/project.blend",  // Background mode with project file
+		"-b", "/work/project.blend", // Background mode with project file
 		"-P", "/work/render_script.py", // Run Python script
 		"--", "--cycles-device", "CUDA", // Force CUDA
 	}
@@ -231,15 +231,15 @@ print("Rendering completed successfully")
 	}
 
 	return &RenderingResult{
-		JobID:         req.JobID,
-		OutputFrames:  outputFrames,
-		FramesCount:   frameCount,
-		Duration:      duration,
-		AverageTime:   avgTimePerFrame,
-		RenderEngine:  engine,
-		GPUUsage:      r.measureGPUUsage(),
-		TotalSamples:  samples * frameCount,
-		Resolution:    resolution,
+		JobID:        req.JobID,
+		OutputFrames: outputFrames,
+		FramesCount:  frameCount,
+		Duration:     duration,
+		AverageTime:  avgTimePerFrame,
+		RenderEngine: engine,
+		GPUUsage:     r.measureGPUUsage(),
+		TotalSamples: samples * frameCount,
+		Resolution:   resolution,
 	}, nil
 }
 
@@ -262,19 +262,19 @@ func (r *RenderingExecutor) downloadFile(url, filepath string) error {
 
 func (r *RenderingExecutor) collectOutputFrames(workDir string, startFrame, endFrame int) ([]string, error) {
 	var frames []string
-	
+
 	for frame := startFrame; frame <= endFrame; frame++ {
 		// Blender typically outputs frames with 4-digit padding (e.g., frame_0001.png)
 		frameName := fmt.Sprintf("frame_%04d.png", frame)
 		framePath := filepath.Join(workDir, frameName)
-		
+
 		if _, err := os.Stat(framePath); err == nil {
 			// File exists - add to list (in production, upload to storage)
 			outputURL := fmt.Sprintf("/tmp/render_output_%s_%04d.png", workDir[strings.LastIndex(workDir, "_")+1:], frame)
 			frames = append(frames, outputURL)
 		}
 	}
-	
+
 	return frames, nil
 }
 

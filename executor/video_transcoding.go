@@ -1,3 +1,5 @@
+//go:build containers
+
 package executor
 
 import (
