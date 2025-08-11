@@ -3,18 +3,18 @@
 package executor
 
 import (
-    "context"
-    "bufio"
-    "encoding/json"
-    "fmt"
-    "io"
-    "net/http"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "strconv"
-    "strings"
-    "time"
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -71,7 +71,7 @@ func (g *GPUInferenceExecutor) ExecuteStableDiffusion(ctx context.Context, req *
 		"height": getIntParam(req.Params, "height", 512),
 		"steps":  getIntParam(req.Params, "steps", 20),
 	}
-	
+
 	inputBytes, _ := json.Marshal(inputData)
 	if err := os.WriteFile(filepath.Join(workDir, "request.json"), inputBytes, 0644); err != nil {
 		return nil, fmt.Errorf("failed to write request: %w", err)
@@ -103,7 +103,7 @@ func (g *GPUInferenceExecutor) ExecuteStableDiffusion(ctx context.Context, req *
 				},
 			},
 			Memory:   8 * 1024 * 1024 * 1024, // 8GB
-			NanoCPUs: 4 * 1000000000,          // 4 CPUs
+			NanoCPUs: 4 * 1000000000,         // 4 CPUs
 		},
 		AutoRemove: true,
 	}
@@ -125,7 +125,7 @@ func (g *GPUInferenceExecutor) ExecuteLLMInference(ctx context.Context, req *Inf
 		"max_tokens":  getIntParam(req.Params, "max_tokens", 100),
 		"temperature": getFloatParam(req.Params, "temperature", 0.7),
 	}
-	
+
 	inputBytes, _ := json.Marshal(inputData)
 	if err := os.WriteFile(filepath.Join(workDir, "request.json"), inputBytes, 0644); err != nil {
 		return nil, fmt.Errorf("failed to write request: %w", err)
@@ -193,7 +193,7 @@ with open('/work/result.json', 'w') as f:
 				},
 			},
 			Memory:   16 * 1024 * 1024 * 1024, // 16GB for LLMs
-			NanoCPUs: 8 * 1000000000,           // 8 CPUs
+			NanoCPUs: 8 * 1000000000,          // 8 CPUs
 		},
 		AutoRemove: true,
 	}
@@ -212,7 +212,7 @@ func (g *GPUInferenceExecutor) ExecuteWhisperTranscription(ctx context.Context, 
 	if req.InputURL == "" {
 		return nil, fmt.Errorf("input_url required for Whisper transcription")
 	}
-	
+
 	audioPath := filepath.Join(workDir, "input.wav")
 	if err := g.downloadFile(req.InputURL, audioPath); err != nil {
 		return nil, fmt.Errorf("failed to download audio: %w", err)
@@ -250,7 +250,7 @@ func (g *GPUInferenceExecutor) ExecuteWhisperTranscription(ctx context.Context, 
 
 func (g *GPUInferenceExecutor) runContainer(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, workDir, jobID string) (*InferenceResult, error) {
 	startTime := time.Now()
-	
+
 	// Create and start container
 	resp, err := g.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("akatosh_%s", jobID))
 	if err != nil {
@@ -351,34 +351,44 @@ func (g *GPUInferenceExecutor) getContainerLogs(ctx context.Context, containerID
 }
 
 func (g *GPUInferenceExecutor) measureGPUUsage() float64 {
-    // Try to query utilization via nvidia-smi; return 0 if unavailable
-    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-    defer cancel()
-    // Query per-GPU utilization (no units, no header)
-    cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits")
-    out, err := cmd.Output()
-    if err != nil || len(out) == 0 {
-        return 0.0
-    }
-    // Parse lines like: "12" or "12 %" depending on driver; we used nounits, so expect plain ints
-    scanner := bufio.NewScanner(strings.NewReader(string(out)))
-    var sum float64
-    var count int
-    for scanner.Scan() {
-        line := strings.TrimSpace(scanner.Text())
-        if line == "" { continue }
-        // Be tolerant: strip possible trailing '%' just in case
-        line = strings.TrimSuffix(line, "%")
-        v, err := strconv.ParseFloat(strings.TrimSpace(line), 64)
-        if err != nil { continue }
-        sum += v
-        count++
-    }
-    if count == 0 { return 0.0 }
-    avg := sum / float64(count)
-    if avg < 0 { avg = 0 }
-    if avg > 100 { avg = 100 }
-    return avg
+	// Try to query utilization via nvidia-smi; return 0 if unavailable
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// Query per-GPU utilization (no units, no header)
+	cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits")
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return 0.0
+	}
+	// Parse lines like: "12" or "12 %" depending on driver; we used nounits, so expect plain ints
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	var sum float64
+	var count int
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		// Be tolerant: strip possible trailing '%' just in case
+		line = strings.TrimSuffix(line, "%")
+		v, err := strconv.ParseFloat(strings.TrimSpace(line), 64)
+		if err != nil {
+			continue
+		}
+		sum += v
+		count++
+	}
+	if count == 0 {
+		return 0.0
+	}
+	avg := sum / float64(count)
+	if avg < 0 {
+		avg = 0
+	}
+	if avg > 100 {
+		avg = 100
+	}
+	return avg
 }
 
 // Helper functions
