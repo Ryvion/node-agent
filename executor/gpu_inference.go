@@ -3,14 +3,18 @@
 package executor
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"path/filepath"
-	"time"
+    "context"
+    "bufio"
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "strconv"
+    "strings"
+    "time"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -347,9 +351,34 @@ func (g *GPUInferenceExecutor) getContainerLogs(ctx context.Context, containerID
 }
 
 func (g *GPUInferenceExecutor) measureGPUUsage() float64 {
-	// TODO: Implement nvidia-ml-py or nvidia-smi parsing
-	// For now return a reasonable estimate
-	return 75.0
+    // Try to query utilization via nvidia-smi; return 0 if unavailable
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+    // Query per-GPU utilization (no units, no header)
+    cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits")
+    out, err := cmd.Output()
+    if err != nil || len(out) == 0 {
+        return 0.0
+    }
+    // Parse lines like: "12" or "12 %" depending on driver; we used nounits, so expect plain ints
+    scanner := bufio.NewScanner(strings.NewReader(string(out)))
+    var sum float64
+    var count int
+    for scanner.Scan() {
+        line := strings.TrimSpace(scanner.Text())
+        if line == "" { continue }
+        // Be tolerant: strip possible trailing '%' just in case
+        line = strings.TrimSuffix(line, "%")
+        v, err := strconv.ParseFloat(strings.TrimSpace(line), 64)
+        if err != nil { continue }
+        sum += v
+        count++
+    }
+    if count == 0 { return 0.0 }
+    avg := sum / float64(count)
+    if avg < 0 { avg = 0 }
+    if avg > 100 { avg = 100 }
+    return avg
 }
 
 // Helper functions
