@@ -150,8 +150,8 @@ func (a *Agent) FetchAndRunWork() error {
 		}
 	}
 
-	if resHashHex == "" {
-		if executor, err := execreal.NewWorkloadExecutor(); err == nil {
+    if resHashHex == "" {
+        if executor, err := execreal.NewWorkloadExecutor(); err == nil {
 			if wa.Kind == "inference" || wa.Kind == "transcoding" || wa.Kind == "rendering" {
 				if result, err := executor.ExecuteInference(ctx, wa.JobID, wa.Kind, wa.PayloadURL); err == nil {
 					resHashHex = result.ResultHash
@@ -162,22 +162,28 @@ func (a *Agent) FetchAndRunWork() error {
 						"gpu_util":    result.Metrics.GPUUtilization,
 						"power_watts": result.Metrics.PowerUsage,
 					}
-				} else {
-					log.Printf("Docker execution failed: %v, falling back to simulation", err)
-					resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
-				}
-			} else {
-				resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
-			}
-		} else {
-			log.Printf("Docker executor unavailable: %v, using simulation", err)
-			resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
-		}
-	}
+                } else {
+                    log.Printf("Docker execution failed: %v, trying native executors", err)
+                    resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
+                }
+            } else {
+                resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
+            }
+        } else {
+            log.Printf("Docker executor unavailable: %v, trying native executors", err)
+            resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
+        }
+    }
 
-	if units == 0 {
-		units = 1
-	}
+    if units == 0 { units = 1 }
+    // If real work is required and we still fell back to simulation, abort
+    if os.Getenv("AK_REQUIRE_REAL") == "1" {
+        if execMeta != nil {
+            if ex, ok := execMeta["executor"].(string); ok && ex == "simulated" {
+                return fmt.Errorf("real execution required but not available")
+            }
+        }
+    }
 
 	rcptMsg := receiptMessage(a.PubKey, wa.JobID, resHashHex, uint64(units))
 	elapsed := time.Since(start)

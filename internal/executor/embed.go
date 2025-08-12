@@ -1,5 +1,3 @@
-//go:build !containers
-
 package executor
 
 import (
@@ -12,13 +10,13 @@ import (
     "time"
 )
 
-// Generic embedding wrapper; uses external binary defined by EMBED_CMD (e.g. "llama-embed")
+// Embedding wrapper that executes an external embedding binary defined by EMBED_CMD (for example, "llama-embed").
 type EmbedSpec struct {
     InputFile  string
-    OutputFile string // where vectors are written
+    OutputFile string // Destination file for vector output
     Timeout    time.Duration
-    Cmd        string   // optional override; else env EMBED_CMD
-    Args       []string // e.g. ["-m","model.gguf","-f","{input}","-o","{output}"]
+    Cmd        string   // Optional explicit command; defaults to EMBED_CMD
+    Args       []string // Example: ["-m","model.gguf","-f","{input}","-o","{output}"]
 }
 
 func RunEmbedding(ctx context.Context, spec EmbedSpec) (hash string, err error) {
@@ -46,7 +44,7 @@ func RunEmbedding(ctx context.Context, spec EmbedSpec) (hash string, err error) 
         return "", err
     }
 
-    // Hash the output vectors deterministically
+    // Compute a deterministic hash over the produced vector file
     f, err := os.Open(spec.OutputFile)
     if err != nil {
         return "", err

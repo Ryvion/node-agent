@@ -1,5 +1,3 @@
-//go:build !containers
-
 package executor
 
 import (
@@ -12,16 +10,19 @@ import (
     "time"
 )
 
+// TranscodeSpec defines parameters for an ffmpeg-based transcode job.
+// Placeholders {input} and {output} in Args are expanded prior to execution.
 type TranscodeSpec struct {
     InputURL  string
-    OutputURL string // presigned upload
-    Args      []string // e.g. ["-i","{input}","-c:v","h264_nvenc","-b:v","4M","/tmp/out.mp4"]
+    OutputURL string // Optional pre-signed upload URL for artifacts
+    Args      []string // Example: ["-i","{input}","-c:v","h264_nvenc","-b:v","4M","{output}"]
     Timeout   time.Duration
 }
 
 func RunFFmpeg(ctx context.Context, spec TranscodeSpec) (hash string, err error) {
     in := spec.InputURL
-    outPath := "/tmp/out.mp4" // keep simple
+    // Default output path for the produced media file
+    outPath := "/tmp/out.mp4"
     
     args := make([]string, 0, len(spec.Args))
     for _, a := range spec.Args {
@@ -39,8 +40,9 @@ func RunFFmpeg(ctx context.Context, spec TranscodeSpec) (hash string, err error)
     
     cmd := exec.CommandContext(cctx, "ffmpeg", args...)
     if out, err := cmd.CombinedOutput(); err != nil {
-        return "", err
+        // preserve output for debugging via assigned var
         _ = out
+        return "", err
     }
 
     f, err := os.Open(outPath)
