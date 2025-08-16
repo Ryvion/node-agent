@@ -15,16 +15,17 @@ RUN apk add --no-cache \
     python3 \
     py3-pip
 
-# Copy the built binary
-COPY --from=build /out/node-agent /usr/local/bin/node-agent
-
-# Create app user
+# Create app user first (before copying binary)
 RUN addgroup -g 1001 appgroup && \
     adduser -u 1001 -D appuser -G appgroup
 
 # Create necessary directories
 RUN mkdir -p /work /var/log/ryvion && \
     chown -R appuser:appgroup /work /var/log/ryvion
+
+# Copy the built binary and set permissions
+COPY --from=build /out/node-agent /usr/local/bin/node-agent
+RUN chmod +x /usr/local/bin/node-agent
 
 # Environment variables
 ENV AK_HUB_URL="https://ryvion-hub.onrender.com"
@@ -38,8 +39,6 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD pgrep node-agent || exit 1
 
-# Switch to app user for security
-USER appuser
-
+# Run as root for Docker access (required for docker:dind)
 ENTRYPOINT ["/usr/local/bin/node-agent"]
 
