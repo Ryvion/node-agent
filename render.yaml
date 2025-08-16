@@ -25,8 +25,8 @@ services:
       # Start Docker daemon in background
       dockerd-entrypoint.sh &
       sleep 5
-      # Start the node agent
+      # Start the node agent with explicit URL
       /usr/local/bin/node-agent \
-        -hub $AK_HUB_URL \
-        -type $AK_DEVICE_TYPE \
-        -ui-port $AK_UI_PORT
+        -hub https://ryvion-hub.onrender.com \
+        -type gpu \
+        -ui-port 3000
