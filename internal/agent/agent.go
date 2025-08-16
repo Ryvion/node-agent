@@ -453,20 +453,32 @@ func fmtInt64(v int64) string {
 }
 
 func postJSON(url string, body any, out any) error {
-	b, _ := json.Marshal(body)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("POST %s: %d %s", url, resp.StatusCode, string(rb))
-	}
-	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
-	}
-	return nil
+    // Optional bind headers to auto-associate node to buyer or wallet
+    bindTok := strings.TrimSpace(os.Getenv("AK_BIND_TOKEN"))
+    wallet := strings.TrimSpace(os.Getenv("AK_WALLET"))
+    if w := strings.TrimSpace(os.Getenv("SOLANA_WALLET")); w != "" {
+        wallet = w
+    }
+
+    b, _ := json.Marshal(body)
+    req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
+    if err != nil { return err }
+    req.Header.Set("Content-Type", "application/json")
+    if bindTok != "" { req.Header.Set("X-Bind-Token", bindTok) }
+    if wallet != "" { req.Header.Set("X-Wallet", wallet) }
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return err
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 {
+        rb, _ := io.ReadAll(resp.Body)
+        return fmt.Errorf("POST %s: %d %s", url, resp.StatusCode, string(rb))
+    }
+    if out != nil {
+        return json.NewDecoder(resp.Body).Decode(out)
+    }
+    return nil
 }
 
 func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string) (string, error) {
