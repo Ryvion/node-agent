@@ -18,15 +18,4 @@ services:
         value: 3000
       - key: AK_LOG_LEVEL
         value: info
-      - key: DOCKER_HOST
-        value: unix:///var/run/docker.sock
     buildCommand: echo "Building with Docker"
-    startCommand: |
-      # Start Docker daemon in background
-      dockerd-entrypoint.sh &
-      sleep 5
-      # Start the node agent with explicit URL
-      /usr/local/bin/node-agent \
-        -hub https://ryvion-hub.onrender.com \
-        -type gpu \
-        -ui-port 3000
