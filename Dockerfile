@@ -3,7 +3,7 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    cd cmd/node-agent && go build -tags containers -o /out/node-agent
+    cd cmd/node-agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags containers -o /out/node-agent
 
 # Use Docker-in-Docker for container execution capabilities
 FROM docker:dind
