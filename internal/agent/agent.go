@@ -307,18 +307,22 @@ func btoa(b bool) string {
 }
 
 func registerMessage(pub ed25519.PublicKey, deviceType, gpuModel string, cpuCores uint32, ram, vram uint64, sensors string, bandwidth, geohash uint64, attest uint32) []byte {
-	s := "AKT1|register|" +
-		hex.EncodeToString(pub) + "|" +
-		deviceType + "|" +
-		gpuModel + "|" +
-		itoaU32(cpuCores) + "|" +
-		itoaU64(ram) + "|" +
-		itoaU64(vram) + "|" +
-		sensors + "|" +
-		itoaU64(bandwidth) + "|" +
-		itoaU64(geohash) + "|" +
-		itoaU32(attest)
-	sum := sha256.Sum256([]byte(s))
+	// Use JSON-based signature calculation to match the hub
+	regData := map[string]any{
+		"pubkey":             pub,
+		"device_type":        deviceType,
+		"gpu_model":          gpuModel,
+		"cpu_cores":          cpuCores,
+		"ram_bytes":          ram,
+		"vram_bytes":         vram,
+		"sensors":            sensors,
+		"bandwidth_mbps":     bandwidth,
+		"geohash_bucket":     geohash,
+		"attestation_method": attest,
+	}
+	cb, _ := json.Marshal(regData)
+	prefix := "AKT1|register|" + hex.EncodeToString(pub) + "|"
+	sum := sha256.Sum256(append([]byte(prefix), cb...))
 	return sum[:]
 }
 
