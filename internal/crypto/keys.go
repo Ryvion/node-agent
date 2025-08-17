@@ -10,8 +10,22 @@ import (
 )
 
 func keyPath() string {
-    home, _ := os.UserHomeDir()
-    return filepath.Join(home, ".akatosh-node-key")
+    // Check for explicit config path first
+    if p := os.Getenv("AK_KEY_PATH"); p != "" {
+        return p
+    }
+    
+    // Use a more reliable directory structure
+    dataDir := os.Getenv("HOME")
+    if dataDir == "" {
+        dataDir = "/root" // Default for Docker containers
+    }
+    
+    // Create .akatosh directory if it doesn't exist
+    akatoshDir := filepath.Join(dataDir, ".akatosh")
+    os.MkdirAll(akatoshDir, 0700)
+    
+    return filepath.Join(akatoshDir, "node-key")
 }
 
 // LoadOrCreateKey stores a hex-encoded ed25519 private key on disk (dev-only).

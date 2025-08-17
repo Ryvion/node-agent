@@ -469,6 +469,7 @@ func postJSON(url string, body any, out any) error {
     req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
     if err != nil { return err }
     req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("User-Agent", "ryvion-node-agent/1.0")
     if bindTok != "" { req.Header.Set("X-Bind-Token", bindTok) }
     if wallet != "" { req.Header.Set("X-Wallet", wallet) }
     resp, err := http.DefaultClient.Do(req)
