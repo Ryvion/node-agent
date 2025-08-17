@@ -44,7 +44,7 @@ func (a *Agent) RegisterWithReferral(referral string) error {
 	caps := metrics.Capabilities(a.DeviceType)
 	regMsg := registerMessage(a.PubKey, a.DeviceType, caps.GPUModel, caps.CPUCores, caps.RAMBytes, caps.VRAMBytes, caps.Sensors, caps.BandwidthMbps, 0, 0)
 	body := map[string]any{
-		"pubkey":             []byte(a.PubKey),
+		"public_key_hex":     hex.EncodeToString(a.PubKey),
 		"device_type":        a.DeviceType,
 		"gpu_model":          caps.GPUModel,
 		"cpu_cores":          caps.CPUCores,
