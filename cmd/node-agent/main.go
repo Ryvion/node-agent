@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"log"
 	"net/http"
+	"os/exec"
 	"sync/atomic"
 	"time"
 
@@ -28,7 +29,7 @@ import (
 
 func main() {
 	hub := flag.String("hub", "http://localhost:8080", "hub orchestrator base URL")
-	deviceType := flag.String("type", "gpu", "device type: gpu|cpu|mobile|iot")
+	deviceType := flag.String("type", "", "device type: gpu|cpu|mobile|iot (auto-detect if empty)")
 	referral := flag.String("referral", "", "optional referral code")
 	printRef := flag.Bool("print-referral", false, "print a referral code for this node and exit")
 	refSrv := flag.Int("referral-server", 0, "start a local referral HTTP server on this port (0=disabled)")
@@ -40,8 +41,13 @@ func main() {
 	if cfg.Hub != "" && *hub == "http://localhost:8080" {
 		*hub = cfg.Hub
 	}
-	if cfg.DeviceType != "" && *deviceType == "gpu" {
+	if cfg.DeviceType != "" && *deviceType == "" {
 		*deviceType = cfg.DeviceType
+	}
+	
+	// Auto-detect device type if not specified
+	if *deviceType == "" {
+		*deviceType = autoDetectDeviceType()
 	}
 	if cfg.UIPort > 0 && *uiPort == 0 {
 		*uiPort = cfg.UIPort
@@ -153,6 +159,28 @@ func loadConfig() appConfig {
 }
 
 func itoa(n int) string { return fmt.Sprintf("%d", n) }
+
+// autoDetectDeviceType detects the appropriate device type based on available hardware
+func autoDetectDeviceType() string {
+	// Check for NVIDIA GPU support
+	if _, err := exec.LookPath("nvidia-smi"); err == nil {
+		// Check if GPU is actually accessible
+		if out, err := exec.Command("nvidia-smi", "-L").CombinedOutput(); err == nil && len(out) > 0 {
+			log.Printf("GPU detected, using device type: gpu")
+			return "gpu"
+		}
+	}
+	
+	// Check if running on mobile (Android)
+	if _, err := os.Stat("/system/build.prop"); err == nil {
+		log.Printf("Android detected, using device type: mobile")
+		return "mobile"
+	}
+	
+	// Default to CPU for servers/desktops without GPU
+	log.Printf("No GPU detected, using device type: cpu")
+	return "cpu"
+}
 
 // Version can be set via -ldflags "-X main.version=v0.1.0"
 var version = "dev"

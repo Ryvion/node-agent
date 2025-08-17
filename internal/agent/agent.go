@@ -58,8 +58,10 @@ func (a *Agent) RegisterWithReferral(referral string) error {
 		"signature":          ed25519.Sign(a.PrivKey, regMsg),
 	}
 	if err := postJSON(a.HubBaseURL+"/api/v1/node/register", body, nil); err != nil {
+		log.Printf("Registration failed: %v", err)
 		return err
 	}
+	log.Printf("Registration succeeded")
 	_ = a.solveChallenge()
 	_ = a.sendHealthReport()
 	return nil
