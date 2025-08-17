@@ -12,3 +12,4 @@ Dev
 Config
 - The agent stores a dev key at `~/.akatosh-node-key`
 - UI stub at `http://localhost:<ui-port>` supports Pause/Resume and shows last heartbeat/error.
+# Test auto-update
