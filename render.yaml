@@ -13,7 +13,7 @@ services:
       - key: AK_HUB_URL
         value: https://ryvion-hub.onrender.com
       - key: AK_DEVICE_TYPE
-        value: gpu
+        value: cpu
       - key: AK_UI_PORT
         value: 3000
       - key: AK_LOG_LEVEL

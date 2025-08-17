@@ -5,15 +5,18 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     cd cmd/node-agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags containers -o /out/node-agent
 
-# Use Docker-in-Docker for container execution capabilities
-FROM docker:dind
+# Use Alpine for lightweight runtime
+FROM alpine:latest
 
-# Install additional dependencies
+# Install dependencies for AI workloads
 RUN apk add --no-cache \
     curl \
     ca-certificates \
     python3 \
-    py3-pip
+    py3-pip \
+    python3-dev \
+    gcc \
+    musl-dev
 
 # Create app user first (before copying binary)
 RUN addgroup -g 1001 appgroup && \
@@ -30,9 +33,8 @@ RUN chmod +x /usr/local/bin/node-agent /usr/local/bin/start.sh
 
 # Environment variables
 ENV AK_HUB_URL="https://ryvion-hub.onrender.com"
-ENV AK_DEVICE_TYPE="gpu"
+ENV AK_DEVICE_TYPE="cpu"
 ENV AK_UI_PORT="3000"
-ENV DOCKER_HOST="unix:///var/run/docker.sock"
 
 # Expose UI port
 EXPOSE 3000
