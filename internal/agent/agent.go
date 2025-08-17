@@ -152,8 +152,8 @@ func (a *Agent) FetchAndRunWork() error {
 		}
 	}
 
-    if resHashHex == "" {
-        if executor, err := execreal.NewWorkloadExecutor(); err == nil {
+	if resHashHex == "" {
+		if executor, err := execreal.NewWorkloadExecutor(); err == nil {
 			if wa.Kind == "inference" || wa.Kind == "transcoding" || wa.Kind == "rendering" {
 				if result, err := executor.ExecuteInference(ctx, wa.JobID, wa.Kind, wa.PayloadURL); err == nil {
 					resHashHex = result.ResultHash
@@ -164,37 +164,39 @@ func (a *Agent) FetchAndRunWork() error {
 						"gpu_util":    result.Metrics.GPUUtilization,
 						"power_watts": result.Metrics.PowerUsage,
 					}
-                } else {
-                    log.Printf("Docker execution failed: %v, trying native executors", err)
-                    resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
-                }
-            } else {
-                resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
-            }
-        } else {
-            log.Printf("Docker executor unavailable: %v, trying native executors", err)
-            resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
-        }
-    }
+				} else {
+					log.Printf("Docker execution failed: %v, trying native executors", err)
+					resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
+				}
+			} else {
+				resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
+			}
+		} else {
+			log.Printf("Docker executor unavailable: %v, trying native executors", err)
+			resHashHex, units, execMeta = execsim.Run(wa.Kind, wa.PayloadURL, wa.Units)
+		}
+	}
 
-    if units == 0 { units = 1 }
-    // If real work is required and we still fell back to simulation, abort
-    if os.Getenv("AK_REQUIRE_REAL") == "1" {
-        if execMeta != nil {
-            if ex, ok := execMeta["executor"].(string); ok && ex == "simulated" {
-                return fmt.Errorf("real execution required but not available")
-            }
-        }
-    }
+	if units == 0 {
+		units = 1
+	}
+	// If real work is required and we still fell back to simulation, abort
+	if os.Getenv("AK_REQUIRE_REAL") == "1" {
+		if execMeta != nil {
+			if ex, ok := execMeta["executor"].(string); ok && ex == "simulated" {
+				return fmt.Errorf("real execution required but not available")
+			}
+		}
+	}
 
 	rcptMsg := receiptMessage(a.PubKey, wa.JobID, resHashHex, uint64(units))
 	elapsed := time.Since(start)
 	gpu := metrics.GPUUtilSnapshot(context.Background())
 	receipt := map[string]any{
-		"job_id":               wa.JobID,
-		"pubkey":               []byte(a.PubKey),
+		"job_id": wa.JobID,
+		"pubkey": []byte(a.PubKey),
 		// Keep legacy field for backward compatibility
-		"result_hash":          resHashHex,
+		"result_hash": resHashHex,
 		// New explicit hex field to avoid base64 vs hex ambiguity on the hub
 		"result_hash_hex":      resHashHex,
 		"metering_units":       uint64(units),
@@ -424,13 +426,13 @@ func (a *Agent) submitOnchainReceipt(jobID, jobPubHex, resultHashHex string, uni
 	if err != nil {
 		return err
 	}
-	
+
 	// Sign the message with the private key
 	signature, err := payer.Sign(messageBytes)
 	if err != nil {
 		return err
 	}
-	
+
 	// Add the signature to the transaction
 	tx.Signatures = []solana.Signature{signature}
 	_, err = client.SendTransactionWithOpts(context.Background(), tx, rpc.TransactionOpts{PreflightCommitment: rpc.CommitmentFinalized})
@@ -463,33 +465,39 @@ func fmtInt64(v int64) string {
 }
 
 func postJSON(url string, body any, out any) error {
-    // Optional bind headers to auto-associate node to buyer or wallet
-    bindTok := strings.TrimSpace(os.Getenv("AK_BIND_TOKEN"))
-    wallet := strings.TrimSpace(os.Getenv("AK_WALLET"))
-    if w := strings.TrimSpace(os.Getenv("SOLANA_WALLET")); w != "" {
-        wallet = w
-    }
+	// Optional bind headers to auto-associate node to buyer or wallet
+	bindTok := strings.TrimSpace(os.Getenv("AK_BIND_TOKEN"))
+	wallet := strings.TrimSpace(os.Getenv("AK_WALLET"))
+	if w := strings.TrimSpace(os.Getenv("SOLANA_WALLET")); w != "" {
+		wallet = w
+	}
 
-    b, _ := json.Marshal(body)
-    req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
-    if err != nil { return err }
-    req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("User-Agent", "ryvion-node-agent/1.0")
-    if bindTok != "" { req.Header.Set("X-Bind-Token", bindTok) }
-    if wallet != "" { req.Header.Set("X-Wallet", wallet) }
-    resp, err := http.DefaultClient.Do(req)
-    if err != nil {
-        return err
-    }
-    defer resp.Body.Close()
-    if resp.StatusCode >= 300 {
-        rb, _ := io.ReadAll(resp.Body)
-        return fmt.Errorf("POST %s: %d %s", url, resp.StatusCode, string(rb))
-    }
-    if out != nil {
-        return json.NewDecoder(resp.Body).Decode(out)
-    }
-    return nil
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "ryvion-node-agent/1.0")
+	if bindTok != "" {
+		req.Header.Set("X-Bind-Token", bindTok)
+	}
+	if wallet != "" {
+		req.Header.Set("X-Wallet", wallet)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		rb, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("POST %s: %d %s", url, resp.StatusCode, string(rb))
+	}
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	return nil
 }
 
 func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string) (string, error) {
