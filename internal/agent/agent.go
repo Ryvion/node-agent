@@ -42,7 +42,7 @@ func (a *Agent) Register() error { return a.RegisterWithReferral("") }
 
 func (a *Agent) RegisterWithReferral(referral string) error {
 	caps := metrics.Capabilities(a.DeviceType)
-	regMsg := registerMessage(a.PubKey, a.DeviceType, caps.GPUModel, caps.CPUCores, caps.RAMBytes, caps.VRAMBytes, caps.Sensors, caps.BandwidthMbps, 0, 0)
+	regMsg := registerMessageWithReferral(a.PubKey, a.DeviceType, caps.GPUModel, caps.CPUCores, caps.RAMBytes, caps.VRAMBytes, caps.Sensors, caps.BandwidthMbps, 0, 0, referral)
 	body := map[string]any{
 		"public_key_hex":     hex.EncodeToString(a.PubKey),
 		"device_type":        a.DeviceType,
@@ -307,6 +307,10 @@ func btoa(b bool) string {
 }
 
 func registerMessage(pub ed25519.PublicKey, deviceType, gpuModel string, cpuCores uint32, ram, vram uint64, sensors string, bandwidth, geohash uint64, attest uint32) []byte {
+	return registerMessageWithReferral(pub, deviceType, gpuModel, cpuCores, ram, vram, sensors, bandwidth, geohash, attest, "")
+}
+
+func registerMessageWithReferral(pub ed25519.PublicKey, deviceType, gpuModel string, cpuCores uint32, ram, vram uint64, sensors string, bandwidth, geohash uint64, attest uint32, referral string) []byte {
 	// Use JSON-based signature calculation to match the hub - use same format as sent
 	regData := map[string]any{
 		"public_key_hex":     hex.EncodeToString(pub),
@@ -319,6 +323,7 @@ func registerMessage(pub ed25519.PublicKey, deviceType, gpuModel string, cpuCore
 		"bandwidth_mbps":     bandwidth,
 		"geohash_bucket":     geohash,
 		"attestation_method": attest,
+		"referral_code":      referral,
 	}
 	cb, _ := json.Marshal(regData)
 	prefix := "AKT1|register|" + hex.EncodeToString(pub) + "|"
