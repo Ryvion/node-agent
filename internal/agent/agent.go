@@ -311,23 +311,19 @@ func registerMessage(pub ed25519.PublicKey, deviceType, gpuModel string, cpuCore
 }
 
 func registerMessageWithReferral(pub ed25519.PublicKey, deviceType, gpuModel string, cpuCores uint32, ram, vram uint64, sensors string, bandwidth, geohash uint64, attest uint32, referral string) []byte {
-	// Use JSON-based signature calculation to match the hub - use same format as sent
-	regData := map[string]any{
-		"public_key_hex":     hex.EncodeToString(pub),
-		"device_type":        deviceType,
-		"gpu_model":          gpuModel,
-		"cpu_cores":          cpuCores,
-		"ram_bytes":          ram,
-		"vram_bytes":         vram,
-		"sensors":            sensors,
-		"bandwidth_mbps":     bandwidth,
-		"geohash_bucket":     geohash,
-		"attestation_method": attest,
-		"referral_code":      referral,
-	}
-	cb, _ := json.Marshal(regData)
-	prefix := "AKT1|register|" + hex.EncodeToString(pub) + "|"
-	sum := sha256.Sum256(append([]byte(prefix), cb...))
+	// Use simple string-based signature - the original working format
+	s := "AKT1|register|" +
+		hex.EncodeToString(pub) + "|" +
+		deviceType + "|" +
+		gpuModel + "|" +
+		itoaU32(cpuCores) + "|" +
+		itoaU64(ram) + "|" +
+		itoaU64(vram) + "|" +
+		sensors + "|" +
+		itoaU64(bandwidth) + "|" +
+		itoaU64(geohash) + "|" +
+		itoaU32(attest)
+	sum := sha256.Sum256([]byte(s))
 	return sum[:]
 }
 
