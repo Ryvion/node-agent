@@ -307,9 +307,9 @@ func btoa(b bool) string {
 }
 
 func registerMessage(pub ed25519.PublicKey, deviceType, gpuModel string, cpuCores uint32, ram, vram uint64, sensors string, bandwidth, geohash uint64, attest uint32) []byte {
-	// Use JSON-based signature calculation to match the hub
+	// Use JSON-based signature calculation to match the hub - use same format as sent
 	regData := map[string]any{
-		"pubkey":             pub,
+		"public_key_hex":     hex.EncodeToString(pub),
 		"device_type":        deviceType,
 		"gpu_model":          gpuModel,
 		"cpu_cores":          cpuCores,
