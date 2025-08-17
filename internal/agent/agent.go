@@ -85,13 +85,13 @@ func (a *Agent) HeartbeatOnce() error {
 	m := metrics.Sample()
 	hbMsg := heartbeatMessage(a.PubKey, time.Now().UnixMilli(), m.CPUUtil, m.MemUtil, m.GPUUtil, m.PowerWatts)
 	body := map[string]any{
-		"pubkey":       []byte(a.PubKey),
-		"timestamp_ms": time.Now().UnixMilli(),
-		"cpu_util":     m.CPUUtil,
-		"mem_util":     m.MemUtil,
-		"gpu_util":     m.GPUUtil,
-		"power_watts":  m.PowerWatts,
-		"signature":    ed25519.Sign(a.PrivKey, hbMsg),
+		"public_key_hex": hex.EncodeToString(a.PubKey),
+		"timestamp_ms":   time.Now().UnixMilli(),
+		"cpu_util":       m.CPUUtil,
+		"mem_util":       m.MemUtil,
+		"gpu_util":       m.GPUUtil,
+		"power_watts":    m.PowerWatts,
+		"signature":      ed25519.Sign(a.PrivKey, hbMsg),
 	}
 	return postJSON(a.HubBaseURL+"/api/v1/node/heartbeat", body, nil)
 }
