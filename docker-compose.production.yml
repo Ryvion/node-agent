@@ -7,10 +7,10 @@ services:
     volumes:
       - node-keys:/root/.akatosh
       - /var/run/docker.sock:/var/run/docker.sock
-    command: ["-hub", "https://ryvion-hub.onrender.com", "-type", "gpu", "-ui-port", "3000"]
+    command: ["-hub", "https://ryvion-hub.onrender.com", "-type", "cpu", "-ui-port", "3000"]
     environment:
       - AK_HUB_URL=https://ryvion-hub.onrender.com
-      - AK_DEVICE_TYPE=gpu
+      - AK_DEVICE_TYPE=cpu
       - AK_UI_PORT=3000
       - AK_LOG_LEVEL=info
     ports:
