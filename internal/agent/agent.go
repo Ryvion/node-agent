@@ -97,7 +97,7 @@ func (a *Agent) HeartbeatOnce() error {
 }
 
 func (a *Agent) FetchAndRunWork() error {
-	url := fmt.Sprintf("%s/api/v1/node/work?pubkey=%s", a.HubBaseURL, hex.EncodeToString(a.PubKey))
+	url := fmt.Sprintf("%s/api/v1/node/work?pubkey=%s", a.HubBaseURL, strings.ToLower(hex.EncodeToString(a.PubKey)))
 	resp, err := http.Get(url)
 	if err != nil {
 		return err
