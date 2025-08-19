@@ -134,22 +134,24 @@ func (a *Agent) FetchAndRunWork() error {
 	defer cancel()
 	if strings.TrimSpace(wa.Image) != "" && strings.TrimSpace(wa.SpecJSON) != "" && os.Getenv("AK_EXECUTOR_MODE") != "sim" {
 
-		rr, rerr := runner.RunOCI(ctx, wa.Image, []byte(wa.SpecJSON), "auto")
-		if rerr == nil {
-			resHashHex = rr.ResultHash
-			units = max(wa.Units)
-			execMeta = map[string]any{"executor": "oci", "duration_ms": rr.Duration.Milliseconds(), "exit_code": rr.ExitCode, "stderr_tail": rr.LogsTail, "metrics": rr.Metrics}
-			if strings.TrimSpace(os.Getenv("AK_UPLOAD")) == "1" && rr.OutputPath != "" {
-				if blobURL, err := a.uploadArtifact(ctx, wa.JobID, rr.OutputPath); err == nil && blobURL != "" {
-					if execMeta == nil {
-						execMeta = map[string]any{}
-					}
-					execMeta["blob_url"] = blobURL
-				}
-			}
-		} else {
-			log.Printf("OCI runner failed: %v", rerr)
-		}
+        rr, rerr := runner.RunOCI(ctx, wa.Image, []byte(wa.SpecJSON), "auto")
+        if rerr == nil {
+            resHashHex = rr.ResultHash
+            units = max(wa.Units)
+            execMeta = map[string]any{"executor": "oci", "duration_ms": rr.Duration.Milliseconds(), "exit_code": rr.ExitCode, "stderr_tail": rr.LogsTail, "metrics": rr.Metrics}
+            if strings.TrimSpace(os.Getenv("AK_UPLOAD")) == "1" && rr.OutputPath != "" {
+                if blobURL, objKey, err := a.uploadArtifact(ctx, wa.JobID, rr.OutputPath); err == nil && blobURL != "" {
+                    if execMeta == nil {
+                        execMeta = map[string]any{}
+                    }
+                    execMeta["blob_url"] = blobURL
+                    execMeta["object_key"] = objKey
+                    execMeta["manifest_key"] = objKey + ".manifest.json"
+                }
+            }
+        } else {
+            log.Printf("OCI runner failed: %v", rerr)
+        }
 	}
 
 	if resHashHex == "" {
@@ -210,13 +212,15 @@ func (a *Agent) FetchAndRunWork() error {
 			"gpu_util":    gpu,
 		},
 	}
-	if strings.TrimSpace(os.Getenv("AK_UPLOAD")) == "1" && strings.TrimSpace(wa.Image) != "" && strings.TrimSpace(wa.SpecJSON) != "" {
-		if blobURL, err := a.uploadArtifact(ctx, wa.JobID, ""); err == nil && blobURL != "" {
-			if md, ok := receipt["metadata"].(map[string]any); ok {
-				md["blob_url"] = blobURL
-			}
-		}
-	}
+    if strings.TrimSpace(os.Getenv("AK_UPLOAD")) == "1" && strings.TrimSpace(wa.Image) != "" && strings.TrimSpace(wa.SpecJSON) != "" {
+        if blobURL, objKey, err := a.uploadArtifact(ctx, wa.JobID, ""); err == nil && blobURL != "" {
+            if md, ok := receipt["metadata"].(map[string]any); ok {
+                md["blob_url"] = blobURL
+                md["object_key"] = objKey
+                md["manifest_key"] = objKey + ".manifest.json"
+            }
+        }
+    }
 	if err := postJSON(a.HubBaseURL+"/api/v1/node/receipt", receipt, nil); err != nil {
 		return err
 	}
@@ -500,18 +504,18 @@ func postJSON(url string, body any, out any) error {
 	return nil
 }
 
-func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string) (string, error) {
+func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string) (string, string, error) {
 
 	if strings.TrimSpace(outPath) == "" {
 		outPath = strings.TrimSpace(os.Getenv("AK_OUTPUT_PATH"))
 	}
-	if outPath == "" {
-		return "", fmt.Errorf("no output path configured")
-	}
-	fi, err := os.Stat(outPath)
-	if err != nil || fi.IsDir() {
-		return "", fmt.Errorf("no artifact file")
-	}
+    if outPath == "" {
+        return "", "", fmt.Errorf("no output path configured")
+    }
+    fi, err := os.Stat(outPath)
+    if err != nil || fi.IsDir() {
+        return "", "", fmt.Errorf("no artifact file")
+    }
 	size := uint64(fi.Size())
 
 	msg := sha256.Sum256([]byte("AKT1|upload_prep|" + jobID + "|" + hex.EncodeToString(a.PubKey) + "|" + "application/octet-stream" + "|" + itoaU64(size)))
@@ -522,55 +526,94 @@ func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string
 		"size_bytes":   size,
 		"signature":    ed25519.Sign(a.PrivKey, msg[:]),
 	}
-	var prep struct {
-		OK        bool   `json:"ok"`
-		Provider  string `json:"provider"`
-		PutURL    string `json:"put_url"`
-		ExpiresAt string `json:"expires_at"`
-	}
-	if err := postJSON(a.HubBaseURL+"/api/v1/node/upload/prepare", body, &prep); err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(prep.PutURL) == "" {
-		return "", fmt.Errorf("no put_url")
-	}
+    var prep struct {
+        OK        bool   `json:"ok"`
+        Provider  string `json:"provider"`
+        PutURL    string `json:"put_url"`
+        ExpiresAt string `json:"expires_at"`
+        Key       string `json:"key"`
+    }
+    if err := postJSON(a.HubBaseURL+"/api/v1/node/upload/prepare", body, &prep); err != nil {
+        return "", "", err
+    }
+    if strings.TrimSpace(prep.PutURL) == "" {
+        return "", "", fmt.Errorf("no put_url")
+    }
 
-	f, err := os.Open(outPath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, absolutize(a.HubBaseURL, prep.PutURL), f)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		b, _ := ioutil.ReadAll(resp.Body)
-		return "", fmt.Errorf("put failed: %d %s", resp.StatusCode, string(b))
-	}
+    f, err := os.Open(outPath)
+    if err != nil {
+        return "", "", err
+    }
+    defer f.Close()
+    // Compute sha256 while streaming once
+    h := sha256.New()
+    // Duplicate reader into buffer for PUT
+    fb, err := os.ReadFile(outPath)
+    if err != nil { return "", "", err }
+    _, _ = h.Write(fb)
+    hexHash := hex.EncodeToString(h.Sum(nil))
+    req, err := http.NewRequestWithContext(ctx, http.MethodPut, absolutize(a.HubBaseURL, prep.PutURL), bytes.NewReader(fb))
+    if err != nil {
+        return "", "", err
+    }
+    req.Header.Set("Content-Type", "application/octet-stream")
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return "", "", err
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 {
+        b, _ := ioutil.ReadAll(resp.Body)
+        return "", "", fmt.Errorf("put failed: %d %s", resp.StatusCode, string(b))
+    }
 
-	if strings.HasPrefix(prep.PutURL, "/") {
+    // If blob managed by hub local endpoint, return hub URL
+    if strings.HasPrefix(prep.PutURL, "/") {
 		var putResp struct {
 			OK  bool   `json:"ok"`
 			URL string `json:"url"`
 		}
 
-		if b, err := ioutil.ReadAll(resp.Body); err == nil && len(b) > 0 {
-			_ = json.Unmarshal(b, &putResp)
-			if strings.TrimSpace(putResp.URL) != "" {
-				return absolutize(a.HubBaseURL, putResp.URL), nil
-			}
-		}
+        if b, err := ioutil.ReadAll(resp.Body); err == nil && len(b) > 0 {
+            _ = json.Unmarshal(b, &putResp)
+            if strings.TrimSpace(putResp.URL) != "" {
+                return absolutize(a.HubBaseURL, putResp.URL), prep.Key, nil
+            }
+        }
 
-		return a.HubBaseURL + "/api/v1/blob/" + jobID, nil
-	}
-	return prep.PutURL, nil
+        return a.HubBaseURL + "/api/v1/blob/" + jobID, prep.Key, nil
+    }
+    // Optionally upload a signed manifest next to object
+    if strings.TrimSpace(prep.Key) != "" {
+        manifest := map[string]any{
+            "job_id":       jobID,
+            "object_key":   prep.Key,
+            "sha256":       hexHash,
+            "size_bytes":   size,
+            "node_pubkey":  strings.ToLower(hex.EncodeToString(a.PubKey)),
+            "submitted_at": time.Now().UTC().Format(time.RFC3339),
+        }
+        mb, _ := json.Marshal(manifest)
+        sum := sha256.Sum256(mb)
+        sig := ed25519.Sign(a.PrivKey, sum[:])
+        manifest["signature_b64"] = base64.StdEncoding.EncodeToString(sig)
+        // Ask hub for presign of manifest key
+        var ps struct{ OK bool `json:"ok"`; URL string `json:"url"` }
+        psBody := map[string]any{"key": prep.Key + ".manifest.json", "method": "PUT", "expiry_seconds": 900}
+        if err := postJSON(a.HubBaseURL+"/api/v1/blob/presign", psBody, &ps); err == nil && strings.TrimSpace(ps.URL) != "" {
+            mreq, _ := http.NewRequestWithContext(ctx, http.MethodPut, absolutize(a.HubBaseURL, ps.URL), bytes.NewReader(mb))
+            mreq.Header.Set("Content-Type", "application/json")
+            _ = withResp(http.DefaultClient.Do(mreq))
+        }
+    }
+    return prep.PutURL, prep.Key, nil
+}
+
+func withResp(resp *http.Response, err error) error {
+    if err != nil { return err }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 { b, _ := io.ReadAll(resp.Body); return fmt.Errorf("http %d: %s", resp.StatusCode, string(b)) }
+    return nil
 }
 
 func absolutize(base, maybeRel string) string {
