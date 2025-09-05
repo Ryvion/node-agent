@@ -191,11 +191,8 @@ func (a *Agent) FetchAndRunWork() error {
 	elapsed := time.Since(start)
 	gpu := metrics.GPUUtilSnapshot(context.Background())
 	receipt := map[string]any{
-		"job_id": wa.JobID,
-		"pubkey": []byte(a.PubKey),
-		// Keep legacy field for backward compatibility
-		"result_hash": resHashHex,
-		// New explicit hex field to avoid base64 vs hex ambiguity on the hub
+		"job_id":               wa.JobID,
+		"pubkey":               []byte(a.PubKey),
 		"result_hash_hex":      resHashHex,
 		"metering_units":       uint64(units),
 		"green_multiplier_bps": uint32(0),

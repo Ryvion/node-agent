@@ -173,8 +173,6 @@ func autoDetectDeviceType() string {
 	return "cpu"
 }
 
-var version = "dev"
-
 func autoUpdateLoop() {
 	base := strings.TrimRight(os.Getenv("AK_UPDATE_URL"), "/")
 	pub := strings.TrimSpace(os.Getenv("AK_UPDATE_PUBKEY"))
