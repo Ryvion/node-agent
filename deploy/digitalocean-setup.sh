@@ -1,42 +1,34 @@
-#!/bin/bash
 set -e
 
-echo "🚀 Ryvion DePIN Node Agent - DigitalOcean Setup"
+echo "Ryvion DePIN Node Agent - DigitalOcean Setup"
 echo "=============================================="
 
-# Update system
 echo "📦 Updating system packages..."
 apt-get update && apt-get upgrade -y
 
-# Install Docker if not present
 if ! command -v docker &> /dev/null; then
     echo "🐳 Installing Docker..."
     curl -fsSL https://get.docker.com -o get-docker.sh
     sh get-docker.sh
     rm get-docker.sh
-    
-    # Enable Docker service
+
     systemctl enable docker
     systemctl start docker
     
-    # Add current user to docker group
     usermod -aG docker $USER
     echo "✅ Docker installed successfully"
 else
     echo "✅ Docker already installed"
 fi
 
-# Install Docker Compose
 echo "🔧 Installing Docker Compose..."
 curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 chmod +x /usr/local/bin/docker-compose
 
-# Create directories
 echo "📁 Creating application directories..."
 mkdir -p /opt/ryvion/{config,data,logs}
 cd /opt/ryvion
 
-# Download node-agent binary
 echo "⬇️ Downloading latest node-agent..."
 RELEASE_URL="https://api.github.com/repos/Ryvion/node-agent/releases/latest"
 DOWNLOAD_URL=$(curl -s $RELEASE_URL | grep "browser_download_url.*linux-amd64" | cut -d '"' -f 4)
@@ -49,7 +41,6 @@ else
     echo "⚠️ Using Docker image instead of binary"
 fi
 
-# Create Docker Compose configuration
 cat > docker-compose.yml << 'EOF'
 version: '3.8'
 services:
@@ -92,7 +83,6 @@ volumes:
   ryvion-logs:
 EOF
 
-# Create systemd service
 cat > /etc/systemd/system/ryvion-node.service << 'EOF'
 [Unit]
 Description=Ryvion DePIN Node Agent
@@ -111,12 +101,10 @@ TimeoutStartSec=0
 WantedBy=multi-user.target
 EOF
 
-# Enable and start service
 echo "🎯 Setting up systemd service..."
 systemctl daemon-reload
 systemctl enable ryvion-node.service
 
-# Create configuration file
 cat > config/node.json << 'EOF'
 {
   "hub": "https://ryvion-hub.onrender.com",
@@ -125,7 +113,6 @@ cat > config/node.json << 'EOF'
 }
 EOF
 
-# Set permissions
 chown -R 1001:1001 /opt/ryvion
 chmod -R 755 /opt/ryvion
 

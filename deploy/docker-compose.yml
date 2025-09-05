@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  ryvion-node:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: ryvion-node-agent
+    restart: unless-stopped
+    privileged: true
+    environment:
+      - AK_HUB_URL=https://ryvion-hub.onrender.com
+      - AK_DEVICE_TYPE=gpu
+      - AK_UI_PORT=3000
+      - AK_LOG_LEVEL=info
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ryvion_data:/work
+      - ryvion_logs:/var/log/ryvion
+      - ryvion_config:/config
+      - ryvion_cache:/cache
+    networks:
+      - ryvion_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  ryvion-monitor:
+    image: prom/node-exporter:latest
+    container_name: ryvion-monitor
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - ryvion_network
+    profiles:
+      - monitoring
+
+  ryvion-logger:
+    image: fluent/fluent-bit:latest
+    container_name: ryvion-logger
+    restart: unless-stopped
+    volumes:
+      - ryvion_logs:/var/log/ryvion:ro
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+    networks:
+      - ryvion_network
+    profiles:
+      - logging
+
+networks:
+  ryvion_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  ryvion_data:
+    driver: local
+  ryvion_logs:
+    driver: local
+  ryvion_config:
+    driver: local
+  ryvion_cache:
+    driver: local

@@ -1,14 +1,11 @@
-module github.com/akatosh/node-agent
+module github.com/Ryvion/node-agent
 
-go 1.21
+go 1.25.0
 
 require (
 	github.com/docker/docker v20.10.24+incompatible
 	github.com/gagliardetto/solana-go v1.13.0
 	github.com/gorilla/websocket v1.5.1
-)
-
-require (
 	filippo.io/edwards25519 v1.0.0-rc.1 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
