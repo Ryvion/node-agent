@@ -8,11 +8,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
+)
+
+const (
+	HubUploadTimeout           = 10 * time.Minute
+	IPFSUploadTimeout          = 5 * time.Minute
+	HubRegisterTimeout         = 30 * time.Second
+	DownloadInputTimeout       = 5 * time.Minute
+	UploadMultipleResultsDelay = 100 * time.Millisecond
 )
 
 type ResultStorage struct {
@@ -29,7 +38,7 @@ type UploadResult struct {
 	Timestamp int64  `json:"timestamp"`
 }
 
-func NewResultStorage(bucketName, hubBaseURL string) (*ResultStorage, error) {
+func NewResultStorage(hubBaseURL, ipfsNodeURL string) (*ResultStorage, error) {
 	localDir := "/tmp/ryvion_results"
 	if err := os.MkdirAll(localDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create local storage directory: %w", err)
@@ -37,7 +46,7 @@ func NewResultStorage(bucketName, hubBaseURL string) (*ResultStorage, error) {
 
 	return &ResultStorage{
 		hubBaseURL: hubBaseURL,
-		ipfsNode:   "http://127.0.0.1:5001",
+		ipfsNode:   ipfsNodeURL,
 		localDir:   localDir,
 	}, nil
 }
@@ -72,7 +81,7 @@ func (rs *ResultStorage) UploadWorkloadResult(ctx context.Context, jobID string,
 		return uploadResult, nil
 	}
 
-	fmt.Printf("IPFS upload failed (%v), trying hub upload...\n", err)
+	log.Printf("IPFS upload failed for job %s (%v), trying hub upload...", jobID, err)
 
 	return rs.UploadToHub(ctx, jobID, resultPath, resultType)
 }
@@ -81,18 +90,32 @@ func (rs *ResultStorage) UploadMultipleResults(ctx context.Context, jobID string
 	var results []*UploadResult
 
 	for i, path := range resultPaths {
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+
+		}
+
 		if _, err := os.Stat(path); os.IsNotExist(err) {
+			log.Printf("File %s does not exist, skipping...", path)
 			continue
 		}
 
-		result, err := rs.UploadWorkloadResult(ctx, fmt.Sprintf("%s_frame_%d", jobID, i), path, resultType)
+		currentJobID := fmt.Sprintf("%s_frame_%d", jobID, i)
+		result, err := rs.UploadWorkloadResult(ctx, currentJobID, path, resultType)
 		if err != nil {
-			return results, fmt.Errorf("failed to upload file %s: %w", path, err)
+			return results, fmt.Errorf("failed to upload file %s for job %s: %w", path, currentJobID, err)
 		}
 
 		results = append(results, result)
 
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-time.After(UploadMultipleResultsDelay):
+		case <-ctx.Done():
+			return results, ctx.Err()
+		}
 	}
 
 	return results, nil
@@ -104,21 +127,36 @@ func (rs *ResultStorage) DownloadWorkloadInput(ctx context.Context, inputURL, de
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	resp, err := http.Get(inputURL)
+	req, err := http.NewRequestWithContext(ctx, "GET", inputURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create download request: %w", err)
+	}
+
+	client := &http.Client{Timeout: DownloadInputTimeout}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download input: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("Error closing response body during download: %v", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("download failed with status: %d: %s", resp.StatusCode, string(body))
 	}
 
 	destFile, err := os.Create(destPath)
 	if err != nil {
 		return fmt.Errorf("failed to create destination file: %w", err)
 	}
-	defer destFile.Close()
+	defer func() {
+		if closeErr := destFile.Close(); closeErr != nil {
+			log.Printf("Error closing destination file during download: %v", closeErr)
+		}
+	}()
 
 	_, err = io.Copy(destFile, resp.Body)
 	if err != nil {
@@ -133,7 +171,11 @@ func (rs *ResultStorage) UploadToHub(ctx context.Context, jobID, resultPath, res
 	if err != nil {
 		return nil, fmt.Errorf("failed to open result file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.Printf("Error closing result file during upload: %v", closeErr)
+		}
+	}()
 
 	fileInfo, err := file.Stat()
 	if err != nil {
@@ -143,20 +185,25 @@ func (rs *ResultStorage) UploadToHub(ctx context.Context, jobID, resultPath, res
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
-	writer.WriteField("job_id", jobID)
-	writer.WriteField("type", resultType)
+	if err := writer.WriteField("job_id", jobID); err != nil {
+		return nil, fmt.Errorf("failed to write job ID: %w", err)
+	}
+	if err := writer.WriteField("type", resultType); err != nil {
+		return nil, fmt.Errorf("failed to write result type: %w", err)
+	}
 
 	part, err := writer.CreateFormFile("result", filepath.Base(resultPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create form file: %w", err)
 	}
 
-	_, err = io.Copy(part, file)
-	if err != nil {
+	if _, err = io.Copy(part, file); err != nil {
 		return nil, fmt.Errorf("failed to copy file to form: %w", err)
 	}
 
-	writer.Close()
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close writer: %w", err)
+	}
 
 	uploadURL := fmt.Sprintf("%s/api/results/upload", rs.hubBaseURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, &buf)
@@ -166,12 +213,16 @@ func (rs *ResultStorage) UploadToHub(ctx context.Context, jobID, resultPath, res
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	client := &http.Client{Timeout: 10 * time.Minute}
+	client := &http.Client{Timeout: HubUploadTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("upload request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("Error closing response body during upload: %v", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -181,36 +232,23 @@ func (rs *ResultStorage) UploadToHub(ctx context.Context, jobID, resultPath, res
 	timestamp := time.Now().Unix()
 	return &UploadResult{
 		URL:       fmt.Sprintf("%s/api/results/%s", rs.hubBaseURL, jobID),
-		Hash:      "hub_upload_hash",
+		Hash:      "hub_upload_hash_placeholder",
 		Size:      fileInfo.Size(),
 		Type:      resultType,
 		Timestamp: timestamp,
 	}, nil
 }
 
-/*func (rs *ResultStorage) getContentType(resultType string) string {
-	switch resultType {
-	case "image", "stable-diffusion":
-		return "image/png"
-	case "video", "transcoding":
-		return "video/mp4"
-	case "audio", "whisper":
-		return "audio/mpeg"
-	case "model", "training":
-		return "application/octet-stream"
-	case "text", "llm-inference":
-		return "text/plain"
-	default:
-		return "application/octet-stream"
-	}
-}*/
-
 func (rs *ResultStorage) calculateFileHash(filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.Printf("Error closing file during hash calculation: %v", closeErr)
+		}
+	}()
 
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
@@ -244,12 +282,16 @@ func (rs *ResultStorage) registerResultWithHub(ctx context.Context, jobID string
 
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: HubRegisterTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("registration request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("Error closing response body during registration: %v", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -264,7 +306,11 @@ func (rs *ResultStorage) UploadToIPFS(ctx context.Context, resultPath string) (s
 	if err != nil {
 		return "", fmt.Errorf("failed to open file: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			log.Printf("Error closing file during IPFS upload: %v", closeErr)
+		}
+	}()
 
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
@@ -274,13 +320,15 @@ func (rs *ResultStorage) UploadToIPFS(ctx context.Context, resultPath string) (s
 		return "", fmt.Errorf("failed to create form file: %w", err)
 	}
 
-	_, err = io.Copy(part, file)
-	if err != nil {
+	if _, err = io.Copy(part, file); err != nil {
 		return "", fmt.Errorf("failed to copy file: %w", err)
 	}
 
-	writer.Close()
-	ipfsURL := "http://127.0.0.1:5001/api/v0/add"
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("failed to close writer: %w", err)
+	}
+
+	ipfsURL := fmt.Sprintf("%s/api/v0/add", rs.ipfsNode)
 	req, err := http.NewRequestWithContext(ctx, "POST", ipfsURL, &buf)
 	if err != nil {
 		return "", fmt.Errorf("failed to create IPFS request: %w", err)
@@ -288,15 +336,20 @@ func (rs *ResultStorage) UploadToIPFS(ctx context.Context, resultPath string) (s
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{Timeout: IPFSUploadTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("IPFS upload failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("Error closing response body during IPFS upload: %v", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("IPFS upload failed with status: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("IPFS upload failed with status: %d: %s", resp.StatusCode, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -314,5 +367,5 @@ func (rs *ResultStorage) UploadToIPFS(ctx context.Context, resultPath string) (s
 		return "", fmt.Errorf("failed to parse IPFS response: %w", err)
 	}
 
-	return fmt.Sprintf("https://ipfs.io/ipfs/%s", ipfsResponse.Hash), nil
+	return fmt.Sprintf("ipfs://%s", ipfsResponse.Hash), nil
 }
