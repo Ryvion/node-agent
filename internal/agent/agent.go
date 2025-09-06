@@ -20,9 +20,9 @@ import (
 	"log"
 	"strings"
 
-	execreal "github.com/Ryvion/node-agent/executor"
 	keysol "github.com/Ryvion/node-agent/internal/crypto"
 	execsim "github.com/Ryvion/node-agent/internal/executor"
+	execreal "github.com/Ryvion/node-agent/internal/executor/executor"
 	"github.com/Ryvion/node-agent/internal/metrics"
 	runner "github.com/Ryvion/node-agent/internal/runner"
 
@@ -37,7 +37,9 @@ type Agent struct {
 	DeviceType string
 }
 
-func (a *Agent) Register() error { return a.RegisterWithReferral("") }
+func (a *Agent) Register() error {
+	return a.RegisterWithReferral("")
+}
 
 func (a *Agent) RegisterWithReferral(referral string) error {
 	caps := metrics.Capabilities(a.DeviceType)
@@ -531,9 +533,7 @@ func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string
 		return "", "", err
 	}
 	defer f.Close()
-	// Compute sha256 while streaming once
 	h := sha256.New()
-	// Duplicate reader into buffer for PUT
 	fb, err := os.ReadFile(outPath)
 	if err != nil {
 		return "", "", err
@@ -554,8 +554,6 @@ func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string
 		b, _ := ioutil.ReadAll(resp.Body)
 		return "", "", fmt.Errorf("put failed: %d %s", resp.StatusCode, string(b))
 	}
-
-	// If blob managed by hub local endpoint, return hub URL
 	if strings.HasPrefix(prep.PutURL, "/") {
 		var putResp struct {
 			OK  bool   `json:"ok"`
@@ -571,7 +569,6 @@ func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string
 
 		return a.HubBaseURL + "/api/v1/blob/" + jobID, prep.Key, nil
 	}
-	// Optionally upload a signed manifest next to object
 	if strings.TrimSpace(prep.Key) != "" {
 		manifest := map[string]any{
 			"job_id":       jobID,
@@ -585,7 +582,6 @@ func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string
 		sum := sha256.Sum256(mb)
 		sig := ed25519.Sign(a.PrivKey, sum[:])
 		manifest["signature_b64"] = base64.StdEncoding.EncodeToString(sig)
-		// Ask hub for presign of manifest key
 		var ps struct {
 			OK  bool   `json:"ok"`
 			URL string `json:"url"`
@@ -604,7 +600,11 @@ func withResp(resp *http.Response, err error) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Printf("Error closing response body during withResp: %v", closeErr)
+		}
+	}()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("http %d: %s", resp.StatusCode, string(b))
