@@ -39,7 +39,6 @@ func RunOCI(ctx context.Context, image string, jobJSON []byte, gpus string) (*Ru
 		return nil, err
 	}
 
-	// GPU selection: if gpus=="auto", use --gpus all only when NVIDIA runtime is available
 	args := []string{"run", "--rm"}
 	useGPU := false
 	if gpus == "auto" {
@@ -56,7 +55,6 @@ func RunOCI(ctx context.Context, image string, jobJSON []byte, gpus string) (*Ru
 		}
 	}
 	args = append(args, "-v", workdir+":/work", image)
-	// Default entrypoint is /runner; if image uses CMD, rely on it.
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	var outBuf limitedBuffer
@@ -73,7 +71,6 @@ func RunOCI(ctx context.Context, image string, jobJSON []byte, gpus string) (*Ru
 	}
 	dur := time.Since(start)
 
-	// Read receipt.json if present
 	receiptPath := filepath.Join(workdir, "receipt.json")
 	metricsPath := filepath.Join(workdir, "metrics.json")
 	var resultHash string
@@ -92,12 +89,10 @@ func RunOCI(ctx context.Context, image string, jobJSON []byte, gpus string) (*Ru
 	} else {
 		metrics = map[string]any{"duration_ms": dur.Milliseconds()}
 	}
-	// If runner didn’t write a hash, hash logs
 	if resultHash == "" {
 		sum := sha256.Sum256(outBuf.Bytes())
 		resultHash = hex.EncodeToString(sum[:])
 	}
-	// Best guess output path
 	outPath := filepath.Join(workdir, "output")
 	return &RunResult{ResultHash: resultHash, Duration: dur, ExitCode: exitCode, LogsTail: outBuf.Tail(2048), Metrics: metrics, OutputPath: outPath}, nil
 }
@@ -123,7 +118,6 @@ func (l *limitedBuffer) Tail(n int) string {
 }
 
 func trimAlgo(s string) string {
-	// Accept forms like sha256:abcdef or plain hex
 	for i := 0; i < len(s); i++ {
 		if s[i] == ':' {
 			return s[i+1:]

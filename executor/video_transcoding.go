@@ -133,7 +133,7 @@ func (v *VideoTranscodingExecutor) ExecuteTranscoding(ctx context.Context, req *
 		AutoRemove: true,
 	}
 
-	resp, err := v.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("akatosh_transcode_%s", req.JobID))
+	resp, err := v.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("ryvion_transcode_%s", req.JobID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container: %w", err)
 	}

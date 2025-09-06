@@ -180,7 +180,7 @@ print("Rendering completed successfully")
 		AutoRemove: true,
 	}
 
-	resp, err := r.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("akatosh_render_%s", req.JobID))
+	resp, err := r.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("ryvion_render_%s", req.JobID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container: %w", err)
 	}

@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+    <title>Ryvion Node</title>
+    <style>
+        body { font-family: system-ui, Arial; margin: 20px }
+        button { padding: 8px 12px; margin-right: 8px }
+        code { background: #f5f5f5; padding: 2px 4px; border-radius: 4px }
+    </style>
+</head>
+<body>
+    <h3>Ryvion Node</h3>
+    <div id="st">Loading…</div>
+    <div style="margin-top:8px">
+        <button onclick="fetch('/api/pause',{method:'POST'}).then(load)">Pause</button>
+        <button onclick="fetch('/api/resume',{method:'POST'}).then(load)">Resume</button>
+    </div>
+    <h4 style="margin-top:16px">Wallet</h4>
+    <div>Node pubkey (hex): <code id="pubhex">...</code> <button onclick="copyPub()">Copy</button></div>
+    <div style="margin-top:8px">Payout wallet (Solana base58): <input id="wallet" size="60" placeholder="Your base58 wallet"/> <button onclick="saveWallet()">Save</button></div>
+    <small>Use a Solana address to receive payouts when enabled.</small>
+    <script>
+        async function load(){ const r=await fetch('/api/status'); const j=await r.json(); document.getElementById('st').innerText='Paused: '+j.paused+' | Last heartbeat: '+j.last_heartbeat_ms+' | Last error: '+(j.last_error||''); const rp=await fetch('/api/pubkey'); const p=await rp.json(); document.getElementById('pubhex').innerText=p.pubhex||''; try{ const cw=await fetch('/api/payout/current'); if(cw.ok){ const w=await cw.json(); if(w.wallet){ document.getElementById('wallet').value=w.wallet } } }catch(e){} }
+        async function copyPub(){ try{ const rp=await fetch('/api/pubkey'); const p=await rp.json(); await navigator.clipboard.writeText(p.pubhex||''); alert('Copied'); }catch(e){ alert('Copy failed: '+e); } }
+        async function saveWallet(){ try{ const w=document.getElementById('wallet').value.trim(); if(!w){ alert('Enter wallet'); return } const res=await fetch('/api/payout',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({wallet:w})}); if(!res.ok){ const t=await res.text(); throw new Error('HTTP '+res.status+' '+t) } alert('Saved payout wallet'); }catch(e){ alert('Save failed: '+e); } }
+        load();
+    </script>
+</body>
+</html>

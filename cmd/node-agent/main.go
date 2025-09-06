@@ -24,7 +24,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/agent"
 	"github.com/Ryvion/node-agent/internal/crypto"
 	upd "github.com/Ryvion/node-agent/internal/update"
-	"github.com/Ryvion/node-agent/ui/tray"
+	"github.com/Ryvion/node-agent/pkg/tray"
 )
 
 func main() {
@@ -137,10 +137,10 @@ func loadConfig() appConfig {
 		paths = append(paths, v)
 	}
 	if ph := os.Getenv("PROGRAMDATA"); ph != "" {
-		paths = append(paths, ph+"\\Akatosh\\config.json")
+		paths = append(paths, ph+"\\Ryvion\\config.json")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, home+"/.akatosh/config.json")
+		paths = append(paths, home+"/.ryvion/config.json")
 	}
 	for _, p := range paths {
 		b, err := os.ReadFile(p)

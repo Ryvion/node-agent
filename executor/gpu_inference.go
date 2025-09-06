@@ -252,7 +252,7 @@ func (g *GPUInferenceExecutor) runContainer(ctx context.Context, config *contain
 	startTime := time.Now()
 
 	// Create and start container
-	resp, err := g.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("akatosh_%s", jobID))
+	resp, err := g.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("ryvion_%s", jobID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container: %w", err)
 	}

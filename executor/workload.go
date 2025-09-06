@@ -31,7 +31,6 @@ const (
 	WorkloadTypeMining      WorkloadType = "mining"
 )
 
-// Local WorkRequest type (simplified version of proto.WorkRequest)
 type WorkRequest struct {
 	JobId      string `json:"job_id"`
 	JobType    string `json:"job_type"`
@@ -86,7 +85,7 @@ func NewWorkloadExecutor() (*WorkloadExecutor, error) {
 		dockerClient:    cli,
 		activeJobs:      make(map[string]*JobExecution),
 		gpuCapabilities: detectGPUCapabilities(),
-		hubBaseURL:      "https://hub.akatosh.network",
+		hubBaseURL:      "https://ryvion-hub.onrender.com",
 	}, nil
 }
 
@@ -127,7 +126,6 @@ func (e *WorkloadExecutor) ExecuteJob(ctx context.Context, job *WorkRequest) (*W
 }
 
 func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType, payloadURL string) (*WorkResult, error) {
-	// Create job execution tracking
 	execution := &JobExecution{
 		JobID:     jobID,
 		StartTime: time.Now(),
@@ -138,13 +136,12 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 
 	gpuExecutor, err := NewGPUInferenceExecutor()
 	if err == nil {
-		// Parse job type to determine inference model
 		var req *InferenceRequest
 		switch jobType {
 		case "stable-diffusion":
 			req = &InferenceRequest{
 				Model:    "stable-diffusion-v1-5",
-				Prompt:   "high quality digital art", // Default prompt
+				Prompt:   "high quality digital art",
 				JobID:    jobID,
 				InputURL: payloadURL,
 				Params:   map[string]interface{}{"steps": 20, "width": 512, "height": 512},
@@ -152,7 +149,7 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 		case "llm-inference":
 			req = &InferenceRequest{
 				Model:    "llama2-7b",
-				Prompt:   "Complete this text:", // Default prompt
+				Prompt:   "Complete this text:",
 				JobID:    jobID,
 				InputURL: payloadURL,
 				Params:   map[string]interface{}{"max_tokens": 100, "temperature": 0.7},
@@ -175,7 +172,6 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 			}
 		}
 
-		// Execute real GPU inference
 		var inferenceResult *InferenceResult
 		switch jobType {
 		case "stable-diffusion":
@@ -189,13 +185,10 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 		}
 
 		if err == nil && inferenceResult.Error == "" {
-			// Real GPU inference succeeded!
 			resultData, _ := json.Marshal(inferenceResult)
 
-			// Upload result if output file exists (check if Output contains a file path)
 			var uploadURL string
 			if inferenceResult.Output != "" && (filepath.Ext(inferenceResult.Output) != "" || len(inferenceResult.Output) > 100) {
-				// Assume it's a file path if it has an extension or is long (base64/binary data)
 				if url, uploadErr := e.uploadResultToHub(ctx, jobID, inferenceResult.Output, jobType); uploadErr == nil {
 					uploadURL = url
 					fmt.Printf("Result uploaded successfully: %s\n", uploadURL)
@@ -216,7 +209,6 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 				},
 			}
 
-			// Add upload URL to result if available
 			if uploadURL != "" {
 				resultWithURL := make(map[string]interface{})
 				json.Unmarshal(resultData, &resultWithURL)
@@ -228,7 +220,6 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 			return result, nil
 		}
 
-		// Log GPU execution failure but continue with fallback
 		errMsg := ""
 		if inferenceResult != nil {
 			errMsg = inferenceResult.Error
@@ -237,13 +228,10 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 			jobID, err, errMsg)
 	}
 
-	// Fallback to simulation if GPU inference fails
 	fmt.Printf("Using simulation fallback for job %s (GPU executor unavailable: %v)\n", jobID, err)
 
-	// Simulate processing time (shorter now that we tried real execution)
 	time.Sleep(2 * time.Second)
 
-	// Generate simulated but realistic result
 	simulatedResult := map[string]interface{}{
 		"job_id":      jobID,
 		"job_type":    jobType,
@@ -262,9 +250,9 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 		OutputData: resultData,
 		Metrics: ExecutionMetrics{
 			Duration:       duration,
-			GPUUtilization: 45.0, // Simulated GPU usage
+			GPUUtilization: 45.0,
 			PowerUsage:     e.measurePowerUsage(),
-			TokensPerSec:   20.0, // Simulated tokens/sec
+			TokensPerSec:   20.0,
 		},
 	}
 
@@ -272,7 +260,6 @@ func (e *WorkloadExecutor) ExecuteInference(ctx context.Context, jobID, jobType,
 	return result, nil
 }
 
-// Full workload job execution method
 func (e *WorkloadExecutor) executeInferenceJob(ctx context.Context, job *WorkRequest) (*WorkResult, error) {
 	var params InferenceParams
 	if err := json.Unmarshal(job.Parameters, &params); err != nil {
@@ -301,8 +288,8 @@ func (e *WorkloadExecutor) executeInferenceJob(ctx context.Context, job *WorkReq
 					Capabilities: [][]string{{"gpu"}},
 				},
 			},
-			Memory:   8 * 1024 * 1024 * 1024, // 8GB
-			NanoCPUs: 4 * 1000000000,         // 4 CPUs
+			Memory:   8 * 1024 * 1024 * 1024,
+			NanoCPUs: 4 * 1000000000,
 		},
 		AutoRemove: true,
 	}
@@ -362,27 +349,24 @@ func (e *WorkloadExecutor) executeTranscoding(ctx context.Context, job *WorkRequ
 		return nil, fmt.Errorf("invalid transcoding parameters: %w", err)
 	}
 
-	// Create transcoding executor
 	transcodingExecutor, err := NewVideoTranscodingExecutor()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transcoding executor: %w", err)
 	}
 
-	// Execute real video transcoding
 	result, err := transcodingExecutor.ExecuteTranscoding(ctx, &VideoTranscodingRequest{
 		JobID:       job.JobId,
 		InputURL:    params.InputURL,
 		OutputCodec: params.OutputCodec,
 		Preset:      params.Preset,
 		Bitrate:     params.Bitrate,
-		Resolution:  "1920x1080", // Default HD
+		Resolution:  "1920x1080",
 	})
 
 	if err != nil {
 		return nil, fmt.Errorf("transcoding failed: %w", err)
 	}
 
-	// Convert to WorkResult format
 	resultData, _ := json.Marshal(result)
 	duration := time.Since(e.activeJobs[job.JobId].StartTime)
 
@@ -405,28 +389,25 @@ func (e *WorkloadExecutor) executeRendering(ctx context.Context, job *WorkReques
 		return nil, fmt.Errorf("invalid rendering parameters: %w", err)
 	}
 
-	// Create rendering executor
 	renderingExecutor, err := NewRenderingExecutor()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rendering executor: %w", err)
 	}
 
-	// Execute real 3D rendering
 	result, err := renderingExecutor.ExecuteRendering(ctx, &RenderingRequest{
 		JobID:      job.JobId,
 		ProjectURL: params.ProjectURL,
 		StartFrame: params.StartFrame,
 		EndFrame:   params.EndFrame,
 		Resolution: params.Resolution,
-		Engine:     "CYCLES", // Use GPU-accelerated Cycles
-		Quality:    "MEDIUM", // Default quality
+		Engine:     "CYCLES",
+		Quality:    "MEDIUM",
 	})
 
 	if err != nil {
 		return nil, fmt.Errorf("rendering failed: %w", err)
 	}
 
-	// Convert to WorkResult format
 	resultData, _ := json.Marshal(result)
 	duration := time.Since(e.activeJobs[job.JobId].StartTime)
 
@@ -438,7 +419,7 @@ func (e *WorkloadExecutor) executeRendering(ctx context.Context, job *WorkReques
 			Duration:       duration,
 			GPUUtilization: result.GPUUsage,
 			PowerUsage:     e.measurePowerUsage(),
-			TokensPerSec:   float64(result.FramesCount) / result.Duration, // Frames per second
+			TokensPerSec:   float64(result.FramesCount) / result.Duration,
 		},
 	}, nil
 }
@@ -449,13 +430,11 @@ func (e *WorkloadExecutor) executeTraining(ctx context.Context, job *WorkRequest
 		return nil, fmt.Errorf("invalid training parameters: %w", err)
 	}
 
-	// Create training executor
 	trainingExecutor, err := NewModelTrainingExecutor()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create training executor: %w", err)
 	}
 
-	// Execute real model training
 	result, err := trainingExecutor.ExecuteTraining(ctx, &ModelTrainingRequest{
 		JobID:        job.JobId,
 		ModelType:    params.ModelType,
@@ -471,7 +450,6 @@ func (e *WorkloadExecutor) executeTraining(ctx context.Context, job *WorkRequest
 		return nil, fmt.Errorf("training failed: %w", err)
 	}
 
-	// Convert to WorkResult format
 	resultData, _ := json.Marshal(result)
 	duration := time.Since(e.activeJobs[job.JobId].StartTime)
 
@@ -525,8 +503,6 @@ func (e *WorkloadExecutor) Cleanup() error {
 // Helper functions
 
 func detectGPUCapabilities() GPUCapabilities {
-	// Use nvidia-smi or similar to detect GPU
-	// This is a placeholder implementation
 	return GPUCapabilities{
 		Model:     "NVIDIA RTX 3080",
 		VRAM:      10240,
@@ -536,17 +512,14 @@ func detectGPUCapabilities() GPUCapabilities {
 }
 
 func (e *WorkloadExecutor) measureGPUUtilization() float64 {
-	// Use nvidia-smi to get current GPU utilization
 	return 85.5 // Placeholder
 }
 
 func (e *WorkloadExecutor) measurePowerUsage() float64 {
-	// Use nvidia-smi to get power usage
 	return 250.0 // Watts, placeholder
 }
 
 func (e *WorkloadExecutor) getContainerOutput(ctx context.Context, containerID string) ([]byte, error) {
-	// Read container logs as output
 	logs, err := e.dockerClient.ContainerLogs(ctx, containerID, types.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
@@ -557,7 +530,6 @@ func (e *WorkloadExecutor) getContainerOutput(ctx context.Context, containerID s
 	}
 	defer logs.Close()
 
-	// Read the logs content
 	output := make([]byte, 1024*1024) // 1MB buffer
 	n, err := logs.Read(output)
 	if err != nil && err.Error() != "EOF" {
@@ -571,8 +543,6 @@ func hashOutput(data []byte) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
 }
-
-// Parameter structs
 
 type InferenceParams struct {
 	ModelImage string `json:"model_image"`
@@ -605,7 +575,6 @@ type TrainingParams struct {
 	MaxSteps     int     `json:"max_steps"`
 }
 
-// Upload result file to hub
 func (e *WorkloadExecutor) uploadResultToHub(ctx context.Context, jobID, resultPath, resultType string) (string, error) {
 	if _, err := os.Stat(resultPath); os.IsNotExist(err) {
 		return "", fmt.Errorf("result file not found: %s", resultPath)
@@ -617,15 +586,12 @@ func (e *WorkloadExecutor) uploadResultToHub(ctx context.Context, jobID, resultP
 	}
 	defer file.Close()
 
-	// Create multipart form
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 
-	// Add job ID and type fields
 	writer.WriteField("job_id", jobID)
 	writer.WriteField("type", resultType)
 
-	// Add file field
 	part, err := writer.CreateFormFile("result", filepath.Base(resultPath))
 	if err != nil {
 		return "", fmt.Errorf("failed to create form file: %w", err)
@@ -638,7 +604,6 @@ func (e *WorkloadExecutor) uploadResultToHub(ctx context.Context, jobID, resultP
 
 	writer.Close()
 
-	// Create HTTP request
 	uploadURL := fmt.Sprintf("%s/api/results/upload", e.hubBaseURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, &buf)
 	if err != nil {
@@ -647,7 +612,6 @@ func (e *WorkloadExecutor) uploadResultToHub(ctx context.Context, jobID, resultP
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	// Send request
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -660,6 +624,5 @@ func (e *WorkloadExecutor) uploadResultToHub(ctx context.Context, jobID, resultP
 		return "", fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Return the uploaded file URL
 	return fmt.Sprintf("%s/api/results/%s", e.hubBaseURL, jobID), nil
 }

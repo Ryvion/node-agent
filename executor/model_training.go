@@ -22,28 +22,28 @@ type ModelTrainingExecutor struct {
 }
 
 type ModelTrainingRequest struct {
-	JobID        string `json:"job_id"`
-	ModelType    string `json:"model_type"`    // "llm", "diffusion", "classifier"
-	DatasetURL   string `json:"dataset_url"`
-	BaseModelURL string `json:"base_model_url"`
-	Epochs       int    `json:"epochs"`
-	BatchSize    int    `json:"batch_size"`
+	JobID        string  `json:"job_id"`
+	ModelType    string  `json:"model_type"` // "llm", "diffusion", "classifier"
+	DatasetURL   string  `json:"dataset_url"`
+	BaseModelURL string  `json:"base_model_url"`
+	Epochs       int     `json:"epochs"`
+	BatchSize    int     `json:"batch_size"`
 	LearningRate float64 `json:"learning_rate"`
-	MaxSteps     int    `json:"max_steps"`
+	MaxSteps     int     `json:"max_steps"`
 }
 
 type ModelTrainingResult struct {
-	JobID            string  `json:"job_id"`
-	ModelOutputURL   string  `json:"model_output_url"`
-	TrainingLoss     float64 `json:"training_loss"`
-	ValidationLoss   float64 `json:"validation_loss"`
-	Accuracy         float64 `json:"accuracy"`
-	Duration         float64 `json:"duration_seconds"`
-	EpochsCompleted  int     `json:"epochs_completed"`
-	StepsCompleted   int     `json:"steps_completed"`
-	GPUUsage         float64 `json:"gpu_usage_percent"`
-	PeakMemoryGB     float64 `json:"peak_memory_gb"`
-	Error            string  `json:"error,omitempty"`
+	JobID           string  `json:"job_id"`
+	ModelOutputURL  string  `json:"model_output_url"`
+	TrainingLoss    float64 `json:"training_loss"`
+	ValidationLoss  float64 `json:"validation_loss"`
+	Accuracy        float64 `json:"accuracy"`
+	Duration        float64 `json:"duration_seconds"`
+	EpochsCompleted int     `json:"epochs_completed"`
+	StepsCompleted  int     `json:"steps_completed"`
+	GPUUsage        float64 `json:"gpu_usage_percent"`
+	PeakMemoryGB    float64 `json:"peak_memory_gb"`
+	Error           string  `json:"error,omitempty"`
 }
 
 func NewModelTrainingExecutor() (*ModelTrainingExecutor, error) {
@@ -160,7 +160,7 @@ func (m *ModelTrainingExecutor) ExecuteTraining(ctx context.Context, req *ModelT
 		AutoRemove: true,
 	}
 
-	resp, err := m.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("akatosh_training_%s", req.JobID))
+	resp, err := m.dockerClient.ContainerCreate(ctx, config, hostConfig, nil, nil, fmt.Sprintf("ryvion_training_%s", req.JobID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create container: %w", err)
 	}
@@ -533,7 +533,7 @@ func (m *ModelTrainingExecutor) downloadFile(url, filepath string) error {
 
 func (m *ModelTrainingExecutor) parseTrainingResults(workDir, jobID string) (*ModelTrainingResult, error) {
 	metricsPath := filepath.Join(workDir, "output", "metrics.json")
-	
+
 	// Check if metrics file exists
 	if _, err := os.Stat(metricsPath); os.IsNotExist(err) {
 		// Return default metrics if no file found
