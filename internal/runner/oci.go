@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -30,7 +31,13 @@ func RunOCI(ctx context.Context, image string, jobJSON []byte, gpus string) (*Ru
 	if gpus == "" {
 		gpus = "all"
 	}
-	workdir, err := os.MkdirTemp("", "ak_work_*")
+	workBase := strings.TrimSpace(os.Getenv("AK_WORK_DIR"))
+	if workBase != "" {
+		if err := os.MkdirAll(workBase, 0755); err != nil {
+			return nil, err
+		}
+	}
+	workdir, err := os.MkdirTemp(workBase, "ak_work_*")
 	if err != nil {
 		return nil, err
 	}
