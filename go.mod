@@ -1,6 +1,6 @@
 module github.com/Ryvion/node-agent
 
-go 1.25.0
+go 1.23.0
 
 require (
 	github.com/docker/docker v28.4.0+incompatible

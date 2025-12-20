@@ -1,4 +1,4 @@
-FROM golang:1.25.0 as build
+FROM golang:1.23 as build
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -10,6 +10,7 @@ FROM alpine:latest
 RUN apk add --no-cache \
     curl \
     ca-certificates \
+    docker-cli \
     python3 \
     py3-pip \
     python3-dev \
@@ -36,4 +37,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD pgrep node-agent || exit 1
 
 ENTRYPOINT ["/usr/local/bin/start.sh"]
-

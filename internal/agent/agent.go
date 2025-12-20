@@ -86,10 +86,11 @@ func (a *Agent) CreateReferral() (string, error) {
 
 func (a *Agent) HeartbeatOnce() error {
 	m := metrics.Sample()
-	hbMsg := heartbeatMessage(a.PubKey, time.Now().UnixMilli(), m.CPUUtil, m.MemUtil, m.GPUUtil, m.PowerWatts)
+	ts := time.Now().UnixMilli()
+	hbMsg := heartbeatMessage(a.PubKey, ts, m.CPUUtil, m.MemUtil, m.GPUUtil, m.PowerWatts)
 	body := map[string]any{
 		"public_key_hex": hex.EncodeToString(a.PubKey),
-		"timestamp_ms":   time.Now().UnixMilli(),
+		"timestamp_ms":   ts,
 		"cpu_util":       m.CPUUtil,
 		"mem_util":       m.MemUtil,
 		"gpu_util":       m.GPUUtil,
@@ -101,7 +102,15 @@ func (a *Agent) HeartbeatOnce() error {
 
 func (a *Agent) FetchAndRunWork() error {
 	url := fmt.Sprintf("%s/api/v1/node/work?pubkey=%s", a.HubBaseURL, strings.ToLower(hex.EncodeToString(a.PubKey)))
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	ts := time.Now().UnixMilli()
+	sig := ed25519.Sign(a.PrivKey, workMessage(a.PubKey, ts))
+	req.Header.Set("X-Node-Timestamp", itoaI64(ts))
+	req.Header.Set("X-Node-Signature", hex.EncodeToString(sig))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -114,6 +123,7 @@ func (a *Agent) FetchAndRunWork() error {
 		return fmt.Errorf("work req status %d: %s", resp.StatusCode, string(b))
 	}
 	var wa struct {
+		HasWork    *bool  `json:"has_work"`
 		JobID      string `json:"job_id"`
 		JobPubkey  string `json:"job_pubkey"`
 		Kind       string `json:"kind"`
@@ -124,6 +134,18 @@ func (a *Agent) FetchAndRunWork() error {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&wa); err != nil {
 		return err
+	}
+	// Hub contract (OpenAPI) uses 200 + {has_work:false} to indicate no work.
+	// Keep backwards-compatibility with older servers by also treating an empty
+	// job_id as "no work" when has_work is omitted.
+	if wa.HasWork != nil && !*wa.HasWork {
+		return nil
+	}
+	if wa.HasWork == nil && strings.TrimSpace(wa.JobID) == "" {
+		return nil
+	}
+	if strings.TrimSpace(wa.JobID) == "" {
+		return fmt.Errorf("work assignment missing job_id")
 	}
 
 	start := time.Now()
@@ -340,6 +362,18 @@ func receiptMessage(pub ed25519.PublicKey, jobID, resultHash string, units uint6
 	return sum[:]
 }
 
+func workMessage(pub ed25519.PublicKey, ts int64) []byte {
+	s := "AKT1|work|" + hex.EncodeToString(pub) + "|" + itoaI64(ts)
+	sum := sha256.Sum256([]byte(s))
+	return sum[:]
+}
+
+func blobMessage(pub ed25519.PublicKey, jobID string, size uint64, ts int64) []byte {
+	s := "AKT1|blob|" + jobID + "|" + hex.EncodeToString(pub) + "|" + itoaU64(size) + "|" + itoaI64(ts)
+	sum := sha256.Sum256([]byte(s))
+	return sum[:]
+}
+
 func challengeMessage(nonce string) []byte {
 	s := "AKT1|challenge|" + nonce
 	sum := sha256.Sum256([]byte(s))
@@ -543,6 +577,13 @@ func (a *Agent) uploadArtifact(ctx context.Context, jobID string, outPath string
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, absolutize(a.HubBaseURL, prep.PutURL), bytes.NewReader(fb))
 	if err != nil {
 		return "", "", err
+	}
+	if strings.HasPrefix(prep.PutURL, "/") {
+		ts := time.Now().UnixMilli()
+		sig := ed25519.Sign(a.PrivKey, blobMessage(a.PubKey, jobID, size, ts))
+		req.Header.Set("X-Node-Pubkey", strings.ToLower(hex.EncodeToString(a.PubKey)))
+		req.Header.Set("X-Node-Timestamp", itoaI64(ts))
+		req.Header.Set("X-Node-Signature", hex.EncodeToString(sig))
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := http.DefaultClient.Do(req)
