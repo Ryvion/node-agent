@@ -38,8 +38,8 @@ docker ps
 # View logs
 docker-compose -f /opt/ryvion/docker-compose.yml logs -f
 
-# Access UI (replace with your droplet IP)
-curl http://YOUR_DROPLET_IP:3000/health
+# Verify the node process is healthy
+docker exec ryvion-node pgrep ryvion-node
 ```
 
 ## Architecture
@@ -102,8 +102,8 @@ curl http://YOUR_DROPLET_IP:3000/health
 
 **Node not connecting to hub:**
 ```bash
-# Check hub URL configuration
-cat /opt/ryvion/config/node.json
+# Check hub URL configuration in compose env
+grep RYV_HUB_URL /opt/ryvion/docker-compose.yml
 
 # Test connectivity
 curl -I https://ryvion-hub.onrender.com/health
@@ -120,12 +120,10 @@ docker run --rm --privileged hello-world
 
 **Port not accessible:**
 ```bash
-# Check firewall (Ubuntu UFW)
-ufw status
-ufw allow 3000/tcp
-
-# Check if service is listening
-netstat -tlnp | grep :3000
+# This node runtime does not expose a local HTTP UI by default.
+# Validate health via process and logs instead:
+docker exec ryvion-node pgrep ryvion-node
+docker-compose -f /opt/ryvion/docker-compose.yml logs --tail=100
 ```
 
 ## Advanced Configuration
@@ -160,7 +158,7 @@ Add your own AI model runners by mounting custom containers:
 volumes:
   - ./custom-runners:/custom-runners
 environment:
-  - AK_CUSTOM_RUNNERS_PATH=/custom-runners
+  - RYV_CUSTOM_RUNNERS_PATH=/custom-runners
 ```
 
 ## Support

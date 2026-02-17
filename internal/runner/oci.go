@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,122 +14,198 @@ import (
 	"time"
 )
 
-type RunResult struct {
-	ResultHash string
-	Duration   time.Duration
+type Result struct {
+	Hash       string
 	ExitCode   int
-	LogsTail   string
-	Metrics    map[string]any
+	Logs       string
 	OutputPath string
+	Duration   time.Duration
+	Metrics    map[string]any
 }
 
-// RunOCI executes a runner image with a mounted work dir containing job.json.
-// It expects the container to read /work/job.json and write /work/receipt.json, /work/metrics.json.
-func RunOCI(ctx context.Context, image string, jobJSON []byte, gpus string) (*RunResult, error) {
-	if image == "" {
+// Run executes an OCI image with /work mounted and specJSON written to /work/job.json.
+// The container is expected to write receipt.json and optional metrics.json/output artifact files.
+func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
+	if strings.TrimSpace(image) == "" {
 		return nil, fmt.Errorf("image required")
 	}
-	if gpus == "" {
-		gpus = "all"
-	}
-	workBase := strings.TrimSpace(os.Getenv("AK_WORK_DIR"))
-	if workBase != "" {
-		if err := os.MkdirAll(workBase, 0755); err != nil {
-			return nil, err
-		}
-	}
-	workdir, err := os.MkdirTemp(workBase, "ak_work_*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(workdir)
-	if err := os.WriteFile(filepath.Join(workdir, "job.json"), jobJSON, 0644); err != nil {
-		return nil, err
+
+	if strings.TrimSpace(specJSON) == "" {
+		specJSON = `{}`
 	}
 
-	args := []string{"run", "--rm"}
-	useGPU := false
-	if gpus == "auto" {
-		if _, err := exec.LookPath("nvidia-smi"); err == nil {
-			useGPU = true
-		}
-	} else if gpus != "" {
-		useGPU = true
-	}
-	if useGPU {
-		args = append(args, "--gpus", map[string]string{"auto": "all"}[gpus])
-		if args[len(args)-1] == "" {
-			args[len(args)-1] = gpus
+	workBase := strings.TrimSpace(os.Getenv("RYV_WORK_DIR"))
+	if workBase != "" {
+		if err := os.MkdirAll(workBase, 0o755); err != nil {
+			return nil, fmt.Errorf("create work dir: %w", err)
 		}
 	}
-	args = append(args, "-v", workdir+":/work", image)
+	workDir, err := os.MkdirTemp(workBase, "ryv_job_*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp work dir: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	if err := os.WriteFile(filepath.Join(workDir, "job.json"), []byte(specJSON), 0o644); err != nil {
+		return nil, fmt.Errorf("write job.json: %w", err)
+	}
+
+	args := []string{"run", "--rm", "-v", workDir + ":/work"}
+	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
+		args = append(args, "--gpus", gpuArg)
+	}
+	args = append(args, image)
+
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	var outBuf limitedBuffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &outBuf
-	err = cmd.Run()
+	var out cappedBuffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	runErr := cmd.Run()
+	duration := time.Since(start)
+
 	exitCode := 0
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+	if runErr != nil {
+		if ee, ok := runErr.(*exec.ExitError); ok {
 			exitCode = ee.ExitCode()
 		} else {
 			exitCode = -1
 		}
 	}
-	dur := time.Since(start)
 
-	receiptPath := filepath.Join(workdir, "receipt.json")
-	metricsPath := filepath.Join(workdir, "metrics.json")
-	var resultHash string
-	var metrics map[string]any
-	if b, rerr := os.ReadFile(receiptPath); rerr == nil {
-		var rec struct {
-			OutputHash  string `json:"output_hash"`
-			ImageDigest string `json:"image_digest"`
-		}
-		if jerr := json.Unmarshal(b, &rec); jerr == nil && rec.OutputHash != "" {
-			resultHash = trimAlgo(rec.OutputHash)
-		}
+	receiptHash := readReceiptHash(filepath.Join(workDir, "receipt.json"))
+	metrics := readMetrics(filepath.Join(workDir, "metrics.json"), duration)
+	artifactPath, _ := copyArtifact(workDir, workBase)
+
+	hash := receiptHash
+	if hash == "" {
+		sum := sha256.Sum256(out.Bytes())
+		hash = hex.EncodeToString(sum[:])
 	}
-	if b, merr := os.ReadFile(metricsPath); merr == nil {
-		_ = json.Unmarshal(b, &metrics)
-	} else {
-		metrics = map[string]any{"duration_ms": dur.Milliseconds()}
+
+	result := &Result{
+		Hash:       hash,
+		ExitCode:   exitCode,
+		Logs:       out.Tail(4096),
+		OutputPath: artifactPath,
+		Duration:   duration,
+		Metrics:    metrics,
 	}
-	if resultHash == "" {
-		sum := sha256.Sum256(outBuf.Bytes())
-		resultHash = hex.EncodeToString(sum[:])
-	}
-	outPath := filepath.Join(workdir, "output")
-	return &RunResult{ResultHash: resultHash, Duration: dur, ExitCode: exitCode, LogsTail: outBuf.Tail(2048), Metrics: metrics, OutputPath: outPath}, nil
+	return result, runErr
 }
 
-type limitedBuffer struct{ buf []byte }
+func resolveGPUFlag(gpus string) string {
+	gpus = strings.TrimSpace(strings.ToLower(gpus))
+	switch gpus {
+	case "", "none", "off":
+		return ""
+	case "auto":
+		if _, err := exec.LookPath("nvidia-smi"); err == nil {
+			return "all"
+		}
+		return ""
+	default:
+		return gpus
+	}
+}
 
-func (l *limitedBuffer) Write(p []byte) (int, error) {
-	l.buf = append(l.buf, p...)
-	if len(l.buf) > 1<<20 {
-		l.buf = l.buf[len(l.buf)-(1<<20):]
+func readReceiptHash(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var rec struct {
+		OutputHash string `json:"output_hash"`
+	}
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return ""
+	}
+	return trimDigestPrefix(strings.TrimSpace(rec.OutputHash))
+}
+
+func readMetrics(path string, duration time.Duration) map[string]any {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return map[string]any{"duration_ms": duration.Milliseconds()}
+	}
+	var metrics map[string]any
+	if err := json.Unmarshal(b, &metrics); err != nil {
+		return map[string]any{"duration_ms": duration.Milliseconds()}
+	}
+	if metrics == nil {
+		metrics = map[string]any{}
+	}
+	if _, ok := metrics["duration_ms"]; !ok {
+		metrics["duration_ms"] = duration.Milliseconds()
+	}
+	return metrics
+}
+
+func copyArtifact(workDir, workBase string) (string, error) {
+	candidates := []string{
+		filepath.Join(workDir, "output"),
+		filepath.Join(workDir, "output.bin"),
+		filepath.Join(workDir, "result.bin"),
+	}
+	for _, src := range candidates {
+		fi, err := os.Stat(src)
+		if err != nil || fi.IsDir() {
+			continue
+		}
+		targetDir := workBase
+		if targetDir == "" {
+			targetDir = os.TempDir()
+		}
+		dst, err := os.CreateTemp(targetDir, "ryv_artifact_*")
+		if err != nil {
+			return "", err
+		}
+		defer dst.Close()
+		in, err := os.Open(src)
+		if err != nil {
+			return "", err
+		}
+		_, copyErr := io.Copy(dst, in)
+		_ = in.Close()
+		if copyErr != nil {
+			_ = os.Remove(dst.Name())
+			return "", copyErr
+		}
+		return dst.Name(), nil
+	}
+	return "", nil
+}
+
+func trimDigestPrefix(v string) string {
+	if i := strings.IndexByte(v, ':'); i > 0 {
+		return v[i+1:]
+	}
+	return v
+}
+
+type cappedBuffer struct {
+	buf []byte
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.buf = append(c.buf, p...)
+	const limit = 1 << 20
+	if len(c.buf) > limit {
+		c.buf = c.buf[len(c.buf)-limit:]
 	}
 	return len(p), nil
 }
-func (l *limitedBuffer) Bytes() []byte { return l.buf }
-func (l *limitedBuffer) Tail(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if len(l.buf) <= n {
-		return string(l.buf)
-	}
-	return string(l.buf[len(l.buf)-n:])
+
+func (c *cappedBuffer) Bytes() []byte {
+	return c.buf
 }
 
-func trimAlgo(s string) string {
-	for i := 0; i < len(s); i++ {
-		if s[i] == ':' {
-			return s[i+1:]
-		}
+func (c *cappedBuffer) Tail(n int) string {
+	if n <= 0 || len(c.buf) == 0 {
+		return ""
 	}
-	return s
+	if len(c.buf) <= n {
+		return string(c.buf)
+	}
+	return string(c.buf[len(c.buf)-n:])
 }

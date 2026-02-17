@@ -4,29 +4,24 @@ services:
   ryvion-node:
     build:
       context: ..
-      dockerfile: Dockerfile
-    container_name: ryvion-node-agent
+      dockerfile: deploy/Dockerfile
+    container_name: ryvion-node
     restart: unless-stopped
-    privileged: true
     environment:
-      - AK_HUB_URL=https://ryvion-hub.onrender.com
-      - AK_DEVICE_TYPE=gpu
-      - AK_UI_PORT=3000
-      - AK_LOG_LEVEL=info
+      - RYV_HUB_URL=https://ryvion-hub.fly.dev
+      - RYV_DEVICE_TYPE=gpu
+      - RYV_GPUS=auto
+      - RYV_LOG_LEVEL=info
       - DOCKER_HOST=unix:///var/run/docker.sock
-    ports:
-      - "3000:3000"
-      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ryvion_data:/work
       - ryvion_logs:/var/log/ryvion
-      - ryvion_config:/config
       - ryvion_cache:/cache
     networks:
       - ryvion_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD-SHELL", "pgrep ryvion-node >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -81,8 +76,6 @@ volumes:
   ryvion_data:
     driver: local
   ryvion_logs:
-    driver: local
-  ryvion_config:
     driver: local
   ryvion_cache:
     driver: local
