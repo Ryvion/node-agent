@@ -36,6 +36,7 @@ func main() {
 	}
 
 	initLogger()
+	cleanupOrphanedContainers()
 
 	hubURL := strings.TrimSpace(*hubFlag)
 	if envHub := strings.TrimSpace(os.Getenv("RYV_HUB_URL")); envHub != "" {
@@ -90,21 +91,37 @@ func main() {
 		slog.Warn("health report failed", "error", err)
 	}
 
-	tick := time.NewTicker(10 * time.Second)
-	defer tick.Stop()
+	backoff := 10 * time.Second
+	maxBackoff := 5 * time.Minute
+	consecutiveFailures := 0
 
 	for {
-		runCycle(ctx, client, *gpusFlag)
+		err := runCycle(ctx, client, *gpusFlag)
+		if err != nil {
+			consecutiveFailures++
+			backoff = time.Duration(float64(backoff) * 1.5)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			slog.Warn("cycle failed, backing off", "error", err, "backoff", backoff, "failures", consecutiveFailures)
+		} else {
+			if consecutiveFailures > 0 {
+				slog.Info("hub connection restored", "previous_failures", consecutiveFailures)
+			}
+			consecutiveFailures = 0
+			backoff = 10 * time.Second
+		}
+
 		select {
 		case <-ctx.Done():
 			slog.Info("shutting down")
 			return
-		case <-tick.C:
+		case <-time.After(backoff):
 		}
 	}
 }
 
-func runCycle(ctx context.Context, client *hub.Client, gpus string) {
+func runCycle(ctx context.Context, client *hub.Client, gpus string) error {
 	metrics := hw.SampleMetrics()
 	if err := client.Heartbeat(ctx, hub.Metrics{
 		TimestampMs: time.Now().UnixMilli(),
@@ -113,20 +130,19 @@ func runCycle(ctx context.Context, client *hub.Client, gpus string) {
 		GPUUtil:     metrics.GPUUtil,
 		PowerWatts:  metrics.PowerWatts,
 	}); err != nil {
-		slog.Warn("heartbeat failed", "error", err)
+		return fmt.Errorf("heartbeat failed: %w", err)
 	}
 
 	work, err := client.FetchWork(ctx)
 	if err != nil {
-		slog.Warn("fetch work failed", "error", err)
-		return
+		return fmt.Errorf("fetch work failed: %w", err)
 	}
 	if work == nil {
-		return
+		return nil
 	}
 	if strings.TrimSpace(work.Image) == "" || strings.TrimSpace(work.SpecJSON) == "" {
 		slog.Warn("received work assignment without container spec", "job_id", work.JobID)
-		return
+		return nil
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -135,7 +151,7 @@ func runCycle(ctx context.Context, client *hub.Client, gpus string) {
 	result, runErr := runner.Run(runCtx, work.Image, work.SpecJSON, gpus)
 	if result == nil {
 		slog.Warn("runner failed", "job_id", work.JobID, "error", runErr)
-		return
+		return nil
 	}
 	if runErr != nil {
 		slog.Warn("container exited with error", "job_id", work.JobID, "exit_code", result.ExitCode, "error", runErr)
@@ -179,9 +195,29 @@ func runCycle(ctx context.Context, client *hub.Client, gpus string) {
 		Metadata:      metadata,
 	}); err != nil {
 		slog.Warn("submit receipt failed", "job_id", work.JobID, "error", err)
-		return
+		return nil
 	}
 	slog.Info("job completed", "job_id", work.JobID, "hash", resultHash, "units", units)
+	return nil
+}
+
+func cleanupOrphanedContainers() {
+	out, err := exec.Command("docker", "ps", "-q", "--filter", "name=ryv_").CombinedOutput()
+	if err != nil {
+		return
+	}
+	ids := strings.TrimSpace(string(out))
+	if ids == "" {
+		return
+	}
+	for _, id := range strings.Split(ids, "\n") {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			slog.Info("killing orphaned container", "id", id)
+			exec.Command("docker", "kill", id).Run()
+			exec.Command("docker", "rm", "-f", id).Run()
+		}
+	}
 }
 
 func buildHealthReport(caps hw.CapSet) hub.HealthReport {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,7 +51,11 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		return nil, fmt.Errorf("write job.json: %w", err)
 	}
 
-	args := []string{"run", "--rm", "-v", workDir + ":/work"}
+	name := fmt.Sprintf("ryv_%s", filepath.Base(workDir))
+	defer exec.Command("docker", "rm", "-f", name).Run()
+
+	args := []string{"run", "--name", name, "--rm", "-v", workDir + ":/work",
+		"--memory", "4g", "--memory-swap", "4g", "--cpus", "2", "--pids-limit", "256"}
 	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
 		args = append(args, "--gpus", gpuArg)
 	}
@@ -63,6 +68,10 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	cmd.Stderr = &out
 	runErr := cmd.Run()
 	duration := time.Since(start)
+
+	if ctx.Err() != nil {
+		exec.Command("docker", "kill", name).Run()
+	}
 
 	exitCode := 0
 	if runErr != nil {
@@ -150,6 +159,14 @@ func copyArtifact(workDir, workBase string) (string, error) {
 	for _, src := range candidates {
 		fi, err := os.Stat(src)
 		if err != nil || fi.IsDir() {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(src)
+		if err != nil {
+			continue
+		}
+		if !strings.HasPrefix(resolved, workDir) {
+			slog.Warn("artifact path traversal blocked", "path", src, "resolved", resolved)
 			continue
 		}
 		targetDir := workBase
