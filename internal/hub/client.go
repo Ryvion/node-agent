@@ -106,7 +106,7 @@ func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, re
 	return c.post(ctx, "/api/v1/node/register", body, nil)
 }
 
-func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) error {
+func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (string, error) {
 	pubHex := c.pubHex()
 	ts := metrics.TimestampMs
 	if ts == 0 {
@@ -129,7 +129,11 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) error {
 		formatFloatJSON(body.GPUUtil),
 		formatFloatJSON(body.PowerWatts),
 	)
-	return c.post(ctx, "/api/v1/node/heartbeat", body, nil)
+	var resp struct {
+		LatestVersion string `json:"latest_version"`
+	}
+	err := c.post(ctx, "/api/v1/node/heartbeat", body, &resp)
+	return resp.LatestVersion, err
 }
 
 func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {

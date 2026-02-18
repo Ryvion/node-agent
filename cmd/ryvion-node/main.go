@@ -17,6 +17,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/nodekey"
 	"github.com/Ryvion/node-agent/internal/runner"
+	"github.com/Ryvion/node-agent/internal/update"
 )
 
 // Set via -ldflags at build time.
@@ -94,9 +95,10 @@ func main() {
 	backoff := 10 * time.Second
 	maxBackoff := 5 * time.Minute
 	consecutiveFailures := 0
+	var lastUpdateAttempt time.Time
 
 	for {
-		err := runCycle(ctx, client, *gpusFlag)
+		err := runCycle(ctx, client, *gpusFlag, hubURL, version, &lastUpdateAttempt)
 		if err != nil {
 			consecutiveFailures++
 			backoff = time.Duration(float64(backoff) * 1.5)
@@ -121,16 +123,31 @@ func main() {
 	}
 }
 
-func runCycle(ctx context.Context, client *hub.Client, gpus string) error {
+func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, lastUpdateAttempt *time.Time) error {
 	metrics := hw.SampleMetrics()
-	if err := client.Heartbeat(ctx, hub.Metrics{
+	latestVersion, err := client.Heartbeat(ctx, hub.Metrics{
 		TimestampMs: time.Now().UnixMilli(),
 		CPUUtil:     metrics.CPUUtil,
 		MemUtil:     metrics.MemUtil,
 		GPUUtil:     metrics.GPUUtil,
 		PowerWatts:  metrics.PowerWatts,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("heartbeat failed: %w", err)
+	}
+
+	// Auto-update: check at most once per 30 minutes
+	if update.NeedsUpdate(currentVersion, latestVersion) && time.Since(*lastUpdateAttempt) > 30*time.Minute {
+		*lastUpdateAttempt = time.Now()
+		slog.Info("update available", "current", currentVersion, "latest", latestVersion)
+		if err := update.Apply(ctx, hubURL); err != nil {
+			slog.Warn("auto-update failed", "error", err)
+		} else {
+			slog.Info("update applied, restarting")
+			if restartErr := update.Restart(); restartErr != nil {
+				slog.Warn("restart failed — update will take effect on next manual restart", "error", restartErr)
+			}
+		}
 	}
 
 	work, err := client.FetchWork(ctx)
