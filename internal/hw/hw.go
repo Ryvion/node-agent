@@ -236,37 +236,123 @@ func parseProcStat(line string) (used uint64, total uint64) {
 }
 
 func detectGPU() (model string, vramBytes uint64, sensors string) {
-	if !hasNvidiaSMI() {
-		return "", 0, ""
-	}
-	out, err := exec.Command(nvidiaSMIPath, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits").CombinedOutput()
-	if err != nil {
-		return "", 0, ""
-	}
-	line := strings.TrimSpace(strings.Split(string(out), "\n")[0])
-	if line == "" {
-		return "", 0, ""
-	}
-	parts := strings.Split(line, ",")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-	}
-	if len(parts) > 0 {
-		model = parts[0]
-	}
-	if len(parts) > 1 {
-		if mb, err := strconv.ParseUint(parts[1], 10, 64); err == nil {
-			vramBytes = mb * 1024 * 1024
+	// 1) NVIDIA via nvidia-smi
+	if hasNvidiaSMI() {
+		out, err := exec.Command(nvidiaSMIPath, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits").CombinedOutput()
+		if err == nil {
+			line := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+			if line != "" {
+				parts := strings.Split(line, ",")
+				for i := range parts {
+					parts[i] = strings.TrimSpace(parts[i])
+				}
+				if len(parts) > 0 {
+					model = parts[0]
+				}
+				if len(parts) > 1 {
+					if mb, convErr := strconv.ParseUint(parts[1], 10, 64); convErr == nil {
+						vramBytes = mb * 1024 * 1024
+					}
+				}
+				driver := ""
+				if len(parts) > 2 {
+					driver = parts[2]
+				}
+				if model != "" || driver != "" {
+					sensors = strings.TrimSpace("nvidia-driver:" + driver + " model:" + model)
+				}
+				return model, vramBytes, sensors
+			}
 		}
 	}
-	driver := ""
-	if len(parts) > 2 {
-		driver = parts[2]
+
+	// 2) AMD via rocm-smi (Linux)
+	if p, err := exec.LookPath("rocm-smi"); err == nil {
+		out, err := exec.Command(p, "--showproductname", "--csv").CombinedOutput()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "device") || strings.HasPrefix(line, "=") {
+					continue
+				}
+				// CSV format: device,card_series,...
+				parts := strings.SplitN(line, ",", 3)
+				if len(parts) >= 2 {
+					model = strings.TrimSpace(parts[1])
+					break
+				}
+			}
+		}
+		if model != "" {
+			// Try to get VRAM
+			out2, err2 := exec.Command(p, "--showmeminfo", "vram", "--csv").CombinedOutput()
+			if err2 == nil {
+				for _, line := range strings.Split(string(out2), "\n") {
+					if strings.Contains(line, "Total") {
+						fields := strings.Split(line, ",")
+						for _, f := range fields {
+							f = strings.TrimSpace(f)
+							if v, convErr := strconv.ParseUint(f, 10, 64); convErr == nil && v > 1000 {
+								vramBytes = v
+								break
+							}
+						}
+					}
+				}
+			}
+			sensors = "amd-rocm model:" + model
+			return model, vramBytes, sensors
+		}
 	}
-	if model != "" || driver != "" {
-		sensors = strings.TrimSpace("nvidia-driver:" + driver + " model:" + model)
+
+	// 3) Fallback: WMI on Windows (catches AMD, Intel, any GPU)
+	if runtime.GOOS == "windows" {
+		m, vram := detectGPUWindows()
+		if m != "" {
+			return m, vram, "wmi model:" + m
+		}
 	}
-	return model, vramBytes, sensors
+
+	return "", 0, ""
+}
+
+// detectGPUWindows uses WMI to detect any discrete GPU on Windows.
+func detectGPUWindows() (model string, vramBytes uint64) {
+	out, err := exec.Command("wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM", "/format:csv").CombinedOutput()
+	if err != nil {
+		return "", 0
+	}
+	// CSV: Node,AdapterRAM,Name
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(strings.ToLower(line), "node") {
+			continue
+		}
+		fields := strings.Split(line, ",")
+		if len(fields) < 3 {
+			continue
+		}
+		name := strings.TrimSpace(fields[len(fields)-1])
+		ramStr := strings.TrimSpace(fields[len(fields)-2])
+		// Skip integrated GPUs
+		nameLower := strings.ToLower(name)
+		if strings.Contains(nameLower, "intel") && (strings.Contains(nameLower, "uhd") || strings.Contains(nameLower, "hd graphics") || strings.Contains(nameLower, "iris")) {
+			continue
+		}
+		if strings.Contains(nameLower, "microsoft basic") || strings.Contains(nameLower, "remote desktop") {
+			continue
+		}
+		if name == "" {
+			continue
+		}
+		ram, _ := strconv.ParseUint(ramStr, 10, 64)
+		// Prefer the GPU with more VRAM
+		if ram > vramBytes {
+			model = name
+			vramBytes = ram
+		}
+	}
+	return model, vramBytes
 }
 
 func detectRAMBytes() uint64 {
