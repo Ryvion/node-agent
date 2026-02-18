@@ -1,0 +1,54 @@
+name: Build and Push LLM Runner Images
+
+on:
+  push:
+    paths:
+      - 'runners/**'
+    branches: [main]
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  runners:
+    name: Build ${{ matrix.tag }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: runners/llm-runner/Dockerfile
+            tag: latest
+            context: runners/llm-runner
+          - dockerfile: runners/llm-runner/Dockerfile.gpu
+            tag: gpu
+            context: runners/llm-runner
+          - dockerfile: runners/llm-runner/Dockerfile.llama3-8b
+            tag: llama3-8b-gpu
+            context: runners/llm-runner
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ghcr.io/ryvion/llm-runner:${{ matrix.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

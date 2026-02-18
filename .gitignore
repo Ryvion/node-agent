@@ -1,4 +1,5 @@
 node-agent
+ryvion-node
 dist/
 bin/
 *.exe
