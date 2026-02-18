@@ -51,18 +51,31 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		return nil, fmt.Errorf("write job.json: %w", err)
 	}
 
-	name := fmt.Sprintf("ryv_%s", filepath.Base(workDir))
-	defer exec.Command("docker", "rm", "-f", name).Run()
+	dockerBin, err := resolveDocker()
+	if err != nil {
+		return nil, fmt.Errorf("docker not found: %w", err)
+	}
 
+	name := fmt.Sprintf("ryv_%s", filepath.Base(workDir))
+	defer exec.Command(dockerBin, "rm", "-f", name).Run()
+
+	memLimit := strings.TrimSpace(os.Getenv("RYV_CONTAINER_MEMORY"))
+	if memLimit == "" {
+		memLimit = "8g"
+	}
+	cpuLimit := strings.TrimSpace(os.Getenv("RYV_CONTAINER_CPUS"))
+	if cpuLimit == "" {
+		cpuLimit = "4"
+	}
 	args := []string{"run", "--name", name, "--rm", "-v", workDir + ":/work",
-		"--memory", "4g", "--memory-swap", "4g", "--cpus", "2", "--pids-limit", "256"}
+		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256"}
 	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
 		args = append(args, "--gpus", gpuArg)
 	}
 	args = append(args, image)
 
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := exec.CommandContext(ctx, dockerBin, args...)
 	var out cappedBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -70,7 +83,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	duration := time.Since(start)
 
 	if ctx.Err() != nil {
-		exec.Command("docker", "kill", name).Run()
+		exec.Command(dockerBin, "kill", name).Run()
 	}
 
 	exitCode := 0
@@ -101,6 +114,25 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		Metrics:    metrics,
 	}
 	return result, runErr
+}
+
+// resolveDocker finds the docker binary, checking well-known paths if it's
+// not on the current PATH (common when running as a background service).
+func resolveDocker() (string, error) {
+	if p, err := exec.LookPath("docker"); err == nil {
+		return p, nil
+	}
+	for _, p := range []string{
+		"/usr/local/bin/docker",
+		"/opt/homebrew/bin/docker",
+		"/usr/bin/docker",
+		"/snap/bin/docker",
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("docker not found in PATH or common locations")
 }
 
 func resolveGPUFlag(gpus string) string {

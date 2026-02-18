@@ -145,7 +145,13 @@ func runCycle(ctx context.Context, client *hub.Client, gpus string) error {
 		return nil
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	jobTimeout := 10 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("RYV_JOB_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			jobTimeout = d
+		}
+	}
+	runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 	defer cancel()
 
 	result, runErr := runner.Run(runCtx, work.Image, work.SpecJSON, gpus)
