@@ -228,29 +228,59 @@ func cleanupOrphanedContainers() {
 
 func buildHealthReport(caps hw.CapSet) hub.HealthReport {
 	gpuReady := strings.TrimSpace(caps.GPUModel) != ""
-	dockerGPU := gpuReady && commandExists("docker")
+	hasDocker := commandExists("docker")
+	dockerGPU := false
 	parts := []string{}
+
 	if gpuReady {
 		parts = append(parts, "nvidia-smi:ok")
 	} else {
 		parts = append(parts, "nvidia-smi:missing")
 	}
-	if dockerGPU {
-		parts = append(parts, "docker:ok")
-	} else if commandExists("docker") {
-		parts = append(parts, "docker:no-gpu")
+
+	if hasDocker {
+		if gpuReady {
+			// Actually test Docker GPU passthrough with a quick container
+			dockerGPU = testDockerGPU()
+			if dockerGPU {
+				parts = append(parts, "docker-gpu:ok")
+			} else {
+				parts = append(parts, "docker-gpu:failed")
+			}
+		} else {
+			parts = append(parts, "docker:ok")
+		}
 	} else {
 		parts = append(parts, "docker:missing")
 	}
-	if strings.TrimSpace(caps.GPUModel) != "" {
+
+	if gpuReady {
 		parts = append(parts, "gpu_model:"+caps.GPUModel)
 	}
+
 	return hub.HealthReport{
 		TimestampMs: time.Now().UnixMilli(),
 		GPUReady:    gpuReady,
 		DockerGPU:   dockerGPU,
 		Message:     strings.Join(parts, ","),
 	}
+}
+
+// testDockerGPU checks if Docker can access the GPU by running a minimal container.
+func testDockerGPU() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Use hello-world-sized image to test --gpus flag; nvidia-smi is baked into
+	// the NVIDIA base images and also available on Windows hosts.
+	out, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--gpus", "all",
+		"nvidia/cuda:12.4.1-base-ubuntu22.04", "nvidia-smi", "--query-gpu=name", "--format=csv,noheader").CombinedOutput()
+	if err != nil {
+		slog.Debug("docker GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
+		return false
+	}
+	result := strings.TrimSpace(string(out))
+	slog.Info("docker GPU test passed", "gpu", result)
+	return result != ""
 }
 
 func resolveDeviceType(raw string, caps hw.CapSet) string {

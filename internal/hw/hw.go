@@ -4,11 +4,41 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// nvidiaSMIPath caches the resolved nvidia-smi binary path.
+var nvidiaSMIPath string
+
+func init() {
+	nvidiaSMIPath = findNvidiaSMI()
+}
+
+// findNvidiaSMI locates nvidia-smi, checking common OS-specific paths
+// when it's not in the default PATH (e.g. Windows services).
+func findNvidiaSMI() string {
+	if p, err := exec.LookPath("nvidia-smi"); err == nil {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		candidates := []string{
+			filepath.Join(os.Getenv("SystemRoot"), "System32", "nvidia-smi.exe"),
+			filepath.Join(os.Getenv("ProgramFiles"), "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"),
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
+func hasNvidiaSMI() bool { return nvidiaSMIPath != "" }
 
 type CapSet struct {
 	GPUModel      string
@@ -67,56 +97,82 @@ func SampleMetrics() Metrics {
 }
 
 func sampleCPU() float64 {
+	// Linux: /proc/stat
 	out1, err := exec.Command("sh", "-lc", "cat /proc/stat | head -n1").CombinedOutput()
-	if err != nil {
-		return -1
+	if err == nil {
+		time.Sleep(120 * time.Millisecond)
+		out2, err2 := exec.Command("sh", "-lc", "cat /proc/stat | head -n1").CombinedOutput()
+		if err2 == nil {
+			used1, total1 := parseProcStat(string(out1))
+			used2, total2 := parseProcStat(string(out2))
+			if total2 > total1 && used2 >= used1 {
+				return 100 * float64(used2-used1) / float64(total2-total1)
+			}
+		}
 	}
-	time.Sleep(120 * time.Millisecond)
-	out2, err := exec.Command("sh", "-lc", "cat /proc/stat | head -n1").CombinedOutput()
-	if err != nil {
-		return -1
+	// Windows: wmic
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("wmic", "cpu", "get", "LoadPercentage").CombinedOutput()
+		if err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				line = strings.TrimSpace(line)
+				if v, convErr := strconv.ParseFloat(line, 64); convErr == nil {
+					return v
+				}
+			}
+		}
 	}
-	used1, total1 := parseProcStat(string(out1))
-	used2, total2 := parseProcStat(string(out2))
-	if total2 <= total1 || used2 < used1 {
-		return -1
-	}
-	return 100 * float64(used2-used1) / float64(total2-total1)
+	return -1
 }
 
 func sampleMem() float64 {
+	// Linux: /proc/meminfo
 	out, err := exec.Command("sh", "-lc", "grep -E 'MemTotal|MemAvailable' /proc/meminfo").CombinedOutput()
-	if err != nil {
-		return -1
-	}
-	var totalKB uint64
-	var availKB uint64
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 2 {
-			continue
+	if err == nil {
+		var totalKB, availKB uint64
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(strings.TrimSpace(line))
+			if len(fields) < 2 {
+				continue
+			}
+			switch fields[0] {
+			case "MemTotal:":
+				totalKB, _ = strconv.ParseUint(fields[1], 10, 64)
+			case "MemAvailable:":
+				availKB, _ = strconv.ParseUint(fields[1], 10, 64)
+			}
 		}
-		switch fields[0] {
-		case "MemTotal:":
-			totalKB, _ = strconv.ParseUint(fields[1], 10, 64)
-		case "MemAvailable:":
-			availKB, _ = strconv.ParseUint(fields[1], 10, 64)
+		if totalKB > 0 && availKB <= totalKB {
+			return 100 * float64(totalKB-availKB) / float64(totalKB)
 		}
 	}
-	if totalKB == 0 || availKB > totalKB {
-		return -1
+	// Windows: wmic
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("wmic", "OS", "get", "TotalVisibleMemorySize,FreePhysicalMemory").CombinedOutput()
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+			for _, line := range lines {
+				fields := strings.Fields(strings.TrimSpace(line))
+				if len(fields) == 2 {
+					free, e1 := strconv.ParseUint(fields[0], 10, 64)
+					total, e2 := strconv.ParseUint(fields[1], 10, 64)
+					if e1 == nil && e2 == nil && total > 0 {
+						return 100 * float64(total-free) / float64(total)
+					}
+				}
+			}
+		}
 	}
-	used := totalKB - availKB
-	return 100 * float64(used) / float64(totalKB)
+	return -1
 }
 
 func sampleGPU(ctx context.Context) float64 {
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
+	if !hasNvidiaSMI() {
 		return -1
 	}
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(cctx, "nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits").CombinedOutput()
+	out, err := exec.CommandContext(cctx, nvidiaSMIPath, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits").CombinedOutput()
 	if err != nil {
 		return -1
 	}
@@ -138,10 +194,10 @@ func sampleGPU(ctx context.Context) float64 {
 }
 
 func samplePower() float64 {
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
+	if !hasNvidiaSMI() {
 		return -1
 	}
-	out, err := exec.Command("nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits").CombinedOutput()
+	out, err := exec.Command(nvidiaSMIPath, "--query-gpu=power.draw", "--format=csv,noheader,nounits").CombinedOutput()
 	if err != nil {
 		return -1
 	}
@@ -180,10 +236,10 @@ func parseProcStat(line string) (used uint64, total uint64) {
 }
 
 func detectGPU() (model string, vramBytes uint64, sensors string) {
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
+	if !hasNvidiaSMI() {
 		return "", 0, ""
 	}
-	out, err := exec.Command("nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits").CombinedOutput()
+	out, err := exec.Command(nvidiaSMIPath, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits").CombinedOutput()
 	if err != nil {
 		return "", 0, ""
 	}
