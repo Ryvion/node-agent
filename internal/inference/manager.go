@@ -190,6 +190,12 @@ func (m *Manager) runServer(ctx context.Context) error {
 	cmd := exec.CommandContext(serverCtx, m.serverPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Set library path so llama-server finds its shared libs
+	binDir := filepath.Dir(m.serverPath)
+	cmd.Env = append(os.Environ(),
+		"DYLD_LIBRARY_PATH="+binDir,
+		"LD_LIBRARY_PATH="+binDir,
+	)
 
 	m.mu.Lock()
 	m.cmd = cmd
@@ -317,7 +323,8 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// downloadAndExtractServer downloads a .tar.gz release and extracts llama-server.
+// downloadAndExtractServer downloads a .tar.gz release and extracts llama-server
+// plus all shared libraries (.dylib / .so) it depends on.
 func downloadAndExtractServer(ctx context.Context, url, dst string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -338,6 +345,9 @@ func downloadAndExtractServer(ctx context.Context, url, dst string) error {
 	}
 	defer gz.Close()
 
+	binDir := filepath.Dir(dst)
+	foundServer := false
+
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -347,9 +357,32 @@ func downloadAndExtractServer(ctx context.Context, url, dst string) error {
 		if err != nil {
 			return fmt.Errorf("tar: %w", err)
 		}
+
 		name := filepath.Base(hdr.Name)
-		if name == "llama-server" && hdr.Typeflag == tar.TypeReg {
-			f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		isServer := name == "llama-server"
+		isLib := strings.HasSuffix(name, ".dylib") || strings.HasSuffix(name, ".so") ||
+			strings.Contains(name, ".so.")
+
+		if !isServer && !isLib {
+			continue
+		}
+
+		outPath := filepath.Join(binDir, name)
+
+		switch hdr.Typeflag {
+		case tar.TypeSymlink:
+			// Recreate symlink (e.g. libmtmd.0.dylib → libmtmd.0.0.8106.dylib)
+			os.Remove(outPath)
+			target := filepath.Base(hdr.Linkname)
+			if err := os.Symlink(target, outPath); err != nil {
+				slog.Warn("failed to create symlink", "name", name, "target", target, "error", err)
+			}
+		case tar.TypeReg:
+			perm := os.FileMode(0o644)
+			if isServer {
+				perm = 0o755
+			}
+			f, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
 			if err != nil {
 				return err
 			}
@@ -358,11 +391,16 @@ func downloadAndExtractServer(ctx context.Context, url, dst string) error {
 				return err
 			}
 			f.Close()
-			slog.Info("extracted llama-server", "path", dst, "size", hdr.Size)
-			return nil
+			if isServer {
+				foundServer = true
+				slog.Info("extracted llama-server", "path", outPath, "size", hdr.Size)
+			}
 		}
 	}
-	return fmt.Errorf("llama-server binary not found in archive")
+	if !foundServer {
+		return fmt.Errorf("llama-server binary not found in archive")
+	}
+	return nil
 }
 
 func envOr(key, fallback string) string {
