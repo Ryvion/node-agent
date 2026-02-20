@@ -137,9 +137,11 @@ func sampleCPU() float64 {
 			}
 		}
 	}
-	// Windows: wmic
+	// Windows: wmic (with timeout to avoid hangs in service context)
 	if runtime.GOOS == "windows" {
-		out, err := exec.Command("wmic", "cpu", "get", "LoadPercentage").CombinedOutput()
+		wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer wcancel()
+		out, err := exec.CommandContext(wctx, "wmic", "cpu", "get", "LoadPercentage").CombinedOutput()
 		if err == nil {
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 				line = strings.TrimSpace(line)
@@ -173,9 +175,11 @@ func sampleMem() float64 {
 			return 100 * float64(totalKB-availKB) / float64(totalKB)
 		}
 	}
-	// Windows: wmic
+	// Windows: wmic (with timeout to avoid hangs in service context)
 	if runtime.GOOS == "windows" {
-		out, err := exec.Command("wmic", "OS", "get", "TotalVisibleMemorySize,FreePhysicalMemory").CombinedOutput()
+		wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer wcancel()
+		out, err := exec.CommandContext(wctx, "wmic", "OS", "get", "TotalVisibleMemorySize,FreePhysicalMemory").CombinedOutput()
 		if err == nil {
 			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 			for _, line := range lines {

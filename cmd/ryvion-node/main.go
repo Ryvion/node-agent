@@ -101,46 +101,49 @@ func main() {
 	dataDir := strings.TrimSpace(os.Getenv("RYV_DATA_DIR"))
 	infMgr := inference.New(dataDir)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("inference manager panic", "error", r)
+			}
+		}()
 		if err := infMgr.Start(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("inference manager stopped", "error", err)
 		}
 	}()
 	defer infMgr.Stop()
 
-	backoff := 10 * time.Second
-	maxBackoff := 5 * time.Minute
-	consecutiveFailures := 0
-	var lastUpdateAttempt time.Time
+	// Independent heartbeat goroutine — keeps node "online" regardless of
+	// what the work loop is doing (long-poll, job execution, etc.).
+	latestVersion := make(chan string, 1)
+	go heartbeatLoop(ctx, client, latestVersion)
+
+	// Work loop — fetch and process jobs.
+	workLoop(ctx, client, *gpusFlag, hubURL, version, infMgr, latestVersion)
+}
+
+// heartbeatLoop sends heartbeats on a fixed 30-second interval, completely
+// independent of the work loop. This ensures the node never goes stale
+// even if a job or long-poll is in progress.
+func heartbeatLoop(ctx context.Context, client *hub.Client, versionCh chan<- string) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	// Send first heartbeat immediately.
+	sendHeartbeat(ctx, client, versionCh)
 
 	for {
-		err := runCycle(ctx, client, *gpusFlag, hubURL, version, &lastUpdateAttempt, infMgr)
-		if err != nil {
-			consecutiveFailures++
-			backoff = time.Duration(float64(backoff) * 1.5)
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			slog.Warn("cycle failed, backing off", "error", err, "backoff", backoff, "failures", consecutiveFailures)
-		} else {
-			if consecutiveFailures > 0 {
-				slog.Info("hub connection restored", "previous_failures", consecutiveFailures)
-			}
-			consecutiveFailures = 0
-			backoff = 10 * time.Second
-		}
-
 		select {
 		case <-ctx.Done():
-			slog.Info("shutting down")
 			return
-		case <-time.After(backoff):
+		case <-ticker.C:
+			sendHeartbeat(ctx, client, versionCh)
 		}
 	}
 }
 
-func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, lastUpdateAttempt *time.Time, infMgr *inference.Manager) error {
+func sendHeartbeat(ctx context.Context, client *hub.Client, versionCh chan<- string) {
 	metrics := hw.SampleMetrics()
-	latestVersion, err := client.Heartbeat(ctx, hub.Metrics{
+	latest, err := client.Heartbeat(ctx, hub.Metrics{
 		TimestampMs: time.Now().UnixMilli(),
 		CPUUtil:     metrics.CPUUtil,
 		MemUtil:     metrics.MemUtil,
@@ -148,31 +151,70 @@ func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		PowerWatts:  metrics.PowerWatts,
 	})
 	if err != nil {
-		return fmt.Errorf("heartbeat failed: %w", err)
+		slog.Warn("heartbeat failed", "error", err)
+		return
 	}
-
-	// Auto-update: check at most once per 30 minutes
-	if update.NeedsUpdate(currentVersion, latestVersion) && time.Since(*lastUpdateAttempt) > 30*time.Minute {
-		*lastUpdateAttempt = time.Now()
-		slog.Info("update available", "current", currentVersion, "latest", latestVersion)
-		if err := update.Apply(ctx, hubURL); err != nil {
-			slog.Warn("auto-update failed", "error", err)
-		} else {
-			slog.Info("update applied, restarting")
-			if restartErr := update.Restart(); restartErr != nil {
-				slog.Warn("restart failed — update will take effect on next manual restart", "error", restartErr)
-			}
+	// Non-blocking send of latest version to work loop for update checks.
+	if latest != "" {
+		select {
+		case versionCh <- latest:
+		default:
 		}
 	}
+}
 
-	work, err := client.FetchWork(ctx)
-	if err != nil {
-		return fmt.Errorf("fetch work failed: %w", err)
-	}
-	if work == nil {
-		return nil
-	}
+// workLoop fetches and processes jobs. Heartbeats are handled separately.
+func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, infMgr *inference.Manager, versionCh <-chan string) {
+	var lastUpdateAttempt time.Time
+	backoff := 5 * time.Second
+	maxBackoff := 2 * time.Minute
 
+	for {
+		// Check for version updates (non-blocking read from heartbeat goroutine).
+		select {
+		case latest := <-versionCh:
+			if update.NeedsUpdate(currentVersion, latest) && time.Since(lastUpdateAttempt) > 30*time.Minute {
+				lastUpdateAttempt = time.Now()
+				slog.Info("update available", "current", currentVersion, "latest", latest)
+				if err := update.Apply(ctx, hubURL); err != nil {
+					slog.Warn("auto-update failed", "error", err)
+				} else {
+					slog.Info("update applied, restarting")
+					if restartErr := update.Restart(); restartErr != nil {
+						slog.Warn("restart failed — update will take effect on next manual restart", "error", restartErr)
+					}
+				}
+			}
+		default:
+		}
+
+		work, err := client.FetchWork(ctx)
+		if err != nil {
+			slog.Warn("fetch work failed", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = time.Duration(float64(backoff) * 1.5)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		// Successful fetch — reset backoff.
+		backoff = 5 * time.Second
+
+		if work == nil {
+			continue
+		}
+
+		processWork(ctx, client, work, gpus, infMgr)
+	}
+}
+
+func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, infMgr *inference.Manager) {
 	// Route inference jobs to persistent llama-server if available
 	if work.Kind == "inference" && infMgr.Healthy() {
 		slog.Info("routing to inference manager", "job_id", work.JobID)
@@ -182,12 +224,12 @@ func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		if err := infMgr.RunStreamingJob(runCtx, client, work.JobID, work.SpecJSON); err != nil {
 			slog.Warn("streaming inference failed", "job_id", work.JobID, "error", err)
 		}
-		return nil
+		return
 	}
 
 	if strings.TrimSpace(work.Image) == "" || strings.TrimSpace(work.SpecJSON) == "" {
 		slog.Warn("received work assignment without container spec", "job_id", work.JobID)
-		return nil
+		return
 	}
 
 	jobTimeout := 10 * time.Minute
@@ -202,7 +244,7 @@ func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 	result, runErr := runner.Run(runCtx, work.Image, work.SpecJSON, gpus)
 	if result == nil {
 		slog.Warn("runner failed", "job_id", work.JobID, "error", runErr)
-		return nil
+		return
 	}
 	if runErr != nil {
 		slog.Warn("container exited with error", "job_id", work.JobID, "exit_code", result.ExitCode, "error", runErr)
@@ -246,10 +288,9 @@ func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		Metadata:      metadata,
 	}); err != nil {
 		slog.Warn("submit receipt failed", "job_id", work.JobID, "error", err)
-		return nil
+		return
 	}
 	slog.Info("job completed", "job_id", work.JobID, "hash", resultHash, "units", units)
-	return nil
 }
 
 func cleanupOrphanedContainers() {
