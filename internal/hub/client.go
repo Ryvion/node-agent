@@ -86,6 +86,8 @@ func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, re
 		GeohashBucket:     caps.GeohashBucket,
 		AttestationMethod: caps.AttestationMethod,
 		ReferralCode:      strings.TrimSpace(referral),
+		TEESupported:      caps.TEESupported,
+		TEEType:           caps.TEEType,
 	}
 	if body.DeviceType == "" {
 		body.DeviceType = "cpu"
@@ -461,6 +463,8 @@ type Capabilities struct {
 	BandwidthMbps     uint64
 	GeohashBucket     uint64
 	AttestationMethod uint32
+	TEESupported      bool
+	TEEType           string
 }
 
 type Metrics struct {
@@ -516,6 +520,8 @@ type registerRequest struct {
 	GeohashBucket     uint64 `json:"geohash_bucket"`
 	AttestationMethod uint32 `json:"attestation_method"`
 	ReferralCode      string `json:"referral_code,omitempty"`
+	TEESupported      bool   `json:"tee_supported"`
+	TEEType           string `json:"tee_type"`
 	Signature         []byte `json:"signature"`
 }
 

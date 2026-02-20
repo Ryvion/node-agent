@@ -49,6 +49,8 @@ type CapSet struct {
 	BandwidthMbps uint64
 	GeohashBucket uint64
 	Attestation   uint32
+	TEESupported  bool
+	TEEType       string
 }
 
 type Metrics struct {
@@ -62,6 +64,7 @@ type Metrics struct {
 // Failed probes return zero values instead of synthetic data.
 func DetectCaps(_ string) CapSet {
 	gpuModel, vramBytes, sensors := detectGPU()
+	teeSupported, teeType := DetectTEE()
 	return CapSet{
 		GPUModel:      gpuModel,
 		CPUCores:      uint32(runtime.NumCPU()),
@@ -71,7 +74,31 @@ func DetectCaps(_ string) CapSet {
 		BandwidthMbps: 100,
 		GeohashBucket: 0,
 		Attestation:   0,
+		TEESupported:  teeSupported,
+		TEEType:       teeType,
 	}
+}
+
+// DetectTEE checks for hardware TEE support.
+// Returns (true, type) if a TEE device is found, (false, "") otherwise.
+func DetectTEE() (bool, string) {
+	// AMD SEV-SNP
+	for _, p := range []string{"/dev/sev", "/dev/sev-guest"} {
+		if _, err := os.Stat(p); err == nil {
+			return true, "sev-snp"
+		}
+	}
+	// Intel SGX
+	for _, p := range []string{"/dev/sgx_enclave", "/dev/sgx"} {
+		if _, err := os.Stat(p); err == nil {
+			return true, "sgx"
+		}
+	}
+	// Intel TDX
+	if _, err := os.Stat("/sys/firmware/tdx"); err == nil {
+		return true, "tdx"
+	}
+	return false, ""
 }
 
 // SampleMetrics collects volatile utilization metrics.

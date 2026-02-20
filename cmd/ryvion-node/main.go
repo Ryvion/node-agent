@@ -79,6 +79,8 @@ func main() {
 		BandwidthMbps:     caps.BandwidthMbps,
 		GeohashBucket:     caps.GeohashBucket,
 		AttestationMethod: caps.Attestation,
+		TEESupported:      caps.TEESupported,
+		TEEType:           caps.TEEType,
 	}, deviceType, strings.TrimSpace(*referralFlag)); err != nil {
 		slog.Error("register failed", "error", err)
 		os.Exit(1)
