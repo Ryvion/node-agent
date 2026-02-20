@@ -164,10 +164,11 @@ func Restart() error {
 	case "darwin":
 		return exec.Command("launchctl", "kickstart", "-k", "system/com.ryvion.node").Run()
 	case "windows":
-		// Stop then start the Windows service
-		_ = exec.Command("sc.exe", "stop", "RyvionNode").Run()
-		time.Sleep(2 * time.Second)
-		return exec.Command("sc.exe", "start", "RyvionNode").Run()
+		// Use cmd /c with "start" to launch a detached process that survives
+		// the service stop. Direct sc.exe stop from within the service kills
+		// this process before sc.exe start can execute.
+		return exec.Command("cmd.exe", "/C",
+			"start /b cmd /c \"sc.exe stop RyvionNode & timeout /t 3 /nobreak >nul & sc.exe start RyvionNode\"").Start()
 	default:
 		return fmt.Errorf("unsupported platform for restart: %s", runtime.GOOS)
 	}
