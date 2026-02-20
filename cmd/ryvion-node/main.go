@@ -25,12 +25,20 @@ import (
 // Set via -ldflags at build time.
 var version = "dev"
 
+// Package-level flags so runNode() and service handler can access them.
+var (
+	flagHub      string
+	flagDevice   string
+	flagReferral string
+	flagGPUs     string
+)
+
 func main() {
 	versionFlag := flag.Bool("version", false, "Print version and exit")
-	hubFlag := flag.String("hub", "https://ryvion-hub.fly.dev", "Hub orchestrator base URL")
-	deviceTypeFlag := flag.String("type", "", "Node device type (gpu|cpu|mobile|iot)")
-	referralFlag := flag.String("referral", "", "Optional referral code")
-	gpusFlag := flag.String("gpus", "auto", "Docker --gpus value (auto|all|none|device list)")
+	flag.StringVar(&flagHub, "hub", "https://ryvion-hub.fly.dev", "Hub orchestrator base URL")
+	flag.StringVar(&flagDevice, "type", "", "Node device type (gpu|cpu|mobile|iot)")
+	flag.StringVar(&flagReferral, "referral", "", "Optional referral code")
+	flag.StringVar(&flagGPUs, "gpus", "auto", "Docker --gpus value (auto|all|none|device list)")
 	flag.Parse()
 
 	if *versionFlag {
@@ -39,22 +47,40 @@ func main() {
 	}
 
 	initLogger()
+
+	// On Windows, if running as a service (session 0), use proper SCM integration.
+	// This ensures the SCM can query status and send stop/shutdown commands.
+	if isWindowsService() {
+		slog.Info("starting as Windows service")
+		runAsWindowsService()
+		return
+	}
+
+	// Console mode — signal-based context.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	runNode(ctx)
+}
+
+// runNode contains all node logic. Called from console mode directly
+// or from the Windows service handler with a cancellable context.
+func runNode(ctx context.Context) {
 	ensureServiceRecovery()
 	cleanupOrphanedContainers()
 
-	hubURL := strings.TrimSpace(*hubFlag)
+	hubURL := strings.TrimSpace(flagHub)
 	if envHub := strings.TrimSpace(os.Getenv("RYV_HUB_URL")); envHub != "" {
 		hubURL = envHub
 	}
 	if hubURL == "" {
 		slog.Error("hub URL is required")
-		os.Exit(1)
+		return
 	}
 
 	pub, priv, err := nodekey.LoadOrCreate(strings.TrimSpace(os.Getenv("RYV_KEY_PATH")))
 	if err != nil {
 		slog.Error("failed to load node key", "error", err)
-		os.Exit(1)
+		return
 	}
 
 	client := hub.New(
@@ -67,11 +93,8 @@ func main() {
 		hub.WithUserAgent("ryvion-node/"+version),
 	)
 
-	caps := hw.DetectCaps(*deviceTypeFlag)
-	deviceType := resolveDeviceType(*deviceTypeFlag, caps)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	caps := hw.DetectCaps(flagDevice)
+	deviceType := resolveDeviceType(flagDevice, caps)
 
 	if err := client.Register(ctx, hub.Capabilities{
 		GPUModel:          caps.GPUModel,
@@ -84,9 +107,9 @@ func main() {
 		AttestationMethod: caps.Attestation,
 		TEESupported:      caps.TEESupported,
 		TEEType:           caps.TEEType,
-	}, deviceType, strings.TrimSpace(*referralFlag)); err != nil {
+	}, deviceType, strings.TrimSpace(flagReferral)); err != nil {
 		slog.Error("register failed", "error", err)
-		os.Exit(1)
+		return
 	}
 	slog.Info("register succeeded", "hub", hubURL, "device_type", deviceType, "pubkey", client.PublicKeyHex())
 
@@ -118,7 +141,7 @@ func main() {
 	go heartbeatLoop(ctx, client, latestVersion)
 
 	// Work loop — fetch and process jobs.
-	workLoop(ctx, client, *gpusFlag, hubURL, version, infMgr, latestVersion)
+	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr, latestVersion)
 }
 
 // heartbeatLoop sends heartbeats on a fixed 30-second interval, completely
