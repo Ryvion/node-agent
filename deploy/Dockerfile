@@ -1,4 +1,4 @@
-FROM golang:1.23 as build
+FROM golang:1.24 AS build
 WORKDIR /src
 COPY . .
 ARG VERSION=dev
