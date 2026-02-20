@@ -5,11 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,11 +30,16 @@ var version = "dev"
 
 // Package-level flags so runNode() and service handler can access them.
 var (
-	flagHub      string
-	flagDevice   string
-	flagReferral string
-	flagGPUs     string
+	flagHub        string
+	flagDevice     string
+	flagReferral   string
+	flagGPUs       string
+	flagMaxGPUUtil float64
 )
+
+// cachedGPUUtil stores the latest GPU utilization from heartbeat sampling.
+// Used by the work loop to skip fetching work when GPU is busy.
+var cachedGPUUtil atomic.Uint64 // stores float64 bits via math.Float64bits
 
 func main() {
 	versionFlag := flag.Bool("version", false, "Print version and exit")
@@ -39,7 +47,15 @@ func main() {
 	flag.StringVar(&flagDevice, "type", "", "Node device type (gpu|cpu|mobile|iot)")
 	flag.StringVar(&flagReferral, "referral", "", "Optional referral code")
 	flag.StringVar(&flagGPUs, "gpus", "auto", "Docker --gpus value (auto|all|none|device list)")
+	flag.Float64Var(&flagMaxGPUUtil, "max-gpu-util", 90, "Skip jobs when GPU utilization exceeds this % (0=disabled)")
 	flag.Parse()
+
+	// Allow env override for max GPU util
+	if v := strings.TrimSpace(os.Getenv("RYV_MAX_GPU_UTIL")); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			flagMaxGPUUtil = f
+		}
+	}
 
 	if *versionFlag {
 		fmt.Println("ryvion-node", version)
@@ -112,6 +128,9 @@ func runNode(ctx context.Context) {
 		return
 	}
 	slog.Info("register succeeded", "hub", hubURL, "device_type", deviceType, "pubkey", client.PublicKeyHex())
+	if flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 {
+		slog.Info("GPU utilization cap enabled", "max_gpu_util", flagMaxGPUUtil)
+	}
 
 	if err := client.SolveChallenge(ctx); err != nil {
 		slog.Warn("challenge solve failed", "error", err)
@@ -166,12 +185,20 @@ func heartbeatLoop(ctx context.Context, client *hub.Client, versionCh chan<- str
 
 func sendHeartbeat(ctx context.Context, client *hub.Client, versionCh chan<- string) {
 	metrics := hw.SampleMetrics()
+
+	// Cache GPU utilization for the work loop's throttle check.
+	cachedGPUUtil.Store(math.Float64bits(metrics.GPUUtil))
+
+	// Report whether the node is self-throttling due to operator GPU usage.
+	throttled := flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 && metrics.GPUUtil > flagMaxGPUUtil
+
 	latest, err := client.Heartbeat(ctx, hub.Metrics{
-		TimestampMs: time.Now().UnixMilli(),
-		CPUUtil:     metrics.CPUUtil,
-		MemUtil:     metrics.MemUtil,
-		GPUUtil:     metrics.GPUUtil,
-		PowerWatts:  metrics.PowerWatts,
+		TimestampMs:  time.Now().UnixMilli(),
+		CPUUtil:      metrics.CPUUtil,
+		MemUtil:      metrics.MemUtil,
+		GPUUtil:      metrics.GPUUtil,
+		PowerWatts:   metrics.PowerWatts,
+		GPUThrottled: throttled,
 	})
 	if err != nil {
 		slog.Warn("heartbeat failed", "error", err)
@@ -209,6 +236,20 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 				}
 			}
 		default:
+		}
+
+		// GPU-aware scheduling: skip work fetch when operator's GPU is busy.
+		if flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 {
+			gpuUtil := math.Float64frombits(cachedGPUUtil.Load())
+			if gpuUtil > flagMaxGPUUtil {
+				slog.Debug("GPU busy, skipping work fetch", "gpu_util", gpuUtil, "max_gpu_util", flagMaxGPUUtil)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Second):
+				}
+				continue
+			}
 		}
 
 		work, err := client.FetchWork(ctx)

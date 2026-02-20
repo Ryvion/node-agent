@@ -68,7 +68,8 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		cpuLimit = "4"
 	}
 	args := []string{"run", "--name", name, "--rm", "-v", workDir + ":/work",
-		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256"}
+		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256",
+		"--cpu-shares", "256"}
 	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
 		args = append(args, "--gpus", gpuArg)
 	}

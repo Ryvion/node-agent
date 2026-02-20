@@ -121,6 +121,7 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (string, error)
 		MemUtil:      metrics.MemUtil,
 		GPUUtil:      metrics.GPUUtil,
 		PowerWatts:   metrics.PowerWatts,
+		GPUThrottled: metrics.GPUThrottled,
 	}
 	body.Signature = c.sign(
 		"heartbeat",
@@ -507,11 +508,12 @@ type Capabilities struct {
 }
 
 type Metrics struct {
-	TimestampMs int64
-	CPUUtil     float64
-	MemUtil     float64
-	GPUUtil     float64
-	PowerWatts  float64
+	TimestampMs  int64
+	CPUUtil      float64
+	MemUtil      float64
+	GPUUtil      float64
+	PowerWatts   float64
+	GPUThrottled bool // node is self-throttling due to operator GPU usage
 }
 
 type WorkAssignment struct {
@@ -571,6 +573,7 @@ type heartbeatRequest struct {
 	MemUtil      float64 `json:"mem_util"`
 	GPUUtil      float64 `json:"gpu_util"`
 	PowerWatts   float64 `json:"power_watts"`
+	GPUThrottled bool    `json:"gpu_throttled"`
 	Signature    []byte  `json:"signature"`
 }
 

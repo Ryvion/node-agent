@@ -205,6 +205,11 @@ func (m *Manager) runServer(ctx context.Context) error {
 		return fmt.Errorf("start llama-server: %w", err)
 	}
 
+	// Lower priority so operator workloads (games, etc.) take precedence.
+	if cmd.Process != nil {
+		setLowPriority(cmd.Process.Pid)
+	}
+
 	// Wait for health check to pass
 	go m.healthLoop(serverCtx)
 
