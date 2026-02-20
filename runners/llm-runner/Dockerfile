@@ -11,6 +11,7 @@ RUN mkdir -p /models && \
     "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
 
 FROM python:3.11-slim
+LABEL org.opencontainers.image.source="https://github.com/Ryvion/node-agent"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 && \
