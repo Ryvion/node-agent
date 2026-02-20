@@ -1,7 +1,7 @@
 FROM python:3.11-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake curl ca-certificates git && \
+    build-essential cmake ninja-build curl ca-certificates git && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir llama-cpp-python==0.3.8
