@@ -1,0 +1,373 @@
+package inference
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	defaultPort       = "8081"
+	defaultThreads    = "4"
+	defaultGPULayers  = "99"
+	defaultCtxSize    = "4096"
+	defaultModelName  = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+	defaultModelURL   = "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+	healthCheckPeriod = 5 * time.Second
+	startupTimeout    = 120 * time.Second
+)
+
+// platformServerURL returns the correct llama.cpp release URL for the current OS/arch.
+func platformServerURL() string {
+	const base = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/"
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "darwin/arm64":
+		return base + "llama-b8106-bin-macos-arm64.tar.gz"
+	case "darwin/amd64":
+		return base + "llama-b8106-bin-macos-x64.tar.gz"
+	case "linux/amd64":
+		// CUDA 12 build for Linux GPU nodes
+		return base + "llama-b8106-bin-ubuntu-x64.tar.gz"
+	case "linux/arm64":
+		return base + "llama-b8106-bin-ubuntu-arm64.tar.gz"
+	default:
+		// Windows or unsupported — caller should check
+		return ""
+	}
+}
+
+type Manager struct {
+	dataDir    string
+	port       string
+	threads    string
+	gpuLayers  string
+	ctxSize    string
+	modelURL   string
+	serverURL  string
+	modelPath  string
+	serverPath string
+
+	mu      sync.RWMutex
+	healthy bool
+	cmd     *exec.Cmd
+	cancel  context.CancelFunc
+}
+
+func New(dataDir string) *Manager {
+	if dataDir == "" {
+		home, _ := os.UserHomeDir()
+		dataDir = filepath.Join(home, ".ryvion")
+	}
+	port := envOr("RYV_INFERENCE_PORT", defaultPort)
+	return &Manager{
+		dataDir:   dataDir,
+		port:      port,
+		threads:   envOr("RYV_INFERENCE_THREADS", defaultThreads),
+		gpuLayers: envOr("RYV_GPU_LAYERS", defaultGPULayers),
+		ctxSize:   envOr("RYV_CTX_SIZE", defaultCtxSize),
+		modelURL:  envOr("RYV_MODEL_URL", defaultModelURL),
+		serverURL: envOr("RYV_SERVER_URL", platformServerURL()),
+	}
+}
+
+func (m *Manager) Start(ctx context.Context) error {
+	if m.serverURL == "" {
+		slog.Info("inference manager: no llama-server binary available for this platform, skipping",
+			"os", runtime.GOOS, "arch", runtime.GOARCH)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	binDir := filepath.Join(m.dataDir, "bin")
+	modelDir := filepath.Join(m.dataDir, "models")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return fmt.Errorf("create bin dir: %w", err)
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		return fmt.Errorf("create model dir: %w", err)
+	}
+
+	serverPath := filepath.Join(binDir, "llama-server")
+	if _, err := os.Stat(serverPath); os.IsNotExist(err) {
+		slog.Info("downloading llama-server", "url", m.serverURL)
+		if err := downloadAndExtractServer(ctx, m.serverURL, serverPath); err != nil {
+			return fmt.Errorf("download llama-server: %w", err)
+		}
+		slog.Info("llama-server downloaded", "path", serverPath)
+	}
+	m.serverPath = serverPath
+
+	modelPath := filepath.Join(modelDir, defaultModelName)
+	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+		slog.Info("downloading model", "url", m.modelURL)
+		if err := downloadFile(ctx, m.modelURL, modelPath); err != nil {
+			return fmt.Errorf("download model: %w", err)
+		}
+		slog.Info("model downloaded", "path", modelPath)
+	}
+	m.modelPath = modelPath
+
+	// Start server with auto-restart
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Info("starting llama-server", "port", m.port, "model", m.modelPath)
+		if err := m.runServer(ctx); err != nil {
+			slog.Warn("llama-server exited", "error", err)
+		}
+		m.setHealthy(false)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+			slog.Info("restarting llama-server")
+		}
+	}
+}
+
+func (m *Manager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.healthy = false
+}
+
+func (m *Manager) Healthy() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.healthy
+}
+
+func (m *Manager) ServerURL() string {
+	return "http://localhost:" + m.port
+}
+
+func (m *Manager) ModelName() string {
+	return "ryvion-llama-3.2-3b"
+}
+
+func (m *Manager) setHealthy(v bool) {
+	m.mu.Lock()
+	m.healthy = v
+	m.mu.Unlock()
+}
+
+func (m *Manager) runServer(ctx context.Context) error {
+	serverCtx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
+	m.cancel = cancel
+	m.mu.Unlock()
+	defer cancel()
+
+	args := []string{
+		"--model", m.modelPath,
+		"--port", m.port,
+		"--host", "127.0.0.1",
+		"--threads", m.threads,
+		"--ctx-size", m.ctxSize,
+		"--log-disable",
+	}
+
+	// Metal acceleration on macOS ARM64
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		args = append(args, "--n-gpu-layers", m.gpuLayers)
+	}
+
+	cmd := exec.CommandContext(serverCtx, m.serverPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	m.mu.Lock()
+	m.cmd = cmd
+	m.mu.Unlock()
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start llama-server: %w", err)
+	}
+
+	// Wait for health check to pass
+	go m.healthLoop(serverCtx)
+
+	return cmd.Wait()
+}
+
+func (m *Manager) healthLoop(ctx context.Context) {
+	url := m.ServerURL() + "/health"
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	// Initial startup: wait up to startupTimeout for first healthy response
+	deadline := time.After(startupTimeout)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline:
+			slog.Warn("llama-server failed to become healthy within timeout")
+			return
+		case <-ticker.C:
+			if checkHealth(ctx, client, url) {
+				slog.Info("llama-server is healthy", "url", m.ServerURL())
+				m.setHealthy(true)
+				goto monitoring
+			}
+		}
+	}
+
+monitoring:
+	ticker.Reset(healthCheckPeriod)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !checkHealth(ctx, client, url) {
+				slog.Warn("llama-server health check failed")
+				m.setHealthy(false)
+			} else if !m.Healthy() {
+				slog.Info("llama-server recovered")
+				m.setHealthy(true)
+			}
+		}
+	}
+}
+
+func checkHealth(ctx context.Context, client *http.Client, url string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// downloadFile downloads a URL to a local file with progress logging.
+func downloadFile(ctx context.Context, url, dst string) error {
+	tmp := dst + ".tmp"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
+	}
+
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+
+	total := resp.ContentLength
+	pw := &progressWriter{dst: f, total: total, label: filepath.Base(dst)}
+	if _, err := io.Copy(pw, resp.Body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	f.Close()
+	return os.Rename(tmp, dst)
+}
+
+type progressWriter struct {
+	dst     io.Writer
+	total   int64
+	written int64
+	label   string
+	lastLog time.Time
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n, err := pw.dst.Write(p)
+	pw.written += int64(n)
+	if time.Since(pw.lastLog) > 5*time.Second {
+		pw.lastLog = time.Now()
+		if pw.total > 0 {
+			pct := float64(pw.written) / float64(pw.total) * 100
+			slog.Info("downloading", "file", pw.label, "progress", fmt.Sprintf("%.1f%%", pct),
+				"downloaded_mb", pw.written/(1024*1024), "total_mb", pw.total/(1024*1024))
+		} else {
+			slog.Info("downloading", "file", pw.label, "downloaded_mb", pw.written/(1024*1024))
+		}
+	}
+	return n, err
+}
+
+// downloadAndExtractServer downloads a .tar.gz release and extracts llama-server.
+func downloadAndExtractServer(ctx context.Context, url, dst string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
+	}
+
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("gzip: %w", err)
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tar: %w", err)
+		}
+		name := filepath.Base(hdr.Name)
+		if name == "llama-server" && hdr.Typeflag == tar.TypeReg {
+			f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+			slog.Info("extracted llama-server", "path", dst, "size", hdr.Size)
+			return nil
+		}
+	}
+	return fmt.Errorf("llama-server binary not found in archive")
+}
+
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}

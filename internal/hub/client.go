@@ -148,6 +148,7 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	}
 	q := u.Query()
 	q.Set("pubkey", pubHex)
+	q.Set("long_poll", "1")
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -159,7 +160,9 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	req.Header.Set("X-Node-Timestamp", strconv.FormatInt(ts, 10))
 	req.Header.Set("X-Node-Signature", hex.EncodeToString(c.sign("work", pubHex, strconv.FormatInt(ts, 10))))
 
-	resp, err := c.http.Do(req)
+	// Use longer timeout for long-polling (hub holds up to 25s)
+	longPollClient := &http.Client{Timeout: 35 * time.Second}
+	resp, err := longPollClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -358,6 +361,42 @@ func (c *Client) BlobUploadHeaders(jobID string, size int64, tsMs int64) map[str
 		"X-Node-Timestamp": tsStr,
 		"X-Node-Signature": hex.EncodeToString(sig),
 	}
+}
+
+func (c *Client) StreamInference(ctx context.Context, jobID string, body io.Reader) error {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return fmt.Errorf("job_id required")
+	}
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	tsStr := strconv.FormatInt(ts, 10)
+	sig := c.sign("stream", jobID, pubHex, tsStr)
+
+	path := "/api/v1/node/inference/stream/" + jobID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.absoluteURL(path), body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "text/event-stream")
+	req.Header.Set("Transfer-Encoding", "chunked")
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("X-Node-Pubkey", pubHex)
+	req.Header.Set("X-Node-Timestamp", tsStr)
+	req.Header.Set("X-Node-Signature", hex.EncodeToString(sig))
+
+	// Use a longer timeout for streaming
+	streamClient := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("stream inference: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("stream inference %s: %d %s", path, resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	return nil
 }
 
 func (c *Client) SignDigest(digest []byte) []byte {

@@ -15,6 +15,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/blob"
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/nodekey"
 	"github.com/Ryvion/node-agent/internal/runner"
 	"github.com/Ryvion/node-agent/internal/update"
@@ -94,13 +95,23 @@ func main() {
 		slog.Warn("health report failed", "error", err)
 	}
 
+	// Start persistent inference manager
+	dataDir := strings.TrimSpace(os.Getenv("RYV_DATA_DIR"))
+	infMgr := inference.New(dataDir)
+	go func() {
+		if err := infMgr.Start(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("inference manager stopped", "error", err)
+		}
+	}()
+	defer infMgr.Stop()
+
 	backoff := 10 * time.Second
 	maxBackoff := 5 * time.Minute
 	consecutiveFailures := 0
 	var lastUpdateAttempt time.Time
 
 	for {
-		err := runCycle(ctx, client, *gpusFlag, hubURL, version, &lastUpdateAttempt)
+		err := runCycle(ctx, client, *gpusFlag, hubURL, version, &lastUpdateAttempt, infMgr)
 		if err != nil {
 			consecutiveFailures++
 			backoff = time.Duration(float64(backoff) * 1.5)
@@ -125,7 +136,7 @@ func main() {
 	}
 }
 
-func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, lastUpdateAttempt *time.Time) error {
+func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, lastUpdateAttempt *time.Time, infMgr *inference.Manager) error {
 	metrics := hw.SampleMetrics()
 	latestVersion, err := client.Heartbeat(ctx, hub.Metrics{
 		TimestampMs: time.Now().UnixMilli(),
@@ -159,6 +170,19 @@ func runCycle(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 	if work == nil {
 		return nil
 	}
+
+	// Route inference jobs to persistent llama-server if available
+	if work.Kind == "inference" && infMgr.Healthy() {
+		slog.Info("routing to inference manager", "job_id", work.JobID)
+		jobTimeout := 5 * time.Minute
+		runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
+		defer cancel()
+		if err := infMgr.RunStreamingJob(runCtx, client, work.JobID, work.SpecJSON); err != nil {
+			slog.Warn("streaming inference failed", "job_id", work.JobID, "error", err)
+		}
+		return nil
+	}
+
 	if strings.TrimSpace(work.Image) == "" || strings.TrimSpace(work.SpecJSON) == "" {
 		slog.Warn("received work assignment without container spec", "job_id", work.JobID)
 		return nil
