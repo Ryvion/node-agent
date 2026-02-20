@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -38,6 +39,7 @@ func main() {
 	}
 
 	initLogger()
+	ensureServiceRecovery()
 	cleanupOrphanedContainers()
 
 	hubURL := strings.TrimSpace(*hubFlag)
@@ -342,6 +344,18 @@ func resolveDeviceType(raw string, caps hw.CapSet) string {
 func commandExists(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+// ensureServiceRecovery configures Windows SCM failure-recovery so the
+// service auto-restarts after crashes and auto-updates. This is idempotent
+// and fixes nodes installed with older installers that lack the config.
+func ensureServiceRecovery() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	_ = exec.Command("sc.exe", "failure", "RyvionNode", "reset=", "86400",
+		"actions=", "restart/5000/restart/10000/restart/30000").Run()
+	_ = exec.Command("sc.exe", "failureflag", "RyvionNode", "1").Run()
 }
 
 func initLogger() {
