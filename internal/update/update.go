@@ -157,6 +157,10 @@ func replaceWindows(exePath string, data []byte) error {
 }
 
 // Restart restarts the service using the platform's service manager.
+// On Windows, we exit with code 1 so the SCM failure-recovery policy
+// (restart after 5 s) relaunches the service with the new binary.
+// Spawning detached processes from within a service is unreliable
+// because Windows terminates child processes when the service stops.
 func Restart() error {
 	switch runtime.GOOS {
 	case "linux":
@@ -164,11 +168,9 @@ func Restart() error {
 	case "darwin":
 		return exec.Command("launchctl", "kickstart", "-k", "system/com.ryvion.node").Run()
 	case "windows":
-		// Use cmd /c with "start" to launch a detached process that survives
-		// the service stop. Direct sc.exe stop from within the service kills
-		// this process before sc.exe start can execute.
-		return exec.Command("cmd.exe", "/C",
-			"start /b cmd /c \"sc.exe stop RyvionNode & timeout /t 3 /nobreak >nul & sc.exe start RyvionNode\"").Start()
+		slog.Info("exiting for Windows service recovery restart")
+		os.Exit(1)
+		return nil // unreachable
 	default:
 		return fmt.Errorf("unsupported platform for restart: %s", runtime.GOOS)
 	}

@@ -332,7 +332,14 @@ func detectGPU() (model string, vramBytes uint64, sensors string) {
 		}
 	}
 
-	// 3) Fallback: WMI on Windows (catches AMD, Intel, any GPU)
+	// 3) Linux fallback: lspci for AMD/other GPUs without ROCm
+	if runtime.GOOS == "linux" {
+		if m := detectGPULspci(); m != "" {
+			return m, 0, "lspci model:" + m
+		}
+	}
+
+	// 4) Fallback: WMI on Windows (catches AMD, Intel, any GPU)
 	if runtime.GOOS == "windows" {
 		m, vram := detectGPUWindows()
 		if m != "" {
@@ -343,7 +350,70 @@ func detectGPU() (model string, vramBytes uint64, sensors string) {
 	return "", 0, ""
 }
 
+// detectGPULspci uses lspci to find discrete GPUs on Linux when
+// neither nvidia-smi nor rocm-smi is available.
+func detectGPULspci() string {
+	p, err := exec.LookPath("lspci")
+	if err != nil {
+		return ""
+	}
+	out, err := exec.Command(p, "-mm").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	// lspci -mm outputs quoted fields: Slot "Class" "Vendor" "Device" ...
+	// VGA class = "0300", 3D controller = "0302"
+	for _, line := range strings.Split(string(out), "\n") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "0300") && !strings.Contains(lower, "0302") {
+			continue
+		}
+		// Skip integrated Intel GPUs
+		if strings.Contains(lower, "intel") {
+			continue
+		}
+		// Extract device name from quoted fields
+		parts := splitQuoted(line)
+		if len(parts) >= 4 {
+			vendor := parts[2]
+			device := parts[3]
+			name := strings.TrimSpace(vendor + " " + device)
+			if name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// splitQuoted splits a line by whitespace but keeps quoted strings together.
+func splitQuoted(s string) []string {
+	var parts []string
+	var cur strings.Builder
+	inQuote := false
+	for _, r := range s {
+		switch {
+		case r == '"':
+			inQuote = !inQuote
+		case (r == ' ' || r == '\t') && !inQuote:
+			if cur.Len() > 0 {
+				parts = append(parts, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		parts = append(parts, cur.String())
+	}
+	return parts
+}
+
 // detectGPUWindows uses WMI to detect any discrete GPU on Windows.
+// Note: WMI's AdapterRAM is uint32 and overflows to 0 for GPUs with
+// VRAM that is a multiple of 4 GB (8, 12, 16, 24 GB). We select the
+// first discrete GPU found and use VRAM only as a tiebreaker.
 func detectGPUWindows() (model string, vramBytes uint64) {
 	out, err := exec.Command("wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM", "/format:csv").CombinedOutput()
 	if err != nil {
@@ -373,8 +443,8 @@ func detectGPUWindows() (model string, vramBytes uint64) {
 			continue
 		}
 		ram, _ := strconv.ParseUint(ramStr, 10, 64)
-		// Prefer the GPU with more VRAM
-		if ram > vramBytes {
+		// Pick first discrete GPU, prefer one with higher reported VRAM
+		if model == "" || ram > vramBytes {
 			model = name
 			vramBytes = ram
 		}
