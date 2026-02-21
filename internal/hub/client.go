@@ -350,6 +350,13 @@ func (c *Client) PublicKeyHex() string {
 	return c.pubHex()
 }
 
+// RedeemClaimCode sends a claim code to the hub to link this node to a buyer account.
+func (c *Client) RedeemClaimCode(ctx context.Context, code string) error {
+	body := map[string]string{"code": code}
+	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
+	return c.postWithHeaders(ctx, "/api/v1/node/claim", body, nil, headers)
+}
+
 func (c *Client) AbsoluteURL(u string) string {
 	return c.absoluteURL(u)
 }

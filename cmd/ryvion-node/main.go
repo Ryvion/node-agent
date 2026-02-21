@@ -42,6 +42,12 @@ var (
 var cachedGPUUtil atomic.Uint64 // stores float64 bits via math.Float64bits
 
 func main() {
+	// Subcommand: ryvion-node claim <CODE>
+	if len(os.Args) > 1 && os.Args[1] == "claim" {
+		runClaim()
+		return
+	}
+
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.StringVar(&flagHub, "hub", "https://ryvion-hub.fly.dev", "Hub orchestrator base URL")
 	flag.StringVar(&flagDevice, "type", "", "Node device type (gpu|cpu|mobile|iot)")
