@@ -137,6 +137,27 @@ func sampleCPU() float64 {
 			}
 		}
 	}
+	// macOS: top -l 2 to get delta-based CPU usage
+	if runtime.GOOS == "darwin" {
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		out, err := exec.CommandContext(dctx, "top", "-l", "2", "-n", "0", "-s", "0").CombinedOutput()
+		if err == nil {
+			// Parse the second sample's "CPU usage:" line
+			lines := strings.Split(string(out), "\n")
+			var lastUser, lastSys float64
+			found := false
+			for _, line := range lines {
+				if strings.Contains(line, "CPU usage:") {
+					lastUser, lastSys = parseDarwinCPU(line)
+					found = true
+				}
+			}
+			if found {
+				return lastUser + lastSys
+			}
+		}
+	}
 	// Windows: wmic (with timeout to avoid hangs in service context)
 	if runtime.GOOS == "windows" {
 		wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -152,6 +173,26 @@ func sampleCPU() float64 {
 		}
 	}
 	return -1
+}
+
+// parseDarwinCPU parses a macOS top "CPU usage:" line like:
+// "CPU usage: 5.26% user, 3.94% sys, 90.78% idle"
+func parseDarwinCPU(line string) (user, sys float64) {
+	line = strings.TrimSpace(line)
+	if i := strings.Index(line, "CPU usage:"); i >= 0 {
+		line = line[i+len("CPU usage:"):]
+	}
+	for _, part := range strings.Split(line, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasSuffix(part, "user") {
+			part = strings.TrimSuffix(strings.TrimSpace(strings.TrimSuffix(part, "user")), "%")
+			user, _ = strconv.ParseFloat(strings.TrimSpace(part), 64)
+		} else if strings.HasSuffix(part, "sys") {
+			part = strings.TrimSuffix(strings.TrimSpace(strings.TrimSuffix(part, "sys")), "%")
+			sys, _ = strconv.ParseFloat(strings.TrimSpace(part), 64)
+		}
+	}
+	return user, sys
 }
 
 func sampleMem() float64 {
@@ -175,6 +216,15 @@ func sampleMem() float64 {
 			return 100 * float64(totalKB-availKB) / float64(totalKB)
 		}
 	}
+	// macOS: sysctl + vm_stat
+	if runtime.GOOS == "darwin" {
+		totalBytes := detectRAMBytes() // uses sysctl hw.memsize
+		if totalBytes > 0 {
+			if used := darwinUsedMemBytes(); used > 0 {
+				return 100 * float64(used) / float64(totalBytes)
+			}
+		}
+	}
 	// Windows: wmic (with timeout to avoid hangs in service context)
 	if runtime.GOOS == "windows" {
 		wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -195,6 +245,50 @@ func sampleMem() float64 {
 		}
 	}
 	return -1
+}
+
+// darwinUsedMemBytes parses vm_stat output to calculate used memory on macOS.
+// vm_stat reports page counts; we multiply by the page size (typically 16384 on ARM64).
+func darwinUsedMemBytes() uint64 {
+	out, err := exec.Command("vm_stat").CombinedOutput()
+	if err != nil {
+		return 0
+	}
+	var pageSize uint64 = 16384 // ARM64 default
+	// First line: "Mach Virtual Memory Statistics: (page size of NNNN bytes)"
+	lines := strings.Split(string(out), "\n")
+	if len(lines) > 0 {
+		if i := strings.Index(lines[0], "page size of "); i >= 0 {
+			rest := lines[0][i+len("page size of "):]
+			if j := strings.IndexByte(rest, ' '); j > 0 {
+				if ps, err := strconv.ParseUint(rest[:j], 10, 64); err == nil && ps > 0 {
+					pageSize = ps
+				}
+			}
+		}
+	}
+	var active, wired, compressed uint64
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if v := parseVMStatLine(line, "Pages active:"); v > 0 {
+			active = v
+		} else if v := parseVMStatLine(line, "Pages wired down:"); v > 0 {
+			wired = v
+		} else if v := parseVMStatLine(line, "Pages occupied by compressor:"); v > 0 {
+			compressed = v
+		}
+	}
+	return (active + wired + compressed) * pageSize
+}
+
+func parseVMStatLine(line, prefix string) uint64 {
+	if !strings.HasPrefix(line, prefix) {
+		return 0
+	}
+	val := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	val = strings.TrimSuffix(val, ".")
+	v, _ := strconv.ParseUint(val, 10, 64)
+	return v
 }
 
 func sampleGPU(ctx context.Context) float64 {

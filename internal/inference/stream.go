@@ -140,7 +140,11 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	duration := time.Since(start)
 	resultHash := hex.EncodeToString(hash.Sum(nil))
 
-	// Submit receipt
+	// Submit receipt — truncate response tail to avoid bloating metadata.
+	tail := fullContent.String()
+	if len(tail) > 4096 {
+		tail = tail[len(tail)-4096:]
+	}
 	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
 		JobID:         jobID,
 		ResultHashHex: resultHash,
@@ -151,7 +155,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 			"duration_ms":     duration.Milliseconds(),
 			"exit_code":       0,
 			"response_length": fullContent.Len(),
-			"stderr_tail":     fullContent.String(),
+			"stderr_tail":     tail,
 		},
 	}); err != nil {
 		slog.Warn("submit receipt failed", "job_id", jobID, "error", err)

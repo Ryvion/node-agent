@@ -188,8 +188,16 @@ func (m *Manager) runServer(ctx context.Context) error {
 	}
 
 	cmd := exec.CommandContext(serverCtx, m.serverPath, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Send llama-server output to a log file to avoid mixing with JSON slog.
+	logPath := filepath.Join(m.dataDir, "llama-server.log")
+	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		defer logFile.Close()
+	} else {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	}
 	// Set library path so llama-server finds its shared libs
 	binDir := filepath.Dir(m.serverPath)
 	cmd.Env = append(os.Environ(),

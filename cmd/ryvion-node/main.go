@@ -118,20 +118,35 @@ func runNode(ctx context.Context) {
 	caps := hw.DetectCaps(flagDevice)
 	deviceType := resolveDeviceType(flagDevice, caps)
 
-	if err := client.Register(ctx, hub.Capabilities{
-		GPUModel:          caps.GPUModel,
-		CPUCores:          caps.CPUCores,
-		RAMBytes:          caps.RAMBytes,
-		VRAMBytes:         caps.VRAMBytes,
-		Sensors:           caps.Sensors,
-		BandwidthMbps:     caps.BandwidthMbps,
-		GeohashBucket:     caps.GeohashBucket,
-		AttestationMethod: caps.Attestation,
-		TEESupported:      caps.TEESupported,
-		TEEType:           caps.TEEType,
-	}, deviceType, strings.TrimSpace(flagReferral)); err != nil {
-		slog.Error("register failed", "error", err)
-		return
+	// Retry registration with backoff — on Windows the service starts before
+	// Docker/WSL2/network are ready, so the first attempts will fail.  Keep
+	// the process alive so SCM doesn't exhaust its restart budget.
+	regBackoff := 5 * time.Second
+	for {
+		if err := client.Register(ctx, hub.Capabilities{
+			GPUModel:          caps.GPUModel,
+			CPUCores:          caps.CPUCores,
+			RAMBytes:          caps.RAMBytes,
+			VRAMBytes:         caps.VRAMBytes,
+			Sensors:           caps.Sensors,
+			BandwidthMbps:     caps.BandwidthMbps,
+			GeohashBucket:     caps.GeohashBucket,
+			AttestationMethod: caps.Attestation,
+			TEESupported:      caps.TEESupported,
+			TEEType:           caps.TEEType,
+		}, deviceType, strings.TrimSpace(flagReferral)); err != nil {
+			slog.Warn("register failed, retrying", "error", err, "retry_in", regBackoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(regBackoff):
+			}
+			if regBackoff < 2*time.Minute {
+				regBackoff = time.Duration(float64(regBackoff) * 1.5)
+			}
+			continue
+		}
+		break
 	}
 	slog.Info("register succeeded", "hub", hubURL, "device_type", deviceType, "pubkey", client.PublicKeyHex())
 	if flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 {
