@@ -138,11 +138,17 @@ jobs:
           pattern: ryvion-node-*
           merge-multiple: false
 
+      - name: Generate checksums
+        run: |
+          sha256sum ryvion-node-*/* > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ryvion-node-*/*
+            SHA256SUMS
           draft: false
           prerelease: false
           generate_release_notes: true

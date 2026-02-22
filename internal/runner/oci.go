@@ -69,7 +69,9 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	}
 	args := []string{"run", "--name", name, "--rm", "-v", workDir + ":/work",
 		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256",
-		"--cpu-shares", "256"}
+		"--cpu-shares", "256",
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges:true"}
 	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
 		args = append(args, "--gpus", gpuArg)
 	}
@@ -84,7 +86,11 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	duration := time.Since(start)
 
 	if ctx.Err() != nil {
-		exec.Command(dockerBin, "kill", name).Run()
+		killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := exec.CommandContext(killCtx, dockerBin, "kill", name).Run(); err != nil {
+			slog.Warn("failed to kill timed-out container", "name", name, "error", err)
+		}
+		killCancel()
 	}
 
 	exitCode := 0

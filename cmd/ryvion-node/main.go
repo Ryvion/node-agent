@@ -41,6 +41,10 @@ var (
 // Used by the work loop to skip fetching work when GPU is busy.
 var cachedGPUUtil atomic.Uint64 // stores float64 bits via math.Float64bits
 
+// jobActive is set to 1 while a job is being processed.
+// The update check reads this to avoid restarting during active work.
+var jobActive atomic.Int32
+
 func main() {
 	// Subcommand: ryvion-node claim <CODE>
 	if len(os.Args) > 1 && os.Args[1] == "claim" {
@@ -178,7 +182,14 @@ func runNode(ctx context.Context) {
 	// Independent heartbeat goroutine — keeps node "online" regardless of
 	// what the work loop is doing (long-poll, job execution, etc.).
 	latestVersion := make(chan string, 1)
-	go heartbeatLoop(ctx, client, latestVersion)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("heartbeat goroutine panic", "error", r)
+			}
+		}()
+		heartbeatLoop(ctx, client, latestVersion)
+	}()
 
 	// Work loop — fetch and process jobs.
 	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr, latestVersion)
@@ -244,15 +255,19 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		// Check for version updates (non-blocking read from heartbeat goroutine).
 		select {
 		case latest := <-versionCh:
-			if update.NeedsUpdate(currentVersion, latest) && time.Since(lastUpdateAttempt) > 30*time.Minute {
-				lastUpdateAttempt = time.Now()
-				slog.Info("update available", "current", currentVersion, "latest", latest)
-				if err := update.Apply(ctx, hubURL); err != nil {
-					slog.Warn("auto-update failed", "error", err)
+			if update.NeedsUpdate(currentVersion, latest) && time.Since(lastUpdateAttempt) > 5*time.Minute {
+				if jobActive.Load() != 0 {
+					slog.Info("update available but job in progress, deferring", "latest", latest)
 				} else {
-					slog.Info("update applied, restarting")
-					if restartErr := update.Restart(); restartErr != nil {
-						slog.Warn("restart failed — update will take effect on next manual restart", "error", restartErr)
+					lastUpdateAttempt = time.Now()
+					slog.Info("update available", "current", currentVersion, "latest", latest)
+					if err := update.Apply(ctx, hubURL); err != nil {
+						slog.Warn("auto-update failed", "error", err)
+					} else {
+						slog.Info("update applied, restarting")
+						if restartErr := update.Restart(); restartErr != nil {
+							slog.Warn("restart failed — update will take effect on next manual restart", "error", restartErr)
+						}
 					}
 				}
 			}
@@ -295,7 +310,9 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 			continue
 		}
 
+		jobActive.Store(1)
 		processWork(ctx, client, work, gpus, infMgr)
+		jobActive.Store(0)
 	}
 }
 
@@ -366,16 +383,43 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	if units == 0 {
 		units = 1
 	}
-	if err := client.SubmitReceipt(ctx, hub.Receipt{
+	receipt := hub.Receipt{
 		JobID:         work.JobID,
 		ResultHashHex: resultHash,
 		MeteringUnits: units,
 		Metadata:      metadata,
-	}); err != nil {
-		slog.Warn("submit receipt failed", "job_id", work.JobID, "error", err)
+	}
+	if err := submitReceiptWithRetry(ctx, client, receipt); err != nil {
+		slog.Error("submit receipt failed after retries", "job_id", work.JobID, "error", err)
 		return
 	}
 	slog.Info("job completed", "job_id", work.JobID, "hash", resultHash, "units", units)
+}
+
+// submitReceiptWithRetry attempts receipt submission with exponential backoff.
+// Receipts represent completed work — losing one means the operator doesn't get paid.
+func submitReceiptWithRetry(ctx context.Context, client *hub.Client, receipt hub.Receipt) error {
+	const maxAttempts = 5
+	delay := 2 * time.Second
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		if err := client.SubmitReceipt(ctx, receipt); err != nil {
+			lastErr = err
+			slog.Warn("receipt submission attempt failed", "job_id", receipt.JobID, "attempt", i+1, "error", err)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during receipt retry: %w", lastErr)
+			case <-time.After(delay):
+			}
+			delay = time.Duration(float64(delay) * 2)
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 func cleanupOrphanedContainers() {
