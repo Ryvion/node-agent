@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -49,6 +50,13 @@ func LoadOrCreate(path string) (ed25519.PublicKey, ed25519.PrivateKey, error) {
 }
 
 func defaultKeyPath() (string, error) {
+	if runtime.GOOS == "windows" {
+		pd := os.Getenv("ProgramData")
+		if pd == "" {
+			pd = `C:\ProgramData`
+		}
+		return filepath.Join(pd, "Ryvion", "node-key"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user home: %w", err)
