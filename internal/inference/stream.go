@@ -57,8 +57,17 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		maxTokens = 1024
 	}
 
+	modelName := strings.TrimSpace(spec.Model)
+	if modelName == "" {
+		modelName = "ryvion-llama-3.2-3b"
+	}
+
+	if err := m.EnsureModel(ctx, modelName); err != nil {
+		return fmt.Errorf("ensure model %s: %w", modelName, err)
+	}
+
 	reqBody := chatRequest{
-		Model:       "local",
+		Model:       modelName,
 		Messages:    spec.Messages,
 		Stream:      true,
 		MaxTokens:   maxTokens,

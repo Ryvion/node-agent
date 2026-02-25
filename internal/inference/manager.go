@@ -22,11 +22,20 @@ const (
 	defaultThreads    = "4"
 	defaultGPULayers  = "99"
 	defaultCtxSize    = "4096"
-	defaultModelName  = "Llama-3.2-3B-Instruct-Q4_K_M.gguf"
-	defaultModelURL   = "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
 	healthCheckPeriod = 5 * time.Second
 	startupTimeout    = 120 * time.Second
 )
+
+type ModelConfig struct {
+	FileName string
+	URL      string
+}
+
+// NativeModels maps UI model names to GGUF downloads
+var NativeModels = map[string]ModelConfig{
+	"ryvion-llama-3.2-3b": {"Llama-3.2-3B-Instruct-Q4_K_M.gguf", "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
+	"phi-4":               {"phi-4-Q4_K_M.gguf", "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf"},
+}
 
 // platformServerURL returns the correct llama.cpp release URL for the current OS/arch.
 func platformServerURL() string {
@@ -53,15 +62,15 @@ type Manager struct {
 	threads    string
 	gpuLayers  string
 	ctxSize    string
-	modelURL   string
 	serverURL  string
-	modelPath  string
 	serverPath string
 
-	mu      sync.RWMutex
-	healthy bool
-	cmd     *exec.Cmd
-	cancel  context.CancelFunc
+	mu              sync.RWMutex
+	healthy         bool
+	cmd             *exec.Cmd
+	cancel          context.CancelFunc
+	activeModelName string
+	activeModelPath string
 }
 
 func New(dataDir string) *Manager {
@@ -71,13 +80,13 @@ func New(dataDir string) *Manager {
 	}
 	port := envOr("RYV_INFERENCE_PORT", defaultPort)
 	return &Manager{
-		dataDir:   dataDir,
-		port:      port,
-		threads:   envOr("RYV_INFERENCE_THREADS", defaultThreads),
-		gpuLayers: envOr("RYV_GPU_LAYERS", defaultGPULayers),
-		ctxSize:   envOr("RYV_CTX_SIZE", defaultCtxSize),
-		modelURL:  envOr("RYV_MODEL_URL", defaultModelURL),
-		serverURL: envOr("RYV_SERVER_URL", platformServerURL()),
+		dataDir:         dataDir,
+		port:            port,
+		threads:         envOr("RYV_INFERENCE_THREADS", defaultThreads),
+		gpuLayers:       envOr("RYV_GPU_LAYERS", defaultGPULayers),
+		ctxSize:         envOr("RYV_CTX_SIZE", defaultCtxSize),
+		serverURL:       envOr("RYV_SERVER_URL", platformServerURL()),
+		activeModelName: "ryvion-llama-3.2-3b",
 	}
 }
 
@@ -108,22 +117,38 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.serverPath = serverPath
 
-	modelPath := filepath.Join(modelDir, defaultModelName)
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		slog.Info("downloading model", "url", m.modelURL)
-		if err := downloadFile(ctx, m.modelURL, modelPath); err != nil {
-			return fmt.Errorf("download model: %w", err)
-		}
-		slog.Info("model downloaded", "path", modelPath)
-	}
-	m.modelPath = modelPath
-
 	// Start server with auto-restart
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		slog.Info("starting llama-server", "port", m.port, "model", m.modelPath)
+
+		m.mu.RLock()
+		currentModel := m.activeModelName
+		m.mu.RUnlock()
+
+		cfg, ok := NativeModels[currentModel]
+		if !ok {
+			currentModel = "ryvion-llama-3.2-3b"
+			cfg = NativeModels[currentModel]
+		}
+
+		modelPath := filepath.Join(modelDir, cfg.FileName)
+		if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+			slog.Info("downloading model", "model", currentModel, "url", cfg.URL)
+			if err := downloadFile(ctx, cfg.URL, modelPath); err != nil {
+				slog.Error("failed to download model", "error", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			slog.Info("model downloaded", "path", modelPath)
+		}
+
+		m.mu.Lock()
+		m.activeModelPath = modelPath
+		m.mu.Unlock()
+
+		slog.Info("starting llama-server", "port", m.port, "model", modelPath)
 		if err := m.runServer(ctx); err != nil {
 			slog.Warn("llama-server exited", "error", err)
 		}
@@ -157,7 +182,50 @@ func (m *Manager) ServerURL() string {
 }
 
 func (m *Manager) ModelName() string {
-	return "ryvion-llama-3.2-3b"
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.activeModelName
+}
+
+func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
+	m.mu.RLock()
+	current := m.activeModelName
+	m.mu.RUnlock()
+
+	if current == modelName {
+		return nil
+	}
+
+	_, ok := NativeModels[modelName]
+	if !ok {
+		return fmt.Errorf("model %s not supported in native registry", modelName)
+	}
+
+	slog.Info("switching native model", "from", current, "to", modelName)
+
+	m.mu.Lock()
+	m.activeModelName = modelName
+	if m.cancel != nil {
+		m.cancel() // Stop the server, it will restart with the new model
+	}
+	m.mu.Unlock()
+
+	// Wait for the new model's server to become healthy
+	for i := 0; i < 300; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+			m.mu.RLock()
+			hc := m.healthy
+			am := m.activeModelName
+			m.mu.RUnlock()
+			if hc && am == modelName {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("timeout waiting for %s to start", modelName)
 }
 
 func (m *Manager) setHealthy(v bool) {
@@ -174,7 +242,7 @@ func (m *Manager) runServer(ctx context.Context) error {
 	defer cancel()
 
 	args := []string{
-		"--model", m.modelPath,
+		"--model", m.activeModelPath,
 		"--port", m.port,
 		"--host", "127.0.0.1",
 		"--threads", m.threads,
