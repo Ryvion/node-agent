@@ -317,8 +317,8 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 }
 
 func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, infMgr *inference.Manager) {
-	// Route inference jobs to persistent llama-server if available
-	if work.Kind == "inference" && infMgr.Healthy() {
+	// Route streaming inference jobs (ryvion-llama-3.2-3b fallback) to persistent llama-server if available
+	if work.Kind == "inference" && work.Image == "streaming" && infMgr.Healthy() {
 		slog.Info("routing to inference manager", "job_id", work.JobID)
 		jobTimeout := 5 * time.Minute
 		runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
