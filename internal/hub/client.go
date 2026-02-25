@@ -393,8 +393,8 @@ func (c *Client) StreamInference(ctx context.Context, jobID string, body io.Read
 	req.Header.Set("X-Node-Timestamp", tsStr)
 	req.Header.Set("X-Node-Signature", hex.EncodeToString(sig))
 
-	// Use a longer timeout for streaming
-	streamClient := &http.Client{Timeout: 5 * time.Minute}
+	// Send stream with no strict timeout so it can handle huge long-running models
+	streamClient := &http.Client{}
 	resp, err := streamClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("stream inference: %w", err)
