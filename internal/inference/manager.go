@@ -2,6 +2,7 @@ package inference
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -50,10 +51,23 @@ func platformServerURL() string {
 		return base + "llama-b8106-bin-ubuntu-x64.tar.gz"
 	case "linux/arm64":
 		return base + "llama-b8106-bin-ubuntu-arm64.tar.gz"
+	case "windows/amd64":
+		return base + "llama-b8106-bin-win-cuda-12.4-x64.zip"
+	case "windows/arm64":
+		return base + "llama-b8106-bin-win-cpu-arm64.zip"
 	default:
 		// Windows or unsupported — caller should check
 		return ""
 	}
+}
+
+// NativeRuntimeAvailable reports whether this host can run the bundled native
+// inference server with the current defaults.
+func NativeRuntimeAvailable() bool {
+	if strings.TrimSpace(os.Getenv("RYV_SERVER_URL")) != "" {
+		return true
+	}
+	return platformServerURL() != ""
 }
 
 type Manager struct {
@@ -107,7 +121,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("create model dir: %w", err)
 	}
 
-	serverPath := filepath.Join(binDir, "llama-server")
+	serverPath := filepath.Join(binDir, serverBinaryName())
 	if _, err := os.Stat(serverPath); os.IsNotExist(err) {
 		slog.Info("downloading llama-server", "url", m.serverURL)
 		if err := downloadAndExtractServer(ctx, m.serverURL, serverPath); err != nil {
@@ -268,10 +282,17 @@ func (m *Manager) runServer(ctx context.Context) error {
 	}
 	// Set library path so llama-server finds its shared libs
 	binDir := filepath.Dir(m.serverPath)
-	cmd.Env = append(os.Environ(),
-		"DYLD_LIBRARY_PATH="+binDir,
-		"LD_LIBRARY_PATH="+binDir,
-	)
+	env := os.Environ()
+	if runtime.GOOS == "windows" {
+		// On Windows, colocated CUDA/llama DLLs are resolved through PATH.
+		env = append(env, "PATH="+binDir+";"+os.Getenv("PATH"))
+	} else {
+		env = append(env,
+			"DYLD_LIBRARY_PATH="+binDir,
+			"LD_LIBRARY_PATH="+binDir,
+		)
+	}
+	cmd.Env = env
 
 	m.mu.Lock()
 	m.cmd = cmd
@@ -404,9 +425,20 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// downloadAndExtractServer downloads a .tar.gz release and extracts llama-server
-// plus all shared libraries (.dylib / .so) it depends on.
+func serverBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "llama-server.exe"
+	}
+	return "llama-server"
+}
+
+// downloadAndExtractServer downloads a llama.cpp release and extracts
+// llama-server plus required shared libraries.
 func downloadAndExtractServer(ctx context.Context, url, dst string) error {
+	if strings.HasSuffix(strings.ToLower(url), ".zip") {
+		return downloadAndExtractServerZip(ctx, url, dst)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -440,7 +472,7 @@ func downloadAndExtractServer(ctx context.Context, url, dst string) error {
 		}
 
 		name := filepath.Base(hdr.Name)
-		isServer := name == "llama-server"
+		isServer := name == serverBinaryName()
 		isLib := strings.HasSuffix(name, ".dylib") || strings.HasSuffix(name, ".so") ||
 			strings.Contains(name, ".so.")
 
@@ -480,6 +512,97 @@ func downloadAndExtractServer(ctx context.Context, url, dst string) error {
 	}
 	if !foundServer {
 		return fmt.Errorf("llama-server binary not found in archive")
+	}
+	return nil
+}
+
+func downloadAndExtractServerZip(ctx context.Context, url, dst string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
+	}
+
+	tmpZip, err := os.CreateTemp("", "ryv-llama-*.zip")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpZip.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(tmpZip, resp.Body); err != nil {
+		tmpZip.Close()
+		return err
+	}
+	if err := tmpZip.Close(); err != nil {
+		return err
+	}
+
+	stat, err := os.Stat(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	zr, err := zip.OpenReader(tmpPath)
+	if err != nil {
+		return fmt.Errorf("zip: %w", err)
+	}
+	defer zr.Close()
+
+	binDir := filepath.Dir(dst)
+	foundServer := false
+
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+
+		name := filepath.Base(f.Name)
+		lc := strings.ToLower(name)
+		isServer := lc == strings.ToLower(serverBinaryName())
+		isLib := strings.HasSuffix(lc, ".dll") || strings.HasSuffix(lc, ".so") || strings.HasSuffix(lc, ".dylib") ||
+			strings.Contains(lc, ".so.")
+		if !isServer && !isLib {
+			continue
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+
+		outPath := filepath.Join(binDir, name)
+		perm := os.FileMode(0o644)
+		if isServer {
+			perm = 0o755
+		}
+		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		if _, err := io.Copy(out, rc); err != nil {
+			out.Close()
+			rc.Close()
+			return err
+		}
+		out.Close()
+		rc.Close()
+
+		if isServer {
+			foundServer = true
+			slog.Info("extracted llama-server", "path", outPath, "size", f.UncompressedSize64, "zip_size", stat.Size())
+		}
+	}
+
+	if !foundServer {
+		return fmt.Errorf("llama-server binary not found in zip archive")
 	}
 	return nil
 }

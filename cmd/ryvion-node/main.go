@@ -161,9 +161,6 @@ func runNode(ctx context.Context) {
 	if err := client.SolveChallenge(ctx); err != nil {
 		slog.Warn("challenge solve failed", "error", err)
 	}
-	if err := client.SendHealthReport(ctx, buildHealthReport(caps)); err != nil {
-		slog.Warn("health report failed", "error", err)
-	}
 
 	// Start persistent inference manager
 	dataDir := strings.TrimSpace(os.Getenv("RYV_DATA_DIR"))
@@ -179,6 +176,17 @@ func runNode(ctx context.Context) {
 		}
 	}()
 	defer infMgr.Stop()
+
+	// Health report loop keeps scheduler-facing capability flags up to date
+	// (for example native inference readiness).
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("health report goroutine panic", "error", r)
+			}
+		}()
+		healthReportLoop(ctx, client, caps, infMgr)
+	}()
 
 	// Independent heartbeat goroutine — keeps node "online" regardless of
 	// what the work loop is doing (long-poll, job execution, etc.).
@@ -242,6 +250,30 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, versionCh chan<- str
 		select {
 		case versionCh <- latest:
 		default:
+		}
+	}
+}
+
+func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, infMgr *inference.Manager) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	send := func() {
+		report := buildHealthReport(caps, infMgr)
+		if err := client.SendHealthReport(ctx, report); err != nil {
+			slog.Warn("health report failed", "error", err)
+		}
+	}
+
+	// Initial report at startup.
+	send()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			send()
 		}
 	}
 }
@@ -494,16 +526,18 @@ func cleanupOrphanedContainers() {
 	}
 }
 
-func buildHealthReport(caps hw.CapSet) hub.HealthReport {
+func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthReport {
 	gpuReady := strings.TrimSpace(caps.GPUModel) != ""
 	hasDocker := commandExists("docker")
 	dockerGPU := false
 	parts := []string{}
+	nativeSupported := inference.NativeRuntimeAvailable()
+	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
 
 	if gpuReady {
-		parts = append(parts, "nvidia-smi:ok")
+		parts = append(parts, "gpu-detect:ok")
 	} else {
-		parts = append(parts, "nvidia-smi:missing")
+		parts = append(parts, "gpu-detect:missing")
 	}
 
 	if hasDocker {
@@ -524,6 +558,17 @@ func buildHealthReport(caps hw.CapSet) hub.HealthReport {
 
 	if gpuReady {
 		parts = append(parts, "gpu_model:"+caps.GPUModel)
+	}
+	if nativeSupported {
+		parts = append(parts, "native-inference:supported")
+	} else {
+		parts = append(parts, "native-inference:unsupported")
+	}
+	if nativeReady {
+		parts = append(parts, "native-inference-ready:1")
+		parts = append(parts, "native-model:"+infMgr.ModelName())
+	} else {
+		parts = append(parts, "native-inference-ready:0")
 	}
 
 	return hub.HealthReport{
