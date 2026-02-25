@@ -132,6 +132,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 			msg := fmt.Sprintf("data: {\"error\": \"llama-server stream error: %s\"}\n\n", errChunk.Error.Message)
 			pw.Write([]byte(msg))
 			pw.Close()
+			<-streamErr
 			return fmt.Errorf("llama-server stream error: %s", errChunk.Error.Message)
 		}
 
@@ -157,6 +158,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		msg := fmt.Sprintf("data: {\"error\": \"reading llama-server stream failed: %v\"}\n\n", err)
 		pw.Write([]byte(msg))
 		pw.Close()
+		<-streamErr
 		return fmt.Errorf("reading llama-server stream failed: %w", err)
 	}
 
@@ -164,6 +166,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		msg := "data: {\"error\": \"llama-server returned empty output (context window or memory exceeded)\"}\n\n"
 		pw.Write([]byte(msg))
 		pw.Close()
+		<-streamErr
 		return fmt.Errorf("llama-server returned empty inference generation")
 	}
 
