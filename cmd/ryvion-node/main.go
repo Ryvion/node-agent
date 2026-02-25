@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -336,12 +337,15 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	// "streaming" is a pseudo-image, not a real container — never fall through to OCI runner.
 	if isStreaming {
 		if !infMgr.Healthy() {
-			slog.Warn("streaming job received but inference manager not healthy, skipping", "job_id", work.JobID)
+			err := fmt.Errorf("inference manager is not healthy")
+			slog.Warn("streaming job received but inference manager not healthy", "job_id", work.JobID)
+			relayStreamingFailure(runCtx, client, work.JobID, err)
 			return
 		}
 		slog.Info("routing to inference manager", "job_id", work.JobID)
 		if err := infMgr.RunStreamingJob(runCtx, client, work.JobID, work.SpecJSON); err != nil {
 			slog.Warn("streaming inference failed", "job_id", work.JobID, "error", err)
+			relayStreamingFailure(runCtx, client, work.JobID, err)
 		}
 		return
 	}
@@ -402,6 +406,47 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 	slog.Info("job completed", "job_id", work.JobID, "hash", resultHash, "units", units)
+}
+
+// relayStreamingFailure sends a terminal SSE error chunk to hub-orch so the
+// buyer stream exits quickly instead of hanging until server timeout.
+func relayStreamingFailure(ctx context.Context, client *hub.Client, jobID string, runErr error) {
+	if client == nil {
+		return
+	}
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return
+	}
+
+	msg := "streaming inference failed"
+	if runErr != nil {
+		if s := strings.TrimSpace(runErr.Error()); s != "" {
+			msg = s
+		}
+	}
+	if len(msg) > 512 {
+		msg = msg[:512]
+	}
+
+	payloadJSON, err := json.Marshal(map[string]any{
+		"error": map[string]string{
+			"message": msg,
+			"type":    "node_error",
+		},
+	})
+	if err != nil {
+		slog.Warn("failed to encode streaming error payload", "job_id", jobID, "error", err)
+		payloadJSON = []byte(`{"error":{"message":"streaming inference failed","type":"node_error"}}`)
+	}
+
+	relayCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	payload := "data: " + string(payloadJSON) + "\n\n" + "data: [DONE]\n\n"
+	if err := client.StreamInference(relayCtx, jobID, strings.NewReader(payload)); err != nil {
+		slog.Warn("failed to relay streaming failure to hub", "job_id", jobID, "error", err)
+	}
 }
 
 // submitReceiptWithRetry attempts receipt submission with exponential backoff.
