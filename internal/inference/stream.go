@@ -162,6 +162,14 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		return fmt.Errorf("reading llama-server stream failed: %w", err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		msg := fmt.Sprintf("data: {\"error\": \"job context cancelled (timeout limit reached): %v\"}\n\n", err)
+		pw.Write([]byte(msg))
+		pw.Close()
+		<-streamErr
+		return fmt.Errorf("job context cancelled: %w", err)
+	}
+
 	if fullContent.Len() == 0 {
 		msg := "data: {\"error\": \"llama-server returned empty output (context window or memory exceeded)\"}\n\n"
 		pw.Write([]byte(msg))

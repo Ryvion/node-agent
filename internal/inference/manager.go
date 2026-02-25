@@ -21,7 +21,7 @@ const (
 	defaultPort       = "8081"
 	defaultThreads    = "4"
 	defaultGPULayers  = "99"
-	defaultCtxSize    = "8192"
+	defaultCtxSize    = "16384"
 	healthCheckPeriod = 5 * time.Second
 	startupTimeout    = 120 * time.Second
 )

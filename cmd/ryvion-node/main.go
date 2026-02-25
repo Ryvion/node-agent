@@ -317,17 +317,29 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 }
 
 func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, infMgr *inference.Manager) {
+	// Determine job timeout based on type or explicit env var
+	isStreaming := work.Kind == "inference" && work.Image == "streaming"
+	jobTimeout := 10 * time.Minute
+	if isStreaming {
+		jobTimeout = 30 * time.Minute // Streaming inference often takes much longer context generation
+	}
+	if v := strings.TrimSpace(os.Getenv("RYV_JOB_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			jobTimeout = d
+		}
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
+	defer cancel()
+
 	// Route streaming inference jobs to persistent llama-server.
 	// "streaming" is a pseudo-image, not a real container — never fall through to OCI runner.
-	if work.Kind == "inference" && work.Image == "streaming" {
+	if isStreaming {
 		if !infMgr.Healthy() {
 			slog.Warn("streaming job received but inference manager not healthy, skipping", "job_id", work.JobID)
 			return
 		}
 		slog.Info("routing to inference manager", "job_id", work.JobID)
-		jobTimeout := 5 * time.Minute
-		runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
-		defer cancel()
 		if err := infMgr.RunStreamingJob(runCtx, client, work.JobID, work.SpecJSON); err != nil {
 			slog.Warn("streaming inference failed", "job_id", work.JobID, "error", err)
 		}
@@ -338,15 +350,6 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		slog.Warn("received work assignment without container spec", "job_id", work.JobID)
 		return
 	}
-
-	jobTimeout := 10 * time.Minute
-	if v := strings.TrimSpace(os.Getenv("RYV_JOB_TIMEOUT")); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			jobTimeout = d
-		}
-	}
-	runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
-	defer cancel()
 
 	result, runErr := runner.Run(runCtx, work.Image, work.SpecJSON, gpus)
 	if result == nil {
