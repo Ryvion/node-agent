@@ -122,6 +122,19 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 			break
 		}
 
+		// Check if llama-server emitted an internal error stream chunk
+		var errChunk struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(data), &errChunk); err == nil && errChunk.Error.Message != "" {
+			msg := fmt.Sprintf("data: {\"error\": \"llama-server stream error: %s\"}\n\n", errChunk.Error.Message)
+			pw.Write([]byte(msg))
+			pw.Close()
+			return fmt.Errorf("llama-server stream error: %s", errChunk.Error.Message)
+		}
+
 		// Extract content for hash/receipt
 		var chunk struct {
 			Choices []struct {
@@ -139,6 +152,21 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		// Relay SSE line to hub
 		pw.Write([]byte(line + "\n\n"))
 	}
+
+	if err := scanner.Err(); err != nil {
+		msg := fmt.Sprintf("data: {\"error\": \"reading llama-server stream failed: %v\"}\n\n", err)
+		pw.Write([]byte(msg))
+		pw.Close()
+		return fmt.Errorf("reading llama-server stream failed: %w", err)
+	}
+
+	if fullContent.Len() == 0 {
+		msg := "data: {\"error\": \"llama-server returned empty output (context window or memory exceeded)\"}\n\n"
+		pw.Write([]byte(msg))
+		pw.Close()
+		return fmt.Errorf("llama-server returned empty inference generation")
+	}
+
 	pw.Close()
 
 	// Wait for hub stream to finish
