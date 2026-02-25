@@ -54,7 +54,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 
 	maxTokens := spec.MaxTokens
 	if maxTokens <= 0 {
-		maxTokens = 1024
+		maxTokens = 2048
 	}
 
 	modelName := strings.TrimSpace(spec.Model)
