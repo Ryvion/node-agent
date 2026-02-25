@@ -317,8 +317,13 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 }
 
 func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, infMgr *inference.Manager) {
-	// Route streaming inference jobs (ryvion-llama-3.2-3b fallback) to persistent llama-server if available
-	if work.Kind == "inference" && work.Image == "streaming" && infMgr.Healthy() {
+	// Route streaming inference jobs to persistent llama-server.
+	// "streaming" is a pseudo-image, not a real container — never fall through to OCI runner.
+	if work.Kind == "inference" && work.Image == "streaming" {
+		if !infMgr.Healthy() {
+			slog.Warn("streaming job received but inference manager not healthy, skipping", "job_id", work.JobID)
+			return
+		}
 		slog.Info("routing to inference manager", "job_id", work.JobID)
 		jobTimeout := 5 * time.Minute
 		runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
