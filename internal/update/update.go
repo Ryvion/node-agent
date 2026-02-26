@@ -3,8 +3,12 @@ package update
 import (
 	"archive/tar"
 	"archive/zip"
+	"bufio"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -63,6 +67,15 @@ func parseSemver(s string) []int {
 
 // Apply downloads the latest binary from the hub and replaces the current executable.
 func Apply(ctx context.Context, hubBaseURL string) error {
+	expectedFile := expectedArchiveFilename()
+	if expectedFile == "" {
+		return fmt.Errorf("unsupported platform for updates: %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	expectedSHA, err := fetchExpectedChecksum(ctx, hubBaseURL, expectedFile)
+	if err != nil {
+		return fmt.Errorf("fetch checksums: %w", err)
+	}
+
 	downloadURL := buildDownloadURL(hubBaseURL)
 	slog.Info("downloading update", "url", downloadURL)
 
@@ -85,11 +98,16 @@ func Apply(ctx context.Context, hubBaseURL string) error {
 		return fmt.Errorf("create temp: %w", err)
 	}
 	defer os.Remove(tmpArchive.Name())
-	if _, err := io.Copy(tmpArchive, resp.Body); err != nil {
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmpArchive, h), resp.Body); err != nil {
 		tmpArchive.Close()
 		return fmt.Errorf("save archive: %w", err)
 	}
 	tmpArchive.Close()
+	gotSHA := hex.EncodeToString(h.Sum(nil))
+	if !secureHexEqual(gotSHA, expectedSHA) {
+		return fmt.Errorf("checksum mismatch for %s: got %s expected %s", expectedFile, gotSHA, expectedSHA)
+	}
 
 	// Extract binary
 	var binaryData []byte
@@ -189,6 +207,75 @@ func buildDownloadURL(hubBase string) string {
 		}
 		return hubBase + "/download/linux/binary"
 	}
+}
+
+func buildChecksumsURL(hubBase string) string {
+	return strings.TrimRight(hubBase, "/") + "/api/v1/downloads/checksums"
+}
+
+func expectedArchiveFilename() string {
+	switch runtime.GOOS {
+	case "windows":
+		return fmt.Sprintf("ryvion-node-%s-%s.zip", runtime.GOOS, runtime.GOARCH)
+	case "darwin", "linux":
+		return fmt.Sprintf("ryvion-node-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	default:
+		return ""
+	}
+}
+
+func fetchExpectedChecksum(ctx context.Context, hubBaseURL, archiveName string) (string, error) {
+	url := buildChecksumsURL(hubBaseURL)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("checksums endpoint returned %d", resp.StatusCode)
+	}
+
+	target := strings.TrimSpace(archiveName)
+	if target == "" {
+		return "", fmt.Errorf("missing archive name")
+	}
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		sum := strings.ToLower(strings.TrimSpace(fields[0]))
+		name := strings.TrimSpace(fields[len(fields)-1])
+		if filepath.Base(name) != target {
+			continue
+		}
+		if _, err := hex.DecodeString(sum); err != nil {
+			return "", fmt.Errorf("invalid checksum format for %s", target)
+		}
+		return sum, nil
+	}
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("checksum for %s not found", target)
+}
+
+func secureHexEqual(a, b string) bool {
+	ab, errA := hex.DecodeString(strings.TrimSpace(a))
+	bb, errB := hex.DecodeString(strings.TrimSpace(b))
+	if errA != nil || errB != nil || len(ab) == 0 || len(ab) != len(bb) {
+		return false
+	}
+	return subtle.ConstantTimeCompare(ab, bb) == 1
 }
 
 func extractFromTarGz(archivePath, binaryName string) ([]byte, error) {
