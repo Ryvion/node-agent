@@ -16,7 +16,7 @@ permissions:
   packages: write
 
 env:
-  GO_VERSION: '1.24.x'
+  GO_VERSION: '1.24.0'
 
 jobs:
   build:
@@ -138,10 +138,60 @@ jobs:
           pattern: ryvion-node-*
           merge-multiple: false
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
       - name: Generate checksums
         run: |
           sha256sum ryvion-node-*/* > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Sign checksums
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY_B64: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY_B64 }}
+        run: |
+          if [ -z "${RELEASE_SIGNING_PRIVATE_KEY_B64}" ]; then
+            echo "::error::Missing RELEASE_SIGNING_PRIVATE_KEY_B64 secret"
+            exit 1
+          fi
+          cat > /tmp/sign_checksums.go <<'EOF'
+          package main
+
+          import (
+          	"crypto/ed25519"
+          	"encoding/base64"
+          	"fmt"
+          	"os"
+          	"strings"
+          )
+
+          func main() {
+          	privB64 := strings.TrimSpace(os.Getenv("RELEASE_SIGNING_PRIVATE_KEY_B64"))
+          	raw, err := base64.StdEncoding.DecodeString(privB64)
+          	if err != nil {
+          		fmt.Fprintln(os.Stderr, "decode private key:", err)
+          		os.Exit(1)
+          	}
+          	if len(raw) != ed25519.PrivateKeySize {
+          		fmt.Fprintf(os.Stderr, "invalid private key size: got %d want %d\n", len(raw), ed25519.PrivateKeySize)
+          		os.Exit(1)
+          	}
+          	checksums, err := os.ReadFile("SHA256SUMS")
+          	if err != nil {
+          		fmt.Fprintln(os.Stderr, "read SHA256SUMS:", err)
+          		os.Exit(1)
+          	}
+          	sig := ed25519.Sign(ed25519.PrivateKey(raw), checksums)
+          	if err := os.WriteFile("SHA256SUMS.sig", []byte(base64.StdEncoding.EncodeToString(sig)+"\n"), 0644); err != nil {
+          		fmt.Fprintln(os.Stderr, "write SHA256SUMS.sig:", err)
+          		os.Exit(1)
+          	}
+          }
+          EOF
+          go run /tmp/sign_checksums.go
+          cat SHA256SUMS.sig
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -149,6 +199,7 @@ jobs:
           files: |
             ryvion-node-*/*
             SHA256SUMS
+            SHA256SUMS.sig
           draft: false
           prerelease: false
           generate_release_notes: true

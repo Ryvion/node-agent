@@ -6,8 +6,10 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -21,6 +23,11 @@ import (
 	"strings"
 	"time"
 )
+
+// releasePublicKeyB64 is the pinned Ed25519 public key used to verify
+// SHA256SUMS signatures for update artifacts. Override at runtime with
+// RYV_UPDATE_PUBKEY_B64 for key rotation.
+const releasePublicKeyB64 = "EAGK3kEXK8ewiFHRJLKHcDbs3E7at2Bw3iqmqjLCAR8="
 
 // NeedsUpdate compares semver strings (with optional "v" prefix).
 // Returns true if latest is strictly newer than current.
@@ -225,25 +232,27 @@ func expectedArchiveFilename() string {
 }
 
 func fetchExpectedChecksum(ctx context.Context, hubBaseURL, archiveName string) (string, error) {
-	url := buildChecksumsURL(hubBaseURL)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	checksums, err := fetchText(ctx, buildChecksumsURL(hubBaseURL))
+	if err != nil {
+		return "", fmt.Errorf("download checksums: %w", err)
+	}
+	sigB64, err := fetchText(ctx, buildChecksumsSigURL(hubBaseURL))
+	if err != nil {
+		return "", fmt.Errorf("download checksums signature: %w", err)
+	}
+	pub, err := resolveUpdatePublicKey()
 	if err != nil {
 		return "", err
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
+	if err := verifyChecksumsSignature(pub, []byte(checksums), sigB64); err != nil {
 		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("checksums endpoint returned %d", resp.StatusCode)
 	}
 
 	target := strings.TrimSpace(archiveName)
 	if target == "" {
 		return "", fmt.Errorf("missing archive name")
 	}
-	sc := bufio.NewScanner(resp.Body)
+	sc := bufio.NewScanner(strings.NewReader(checksums))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -267,6 +276,62 @@ func fetchExpectedChecksum(ctx context.Context, hubBaseURL, archiveName string) 
 		return "", err
 	}
 	return "", fmt.Errorf("checksum for %s not found", target)
+}
+
+func buildChecksumsSigURL(hubBase string) string {
+	return strings.TrimRight(hubBase, "/") + "/api/v1/downloads/checksums.sig"
+}
+
+func fetchText(ctx context.Context, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("endpoint %s returned %d", url, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func resolveUpdatePublicKey() (ed25519.PublicKey, error) {
+	keyB64 := strings.TrimSpace(os.Getenv("RYV_UPDATE_PUBKEY_B64"))
+	if keyB64 == "" {
+		keyB64 = strings.TrimSpace(releasePublicKeyB64)
+	}
+	if keyB64 == "" {
+		return nil, fmt.Errorf("missing update signing public key")
+	}
+	key, err := base64.StdEncoding.DecodeString(keyB64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid update signing public key encoding")
+	}
+	if len(key) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid update signing public key size")
+	}
+	return ed25519.PublicKey(key), nil
+}
+
+func verifyChecksumsSignature(pub ed25519.PublicKey, checksums []byte, sigB64 string) error {
+	sigRaw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sigB64))
+	if err != nil {
+		return fmt.Errorf("invalid checksums signature encoding")
+	}
+	if len(sigRaw) != ed25519.SignatureSize {
+		return fmt.Errorf("invalid checksums signature size")
+	}
+	if !ed25519.Verify(pub, checksums, sigRaw) {
+		return fmt.Errorf("invalid checksums signature")
+	}
+	return nil
 }
 
 func secureHexEqual(a, b string) bool {
