@@ -190,6 +190,7 @@ func readMetrics(path string, duration time.Duration) map[string]any {
 }
 
 func copyArtifact(workDir, workBase string) (string, error) {
+	workRoot := canonicalPath(workDir)
 	candidates := []string{
 		filepath.Join(workDir, "output"),
 		filepath.Join(workDir, "output.bin"),
@@ -204,7 +205,7 @@ func copyArtifact(workDir, workBase string) (string, error) {
 		if err != nil {
 			continue
 		}
-		if !strings.HasPrefix(resolved, workDir) {
+		if !isPathWithin(workRoot, canonicalPath(resolved)) {
 			slog.Warn("artifact path traversal blocked", "path", src, "resolved", resolved)
 			continue
 		}
@@ -230,6 +231,27 @@ func copyArtifact(workDir, workBase string) (string, error) {
 		return dst.Name(), nil
 	}
 	return "", nil
+}
+
+func canonicalPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(path)
+}
+
+func isPathWithin(root, target string) bool {
+	if root == "" || target == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func trimDigestPrefix(v string) string {
