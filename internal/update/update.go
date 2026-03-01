@@ -27,7 +27,7 @@ import (
 // releasePublicKeyB64 is the pinned Ed25519 public key used to verify
 // SHA256SUMS signatures for update artifacts. Override at runtime with
 // RYV_UPDATE_PUBKEY_B64 for key rotation.
-const releasePublicKeyB64 = "EAGK3kEXK8ewiFHRJLKHcDbs3E7at2Bw3iqmqjLCAR8="
+const releasePublicKeyB64 = "KZWGe+VQWPy2ypCNpGwPEYlc8FnFVadufGXnbGAk2nE="
 
 // NeedsUpdate compares semver strings (with optional "v" prefix).
 // Returns true if latest is strictly newer than current.
