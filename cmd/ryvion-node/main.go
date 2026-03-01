@@ -533,6 +533,10 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	parts := []string{}
 	nativeSupported := inference.NativeRuntimeAvailable()
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
+	diskGB := detectAvailableDiskGB()
+	ffmpegOK := commandExists("ffmpeg")
+	pdalOK := commandExists("pdal")
+	open3dOK := commandExists("open3d") || pythonModuleAvailable("open3d")
 
 	if gpuReady {
 		parts = append(parts, "gpu-detect:ok")
@@ -559,6 +563,22 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	if gpuReady {
 		parts = append(parts, "gpu_model:"+caps.GPUModel)
 	}
+	parts = append(parts, "disk_gb:"+strconv.FormatUint(diskGB, 10))
+	if ffmpegOK {
+		parts = append(parts, "tool:ffmpeg")
+	}
+	if pdalOK {
+		parts = append(parts, "tool:pdal")
+	}
+	if open3dOK {
+		parts = append(parts, "tool:open3d")
+	}
+	spatialReady := ffmpegOK && (pdalOK || open3dOK) && diskGB >= 50 && (gpuReady || caps.CPUCores >= 8)
+	if spatialReady {
+		parts = append(parts, "spatial-ready:1")
+	} else {
+		parts = append(parts, "spatial-ready:0")
+	}
 	if nativeSupported {
 		parts = append(parts, "native-inference:supported")
 	} else {
@@ -577,6 +597,55 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 		DockerGPU:   dockerGPU,
 		Message:     strings.Join(parts, ","),
 	}
+}
+
+func detectAvailableDiskGB() uint64 {
+	if runtime.GOOS == "windows" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "wmic", "logicaldisk", "where", "DeviceID='C:'", "get", "FreeSpace", "/value").CombinedOutput()
+		if err != nil {
+			return 0
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(strings.ToLower(line), "freespace=") {
+				continue
+			}
+			v := strings.TrimSpace(strings.TrimPrefix(line, "FreeSpace="))
+			if bytes, err := strconv.ParseUint(v, 10, 64); err == nil {
+				return bytes / (1024 * 1024 * 1024)
+			}
+		}
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sh", "-lc", "df -k . | tail -1 | awk '{print $4}'").CombinedOutput()
+	if err != nil {
+		return 0
+	}
+	kbRaw := strings.TrimSpace(string(out))
+	kb, err := strconv.ParseUint(kbRaw, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return kb / (1024 * 1024)
+}
+
+func pythonModuleAvailable(module string) bool {
+	module = strings.TrimSpace(module)
+	if module == "" {
+		return false
+	}
+	py := "python3"
+	if runtime.GOOS == "windows" {
+		py = "python"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, py, "-c", "import "+module)
+	return cmd.Run() == nil
 }
 
 // testDockerGPU checks if Docker can access the GPU by running a minimal container.
