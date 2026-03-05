@@ -57,3 +57,60 @@ func TestParseVMStatLine(t *testing.T) {
 		t.Errorf("expected 0 for non-matching prefix, got %d", v)
 	}
 }
+
+func TestParseWindowsSizedMemory(t *testing.T) {
+	tests := []struct {
+		input string
+		want  uint64
+	}{
+		{input: "24564 MB", want: 24564 * 1024 * 1024},
+		{input: "24 GB", want: 24 * 1024 * 1024 * 1024},
+		{input: "3,072 MB", want: 3072 * 1024 * 1024},
+		{input: "", want: 0},
+		{input: "n/a", want: 0},
+	}
+
+	for _, tc := range tests {
+		if got := parseWindowsSizedMemory(tc.input); got != tc.want {
+			t.Fatalf("parseWindowsSizedMemory(%q)=%d want %d", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestParseDxDiagDisplayDevicesPrefersDiscreteGPU(t *testing.T) {
+	xml := []byte(`
+<DxDiag>
+  <DisplayDevices>
+    <DisplayDevice>
+      <CardName>Intel(R) Iris(R) Xe Graphics</CardName>
+      <DedicatedMemory>128 MB</DedicatedMemory>
+      <DisplayMemory>8120 MB</DisplayMemory>
+    </DisplayDevice>
+    <DisplayDevice>
+      <CardName>AMD Radeon RX 7900 XTX</CardName>
+      <DedicatedMemory>24564 MB</DedicatedMemory>
+      <DisplayMemory>24564 MB</DisplayMemory>
+    </DisplayDevice>
+  </DisplayDevices>
+</DxDiag>`)
+
+	gpu := pickBestWindowsGPU(parseDxDiagDisplayDevices(xml))
+	if gpu.Name != "AMD Radeon RX 7900 XTX" {
+		t.Fatalf("expected 7900 XTX, got %q", gpu.Name)
+	}
+	if gpu.VRAMBytes != 24564*1024*1024 {
+		t.Fatalf("expected 24564 MB, got %d", gpu.VRAMBytes)
+	}
+}
+
+func TestParseWindowsGPUWMICSV(t *testing.T) {
+	csv := []byte("Node,AdapterRAM,Name\r\nDESKTOP,4293918720,Intel(R) Iris(R) Xe Graphics\r\nDESKTOP,3221225472,AMD Radeon RX 7900 XTX\r\n")
+
+	gpu := pickBestWindowsGPU(parseWindowsGPUWMICSV(csv))
+	if gpu.Name != "AMD Radeon RX 7900 XTX" {
+		t.Fatalf("expected 7900 XTX, got %q", gpu.Name)
+	}
+	if gpu.VRAMBytes != 3221225472 {
+		t.Fatalf("expected raw WMI bytes, got %d", gpu.VRAMBytes)
+	}
+}

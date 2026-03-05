@@ -2,6 +2,8 @@ package hw
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/xml"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +41,28 @@ func findNvidiaSMI() string {
 }
 
 func hasNvidiaSMI() bool { return nvidiaSMIPath != "" }
+
+func findWindowsSystemTool(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	candidates := []string{
+		filepath.Join(os.Getenv("SystemRoot"), "System32", name+".exe"),
+		filepath.Join(os.Getenv("WINDIR"), "System32", name+".exe"),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
 
 type CapSet struct {
 	GPUModel      string
@@ -439,9 +463,9 @@ func detectGPU() (model string, vramBytes uint64, sensors string) {
 
 	// 4) Fallback: WMI on Windows (catches AMD, Intel, any GPU)
 	if runtime.GOOS == "windows" {
-		m, vram := detectGPUWindows()
+		m, vram, sensor := detectGPUWindows()
 		if m != "" {
-			return m, vram, "wmi model:" + m
+			return m, vram, sensor
 		}
 	}
 
@@ -508,46 +532,280 @@ func splitQuoted(s string) []string {
 	return parts
 }
 
-// detectGPUWindows uses WMI to detect any discrete GPU on Windows.
-// Note: WMI's AdapterRAM is uint32 and overflows to 0 for GPUs with
-// VRAM that is a multiple of 4 GB (8, 12, 16, 24 GB). We select the
-// first discrete GPU found and use VRAM only as a tiebreaker.
-func detectGPUWindows() (model string, vramBytes uint64) {
-	out, err := exec.Command("wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM", "/format:csv").CombinedOutput()
-	if err != nil {
-		return "", 0
+// detectGPUWindows uses dxdiag as the primary source because
+// Win32_VideoController.AdapterRAM is unreliable for modern cards.
+// WMI remains as a model fallback when dxdiag is unavailable.
+func detectGPUWindows() (model string, vramBytes uint64, sensor string) {
+	if gpu := detectGPUWindowsDxDiag(); gpu.Name != "" {
+		return gpu.Name, gpu.VRAMBytes, "dxdiag model:" + gpu.Name
 	}
-	// CSV: Node,AdapterRAM,Name
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(strings.ToLower(line), "node") {
-			continue
-		}
-		fields := strings.Split(line, ",")
-		if len(fields) < 3 {
-			continue
-		}
-		name := strings.TrimSpace(fields[len(fields)-1])
-		ramStr := strings.TrimSpace(fields[len(fields)-2])
-		// Skip integrated GPUs
-		nameLower := strings.ToLower(name)
-		if strings.Contains(nameLower, "intel") && (strings.Contains(nameLower, "uhd") || strings.Contains(nameLower, "hd graphics") || strings.Contains(nameLower, "iris")) {
-			continue
-		}
-		if strings.Contains(nameLower, "microsoft basic") || strings.Contains(nameLower, "remote desktop") {
-			continue
+	if gpu := detectGPUWindowsWMICSV(); gpu.Name != "" {
+		return gpu.Name, gpu.VRAMBytes, "wmic model:" + gpu.Name
+	}
+	return "", 0, ""
+}
+
+type windowsGPUInfo struct {
+	Name      string
+	VRAMBytes uint64
+}
+
+type dxDiagReport struct {
+	DisplayDevices []dxDiagDisplayDevice `xml:"DisplayDevices>DisplayDevice"`
+}
+
+type dxDiagDisplayDevice struct {
+	CardName         string `xml:"CardName"`
+	ChipType         string `xml:"ChipType"`
+	DedicatedMemory  string `xml:"DedicatedMemory"`
+	DisplayMemory    string `xml:"DisplayMemory"`
+	SharedMemory     string `xml:"SharedMemory"`
+	Manufacturer     string `xml:"Manufacturer"`
+	DriverModel      string `xml:"DriverModel"`
+	DriverAttributes string `xml:"DriverAttributes"`
+}
+
+func detectGPUWindowsDxDiag() windowsGPUInfo {
+	path := findWindowsSystemTool("dxdiag")
+	if path == "" {
+		return windowsGPUInfo{}
+	}
+
+	tmp, err := os.CreateTemp("", "ryvion-dxdiag-*.xml")
+	if err != nil {
+		return windowsGPUInfo{}
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if out, err := exec.CommandContext(ctx, path, "/whql:off", "/x", tmpPath).CombinedOutput(); err != nil {
+		_ = out
+		return windowsGPUInfo{}
+	}
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return windowsGPUInfo{}
+	}
+	return pickBestWindowsGPU(parseDxDiagDisplayDevices(data))
+}
+
+func detectGPUWindowsWMICSV() windowsGPUInfo {
+	path := findWindowsSystemTool("wmic")
+	if path == "" {
+		return windowsGPUInfo{}
+	}
+	out, err := exec.Command(path, "path", "win32_VideoController", "get", "Name,AdapterRAM", "/format:csv").CombinedOutput()
+	if err != nil {
+		return windowsGPUInfo{}
+	}
+	return pickBestWindowsGPU(parseWindowsGPUWMICSV(out))
+}
+
+func parseDxDiagDisplayDevices(data []byte) []windowsGPUInfo {
+	var report dxDiagReport
+	if err := xml.Unmarshal(data, &report); err != nil {
+		return nil
+	}
+
+	gpus := make([]windowsGPUInfo, 0, len(report.DisplayDevices))
+	for _, device := range report.DisplayDevices {
+		name := strings.TrimSpace(device.CardName)
+		if name == "" {
+			name = strings.TrimSpace(device.ChipType)
 		}
 		if name == "" {
 			continue
 		}
-		ram, _ := strconv.ParseUint(ramStr, 10, 64)
-		// Pick first discrete GPU, prefer one with higher reported VRAM
-		if model == "" || ram > vramBytes {
-			model = name
-			vramBytes = ram
+
+		vramBytes := parseWindowsSizedMemory(device.DedicatedMemory)
+		if vramBytes == 0 {
+			vramBytes = parseWindowsSizedMemory(device.DisplayMemory)
+		}
+		gpus = append(gpus, windowsGPUInfo{Name: name, VRAMBytes: vramBytes})
+	}
+	return gpus
+}
+
+func parseWindowsGPUWMICSV(data []byte) []windowsGPUInfo {
+	reader := csv.NewReader(strings.NewReader(string(data)))
+	reader.FieldsPerRecord = -1
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil
+	}
+
+	var header []string
+	for _, record := range records {
+		if len(record) == 0 {
+			continue
+		}
+		empty := true
+		for i := range record {
+			record[i] = strings.TrimSpace(record[i])
+			if record[i] != "" {
+				empty = false
+			}
+		}
+		if empty {
+			continue
+		}
+		header = record
+		break
+	}
+	if len(header) == 0 {
+		return nil
+	}
+
+	index := make(map[string]int, len(header))
+	for i, column := range header {
+		index[strings.ToLower(column)] = i
+	}
+	nameIdx, okName := index["name"]
+	ramIdx, okRAM := index["adapterram"]
+	if !okName || !okRAM {
+		return nil
+	}
+
+	var gpus []windowsGPUInfo
+	headerSeen := false
+	for _, record := range records {
+		if len(record) == 0 {
+			continue
+		}
+		for i := range record {
+			record[i] = strings.TrimSpace(record[i])
+		}
+		if !headerSeen {
+			if len(record) == len(header) {
+				matches := true
+				for i := range header {
+					if !strings.EqualFold(record[i], header[i]) {
+						matches = false
+						break
+					}
+				}
+				if matches {
+					headerSeen = true
+					continue
+				}
+			}
+			continue
+		}
+		if len(record) <= nameIdx || len(record) <= ramIdx {
+			continue
+		}
+		name := strings.TrimSpace(record[nameIdx])
+		if name == "" {
+			continue
+		}
+		ram, _ := strconv.ParseUint(strings.TrimSpace(record[ramIdx]), 10, 64)
+		gpus = append(gpus, windowsGPUInfo{Name: name, VRAMBytes: ram})
+	}
+	return gpus
+}
+
+func pickBestWindowsGPU(gpus []windowsGPUInfo) windowsGPUInfo {
+	var best windowsGPUInfo
+	bestTier := -1
+	for _, gpu := range gpus {
+		name := strings.TrimSpace(gpu.Name)
+		if name == "" || isIgnoredWindowsGPU(name) {
+			continue
+		}
+		tier := windowsGPUTier(name)
+		if tier < 0 {
+			continue
+		}
+		if best.Name == "" || tier > bestTier || (tier == bestTier && gpu.VRAMBytes > best.VRAMBytes) {
+			best = windowsGPUInfo{Name: name, VRAMBytes: gpu.VRAMBytes}
+			bestTier = tier
 		}
 	}
-	return model, vramBytes
+	return best
+}
+
+func windowsGPUTier(name string) int {
+	nameLower := strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case nameLower == "":
+		return -1
+	case strings.Contains(nameLower, "intel") && (strings.Contains(nameLower, "uhd") || strings.Contains(nameLower, "hd graphics") || strings.Contains(nameLower, "iris")):
+		return 0
+	case strings.Contains(nameLower, "amd radeon(tm) graphics"),
+		strings.HasSuffix(nameLower, "radeon graphics"),
+		strings.Contains(nameLower, "vega 3 graphics"),
+		strings.Contains(nameLower, "vega 6 graphics"),
+		strings.Contains(nameLower, "vega 7 graphics"),
+		strings.Contains(nameLower, "vega 8 graphics"),
+		strings.Contains(nameLower, "vega 10 graphics"),
+		strings.Contains(nameLower, "vega 11 graphics"):
+		return 0
+	default:
+		return 1
+	}
+}
+
+func isIgnoredWindowsGPU(name string) bool {
+	nameLower := strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(nameLower, "microsoft basic") ||
+		strings.Contains(nameLower, "remote desktop") ||
+		strings.Contains(nameLower, "vmware") ||
+		strings.Contains(nameLower, "virtualbox") ||
+		strings.Contains(nameLower, "parallels") ||
+		strings.Contains(nameLower, "hyper-v")
+}
+
+func parseWindowsSizedMemory(value string) uint64 {
+	value = strings.TrimSpace(strings.ReplaceAll(strings.ToUpper(value), ",", ""))
+	if value == "" {
+		return 0
+	}
+
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return 0
+	}
+
+	num := fields[0]
+	unit := "B"
+	if len(fields) > 1 {
+		unit = fields[1]
+	} else {
+		switch {
+		case strings.HasSuffix(num, "TB"), strings.HasSuffix(num, "TIB"):
+			unit = "TB"
+		case strings.HasSuffix(num, "GB"), strings.HasSuffix(num, "GIB"):
+			unit = "GB"
+		case strings.HasSuffix(num, "MB"), strings.HasSuffix(num, "MIB"):
+			unit = "MB"
+		case strings.HasSuffix(num, "KB"), strings.HasSuffix(num, "KIB"):
+			unit = "KB"
+		}
+		num = strings.TrimRight(num, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	}
+
+	v, err := strconv.ParseFloat(num, 64)
+	if err != nil || v <= 0 {
+		return 0
+	}
+
+	switch unit {
+	case "TB", "TIB":
+		return uint64(v * 1024 * 1024 * 1024 * 1024)
+	case "GB", "GIB":
+		return uint64(v * 1024 * 1024 * 1024)
+	case "MB", "MIB":
+		return uint64(v * 1024 * 1024)
+	case "KB", "KIB":
+		return uint64(v * 1024)
+	default:
+		return uint64(v)
+	}
 }
 
 func detectRAMBytes() uint64 {
