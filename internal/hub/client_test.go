@@ -48,6 +48,7 @@ func TestRegisterSignsExpectedMessage(t *testing.T) {
 		var req struct {
 			PublicKeyHex      string `json:"public_key_hex"`
 			DeviceType        string `json:"device_type"`
+			DeclaredCountry   string `json:"declared_country"`
 			GPUModel          string `json:"gpu_model"`
 			CPUCores          uint32 `json:"cpu_cores"`
 			RAMBytes          uint64 `json:"ram_bytes"`
@@ -64,10 +65,16 @@ func TestRegisterSignsExpectedMessage(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		msg := signPayload(
-			"register",
-			pubHex,
-			req.DeviceType,
+		if req.DeclaredCountry != "CA" {
+			setHandlerErr(fmt.Errorf("declared country mismatch: %q", req.DeclaredCountry))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		parts := []string{"register", pubHex, req.DeviceType}
+		if req.DeclaredCountry != "" {
+			parts = append(parts, req.DeclaredCountry)
+		}
+		parts = append(parts,
 			req.GPUModel,
 			strconv.FormatUint(uint64(req.CPUCores), 10),
 			strconv.FormatUint(req.RAMBytes, 10),
@@ -77,6 +84,7 @@ func TestRegisterSignsExpectedMessage(t *testing.T) {
 			strconv.FormatUint(req.GeohashBucket, 10),
 			strconv.FormatUint(uint64(req.AttestationMethod), 10),
 		)
+		msg := signPayload(parts...)
 		if !ed25519.Verify(pub, msg, req.Signature) {
 			setHandlerErr(fmt.Errorf("invalid signature"))
 			w.WriteHeader(http.StatusUnauthorized)
@@ -96,7 +104,7 @@ func TestRegisterSignsExpectedMessage(t *testing.T) {
 		BandwidthMbps:     1000,
 		GeohashBucket:     0,
 		AttestationMethod: 0,
-	}, "gpu", "ref-xyz")
+	}, "gpu", "ref-xyz", "ca")
 	if err != nil {
 		t.Fatalf("register failed: %v", err)
 	}

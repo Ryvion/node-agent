@@ -72,11 +72,12 @@ func New(baseURL string, pub ed25519.PublicKey, priv ed25519.PrivateKey, opts ..
 	return c
 }
 
-func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, referral string) error {
+func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, referral, declaredCountry string) error {
 	pubHex := c.pubHex()
 	body := registerRequest{
 		PublicKeyHex:      pubHex,
 		DeviceType:        strings.TrimSpace(deviceType),
+		DeclaredCountry:   strings.ToUpper(strings.TrimSpace(declaredCountry)),
 		GPUModel:          caps.GPUModel,
 		CPUCores:          caps.CPUCores,
 		RAMBytes:          caps.RAMBytes,
@@ -92,10 +93,15 @@ func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, re
 	if body.DeviceType == "" {
 		body.DeviceType = "cpu"
 	}
-	body.Signature = c.sign(
+	signParts := []string{
 		"register",
 		pubHex,
 		body.DeviceType,
+	}
+	if body.DeclaredCountry != "" {
+		signParts = append(signParts, body.DeclaredCountry)
+	}
+	signParts = append(signParts,
 		body.GPUModel,
 		strconv.FormatUint(uint64(body.CPUCores), 10),
 		strconv.FormatUint(body.RAMBytes, 10),
@@ -105,6 +111,7 @@ func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, re
 		strconv.FormatUint(body.GeohashBucket, 10),
 		strconv.FormatUint(uint64(body.AttestationMethod), 10),
 	)
+	body.Signature = c.sign(signParts...)
 	return c.post(ctx, "/api/v1/node/register", body, nil)
 }
 
@@ -559,6 +566,7 @@ type UploadToken struct {
 type registerRequest struct {
 	PublicKeyHex      string `json:"public_key_hex"`
 	DeviceType        string `json:"device_type"`
+	DeclaredCountry   string `json:"declared_country,omitempty"`
 	GPUModel          string `json:"gpu_model"`
 	CPUCores          uint32 `json:"cpu_cores"`
 	RAMBytes          uint64 `json:"ram_bytes"`

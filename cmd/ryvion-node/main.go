@@ -34,6 +34,7 @@ var version = "dev"
 var (
 	flagHub        string
 	flagDevice     string
+	flagCountry    string
 	flagReferral   string
 	flagGPUs       string
 	flagMaxGPUUtil float64
@@ -57,6 +58,7 @@ func main() {
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.StringVar(&flagHub, "hub", "https://ryvion-hub.fly.dev", "Hub orchestrator base URL")
 	flag.StringVar(&flagDevice, "type", "", "Node device type (gpu|cpu|mobile|iot)")
+	flag.StringVar(&flagCountry, "country", "", "Declared ISO 3166-1 alpha-2 country code for sovereign routing")
 	flag.StringVar(&flagReferral, "referral", "", "Optional referral code")
 	flag.StringVar(&flagGPUs, "gpus", "auto", "Docker --gpus value (auto|all|none|device list)")
 	flag.Float64Var(&flagMaxGPUUtil, "max-gpu-util", 90, "Skip jobs when GPU utilization exceeds this % (0=disabled)")
@@ -123,6 +125,10 @@ func runNode(ctx context.Context) {
 
 	caps := hw.DetectCaps(flagDevice)
 	deviceType := resolveDeviceType(flagDevice, caps)
+	declaredCountry := strings.TrimSpace(flagCountry)
+	if envCountry := strings.TrimSpace(os.Getenv("RYV_DECLARED_COUNTRY")); envCountry != "" {
+		declaredCountry = envCountry
+	}
 
 	// Retry registration with backoff — on Windows the service starts before
 	// Docker/WSL2/network are ready, so the first attempts will fail.  Keep
@@ -140,7 +146,7 @@ func runNode(ctx context.Context) {
 			AttestationMethod: caps.Attestation,
 			TEESupported:      caps.TEESupported,
 			TEEType:           caps.TEEType,
-		}, deviceType, strings.TrimSpace(flagReferral)); err != nil {
+		}, deviceType, strings.TrimSpace(flagReferral), declaredCountry); err != nil {
 			slog.Warn("register failed, retrying", "error", err, "retry_in", regBackoff)
 			select {
 			case <-ctx.Done():
