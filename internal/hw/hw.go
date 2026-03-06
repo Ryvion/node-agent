@@ -184,9 +184,13 @@ func sampleCPU() float64 {
 	}
 	// Windows: wmic (with timeout to avoid hangs in service context)
 	if runtime.GOOS == "windows" {
+		path := findWindowsSystemTool("wmic")
+		if path == "" {
+			return -1
+		}
 		wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer wcancel()
-		out, err := exec.CommandContext(wctx, "wmic", "cpu", "get", "LoadPercentage").CombinedOutput()
+		out, err := exec.CommandContext(wctx, path, "cpu", "get", "LoadPercentage").CombinedOutput()
 		if err == nil {
 			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 				line = strings.TrimSpace(line)
@@ -251,9 +255,13 @@ func sampleMem() float64 {
 	}
 	// Windows: wmic (with timeout to avoid hangs in service context)
 	if runtime.GOOS == "windows" {
+		path := findWindowsSystemTool("wmic")
+		if path == "" {
+			return -1
+		}
 		wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer wcancel()
-		out, err := exec.CommandContext(wctx, "wmic", "OS", "get", "TotalVisibleMemorySize,FreePhysicalMemory").CombinedOutput()
+		out, err := exec.CommandContext(wctx, path, "OS", "get", "TotalVisibleMemorySize,FreePhysicalMemory").CombinedOutput()
 		if err == nil {
 			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 			for _, line := range lines {
@@ -346,7 +354,9 @@ func samplePower() float64 {
 	if !hasNvidiaSMI() {
 		return -1
 	}
-	out, err := exec.Command(nvidiaSMIPath, "--query-gpu=power.draw", "--format=csv,noheader,nounits").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, nvidiaSMIPath, "--query-gpu=power.draw", "--format=csv,noheader,nounits").CombinedOutput()
 	if err != nil {
 		return -1
 	}
@@ -387,7 +397,9 @@ func parseProcStat(line string) (used uint64, total uint64) {
 func detectGPU() (model string, vramBytes uint64, sensors string) {
 	// 1) NVIDIA via nvidia-smi
 	if hasNvidiaSMI() {
-		out, err := exec.Command(nvidiaSMIPath, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits").CombinedOutput()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := exec.CommandContext(ctx, nvidiaSMIPath, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits").CombinedOutput()
+		cancel()
 		if err == nil {
 			line := strings.TrimSpace(strings.Split(string(out), "\n")[0])
 			if line != "" {
@@ -819,11 +831,17 @@ func detectRAMBytes() uint64 {
 			return b
 		}
 	}
-	if out, err := exec.Command("wmic", "ComputerSystem", "get", "TotalPhysicalMemory").CombinedOutput(); err == nil {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		if len(lines) >= 2 {
-			if b, convErr := strconv.ParseUint(strings.TrimSpace(lines[1]), 10, 64); convErr == nil {
-				return b
+	if runtime.GOOS == "windows" {
+		if path := findWindowsSystemTool("wmic"); path != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if out, err := exec.CommandContext(ctx, path, "ComputerSystem", "get", "TotalPhysicalMemory").CombinedOutput(); err == nil {
+				lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+				if len(lines) >= 2 {
+					if b, convErr := strconv.ParseUint(strings.TrimSpace(lines[1]), 10, 64); convErr == nil {
+						return b
+					}
+				}
 			}
 		}
 	}

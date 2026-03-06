@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -508,7 +509,13 @@ func submitReceiptWithRetry(ctx context.Context, client *hub.Client, receipt hub
 }
 
 func cleanupOrphanedContainers() {
-	out, err := exec.Command("docker", "ps", "-q", "--filter", "name=ryv_").CombinedOutput()
+	dockerBin := resolveDockerCLI()
+	if dockerBin == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, dockerBin, "ps", "-q", "--filter", "name=ryv_").CombinedOutput()
 	if err != nil {
 		return
 	}
@@ -520,15 +527,15 @@ func cleanupOrphanedContainers() {
 		id = strings.TrimSpace(id)
 		if id != "" {
 			slog.Info("killing orphaned container", "id", id)
-			exec.Command("docker", "kill", id).Run()
-			exec.Command("docker", "rm", "-f", id).Run()
+			exec.Command(dockerBin, "kill", id).Run()
+			exec.Command(dockerBin, "rm", "-f", id).Run()
 		}
 	}
 }
 
 func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthReport {
 	gpuReady := strings.TrimSpace(caps.GPUModel) != ""
-	hasDocker := commandExists("docker")
+	hasDocker := resolveDockerCLI() != ""
 	dockerGPU := false
 	parts := []string{}
 	nativeSupported := inference.NativeRuntimeAvailable()
@@ -601,9 +608,13 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 
 func detectAvailableDiskGB() uint64 {
 	if runtime.GOOS == "windows" {
+		wmic := resolveWindowsSystemTool("wmic")
+		if wmic == "" {
+			return 0
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "wmic", "logicaldisk", "where", "DeviceID='C:'", "get", "FreeSpace", "/value").CombinedOutput()
+		out, err := exec.CommandContext(ctx, wmic, "logicaldisk", "where", "DeviceID='C:'", "get", "FreeSpace", "/value").CombinedOutput()
 		if err != nil {
 			return 0
 		}
@@ -650,11 +661,15 @@ func pythonModuleAvailable(module string) bool {
 
 // testDockerGPU checks if Docker can access the GPU by running a minimal container.
 func testDockerGPU() bool {
+	dockerBin := resolveDockerCLI()
+	if dockerBin == "" {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	// Use hello-world-sized image to test --gpus flag; nvidia-smi is baked into
 	// the NVIDIA base images and also available on Windows hosts.
-	out, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--gpus", "all",
+	out, err := exec.CommandContext(ctx, dockerBin, "run", "--rm", "--gpus", "all",
 		"nvidia/cuda:12.4.1-base-ubuntu22.04", "nvidia-smi", "--query-gpu=name", "--format=csv,noheader").CombinedOutput()
 	if err != nil {
 		slog.Debug("docker GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
@@ -663,6 +678,49 @@ func testDockerGPU() bool {
 	result := strings.TrimSpace(string(out))
 	slog.Info("docker GPU test passed", "gpu", result)
 	return result != ""
+}
+
+func resolveDockerCLI() string {
+	if p, err := exec.LookPath("docker"); err == nil {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		candidates := []string{
+			filepath.Join(os.Getenv("ProgramFiles"), "Docker", "Docker", "resources", "bin", "docker.exe"),
+			filepath.Join(os.Getenv("ProgramW6432"), "Docker", "Docker", "resources", "bin", "docker.exe"),
+		}
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func resolveWindowsSystemTool(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	candidates := []string{
+		filepath.Join(os.Getenv("SystemRoot"), "System32", name+".exe"),
+		filepath.Join(os.Getenv("WINDIR"), "System32", name+".exe"),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func resolveDeviceType(raw string, caps hw.CapSet) string {
