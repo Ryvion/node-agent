@@ -6,6 +6,52 @@ import (
 	"testing"
 )
 
+func TestResolveWorkBasePrefersExplicitEnv(t *testing.T) {
+	t.Parallel()
+
+	got := resolveWorkBase("windows", func(key string) string {
+		switch key {
+		case "RYV_WORK_DIR":
+			return `D:\Ryvion\custom-work`
+		case "ProgramData":
+			return `C:\ProgramData`
+		default:
+			return ""
+		}
+	})
+
+	if got != `D:\Ryvion\custom-work` {
+		t.Fatalf("expected explicit work dir, got %q", got)
+	}
+}
+
+func TestResolveWorkBaseDefaultsToProgramDataOnWindows(t *testing.T) {
+	t.Parallel()
+
+	got := resolveWorkBase("windows", func(key string) string {
+		switch key {
+		case "ProgramData":
+			return `C:\ProgramData`
+		default:
+			return ""
+		}
+	})
+
+	want := filepath.Join(`C:\ProgramData`, "Ryvion", "work")
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestResolveWorkBaseFallsBackToSystemDefaultOffWindows(t *testing.T) {
+	t.Parallel()
+
+	got := resolveWorkBase("linux", func(string) string { return "" })
+	if got != "" {
+		t.Fatalf("expected empty work base on non-windows, got %q", got)
+	}
+}
+
 func TestCopyArtifactAcceptsSymlinkedWorkDir(t *testing.T) {
 	t.Parallel()
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -35,7 +36,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		specJSON = `{}`
 	}
 
-	workBase := strings.TrimSpace(os.Getenv("RYV_WORK_DIR"))
+	workBase := resolveWorkBase(runtime.GOOS, os.Getenv)
 	if workBase != "" {
 		if err := os.MkdirAll(workBase, 0o755); err != nil {
 			return nil, fmt.Errorf("create work dir: %w", err)
@@ -121,6 +122,23 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		Metrics:    metrics,
 	}
 	return result, runErr
+}
+
+func resolveWorkBase(goos string, getenv func(string) string) string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if workBase := strings.TrimSpace(getenv("RYV_WORK_DIR")); workBase != "" {
+		return workBase
+	}
+	if goos != "windows" {
+		return ""
+	}
+	programData := strings.TrimSpace(getenv("ProgramData"))
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return filepath.Join(programData, "Ryvion", "work")
 }
 
 // resolveDocker finds the docker binary, checking well-known paths if it's
