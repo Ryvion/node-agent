@@ -126,3 +126,41 @@ func TestCopyArtifactBlocksTraversal(t *testing.T) {
 		t.Fatalf("expected traversal artifact to be blocked, got %q", path)
 	}
 }
+
+func TestCopyArtifactFindsNamedOutputFromMetrics(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work dir: %v", err)
+	}
+
+	output := []byte("mp4-bytes")
+	if err := os.WriteFile(filepath.Join(workDir, "output.mp4"), output, 0o644); err != nil {
+		t.Fatalf("write output.mp4: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "metrics.json"), []byte(`{"output_name":"output.mp4"}`), 0o644); err != nil {
+		t.Fatalf("write metrics.json: %v", err)
+	}
+
+	outBase := filepath.Join(tmp, "out")
+	if err := os.MkdirAll(outBase, 0o755); err != nil {
+		t.Fatalf("mkdir out base: %v", err)
+	}
+
+	path, err := copyArtifact(workDir, outBase)
+	if err != nil {
+		t.Fatalf("copyArtifact returned error: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected artifact path")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read copied artifact: %v", err)
+	}
+	if string(got) != string(output) {
+		t.Fatalf("artifact mismatch: got=%q want=%q", string(got), string(output))
+	}
+}

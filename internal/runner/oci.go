@@ -209,11 +209,7 @@ func readMetrics(path string, duration time.Duration) map[string]any {
 
 func copyArtifact(workDir, workBase string) (string, error) {
 	workRoot := canonicalPath(workDir)
-	candidates := []string{
-		filepath.Join(workDir, "output"),
-		filepath.Join(workDir, "output.bin"),
-		filepath.Join(workDir, "result.bin"),
-	}
+	candidates := artifactCandidates(workDir)
 	for _, src := range candidates {
 		fi, err := os.Stat(src)
 		if err != nil || fi.IsDir() {
@@ -249,6 +245,64 @@ func copyArtifact(workDir, workBase string) (string, error) {
 		return dst.Name(), nil
 	}
 	return "", nil
+}
+
+func artifactCandidates(workDir string) []string {
+	controlFiles := map[string]bool{
+		"job.json":     true,
+		"receipt.json": true,
+		"metrics.json": true,
+	}
+	seen := map[string]bool{}
+	candidates := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		cleaned := filepath.Clean(path)
+		if seen[cleaned] {
+			return
+		}
+		seen[cleaned] = true
+		candidates = append(candidates, cleaned)
+	}
+
+	add(filepath.Join(workDir, "output"))
+	add(filepath.Join(workDir, "output.bin"))
+	add(filepath.Join(workDir, "result.bin"))
+
+	if outputName := metricsOutputName(filepath.Join(workDir, "metrics.json")); outputName != "" {
+		add(filepath.Join(workDir, filepath.Base(outputName)))
+	}
+
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return candidates
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if controlFiles[strings.ToLower(entry.Name())] {
+			continue
+		}
+		add(filepath.Join(workDir, entry.Name()))
+	}
+	return candidates
+}
+
+func metricsOutputName(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var metrics map[string]any
+	if err := json.Unmarshal(b, &metrics); err != nil {
+		return ""
+	}
+	v, _ := metrics["output_name"].(string)
+	return strings.TrimSpace(v)
 }
 
 func canonicalPath(path string) string {
