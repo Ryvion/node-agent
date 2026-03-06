@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,6 +84,52 @@ func TestJobActiveFlag_PreventsUpdate(t *testing.T) {
 	jobActive.Store(0)
 	if jobActive.Load() != 0 {
 		t.Fatal("expected jobActive=0 after reset")
+	}
+}
+
+func TestDetectDockerRuntimeWithProbesWithoutDaemonRejectsCPUContainerWork(t *testing.T) {
+	cli, ready, gpu, parts := detectDockerRuntimeWithProbes(false,
+		func() string { return "/usr/bin/docker" },
+		func(string) bool { return false },
+		func(string) bool {
+			t.Fatal("gpu probe should not run when daemon is unavailable")
+			return false
+		},
+	)
+
+	if !cli {
+		t.Fatal("expected docker CLI to be detected")
+	}
+	if ready {
+		t.Fatal("expected docker daemon to be unavailable")
+	}
+	if gpu {
+		t.Fatal("expected docker GPU check to be false")
+	}
+	want := []string{"docker-cli:present", "docker-ready:0", "docker:unavailable"}
+	if !reflect.DeepEqual(parts, want) {
+		t.Fatalf("unexpected docker parts: got=%v want=%v", parts, want)
+	}
+}
+
+func TestDetectDockerRuntimeWithProbesReportsGPUReadiness(t *testing.T) {
+	cli, ready, gpu, parts := detectDockerRuntimeWithProbes(true,
+		func() string { return "/usr/bin/docker" },
+		func(string) bool { return true },
+		func(bin string) bool {
+			if bin != "/usr/bin/docker" {
+				t.Fatalf("unexpected docker bin %q", bin)
+			}
+			return true
+		},
+	)
+
+	if !cli || !ready || !gpu {
+		t.Fatalf("expected docker CLI, daemon, and GPU to be ready, got cli=%v ready=%v gpu=%v", cli, ready, gpu)
+	}
+	want := []string{"docker-cli:present", "docker-ready:1", "docker:ok", "docker-gpu:ok"}
+	if !reflect.DeepEqual(parts, want) {
+		t.Fatalf("unexpected docker parts: got=%v want=%v", parts, want)
 	}
 }
 

@@ -535,8 +535,6 @@ func cleanupOrphanedContainers() {
 
 func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthReport {
 	gpuReady := strings.TrimSpace(caps.GPUModel) != ""
-	hasDocker := resolveDockerCLI() != ""
-	dockerGPU := false
 	parts := []string{}
 	nativeSupported := inference.NativeRuntimeAvailable()
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
@@ -544,6 +542,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	ffmpegOK := commandExists("ffmpeg")
 	pdalOK := commandExists("pdal")
 	open3dOK := commandExists("open3d") || pythonModuleAvailable("open3d")
+	dockerCLI, dockerReady, dockerGPU, dockerParts := detectDockerRuntimeWithProbes(gpuReady, resolveDockerCLI, testDockerDaemon, testDockerGPU)
 
 	if gpuReady {
 		parts = append(parts, "gpu-detect:ok")
@@ -551,21 +550,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 		parts = append(parts, "gpu-detect:missing")
 	}
 
-	if hasDocker {
-		if gpuReady {
-			// Actually test Docker GPU passthrough with a quick container
-			dockerGPU = testDockerGPU()
-			if dockerGPU {
-				parts = append(parts, "docker-gpu:ok")
-			} else {
-				parts = append(parts, "docker-gpu:failed")
-			}
-		} else {
-			parts = append(parts, "docker:ok")
-		}
-	} else {
-		parts = append(parts, "docker:missing")
-	}
+	parts = append(parts, dockerParts...)
 
 	if gpuReady {
 		parts = append(parts, "gpu_model:"+caps.GPUModel)
@@ -601,9 +586,44 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	return hub.HealthReport{
 		TimestampMs: time.Now().UnixMilli(),
 		GPUReady:    gpuReady,
-		DockerGPU:   dockerGPU,
+		DockerGPU:   dockerCLI && dockerReady && dockerGPU,
 		Message:     strings.Join(parts, ","),
 	}
+}
+
+func detectDockerRuntimeWithProbes(gpuReady bool, resolve func() string, daemonCheck func(string) bool, gpuCheck func(string) bool) (bool, bool, bool, []string) {
+	dockerBin := strings.TrimSpace(resolve())
+	if dockerBin == "" {
+		parts := []string{"docker-cli:missing", "docker-ready:0", "docker:missing"}
+		if gpuReady {
+			parts = append(parts, "docker-gpu:missing")
+		}
+		return false, false, false, parts
+	}
+
+	daemonReady := daemonCheck(dockerBin)
+	parts := []string{"docker-cli:present"}
+	if daemonReady {
+		parts = append(parts, "docker-ready:1", "docker:ok")
+	} else {
+		parts = append(parts, "docker-ready:0", "docker:unavailable")
+		if gpuReady {
+			parts = append(parts, "docker-gpu:unavailable")
+		}
+		return true, false, false, parts
+	}
+
+	if !gpuReady {
+		return true, true, false, parts
+	}
+
+	dockerGPU := gpuCheck(dockerBin)
+	if dockerGPU {
+		parts = append(parts, "docker-gpu:ok")
+	} else {
+		parts = append(parts, "docker-gpu:failed")
+	}
+	return true, true, dockerGPU, parts
 }
 
 func detectAvailableDiskGB() uint64 {
@@ -659,10 +679,23 @@ func pythonModuleAvailable(module string) bool {
 	return cmd.Run() == nil
 }
 
+func testDockerDaemon(dockerBin string) bool {
+	if strings.TrimSpace(dockerBin) == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, dockerBin, "version", "--format", "{{.Server.Version}}").CombinedOutput()
+	if err != nil {
+		slog.Debug("docker daemon check failed", "error", err, "output", strings.TrimSpace(string(out)))
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
 // testDockerGPU checks if Docker can access the GPU by running a minimal container.
-func testDockerGPU() bool {
-	dockerBin := resolveDockerCLI()
-	if dockerBin == "" {
+func testDockerGPU(dockerBin string) bool {
+	if strings.TrimSpace(dockerBin) == "" {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
