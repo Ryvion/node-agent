@@ -191,7 +191,19 @@ func Restart() error {
 	case "linux":
 		return exec.Command("systemctl", "restart", "ryvion-node").Run()
 	case "darwin":
-		return exec.Command("launchctl", "kickstart", "-k", "system/com.ryvion.node").Run()
+		targets := []string{
+			fmt.Sprintf("gui/%d/com.ryvion.node", os.Getuid()),
+			"system/com.ryvion.node",
+		}
+		var lastErr error
+		for _, target := range targets {
+			if err := exec.Command("launchctl", "kickstart", "-k", target).Run(); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
+		return lastErr
 	case "windows":
 		slog.Info("exiting for Windows service recovery restart")
 		os.Exit(1)
