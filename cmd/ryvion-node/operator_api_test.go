@@ -96,3 +96,18 @@ func TestStatusTokenParsing(t *testing.T) {
 		t.Fatalf("expected disk_gb 512, got %d", got)
 	}
 }
+
+func TestSplitStatusTokens(t *testing.T) {
+	t.Parallel()
+
+	got := splitStatusTokens("docker-cli:present, docker-ready:1, , native-inference-ready:1 ")
+	want := []string{"docker-cli:present", "docker-ready:1", "native-inference-ready:1"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d tokens, got %d: %#v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("token %d: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}

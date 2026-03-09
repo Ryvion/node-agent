@@ -83,7 +83,7 @@ type operatorStatusResponse struct {
 	LastHeartbeatErr string            `json:"last_heartbeat_error,omitempty"`
 	Machine         operatorMachine    `json:"machine"`
 	Runtime         operatorRuntimeInfo `json:"runtime"`
-	Metrics         hw.Metrics         `json:"metrics"`
+	Metrics         operatorMetrics    `json:"metrics"`
 	CurrentJob      *operatorJob       `json:"current_job,omitempty"`
 	RecentJobs      []operatorJob      `json:"recent_jobs"`
 	LastClaimAt     time.Time          `json:"last_claim_at,omitempty"`
@@ -111,6 +111,44 @@ type operatorRuntimeInfo struct {
 	NativeInferenceReady       bool   `json:"native_inference_ready"`
 	NativeModel                string `json:"native_model,omitempty"`
 	DiskGB                     uint64 `json:"disk_gb,omitempty"`
+}
+
+type operatorMetrics struct {
+	TimestampMs  int64   `json:"timestamp_ms,omitempty"`
+	CPUUtil      float64 `json:"cpu_util,omitempty"`
+	MemUtil      float64 `json:"mem_util,omitempty"`
+	GPUUtil      float64 `json:"gpu_util,omitempty"`
+	PowerWatts   float64 `json:"power_watts,omitempty"`
+	GPUThrottled bool    `json:"gpu_throttled,omitempty"`
+}
+
+type operatorDiagnosticCheck struct {
+	Key     string `json:"key"`
+	Label   string `json:"label"`
+	Ready   bool   `json:"ready"`
+	Detail  string `json:"detail,omitempty"`
+	Severity string `json:"severity,omitempty"`
+}
+
+type operatorDiagnosticIssue struct {
+	Key       string    `json:"key"`
+	Message   string    `json:"message"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+type operatorDiagnosticsResponse struct {
+	Version          string                    `json:"version"`
+	LatestVersion    string                    `json:"latest_version,omitempty"`
+	LocalAPIURL      string                    `json:"local_api_url"`
+	DeclaredCountry  string                    `json:"declared_country,omitempty"`
+	RuntimeChecks    []operatorDiagnosticCheck `json:"runtime_checks"`
+	Recommendations  []string                  `json:"recommendations"`
+	Issues           []operatorDiagnosticIssue `json:"issues"`
+	StatusTokens     []string                  `json:"status_tokens,omitempty"`
+	LogTail          []string                  `json:"log_tail"`
+	LastHeartbeatAt  time.Time                 `json:"last_heartbeat_at,omitempty"`
+	LastClaimAt      time.Time                 `json:"last_claim_at,omitempty"`
+	LastPayoutAt     time.Time                 `json:"last_payout_at,omitempty"`
 }
 
 type logRing struct {
@@ -378,13 +416,123 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			VRAMBytes: caps.VRAMBytes,
 		},
 		Runtime:         runtimeInfo,
-		Metrics:         metrics,
+		Metrics: operatorMetrics{
+			CPUUtil:      metrics.CPUUtil,
+			MemUtil:      metrics.MemUtil,
+			GPUUtil:      metrics.GPUUtil,
+			PowerWatts:   metrics.PowerWatts,
+		},
 		CurrentJob:      currentJob,
 		RecentJobs:      recent,
 		LastClaimAt:     lastClaimAt,
 		LastClaimError:  lastClaimErr,
 		LastPayoutAt:    lastPayoutAt,
 		LastPayoutError: lastPayoutErr,
+	}
+}
+
+func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnosticsResponse {
+	s.mu.RLock()
+	version := s.version
+	latestVersion := s.latestVersion
+	declaredCountry := s.declaredCountry
+	lastHeartbeatAt := s.lastHeartbeatAt
+	lastHeartbeatErr := s.lastHeartbeatErr
+	lastRegisterErr := s.lastRegisterError
+	lastClaimAt := s.lastClaimAt
+	lastClaimErr := s.lastClaimError
+	lastPayoutAt := s.lastPayoutAt
+	lastPayoutErr := s.lastPayoutError
+	report := s.lastHealthReport
+	infMgr := s.infMgr
+	s.mu.RUnlock()
+
+	runtimeChecks := []operatorDiagnosticCheck{
+		{
+			Key:      "docker_cli",
+			Label:    "Docker CLI",
+			Ready:    statusToken(report.Message, "docker-cli:present"),
+			Detail:   "Required to inspect and run container-backed workloads.",
+			Severity: "warn",
+		},
+		{
+			Key:      "docker_runtime",
+			Label:    "Docker runtime",
+			Ready:    statusToken(report.Message, "docker-ready:1"),
+			Detail:   "Required for video transcode, embeddings, and other OCI workloads.",
+			Severity: "warn",
+		},
+		{
+			Key:      "gpu_runtime",
+			Label:    "GPU runtime",
+			Ready:    report.GPUReady || statusToken(report.Message, "docker-gpu:ok"),
+			Detail:   "Required for GPU-backed workload classes.",
+			Severity: "neutral",
+		},
+		{
+			Key:      "native_inference",
+			Label:    "Native inference",
+			Ready:    statusToken(report.Message, "native-inference-ready:1"),
+			Detail:   "Used for local gateway-backed inference without OCI startup cost.",
+			Severity: "neutral",
+		},
+		{
+			Key:      "spatial_runtime",
+			Label:    "Spatial runtime",
+			Ready:    statusToken(report.Message, "spatial-ready:1"),
+			Detail:   "Required for spatial staging workloads.",
+			Severity: "neutral",
+		},
+	}
+	if infMgr != nil && infMgr.ModelName() != "" {
+		for i := range runtimeChecks {
+			if runtimeChecks[i].Key == "native_inference" {
+				runtimeChecks[i].Detail = fmt.Sprintf("%s (model: %s)", runtimeChecks[i].Detail, infMgr.ModelName())
+			}
+		}
+	}
+
+	var issues []operatorDiagnosticIssue
+	if strings.TrimSpace(lastRegisterErr) != "" {
+		issues = append(issues, operatorDiagnosticIssue{Key: "register", Message: lastRegisterErr})
+	}
+	if strings.TrimSpace(lastHeartbeatErr) != "" {
+		issues = append(issues, operatorDiagnosticIssue{Key: "heartbeat", Message: lastHeartbeatErr, UpdatedAt: lastHeartbeatAt})
+	}
+	if strings.TrimSpace(lastClaimErr) != "" {
+		issues = append(issues, operatorDiagnosticIssue{Key: "claim", Message: lastClaimErr, UpdatedAt: lastClaimAt})
+	}
+	if strings.TrimSpace(lastPayoutErr) != "" {
+		issues = append(issues, operatorDiagnosticIssue{Key: "payout", Message: lastPayoutErr, UpdatedAt: lastPayoutAt})
+	}
+
+	recommendations := make([]string, 0, 6)
+	if !statusToken(report.Message, "docker-ready:1") {
+		recommendations = append(recommendations, "Start Docker before login so container-backed workloads can land immediately.")
+	}
+	if !statusToken(report.Message, "native-inference-ready:1") {
+		recommendations = append(recommendations, "Load or repair the native model path if you want low-latency gateway inference without OCI startup.")
+	}
+	if strings.TrimSpace(declaredCountry) == "" {
+		recommendations = append(recommendations, "Declare country on the node runtime before pursuing sovereign routing or country-restricted workloads.")
+	}
+	if len(issues) == 0 && len(recommendations) == 0 {
+		recommendations = append(recommendations, "Runtime posture is clean. Keep Docker and the node service running to preserve workload eligibility.")
+	}
+
+	return operatorDiagnosticsResponse{
+		Version:         version,
+		LatestVersion:   latestVersion,
+		LocalAPIURL:     fmt.Sprintf("http://127.0.0.1:%s", apiPort),
+		DeclaredCountry: declaredCountry,
+		RuntimeChecks:   runtimeChecks,
+		Recommendations: recommendations,
+		Issues:          issues,
+		StatusTokens:    splitStatusTokens(report.Message),
+		LogTail:         operatorLogBuffer.tail(80),
+		LastHeartbeatAt: lastHeartbeatAt,
+		LastClaimAt:     lastClaimAt,
+		LastPayoutAt:    lastPayoutAt,
 	}
 }
 
@@ -420,6 +568,9 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		writeJSON(w, http.StatusOK, map[string]any{
 			"lines": operatorLogBuffer.tail(limit),
 		})
+	})
+	mux.HandleFunc("GET /api/v1/operator/diagnostics", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.diagnosticsSnapshot(port))
 	})
 	mux.HandleFunc("POST /api/v1/operator/claim", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -608,6 +759,19 @@ func statusTokenUint(msg, prefix string) uint64 {
 		}
 	}
 	return 0
+}
+
+func splitStatusTokens(msg string) []string {
+	parts := strings.Split(msg, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }
 
 type runnerResultSnapshot struct {
