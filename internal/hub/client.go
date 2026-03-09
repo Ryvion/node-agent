@@ -364,6 +364,59 @@ func (c *Client) RedeemClaimCode(ctx context.Context, code string) error {
 	return c.postWithHeaders(ctx, "/api/v1/node/claim", body, nil, headers)
 }
 
+func (c *Client) CreateConnectAccount(ctx context.Context, email, country string) (string, error) {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return "", fmt.Errorf("email required")
+	}
+	country = strings.ToUpper(strings.TrimSpace(country))
+	if country == "" {
+		return "", fmt.Errorf("country required")
+	}
+	var out connectCreateResponse
+	if err := c.postWithHeaders(ctx, "/api/v1/node/connect/create", map[string]string{
+		"email":   email,
+		"country": country,
+	}, &out, map[string]string{"X-Node-Token": c.NodeAuthToken(0)}); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out.AccountID) == "" {
+		return "", fmt.Errorf("connect account response missing account_id")
+	}
+	return out.AccountID, nil
+}
+
+func (c *Client) ConnectOnboardingLink(ctx context.Context, accountID string) (string, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return "", fmt.Errorf("account_id required")
+	}
+	var out connectOnboardingResponse
+	if err := c.postWithHeaders(ctx, "/api/v1/node/connect/onboarding-link", map[string]string{
+		"account_id": accountID,
+	}, &out, map[string]string{"X-Node-Token": c.NodeAuthToken(0)}); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out.URL) == "" {
+		return "", fmt.Errorf("onboarding link response missing url")
+	}
+	return out.URL, nil
+}
+
+func (c *Client) ConnectStatus(ctx context.Context, accountID string) (bool, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return false, fmt.Errorf("account_id required")
+	}
+	var out connectStatusResponse
+	if err := c.getWithHeaders(ctx, "/api/v1/node/connect/status?account_id="+url.QueryEscape(accountID), &out, map[string]string{
+		"X-Node-Token": c.NodeAuthToken(0),
+	}); err != nil {
+		return false, err
+	}
+	return out.Onboarded, nil
+}
+
 func (c *Client) AbsoluteURL(u string) string {
 	return c.absoluteURL(u)
 }
@@ -433,6 +486,48 @@ func (c *Client) sign(parts ...string) []byte {
 
 func (c *Client) post(ctx context.Context, path string, body any, out any) error {
 	return c.postWithHeaders(ctx, path, body, out, nil)
+}
+
+func (c *Client) getWithHeaders(ctx context.Context, path string, out any, headers map[string]string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.absoluteURL(path), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+	if c.bindToken != "" {
+		req.Header.Set("X-Bind-Token", c.bindToken)
+	}
+	if c.wallet != "" {
+		req.Header.Set("X-Wallet", c.wallet)
+	}
+	for k, v := range headers {
+		if strings.TrimSpace(v) != "" {
+			req.Header.Set(k, v)
+		}
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return fmt.Errorf("GET %s: %d %s", req.URL.String(), resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	if out == nil || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	rb, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(rb)) == 0 {
+		return nil
+	}
+	return json.Unmarshal(rb, out)
 }
 
 func (c *Client) postWithHeaders(ctx context.Context, path string, body any, out any, headers map[string]string) error {
@@ -663,4 +758,17 @@ type blobPresignResponse struct {
 	OK        bool   `json:"ok"`
 	URL       string `json:"url"`
 	ExpiresAt string `json:"expires_at"`
+}
+
+type connectCreateResponse struct {
+	AccountID string `json:"account_id"`
+}
+
+type connectOnboardingResponse struct {
+	URL string `json:"url"`
+}
+
+type connectStatusResponse struct {
+	AccountID string `json:"account_id"`
+	Onboarded bool   `json:"onboarded"`
 }

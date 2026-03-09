@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -37,6 +38,7 @@ var (
 	flagCountry    string
 	flagReferral   string
 	flagGPUs       string
+	flagUIPort     string
 	flagMaxGPUUtil float64
 )
 
@@ -61,6 +63,7 @@ func main() {
 	flag.StringVar(&flagCountry, "country", "", "Declared ISO 3166-1 alpha-2 country code for sovereign routing")
 	flag.StringVar(&flagReferral, "referral", "", "Optional referral code")
 	flag.StringVar(&flagGPUs, "gpus", "auto", "Docker --gpus value (auto|all|none|device list)")
+	flag.StringVar(&flagUIPort, "ui-port", defaultOperatorAPIPort, "Local operator API port (set 0 to disable)")
 	flag.Float64Var(&flagMaxGPUUtil, "max-gpu-util", 90, "Skip jobs when GPU utilization exceeds this % (0=disabled)")
 	flag.Parse()
 
@@ -130,6 +133,9 @@ func runNode(ctx context.Context) {
 		declaredCountry = envCountry
 	}
 
+	operatorRuntimeState = newOperatorRuntime(version, hubURL, deviceType, declaredCountry, caps, client)
+	startOperatorAPIServer(ctx, operatorRuntimeState, operatorAPIPort(flagUIPort))
+
 	// Retry registration with backoff — on Windows the service starts before
 	// Docker/WSL2/network are ready, so the first attempts will fail.  Keep
 	// the process alive so SCM doesn't exhaust its restart budget.
@@ -147,6 +153,9 @@ func runNode(ctx context.Context) {
 			TEESupported:      caps.TEESupported,
 			TEEType:           caps.TEEType,
 		}, deviceType, strings.TrimSpace(flagReferral), declaredCountry); err != nil {
+			if operatorRuntimeState != nil {
+				operatorRuntimeState.setRegistered(false, err)
+			}
 			slog.Warn("register failed, retrying", "error", err, "retry_in", regBackoff)
 			select {
 			case <-ctx.Done():
@@ -157,6 +166,9 @@ func runNode(ctx context.Context) {
 				regBackoff = time.Duration(float64(regBackoff) * 1.5)
 			}
 			continue
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.setRegistered(true, nil)
 		}
 		break
 	}
@@ -183,6 +195,9 @@ func runNode(ctx context.Context) {
 		}
 	}()
 	defer infMgr.Stop()
+	if operatorRuntimeState != nil {
+		operatorRuntimeState.setInferenceManager(infMgr)
+	}
 
 	// Health report loop keeps scheduler-facing capability flags up to date
 	// (for example native inference readiness).
@@ -249,8 +264,14 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, versionCh chan<- str
 		GPUThrottled: throttled,
 	})
 	if err != nil {
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.recordHeartbeat(metrics, "", err)
+		}
 		slog.Warn("heartbeat failed", "error", err)
 		return
+	}
+	if operatorRuntimeState != nil {
+		operatorRuntimeState.recordHeartbeat(metrics, latest, nil)
 	}
 	// Non-blocking send of latest version to work loop for update checks.
 	if latest != "" {
@@ -267,6 +288,9 @@ func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, i
 
 	send := func() {
 		report := buildHealthReport(caps, infMgr)
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.recordHealthReport(report)
+		}
 		if err := client.SendHealthReport(ctx, report); err != nil {
 			slog.Warn("health report failed", "error", err)
 		}
@@ -357,6 +381,10 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 }
 
 func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, infMgr *inference.Manager) {
+	if operatorRuntimeState != nil {
+		operatorRuntimeState.startJob(work)
+	}
+
 	// Determine job timeout based on type or explicit env var
 	isStreaming := work.Kind == "inference" && work.Image == "streaming"
 	jobTimeout := 10 * time.Minute
@@ -379,24 +407,40 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 			err := fmt.Errorf("inference manager is not healthy")
 			slog.Warn("streaming job received but inference manager not healthy", "job_id", work.JobID)
 			relayStreamingFailure(runCtx, client, work.JobID, err)
+			if operatorRuntimeState != nil {
+				operatorRuntimeState.finishJob(work, nil, err)
+			}
 			return
 		}
 		slog.Info("routing to inference manager", "job_id", work.JobID)
 		if err := infMgr.RunStreamingJob(runCtx, client, work.JobID, work.SpecJSON); err != nil {
 			slog.Warn("streaming inference failed", "job_id", work.JobID, "error", err)
 			relayStreamingFailure(runCtx, client, work.JobID, err)
+			if operatorRuntimeState != nil {
+				operatorRuntimeState.finishJob(work, nil, err)
+			}
+			return
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, nil, nil)
 		}
 		return
 	}
 
 	if strings.TrimSpace(work.Image) == "" || strings.TrimSpace(work.SpecJSON) == "" {
 		slog.Warn("received work assignment without container spec", "job_id", work.JobID)
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, nil, fmt.Errorf("missing container image or spec"))
+		}
 		return
 	}
 
 	result, runErr := runner.Run(runCtx, work.Image, work.SpecJSON, gpus)
 	if result == nil {
 		slog.Warn("runner failed", "job_id", work.JobID, "error", runErr)
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, nil, runErr)
+		}
 		return
 	}
 	if runErr != nil {
@@ -442,9 +486,31 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	}
 	if err := submitReceiptWithRetry(ctx, client, receipt); err != nil {
 		slog.Error("submit receipt failed after retries", "job_id", work.JobID, "error", err)
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, &runnerResultSnapshot{
+				DurationMs:    result.Duration.Milliseconds(),
+				ResultHashHex: resultHash,
+				ExitCode:      result.ExitCode,
+				MeteringUnits: units,
+				BlobURL:       stringValue(metadata["blob_url"]),
+				ObjectKey:     stringValue(metadata["object_key"]),
+				Metadata:      metadata,
+			}, err)
+		}
 		return
 	}
 	slog.Info("job completed", "job_id", work.JobID, "hash", resultHash, "units", units)
+	if operatorRuntimeState != nil {
+		operatorRuntimeState.finishJob(work, &runnerResultSnapshot{
+			DurationMs:    result.Duration.Milliseconds(),
+			ResultHashHex: resultHash,
+			ExitCode:      result.ExitCode,
+			MeteringUnits: units,
+			BlobURL:       stringValue(metadata["blob_url"]),
+			ObjectKey:     stringValue(metadata["object_key"]),
+			Metadata:      metadata,
+		}, runErr)
+	}
 }
 
 // relayStreamingFailure sends a terminal SSE error chunk to hub-orch so the
@@ -802,6 +868,15 @@ func initLogger() {
 	case "error":
 		level = slog.LevelError
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	writer := io.Writer(os.Stdout)
+	if operatorLogBuffer != nil {
+		writer = io.MultiWriter(os.Stdout, operatorLogBuffer)
+	}
+	logger := slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
+}
+
+func stringValue(v any) string {
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
 }
