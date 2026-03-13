@@ -36,6 +36,7 @@ type ModelConfig struct {
 var NativeModels = map[string]ModelConfig{
 	"ryvion-llama-3.2-3b": {"Llama-3.2-3B-Instruct-Q4_K_M.gguf", "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
 	"phi-4":               {"phi-4-Q4_K_M.gguf", "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf"},
+	"tinyllama":           {"tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
 }
 
 // platformServerURL returns the correct llama.cpp release URL for the current OS/arch.
