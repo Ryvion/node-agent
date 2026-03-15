@@ -100,6 +100,7 @@ func main() {
 func runNode(ctx context.Context) {
 	ensureServiceRecovery()
 	cleanupOrphanedContainers()
+	ensureDockerGPURuntime()
 
 	hubURL := strings.TrimSpace(flagHub)
 	if envHub := strings.TrimSpace(os.Getenv("RYV_HUB_URL")); envHub != "" {
@@ -749,6 +750,169 @@ func pythonModuleAvailable(module string) bool {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, py, "-c", "import "+module)
 	return cmd.Run() == nil
+}
+
+// ensureDockerGPURuntime auto-installs nvidia-container-toolkit on Linux if an
+// NVIDIA GPU is detected and Docker is available but GPU passthrough fails.
+// This runs once at startup so operators don't need to know about the toolkit.
+func ensureDockerGPURuntime() {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	// Only needed for NVIDIA GPUs.
+	if _, err := exec.LookPath("nvidia-smi"); err != nil {
+		return
+	}
+	dockerBin := resolveDockerCLI()
+	if dockerBin == "" {
+		return
+	}
+	if !testDockerDaemon(dockerBin) {
+		// Try starting Docker daemon.
+		slog.Info("Docker not running, attempting to start")
+		if out, err := exec.Command("sudo", "systemctl", "start", "docker").CombinedOutput(); err != nil {
+			slog.Warn("failed to start Docker", "error", err, "output", strings.TrimSpace(string(out)))
+			return
+		}
+		time.Sleep(2 * time.Second)
+		if !testDockerDaemon(dockerBin) {
+			return
+		}
+	}
+	// Docker is running — check if GPU passthrough already works.
+	if testDockerGPUNvidia(dockerBin) {
+		slog.Info("Docker GPU passthrough already configured")
+		return
+	}
+	slog.Info("NVIDIA GPU detected but Docker GPU passthrough failed, installing nvidia-container-toolkit")
+
+	// Check if nvidia-ctk is already installed (just not configured).
+	if _, err := exec.LookPath("nvidia-ctk"); err == nil {
+		slog.Info("nvidia-ctk found, configuring runtime")
+		if configureNvidiaDockerRuntime(dockerBin) {
+			return
+		}
+	}
+
+	// Install nvidia-container-toolkit via package manager.
+	if installNvidiaContainerToolkit() {
+		configureNvidiaDockerRuntime(dockerBin)
+	}
+}
+
+func installNvidiaContainerToolkit() bool {
+	// Detect package manager and install.
+	if _, err := exec.LookPath("apt-get"); err == nil {
+		return installNvidiaCTKApt()
+	}
+	if _, err := exec.LookPath("dnf"); err == nil {
+		return installNvidiaCTKDnf()
+	}
+	if _, err := exec.LookPath("yum"); err == nil {
+		return installNvidiaCTKYum()
+	}
+	slog.Warn("no supported package manager found for nvidia-container-toolkit install")
+	return false
+}
+
+func installNvidiaCTKApt() bool {
+	steps := []struct {
+		name string
+		cmd  []string
+	}{
+		{"add NVIDIA GPG key", []string{"bash", "-c",
+			`curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null`}},
+		{"add NVIDIA repo", []string{"bash", "-c",
+			`curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list`}},
+		{"apt update", []string{"apt-get", "update", "-qq"}},
+		{"install toolkit", []string{"apt-get", "install", "-y", "-qq", "nvidia-container-toolkit"}},
+	}
+	for _, s := range steps {
+		slog.Info("nvidia-container-toolkit setup", "step", s.name)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		out, err := exec.CommandContext(ctx, "sudo", s.cmd...).CombinedOutput()
+		cancel()
+		if err != nil {
+			slog.Warn("nvidia-container-toolkit install failed", "step", s.name, "error", err, "output", strings.TrimSpace(string(out)))
+			return false
+		}
+	}
+	slog.Info("nvidia-container-toolkit installed via apt")
+	return true
+}
+
+func installNvidiaCTKDnf() bool {
+	steps := []struct {
+		name string
+		cmd  []string
+	}{
+		{"add NVIDIA repo", []string{"bash", "-c",
+			`curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | tee /etc/yum.repos.d/nvidia-container-toolkit.repo`}},
+		{"install toolkit", []string{"dnf", "install", "-y", "nvidia-container-toolkit"}},
+	}
+	for _, s := range steps {
+		slog.Info("nvidia-container-toolkit setup", "step", s.name)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		out, err := exec.CommandContext(ctx, "sudo", s.cmd...).CombinedOutput()
+		cancel()
+		if err != nil {
+			slog.Warn("nvidia-container-toolkit install failed", "step", s.name, "error", err, "output", strings.TrimSpace(string(out)))
+			return false
+		}
+	}
+	slog.Info("nvidia-container-toolkit installed via dnf")
+	return true
+}
+
+func installNvidiaCTKYum() bool {
+	steps := []struct {
+		name string
+		cmd  []string
+	}{
+		{"add NVIDIA repo", []string{"bash", "-c",
+			`curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | tee /etc/yum.repos.d/nvidia-container-toolkit.repo`}},
+		{"install toolkit", []string{"yum", "install", "-y", "nvidia-container-toolkit"}},
+	}
+	for _, s := range steps {
+		slog.Info("nvidia-container-toolkit setup", "step", s.name)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		out, err := exec.CommandContext(ctx, "sudo", s.cmd...).CombinedOutput()
+		cancel()
+		if err != nil {
+			slog.Warn("nvidia-container-toolkit install failed", "step", s.name, "error", err, "output", strings.TrimSpace(string(out)))
+			return false
+		}
+	}
+	slog.Info("nvidia-container-toolkit installed via yum")
+	return true
+}
+
+func configureNvidiaDockerRuntime(dockerBin string) bool {
+	slog.Info("configuring NVIDIA Docker runtime")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	out, err := exec.CommandContext(ctx, "sudo", "nvidia-ctk", "runtime", "configure", "--runtime=docker").CombinedOutput()
+	cancel()
+	if err != nil {
+		slog.Warn("nvidia-ctk configure failed", "error", err, "output", strings.TrimSpace(string(out)))
+		return false
+	}
+	// Restart Docker to pick up new runtime config.
+	slog.Info("restarting Docker to apply NVIDIA runtime")
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	out2, err2 := exec.CommandContext(ctx2, "sudo", "systemctl", "restart", "docker").CombinedOutput()
+	cancel2()
+	if err2 != nil {
+		slog.Warn("Docker restart failed", "error", err2, "output", strings.TrimSpace(string(out2)))
+		return false
+	}
+	time.Sleep(3 * time.Second)
+	// Verify it worked.
+	if testDockerGPUNvidia(dockerBin) {
+		slog.Info("Docker GPU passthrough configured successfully")
+		return true
+	}
+	slog.Warn("Docker GPU passthrough still failing after toolkit install")
+	return false
 }
 
 func testDockerDaemon(dockerBin string) bool {
