@@ -265,8 +265,15 @@ func (m *Manager) runServer(ctx context.Context) error {
 		"--log-disable",
 	}
 
-	// Metal acceleration on macOS ARM64
-	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+	// GPU offloading: Metal on macOS, CUDA on Linux/Windows
+	// --n-gpu-layers=99 offloads all layers to GPU when available.
+	// llama.cpp gracefully falls back to CPU if no GPU is detected.
+	switch runtime.GOOS {
+	case "darwin":
+		// Metal acceleration (ARM64 and AMD64 with Metal)
+		args = append(args, "--n-gpu-layers", m.gpuLayers)
+	case "linux", "windows":
+		// CUDA acceleration if available; llama.cpp ignores flag if no GPU
 		args = append(args, "--n-gpu-layers", m.gpuLayers)
 	}
 
@@ -299,6 +306,17 @@ func (m *Manager) runServer(ctx context.Context) error {
 	m.cmd = cmd
 	m.mu.Unlock()
 
+	slog.Info("launching llama-server",
+		"binary", m.serverPath,
+		"model", m.activeModelPath,
+		"port", m.port,
+		"threads", m.threads,
+		"gpu_layers", m.gpuLayers,
+		"ctx_size", m.ctxSize,
+		"os", runtime.GOOS,
+		"arch", runtime.GOARCH,
+	)
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start llama-server: %w", err)
 	}
@@ -311,7 +329,15 @@ func (m *Manager) runServer(ctx context.Context) error {
 	// Wait for health check to pass
 	go m.healthLoop(serverCtx)
 
-	return cmd.Wait()
+	waitErr := cmd.Wait()
+	if waitErr != nil {
+		slog.Error("llama-server process exited with error",
+			"error", waitErr,
+			"model", m.activeModelPath,
+			"log_file", filepath.Join(m.dataDir, "llama-server.log"),
+		)
+	}
+	return waitErr
 }
 
 func (m *Manager) healthLoop(ctx context.Context) {
