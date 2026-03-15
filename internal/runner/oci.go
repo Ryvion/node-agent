@@ -75,6 +75,9 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		"--security-opt=no-new-privileges:true"}
 	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
 		args = append(args, "--gpus", gpuArg)
+	} else if gpus == "auto" && isROCmAvailable() {
+		// AMD ROCm GPU passthrough
+		args = append(args, "--device=/dev/kfd", "--device=/dev/dri")
 	}
 	args = append(args, image)
 
@@ -173,6 +176,11 @@ func resolveGPUFlag(gpus string) string {
 	default:
 		return gpus
 	}
+}
+
+func isROCmAvailable() bool {
+	_, err := os.Stat("/dev/kfd")
+	return err == nil
 }
 
 func readReceiptHash(path string) string {

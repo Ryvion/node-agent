@@ -766,22 +766,47 @@ func testDockerDaemon(dockerBin string) bool {
 }
 
 // testDockerGPU checks if Docker can access the GPU by running a minimal container.
+// Tries NVIDIA (--gpus all) first, then ROCm (--device=/dev/kfd + /dev/dri) for AMD.
 func testDockerGPU(dockerBin string) bool {
 	if strings.TrimSpace(dockerBin) == "" {
 		return false
 	}
+	if testDockerGPUNvidia(dockerBin) {
+		return true
+	}
+	return testDockerGPURocm(dockerBin)
+}
+
+func testDockerGPUNvidia(dockerBin string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// Use hello-world-sized image to test --gpus flag; nvidia-smi is baked into
-	// the NVIDIA base images and also available on Windows hosts.
 	out, err := exec.CommandContext(ctx, dockerBin, "run", "--rm", "--gpus", "all",
 		"nvidia/cuda:12.4.1-base-ubuntu22.04", "nvidia-smi", "--query-gpu=name", "--format=csv,noheader").CombinedOutput()
 	if err != nil {
-		slog.Debug("docker GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
+		slog.Debug("docker NVIDIA GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
 		return false
 	}
 	result := strings.TrimSpace(string(out))
-	slog.Info("docker GPU test passed", "gpu", result)
+	slog.Info("docker NVIDIA GPU test passed", "gpu", result)
+	return result != ""
+}
+
+func testDockerGPURocm(dockerBin string) bool {
+	// Check if ROCm devices exist before pulling a container image.
+	if _, err := os.Stat("/dev/kfd"); err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, dockerBin, "run", "--rm",
+		"--device=/dev/kfd", "--device=/dev/dri",
+		"rocm/rocm-terminal:latest", "rocm-smi", "--showproductname").CombinedOutput()
+	if err != nil {
+		slog.Debug("docker ROCm GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
+		return false
+	}
+	result := strings.TrimSpace(string(out))
+	slog.Info("docker ROCm GPU test passed", "output", result)
 	return result != ""
 }
 
