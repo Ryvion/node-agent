@@ -71,25 +71,25 @@ type operatorJob struct {
 }
 
 type operatorStatusResponse struct {
-	Version         string             `json:"version"`
-	HubURL          string             `json:"hub_url"`
-	PublicKeyHex    string             `json:"public_key_hex"`
-	DeviceType      string             `json:"device_type"`
-	DeclaredCountry string             `json:"declared_country,omitempty"`
-	Registered      bool               `json:"registered"`
-	RegisterError   string             `json:"register_error,omitempty"`
-	LatestVersion   string             `json:"latest_version,omitempty"`
-	LastHeartbeatAt time.Time          `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatErr string            `json:"last_heartbeat_error,omitempty"`
-	Machine         operatorMachine    `json:"machine"`
-	Runtime         operatorRuntimeInfo `json:"runtime"`
-	Metrics         operatorMetrics    `json:"metrics"`
-	CurrentJob      *operatorJob       `json:"current_job,omitempty"`
-	RecentJobs      []operatorJob      `json:"recent_jobs"`
-	LastClaimAt     time.Time          `json:"last_claim_at,omitempty"`
-	LastClaimError  string             `json:"last_claim_error,omitempty"`
-	LastPayoutAt    time.Time          `json:"last_payout_at,omitempty"`
-	LastPayoutError string             `json:"last_payout_error,omitempty"`
+	Version          string              `json:"version"`
+	HubURL           string              `json:"hub_url"`
+	PublicKeyHex     string              `json:"public_key_hex"`
+	DeviceType       string              `json:"device_type"`
+	DeclaredCountry  string              `json:"declared_country,omitempty"`
+	Registered       bool                `json:"registered"`
+	RegisterError    string              `json:"register_error,omitempty"`
+	LatestVersion    string              `json:"latest_version,omitempty"`
+	LastHeartbeatAt  time.Time           `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatErr string              `json:"last_heartbeat_error,omitempty"`
+	Machine          operatorMachine     `json:"machine"`
+	Runtime          operatorRuntimeInfo `json:"runtime"`
+	Metrics          operatorMetrics     `json:"metrics"`
+	CurrentJob       *operatorJob        `json:"current_job,omitempty"`
+	RecentJobs       []operatorJob       `json:"recent_jobs"`
+	LastClaimAt      time.Time           `json:"last_claim_at,omitempty"`
+	LastClaimError   string              `json:"last_claim_error,omitempty"`
+	LastPayoutAt     time.Time           `json:"last_payout_at,omitempty"`
+	LastPayoutError  string              `json:"last_payout_error,omitempty"`
 }
 
 type operatorMachine struct {
@@ -100,17 +100,19 @@ type operatorMachine struct {
 }
 
 type operatorRuntimeInfo struct {
-	LocalAPIURL                string `json:"local_api_url"`
-	StatusMessage              string `json:"status_message,omitempty"`
-	DockerCLIPresent           bool   `json:"docker_cli_present"`
-	DockerReady                bool   `json:"docker_ready"`
-	DockerGPUEnabled           bool   `json:"docker_gpu_enabled"`
-	GPUReady                   bool   `json:"gpu_ready"`
-	SpatialReady               bool   `json:"spatial_ready"`
-	NativeInferenceSupported   bool   `json:"native_inference_supported"`
-	NativeInferenceReady       bool   `json:"native_inference_ready"`
-	NativeModel                string `json:"native_model,omitempty"`
-	DiskGB                     uint64 `json:"disk_gb,omitempty"`
+	LocalAPIURL              string `json:"local_api_url"`
+	StatusMessage            string `json:"status_message,omitempty"`
+	DockerCLIPresent         bool   `json:"docker_cli_present"`
+	DockerReady              bool   `json:"docker_ready"`
+	DockerGPUEnabled         bool   `json:"docker_gpu_enabled"`
+	GPUReady                 bool   `json:"gpu_ready"`
+	SpatialReady             bool   `json:"spatial_ready"`
+	PublicAIReady            bool   `json:"public_ai_ready"`
+	NativeInferenceSupported bool   `json:"native_inference_supported"`
+	NativeInferenceReady     bool   `json:"native_inference_ready"`
+	PublicInferenceReady     bool   `json:"public_inference_ready"`
+	NativeModel              string `json:"native_model,omitempty"`
+	DiskGB                   uint64 `json:"disk_gb,omitempty"`
 }
 
 type operatorMetrics struct {
@@ -123,10 +125,10 @@ type operatorMetrics struct {
 }
 
 type operatorDiagnosticCheck struct {
-	Key     string `json:"key"`
-	Label   string `json:"label"`
-	Ready   bool   `json:"ready"`
-	Detail  string `json:"detail,omitempty"`
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Ready    bool   `json:"ready"`
+	Detail   string `json:"detail,omitempty"`
 	Severity string `json:"severity,omitempty"`
 }
 
@@ -137,18 +139,18 @@ type operatorDiagnosticIssue struct {
 }
 
 type operatorDiagnosticsResponse struct {
-	Version          string                    `json:"version"`
-	LatestVersion    string                    `json:"latest_version,omitempty"`
-	LocalAPIURL      string                    `json:"local_api_url"`
-	DeclaredCountry  string                    `json:"declared_country,omitempty"`
-	RuntimeChecks    []operatorDiagnosticCheck `json:"runtime_checks"`
-	Recommendations  []string                  `json:"recommendations"`
-	Issues           []operatorDiagnosticIssue `json:"issues"`
-	StatusTokens     []string                  `json:"status_tokens,omitempty"`
-	LogTail          []string                  `json:"log_tail"`
-	LastHeartbeatAt  time.Time                 `json:"last_heartbeat_at,omitempty"`
-	LastClaimAt      time.Time                 `json:"last_claim_at,omitempty"`
-	LastPayoutAt     time.Time                 `json:"last_payout_at,omitempty"`
+	Version         string                    `json:"version"`
+	LatestVersion   string                    `json:"latest_version,omitempty"`
+	LocalAPIURL     string                    `json:"local_api_url"`
+	DeclaredCountry string                    `json:"declared_country,omitempty"`
+	RuntimeChecks   []operatorDiagnosticCheck `json:"runtime_checks"`
+	Recommendations []string                  `json:"recommendations"`
+	Issues          []operatorDiagnosticIssue `json:"issues"`
+	StatusTokens    []string                  `json:"status_tokens,omitempty"`
+	LogTail         []string                  `json:"log_tail"`
+	LastHeartbeatAt time.Time                 `json:"last_heartbeat_at,omitempty"`
+	LastClaimAt     time.Time                 `json:"last_claim_at,omitempty"`
+	LastPayoutAt    time.Time                 `json:"last_payout_at,omitempty"`
 }
 
 type logRing struct {
@@ -383,15 +385,17 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	}
 
 	runtimeInfo := operatorRuntimeInfo{
-		LocalAPIURL: fmt.Sprintf("http://127.0.0.1:%s", apiPort),
-		StatusMessage: report.Message,
+		LocalAPIURL:              fmt.Sprintf("http://127.0.0.1:%s", apiPort),
+		StatusMessage:            report.Message,
 		DockerCLIPresent:         statusToken(report.Message, "docker-cli:present"),
 		DockerReady:              statusToken(report.Message, "docker-ready:1"),
 		DockerGPUEnabled:         statusToken(report.Message, "docker-gpu:ok"),
 		GPUReady:                 report.GPUReady,
 		SpatialReady:             statusToken(report.Message, "spatial-ready:1"),
+		PublicAIReady:            statusToken(report.Message, "public-ai-ready:1"),
 		NativeInferenceSupported: statusToken(report.Message, "native-inference:supported"),
 		NativeInferenceReady:     statusToken(report.Message, "native-inference-ready:1"),
+		PublicInferenceReady:     statusToken(report.Message, "public-inference-ready:1"),
 		DiskGB:                   statusTokenUint(report.Message, "disk_gb:"),
 	}
 	if infMgr != nil {
@@ -415,12 +419,12 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUModel:  caps.GPUModel,
 			VRAMBytes: caps.VRAMBytes,
 		},
-		Runtime:         runtimeInfo,
+		Runtime: runtimeInfo,
 		Metrics: operatorMetrics{
-			CPUUtil:      metrics.CPUUtil,
-			MemUtil:      metrics.MemUtil,
-			GPUUtil:      metrics.GPUUtil,
-			PowerWatts:   metrics.PowerWatts,
+			CPUUtil:    metrics.CPUUtil,
+			MemUtil:    metrics.MemUtil,
+			GPUUtil:    metrics.GPUUtil,
+			PowerWatts: metrics.PowerWatts,
 		},
 		CurrentJob:      currentJob,
 		RecentJobs:      recent,
@@ -470,10 +474,17 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 			Severity: "neutral",
 		},
 		{
+			Key:      "public_ai_opt_in",
+			Label:    "Public AI opt-in",
+			Ready:    statusToken(report.Message, "public-ai-ready:1"),
+			Detail:   "Required before buyer-facing AI jobs can land on this machine.",
+			Severity: "warn",
+		},
+		{
 			Key:      "native_inference",
 			Label:    "Native inference",
-			Ready:    statusToken(report.Message, "native-inference-ready:1"),
-			Detail:   "Used for local gateway-backed inference without OCI startup cost.",
+			Ready:    statusToken(report.Message, "public-inference-ready:1"),
+			Detail:   "Required before public chat inference can use the native runtime on this machine.",
 			Severity: "neutral",
 		},
 		{
@@ -512,6 +523,9 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	}
 	if !statusToken(report.Message, "native-inference-ready:1") {
 		recommendations = append(recommendations, "Load or repair the native model path if you want low-latency gateway inference without OCI startup.")
+	}
+	if statusToken(report.Message, "native-inference-ready:1") && !statusToken(report.Message, "public-inference-ready:1") {
+		recommendations = append(recommendations, "Set RYV_PUBLIC_AI=1 only on machines you explicitly want exposed to buyer-facing AI jobs.")
 	}
 	if strings.TrimSpace(declaredCountry) == "" {
 		recommendations = append(recommendations, "Declare country on the node runtime before pursuing sovereign routing or country-restricted workloads.")

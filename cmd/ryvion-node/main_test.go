@@ -133,6 +133,28 @@ func TestDetectDockerRuntimeWithProbesReportsGPUReadiness(t *testing.T) {
 	}
 }
 
+func TestPublicAIOptInEnabled(t *testing.T) {
+	t.Setenv("RYV_PUBLIC_AI", "")
+	if publicAIOptInEnabled() {
+		t.Fatal("expected public AI opt-in to default to false")
+	}
+
+	t.Setenv("RYV_PUBLIC_AI", "1")
+	if !publicAIOptInEnabled() {
+		t.Fatal("expected public AI opt-in to enable on 1")
+	}
+
+	t.Setenv("RYV_PUBLIC_AI", "true")
+	if !publicAIOptInEnabled() {
+		t.Fatal("expected public AI opt-in to enable on true")
+	}
+
+	t.Setenv("RYV_PUBLIC_AI", "no")
+	if publicAIOptInEnabled() {
+		t.Fatal("expected public AI opt-in to disable on no")
+	}
+}
+
 // submitReceiptWithRetryTestable is the same logic as submitReceiptWithRetry
 // but accepts an interface so we can inject a fake client.
 type receiptSubmitter interface {

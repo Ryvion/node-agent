@@ -611,6 +611,8 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	parts := []string{}
 	nativeSupported := inference.NativeRuntimeAvailable()
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
+	publicAIReady := publicAIOptInEnabled()
+	publicInferenceReady := publicAIReady && nativeReady
 	diskGB := detectAvailableDiskGB()
 	ffmpegOK := commandExists("ffmpeg")
 	pdalOK := commandExists("pdal")
@@ -649,11 +651,21 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	} else {
 		parts = append(parts, "native-inference:unsupported")
 	}
+	if publicAIReady {
+		parts = append(parts, "public-ai-ready:1")
+	} else {
+		parts = append(parts, "public-ai-ready:0")
+	}
 	if nativeReady {
 		parts = append(parts, "native-inference-ready:1")
 		parts = append(parts, "native-model:"+infMgr.ModelName())
 	} else {
 		parts = append(parts, "native-inference-ready:0")
+	}
+	if publicInferenceReady {
+		parts = append(parts, "public-inference-ready:1")
+	} else {
+		parts = append(parts, "public-inference-ready:0")
 	}
 
 	return hub.HealthReport{
@@ -661,6 +673,19 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 		GPUReady:    gpuReady,
 		DockerGPU:   dockerCLI && dockerReady && dockerGPU,
 		Message:     strings.Join(parts, ","),
+	}
+}
+
+func publicAIOptInEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("RYV_PUBLIC_AI"))
+	if raw == "" {
+		return false
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
