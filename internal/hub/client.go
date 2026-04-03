@@ -129,7 +129,7 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (string, error)
 		GPUUtil:        metrics.GPUUtil,
 		PowerWatts:     metrics.PowerWatts,
 		GPUThrottled:   metrics.GPUThrottled,
-		SystemTimezone: time.Now().Location().String(),
+		SystemTimezone: detectIANATimezone(),
 	}
 	body.Signature = c.sign(
 		"heartbeat",
