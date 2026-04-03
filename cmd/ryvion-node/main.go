@@ -50,6 +50,10 @@ var cachedGPUUtil atomic.Uint64 // stores float64 bits via math.Float64bits
 // The update check reads this to avoid restarting during active work.
 var jobActive atomic.Int32
 
+// latestHubVersion stores the most recent agent version advertised by the hub.
+// Written by heartbeat goroutine, read by work loop for auto-update checks.
+var latestHubVersion atomic.Value // string
+
 func main() {
 	// Subcommand: ryvion-node claim <CODE>
 	if len(os.Args) > 1 && os.Args[1] == "claim" {
@@ -213,41 +217,40 @@ func runNode(ctx context.Context) {
 
 	// Independent heartbeat goroutine — keeps node "online" regardless of
 	// what the work loop is doing (long-poll, job execution, etc.).
-	latestVersion := make(chan string, 1)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("heartbeat goroutine panic", "error", r)
 			}
 		}()
-		heartbeatLoop(ctx, client, latestVersion)
+		heartbeatLoop(ctx, client)
 	}()
 
 	// Work loop — fetch and process jobs.
-	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr, latestVersion)
+	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr)
 }
 
 // heartbeatLoop sends heartbeats on a fixed 30-second interval, completely
 // independent of the work loop. This ensures the node never goes stale
 // even if a job or long-poll is in progress.
-func heartbeatLoop(ctx context.Context, client *hub.Client, versionCh chan<- string) {
+func heartbeatLoop(ctx context.Context, client *hub.Client) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	// Send first heartbeat immediately.
-	sendHeartbeat(ctx, client, versionCh)
+	sendHeartbeat(ctx, client)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sendHeartbeat(ctx, client, versionCh)
+			sendHeartbeat(ctx, client)
 		}
 	}
 }
 
-func sendHeartbeat(ctx context.Context, client *hub.Client, versionCh chan<- string) {
+func sendHeartbeat(ctx context.Context, client *hub.Client) {
 	metrics := hw.SampleMetrics()
 
 	// Cache GPU utilization for the work loop's throttle check.
@@ -274,12 +277,9 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, versionCh chan<- str
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.recordHeartbeat(metrics, latest, nil)
 	}
-	// Non-blocking send of latest version to work loop for update checks.
+	// Store latest version for work loop update checks.
 	if latest != "" {
-		select {
-		case versionCh <- latest:
-		default:
-		}
+		latestHubVersion.Store(latest)
 	}
 }
 
@@ -311,21 +311,20 @@ func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, i
 }
 
 // workLoop fetches and processes jobs. Heartbeats are handled separately.
-func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, infMgr *inference.Manager, versionCh <-chan string) {
+func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, infMgr *inference.Manager) {
 	var lastUpdateAttempt time.Time
 	backoff := 5 * time.Second
 	maxBackoff := 2 * time.Minute
 
 	for {
-		// Check for version updates (non-blocking read from heartbeat goroutine).
-		select {
-		case latest := <-versionCh:
-			if update.NeedsUpdate(currentVersion, latest) && time.Since(lastUpdateAttempt) > 5*time.Minute {
+		// Check for version updates (read from atomic, never missed).
+		if v, ok := latestHubVersion.Load().(string); ok && v != "" {
+			if update.NeedsUpdate(currentVersion, v) && time.Since(lastUpdateAttempt) > 5*time.Minute {
 				if jobActive.Load() != 0 {
-					slog.Info("update available but job in progress, deferring", "latest", latest)
+					slog.Info("update available but job in progress, deferring", "latest", v)
 				} else {
 					lastUpdateAttempt = time.Now()
-					slog.Info("update available", "current", currentVersion, "latest", latest)
+					slog.Info("update available", "current", currentVersion, "latest", v)
 					if err := update.Apply(ctx, hubURL); err != nil {
 						slog.Warn("auto-update failed", "error", err)
 					} else {
@@ -336,7 +335,6 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 					}
 				}
 			}
-		default:
 		}
 
 		// GPU-aware scheduling: skip work fetch when operator's GPU is busy.
