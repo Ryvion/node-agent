@@ -677,7 +677,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 func publicAIOptInEnabled() bool {
 	raw := strings.TrimSpace(os.Getenv("RYV_PUBLIC_AI"))
 	if raw == "" {
-		return false
+		return true // default ON — operators opt out with RYV_PUBLIC_AI=0
 	}
 	switch strings.ToLower(raw) {
 	case "1", "true", "yes", "on":

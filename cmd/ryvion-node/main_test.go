@@ -135,8 +135,8 @@ func TestDetectDockerRuntimeWithProbesReportsGPUReadiness(t *testing.T) {
 
 func TestPublicAIOptInEnabled(t *testing.T) {
 	t.Setenv("RYV_PUBLIC_AI", "")
-	if publicAIOptInEnabled() {
-		t.Fatal("expected public AI opt-in to default to false")
+	if !publicAIOptInEnabled() {
+		t.Fatal("expected public AI to default to true (opt-out model)")
 	}
 
 	t.Setenv("RYV_PUBLIC_AI", "1")
