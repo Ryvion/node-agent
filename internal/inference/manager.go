@@ -5,6 +5,8 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -140,23 +142,33 @@ func (m *Manager) Start(ctx context.Context) error {
 
 		m.mu.RLock()
 		currentModel := m.activeModelName
+		customPath := m.activeModelPath
 		m.mu.RUnlock()
 
-		cfg, ok := NativeModels[currentModel]
-		if !ok {
-			currentModel = "ryvion-llama-3.2-3b"
-			cfg = NativeModels[currentModel]
-		}
-
-		modelPath := filepath.Join(modelDir, cfg.FileName)
-		if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-			slog.Info("downloading model", "model", currentModel, "url", cfg.URL)
-			if err := downloadFile(ctx, cfg.URL, modelPath); err != nil {
-				slog.Error("failed to download model", "error", err)
-				time.Sleep(5 * time.Second)
-				continue
+		var modelPath string
+		if customPath != "" && strings.HasSuffix(customPath, ".gguf") {
+			// Custom model — path was already set by EnsureCustomModel
+			if _, err := os.Stat(customPath); err == nil {
+				modelPath = customPath
 			}
-			slog.Info("model downloaded", "path", modelPath)
+		}
+		if modelPath == "" {
+			// Native registry model
+			cfg, ok := NativeModels[currentModel]
+			if !ok {
+				currentModel = "ryvion-llama-3.2-3b"
+				cfg = NativeModels[currentModel]
+			}
+			modelPath = filepath.Join(modelDir, cfg.FileName)
+			if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+				slog.Info("downloading model", "model", currentModel, "url", cfg.URL)
+				if err := downloadFile(ctx, cfg.URL, modelPath); err != nil {
+					slog.Error("failed to download model", "error", err)
+					time.Sleep(5 * time.Second)
+					continue
+				}
+				slog.Info("model downloaded", "path", modelPath)
+			}
 		}
 
 		m.mu.Lock()
@@ -241,6 +253,60 @@ func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
 		}
 	}
 	return fmt.Errorf("timeout waiting for %s to start", modelName)
+}
+
+// EnsureCustomModel downloads a custom GGUF model from a URL and hot-swaps the server to use it.
+func (m *Manager) EnsureCustomModel(ctx context.Context, modelName, modelURL string) error {
+	m.mu.RLock()
+	current := m.activeModelName
+	m.mu.RUnlock()
+
+	// Download model if not already cached
+	modelsDir := filepath.Join(m.dataDir, "models")
+	os.MkdirAll(modelsDir, 0755)
+	// Use a hash of the URL as the filename to cache per-URL
+	h := sha256.Sum256([]byte(modelURL))
+	fileName := modelName + "-" + hex.EncodeToString(h[:8]) + ".gguf"
+	modelPath := filepath.Join(modelsDir, fileName)
+
+	if _, err := os.Stat(modelPath); err != nil {
+		slog.Info("downloading custom model", "name", modelName, "path", modelPath)
+		if err := downloadFile(ctx, modelURL, modelPath); err != nil {
+			return fmt.Errorf("download custom model: %w", err)
+		}
+		slog.Info("custom model downloaded", "name", modelName, "path", modelPath)
+	}
+
+	// If already loaded, skip restart
+	if current == fileName {
+		return nil
+	}
+
+	slog.Info("switching to custom model", "from", current, "to", modelName)
+
+	m.mu.Lock()
+	m.activeModelName = fileName
+	m.activeModelPath = modelPath
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.mu.Unlock()
+
+	// Wait for server to become healthy with the new model
+	for i := 0; i < 300; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+			m.mu.RLock()
+			hc := m.healthy
+			m.mu.RUnlock()
+			if hc {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("timeout waiting for custom model %s to start", modelName)
 }
 
 func (m *Manager) setHealthy(v bool) {

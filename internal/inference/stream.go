@@ -37,6 +37,10 @@ type specPayload struct {
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`
 	Model       string        `json:"model,omitempty"`
+	ModelURL    string        `json:"model_url,omitempty"`    // Presigned download URL for custom models
+	ModelFormat string        `json:"model_format,omitempty"` // "gguf", "onnx", etc.
+	ModelName   string        `json:"model_name,omitempty"`   // Human-readable name
+	Task        string        `json:"task,omitempty"`         // "custom_inference" for custom models
 }
 
 // RunStreamingJob handles an inference job by calling the local llama-server
@@ -58,12 +62,25 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	}
 
 	modelName := strings.TrimSpace(spec.Model)
-	if modelName == "" {
-		modelName = "ryvion-llama-3.2-3b"
-	}
 
-	if err := m.EnsureModel(ctx, modelName); err != nil {
-		return fmt.Errorf("ensure model %s: %w", modelName, err)
+	// Custom model: download from URL and load it
+	if spec.Task == "custom_inference" && spec.ModelURL != "" {
+		customName := strings.TrimSpace(spec.ModelName)
+		if customName == "" {
+			customName = "custom-model"
+		}
+		slog.Info("custom model inference requested", "model_name", customName, "format", spec.ModelFormat)
+		if err := m.EnsureCustomModel(ctx, customName, spec.ModelURL); err != nil {
+			return fmt.Errorf("ensure custom model %s: %w", customName, err)
+		}
+		modelName = customName
+	} else {
+		if modelName == "" {
+			modelName = "ryvion-llama-3.2-3b"
+		}
+		if err := m.EnsureModel(ctx, modelName); err != nil {
+			return fmt.Errorf("ensure model %s: %w", modelName, err)
+		}
 	}
 
 	reqBody := chatRequest{
