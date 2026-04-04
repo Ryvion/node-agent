@@ -81,4 +81,6 @@ The node agent supports signed auto-updates. When a new release is published, ru
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Business Source License 1.1 — see [LICENSE](LICENSE).
+
+You can use, modify, and run this software freely. You cannot use it to operate a competing distributed GPU compute network. The code converts to Apache 2.0 on April 4, 2030.
