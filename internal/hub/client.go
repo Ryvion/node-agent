@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Ryvion/node-agent/internal/hw"
 )
 
 type Client struct {
@@ -253,6 +255,53 @@ func (c *Client) SavePayout(ctx context.Context, stripeConnectID, currency strin
 	}
 	body.Signature = c.sign("payout", pubHex, stripeConnectID, strconv.FormatInt(ts, 10))
 	return c.post(ctx, "/api/v1/node/payout/save", body, nil)
+}
+
+// Attest performs TEE attestation with the hub via challenge-response protocol.
+func (c *Client) Attest(ctx context.Context, caps hw.CapSet) error {
+	if !caps.TEESupported {
+		return nil
+	}
+
+	// Step 1: Request challenge nonce
+	var challenge struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := c.post(ctx, "/api/v1/node/attest/challenge",
+		map[string]string{"public_key_hex": c.pubHex()}, &challenge); err != nil {
+		return fmt.Errorf("attestation challenge: %w", err)
+	}
+
+	// Step 2: Generate attestation report with the nonce
+	nonce, err := hex.DecodeString(challenge.Nonce)
+	if err != nil {
+		return fmt.Errorf("bad nonce: %w", err)
+	}
+	report := hw.GenerateAttestationReport(nonce)
+	if report.ReportB64 == "" {
+		return fmt.Errorf("failed to generate attestation report")
+	}
+
+	// Step 3: Submit for verification
+	var result struct {
+		Verified bool   `json:"verified"`
+		Reason   string `json:"reason,omitempty"`
+	}
+	if err := c.post(ctx, "/api/v1/node/attest/verify", map[string]any{
+		"public_key_hex": c.pubHex(),
+		"method":         report.Method,
+		"tee_type":       report.TEEType,
+		"report_b64":     report.ReportB64,
+		"nonce_hex":      report.NonceHex,
+		"cert_chain":     report.CertChain,
+	}, &result); err != nil {
+		return fmt.Errorf("attestation verify: %w", err)
+	}
+
+	if !result.Verified {
+		return fmt.Errorf("attestation rejected: %s", result.Reason)
+	}
+	return nil
 }
 
 func (c *Client) SolveChallenge(ctx context.Context) error {

@@ -182,6 +182,15 @@ func runNode(ctx context.Context) {
 		slog.Info("GPU utilization cap enabled", "max_gpu_util", flagMaxGPUUtil)
 	}
 
+	if caps.TEESupported {
+		slog.Info("attempting TEE attestation", "tee_type", caps.TEEType)
+		if err := client.Attest(ctx, caps); err != nil {
+			slog.Warn("TEE attestation failed", "error", err)
+		} else {
+			slog.Info("TEE attestation verified", "tee_type", caps.TEEType)
+		}
+	}
+
 	if err := client.SolveChallenge(ctx); err != nil {
 		slog.Warn("challenge solve failed", "error", err)
 	}
