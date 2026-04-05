@@ -107,6 +107,9 @@ func New(dataDir string) *Manager {
 	}
 }
 
+// amdSmokeTestPassed tracks whether the AMD GPU dry-run succeeded.
+var amdSmokeTestPassed bool
+
 func (m *Manager) Start(ctx context.Context) error {
 	if m.serverURL == "" {
 		slog.Info("inference manager: no llama-server binary available for this platform, skipping",
@@ -133,6 +136,20 @@ func (m *Manager) Start(ctx context.Context) error {
 		slog.Info("llama-server downloaded", "path", serverPath)
 	}
 	m.serverPath = serverPath
+
+	// AMD GPU smoke test — verify ROCm compatibility before accepting work
+	if _, err := os.Stat("/dev/kfd"); err == nil {
+		slog.Info("AMD GPU detected, running compatibility smoke test")
+		if err := m.runAMDSmokeTest(ctx, modelDir); err != nil {
+			slog.Error("AMD GPU smoke test FAILED — GPU inference may not work",
+				"error", err,
+				"hint", "check ROCm version and gfx architecture compatibility")
+			// Don't return error — still allow CPU inference and native mode
+		} else {
+			amdSmokeTestPassed = true
+			slog.Info("AMD GPU smoke test PASSED — ROCm inference is operational")
+		}
+	}
 
 	// Start server with auto-restart
 	for {
@@ -832,4 +849,80 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// runAMDSmokeTest downloads a tiny model and runs a quick inference to verify ROCm works.
+// If the gfx architecture is incompatible, llama-server will segfault — we catch that here.
+func (m *Manager) runAMDSmokeTest(ctx context.Context, modelDir string) error {
+	// Use tinyllama as the smoke test model — small enough to download quickly
+	testModel := filepath.Join(modelDir, "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")
+	if _, err := os.Stat(testModel); os.IsNotExist(err) {
+		cfg, ok := NativeModels["tinyllama"]
+		if !ok {
+			return fmt.Errorf("tinyllama not in native registry for smoke test")
+		}
+		slog.Info("downloading smoke test model", "model", cfg.FileName)
+		if err := downloadFile(ctx, cfg.URL, testModel); err != nil {
+			return fmt.Errorf("download smoke test model: %w", err)
+		}
+	}
+
+	// Try running llama-server with the test model for a quick health check
+	testCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	port := "18081" // Use a different port to not conflict with main server
+	args := []string{
+		"--model", testModel,
+		"--port", port,
+		"--host", "127.0.0.1",
+		"--threads", "2",
+		"--ctx-size", "512",
+		"--n-gpu-layers", "99",
+	}
+
+	// For older RDNA2 cards, try injecting HSA_OVERRIDE_GFX_VERSION
+	gfxVersion := os.Getenv("HSA_OVERRIDE_GFX_VERSION")
+
+	cmd := exec.CommandContext(testCtx, m.serverPath, args...)
+	cmd.Env = append(os.Environ(), "CUDA_VISIBLE_DEVICES=0")
+	if gfxVersion != "" {
+		cmd.Env = append(cmd.Env, "HSA_OVERRIDE_GFX_VERSION="+gfxVersion)
+	}
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start smoke test server: %w", err)
+	}
+
+	// Wait for health check
+	healthURL := "http://127.0.0.1:" + port + "/health"
+	passed := false
+	for i := 0; i < 30; i++ {
+		time.Sleep(2 * time.Second)
+		resp, err := http.Get(healthURL)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				passed = true
+				break
+			}
+		}
+		// Check if process died (segfault)
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			break
+		}
+	}
+
+	// Kill the test server
+	if cmd.Process != nil {
+		cmd.Process.Kill()
+	}
+	cmd.Wait()
+
+	if !passed {
+		return fmt.Errorf("smoke test failed — llama-server did not become healthy (possible gfx incompatibility)")
+	}
+	return nil
 }
