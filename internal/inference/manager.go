@@ -316,6 +316,133 @@ func (m *Manager) setHealthy(v bool) {
 }
 
 func (m *Manager) runServer(ctx context.Context) error {
+	m.setHealthy(false)
+
+	m.mu.RLock()
+	modelPath := m.activeModelPath
+	port := m.port
+	m.mu.RUnlock()
+
+	// Try containerized mode first (more secure — isolates GGUF parsing)
+	if m.useContainerizedInference() {
+		return m.runServerContainerized(ctx, modelPath, port)
+	}
+
+	// Fallback: native mode
+	return m.runServerNative(ctx, modelPath, port)
+}
+
+// useContainerizedInference reports whether Docker is available for sandboxed inference.
+func (m *Manager) useContainerizedInference() bool {
+	if os.Getenv("RYV_NATIVE_INFERENCE_ONLY") == "1" {
+		return false
+	}
+	cmd := exec.Command("docker", "info")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
+}
+
+// runServerContainerized runs llama-server inside a Docker container with GPU passthrough.
+func (m *Manager) runServerContainerized(ctx context.Context, modelPath, port string) error {
+	serverCtx, cancel := context.WithCancel(ctx)
+	m.mu.Lock()
+	m.cancel = cancel
+	m.mu.Unlock()
+	defer cancel()
+
+	modelDir := filepath.Dir(modelPath)
+	modelFile := filepath.Base(modelPath)
+
+	image := os.Getenv("RYV_INFERENCE_IMAGE")
+	if image == "" {
+		image = "ghcr.io/ggml-org/llama.cpp:server"
+	}
+
+	args := []string{
+		"run", "--rm",
+		"--name", "ryvion-inference",
+		// Security constraints
+		"--security-opt=no-new-privileges:true",
+		"--cap-drop=ALL",
+		"--memory=8g",
+		"--pids-limit=256",
+	}
+
+	// Detect GPU type and add passthrough
+	if _, err := exec.Command("nvidia-smi").Output(); err == nil {
+		args = append(args, "--gpus", "all")
+	} else if _, err := os.Stat("/dev/kfd"); err == nil {
+		// ROCm (AMD) GPU
+		args = append(args, "--device=/dev/kfd", "--device=/dev/dri")
+	}
+
+	// Mount model directory read-only, expose the port
+	args = append(args,
+		"-v", modelDir+":/models:ro",
+		"-p", port+":"+port,
+		image,
+		"--model", "/models/"+modelFile,
+		"--port", port,
+		"--host", "0.0.0.0",
+		"--threads", m.threads,
+		"--ctx-size", m.ctxSize,
+	)
+
+	// GPU layers (skip on macOS where Metal isn't available inside containers)
+	if runtime.GOOS != "darwin" {
+		args = append(args, "--n-gpu-layers", m.gpuLayers)
+	}
+
+	slog.Info("starting containerized llama-server",
+		"image", image,
+		"model", modelFile,
+		"port", port,
+	)
+
+	cmd := exec.CommandContext(serverCtx, "docker", args...)
+	// Send container output to a log file
+	logPath := filepath.Join(m.dataDir, "llama-server.log")
+	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		defer logFile.Close()
+	} else {
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+	}
+
+	m.mu.Lock()
+	m.cmd = cmd
+	m.mu.Unlock()
+
+	if err := cmd.Start(); err != nil {
+		slog.Warn("containerized inference failed to start, falling back to native", "error", err)
+		return m.runServerNative(ctx, modelPath, port)
+	}
+
+	go m.healthLoop(serverCtx)
+
+	waitErr := cmd.Wait()
+
+	// Clean up container on exit (may already be removed by --rm, but be safe)
+	cleanup := exec.Command("docker", "rm", "-f", "ryvion-inference")
+	cleanup.Stdout = io.Discard
+	cleanup.Stderr = io.Discard
+	cleanup.Run()
+
+	if waitErr != nil {
+		slog.Error("containerized llama-server exited with error",
+			"error", waitErr,
+			"model", modelPath,
+			"log_file", logPath,
+		)
+	}
+	return waitErr
+}
+
+// runServerNative runs llama-server directly on the host.
+func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) error {
 	serverCtx, cancel := context.WithCancel(ctx)
 	m.mu.Lock()
 	m.cancel = cancel
@@ -323,8 +450,8 @@ func (m *Manager) runServer(ctx context.Context) error {
 	defer cancel()
 
 	args := []string{
-		"--model", m.activeModelPath,
-		"--port", m.port,
+		"--model", modelPath,
+		"--port", port,
 		"--host", "127.0.0.1",
 		"--threads", m.threads,
 		"--ctx-size", m.ctxSize,
@@ -372,10 +499,10 @@ func (m *Manager) runServer(ctx context.Context) error {
 	m.cmd = cmd
 	m.mu.Unlock()
 
-	slog.Info("launching llama-server",
+	slog.Info("launching llama-server (native)",
 		"binary", m.serverPath,
-		"model", m.activeModelPath,
-		"port", m.port,
+		"model", modelPath,
+		"port", port,
 		"threads", m.threads,
 		"gpu_layers", m.gpuLayers,
 		"ctx_size", m.ctxSize,
@@ -399,8 +526,8 @@ func (m *Manager) runServer(ctx context.Context) error {
 	if waitErr != nil {
 		slog.Error("llama-server process exited with error",
 			"error", waitErr,
-			"model", m.activeModelPath,
-			"log_file", filepath.Join(m.dataDir, "llama-server.log"),
+			"model", modelPath,
+			"log_file", logPath,
 		)
 	}
 	return waitErr
