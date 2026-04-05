@@ -408,6 +408,19 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 	defer cancel()
 
+	// Pre-job VRAM check — reject if GPU is too busy
+	if isStreaming {
+		freeVRAM := hw.GetFreeVRAM()
+		if freeVRAM > 0 && freeVRAM < 2*1024*1024*1024 { // Less than 2GB free
+			slog.Warn("insufficient free VRAM, rejecting job", "free_vram_mb", freeVRAM/(1024*1024), "job_id", work.JobID)
+			relayStreamingFailure(runCtx, client, work.JobID, fmt.Errorf("insufficient VRAM: %d MB free", freeVRAM/(1024*1024)))
+			if operatorRuntimeState != nil {
+				operatorRuntimeState.finishJob(work, nil, fmt.Errorf("insufficient VRAM"))
+			}
+			return
+		}
+	}
+
 	// Route streaming inference jobs to persistent llama-server.
 	// "streaming" is a pseudo-image, not a real container — never fall through to OCI runner.
 	if isStreaming {

@@ -42,6 +42,22 @@ func findNvidiaSMI() string {
 
 func hasNvidiaSMI() bool { return nvidiaSMIPath != "" }
 
+// GetFreeVRAM returns free VRAM in bytes. Returns 0 if detection fails.
+func GetFreeVRAM() uint64 {
+	if !hasNvidiaSMI() {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, nvidiaSMIPath, "--query-gpu=memory.free", "--format=csv,noheader,nounits").Output()
+	if err == nil {
+		if mb, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64); err == nil {
+			return mb * 1024 * 1024
+		}
+	}
+	return 0
+}
+
 func findWindowsSystemTool(name string) string {
 	if p, err := exec.LookPath(name); err == nil {
 		return p
