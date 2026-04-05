@@ -423,9 +423,13 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 
 	// Determine job timeout based on type or explicit env var
 	isStreaming := work.Kind == "inference" && work.Image == "streaming"
+	isTraining := work.Kind == "training"
 	jobTimeout := 10 * time.Minute
 	if isStreaming {
 		jobTimeout = 30 * time.Minute // Streaming inference often takes much longer context generation
+	}
+	if isTraining {
+		jobTimeout = 4 * time.Hour // Training/fine-tuning jobs can take hours
 	}
 	if v := strings.TrimSpace(os.Getenv("RYV_JOB_TIMEOUT")); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
