@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +53,12 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		return nil, fmt.Errorf("write job.json: %w", err)
 	}
 
+	// Pre-download payload URL into the work directory so the container
+	// (which runs with --network=none) can access it as a local file.
+	if err := prefetchPayloadURL(ctx, specJSON, workDir); err != nil {
+		slog.Warn("payload prefetch failed (non-fatal)", "error", err)
+	}
+
 	dockerBin, err := resolveDocker()
 	if err != nil {
 		return nil, fmt.Errorf("docker not found: %w", err)
@@ -68,12 +75,19 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	if cpuLimit == "" {
 		cpuLimit = "4"
 	}
+	// Determine network mode: finetune/training jobs need network access to
+	// download base models from HuggingFace. All other jobs run isolated.
+	networkMode := "--network=none"
+	if needsNetwork(specJSON) {
+		networkMode = "--network=bridge"
+	}
+
 	args := []string{"run", "--name", name, "--rm", "-v", workDir + ":/work",
 		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256",
 		"--cpu-shares", "256",
 		"--cap-drop=ALL",
 		"--security-opt=no-new-privileges:true",
-		"--network=none"}
+		networkMode}
 	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
 		args = append(args, "--gpus", gpuArg)
 	} else if gpus == "auto" && isROCmAvailable() {
@@ -126,6 +140,85 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		Metrics:    metrics,
 	}
 	return result, runErr
+}
+
+// needsNetwork checks if a job spec requires network access inside the container.
+// Currently only finetune jobs need this (to download HuggingFace base models).
+func needsNetwork(specJSON string) bool {
+	var spec map[string]any
+	if json.Unmarshal([]byte(specJSON), &spec) != nil {
+		return false
+	}
+	task, _ := spec["task"].(string)
+	return task == "finetune"
+}
+
+// prefetchPayloadURL parses specJSON for payload_url, training_data_url, or
+// audio_url fields and downloads them into workDir so the container (which
+// runs with --network=none) can access them as local files.
+func prefetchPayloadURL(ctx context.Context, specJSON, workDir string) error {
+	var spec map[string]any
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return nil // not JSON, skip
+	}
+	downloads := map[string]string{
+		"payload_url":       "payload.bin",
+		"training_data_url": "training.jsonl",
+		"audio_url":         "input_audio",
+		"input_url":         "input.bin",
+		"model_url":         "model.bin",
+	}
+	for field, filename := range downloads {
+		rawURL, ok := spec[field].(string)
+		if !ok || strings.TrimSpace(rawURL) == "" {
+			continue
+		}
+		dest := filepath.Join(workDir, filename)
+		if err := downloadToFile(ctx, rawURL, dest); err != nil {
+			slog.Warn("prefetch download failed", "field", field, "url", rawURL[:min(len(rawURL), 80)], "error", err)
+			continue
+		}
+		slog.Info("prefetched input file", "field", field, "dest", filename, "size", fileSize(dest))
+	}
+	return nil
+}
+
+func downloadToFile(ctx context.Context, rawURL, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, resp.Body)
+	return err
+}
+
+func fileSize(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func resolveWorkBase(goos string, getenv func(string) string) string {
