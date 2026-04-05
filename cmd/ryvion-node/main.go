@@ -650,6 +650,9 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	if gpuReady {
 		parts = append(parts, "gpu_model:"+caps.GPUModel)
 	}
+	if caps.GfxVersion != "" {
+		parts = append(parts, "gfx_version:"+caps.GfxVersion)
+	}
 	parts = append(parts, "disk_gb:"+strconv.FormatUint(diskGB, 10))
 	if ffmpegOK {
 		parts = append(parts, "tool:ffmpeg")

@@ -44,17 +44,41 @@ func hasNvidiaSMI() bool { return nvidiaSMIPath != "" }
 
 // GetFreeVRAM returns free VRAM in bytes. Returns 0 if detection fails.
 func GetFreeVRAM() uint64 {
-	if !hasNvidiaSMI() {
-		return 0
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, nvidiaSMIPath, "--query-gpu=memory.free", "--format=csv,noheader,nounits").Output()
-	if err == nil {
-		if mb, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64); err == nil {
-			return mb * 1024 * 1024
+	// NVIDIA
+	if hasNvidiaSMI() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, nvidiaSMIPath, "--query-gpu=memory.free", "--format=csv,noheader,nounits").Output()
+		if err == nil {
+			if mb, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64); err == nil {
+				return mb * 1024 * 1024
+			}
 		}
 	}
+
+	// AMD via rocm-smi
+	if p, err := exec.LookPath("rocm-smi"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, p, "--showmeminfo", "vram", "--csv").Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "GPU") || strings.HasPrefix(line, "=") || strings.HasPrefix(line, "device") {
+					continue
+				}
+				parts := strings.Split(line, ",")
+				if len(parts) >= 3 {
+					used, err1 := strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 64)
+					total, err2 := strconv.ParseUint(strings.TrimSpace(parts[2]), 10, 64)
+					if err1 == nil && err2 == nil && total > used {
+						return total - used
+					}
+				}
+			}
+		}
+	}
+
 	return 0
 }
 
@@ -91,6 +115,7 @@ type CapSet struct {
 	Attestation   uint32
 	TEESupported  bool
 	TEEType       string
+	GfxVersion    string // AMD gfx architecture (e.g., "gfx1100")
 }
 
 type Metrics struct {
@@ -116,7 +141,32 @@ func DetectCaps(_ string) CapSet {
 		Attestation:   0,
 		TEESupported:  teeSupported,
 		TEEType:       teeType,
+		GfxVersion:    GetAMDGfxVersion(),
 	}
+}
+
+// GetAMDGfxVersion returns the AMD GPU architecture version (e.g., "gfx1100" for RDNA3).
+func GetAMDGfxVersion() string {
+	p, err := exec.LookPath("rocminfo")
+	if err != nil {
+		return ""
+	}
+	out, err := exec.Command(p).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Name:") && strings.Contains(line, "gfx") {
+			parts := strings.Fields(line)
+			for _, part := range parts {
+				if strings.HasPrefix(part, "gfx") {
+					return part
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // DetectTEE checks for hardware TEE support.

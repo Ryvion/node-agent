@@ -78,7 +78,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		args = append(args, "--gpus", gpuArg)
 	} else if gpus == "auto" && isROCmAvailable() {
 		// AMD ROCm GPU passthrough
-		args = append(args, "--device=/dev/kfd", "--device=/dev/dri")
+		args = append(args, "--device=/dev/kfd", "--device=/dev/dri", "--group-add=video")
 	}
 	args = append(args, image)
 

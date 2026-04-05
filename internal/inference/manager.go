@@ -374,7 +374,7 @@ func (m *Manager) runServerContainerized(ctx context.Context, modelPath, port st
 		args = append(args, "--gpus", "all")
 	} else if _, err := os.Stat("/dev/kfd"); err == nil {
 		// ROCm (AMD) GPU
-		args = append(args, "--device=/dev/kfd", "--device=/dev/dri")
+		args = append(args, "--device=/dev/kfd", "--device=/dev/dri", "--group-add=video")
 	}
 
 	// Mount model directory read-only, expose the port
