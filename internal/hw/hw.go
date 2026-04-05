@@ -3,6 +3,7 @@ package hw
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"encoding/xml"
 	"os"
 	"os/exec"
@@ -56,25 +57,15 @@ func GetFreeVRAM() uint64 {
 		}
 	}
 
-	// AMD via rocm-smi
+	// AMD via rocm-smi JSON output (safer than CSV — field names stay stable across versions)
 	if p, err := exec.LookPath("rocm-smi"); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, p, "--showmeminfo", "vram", "--csv").Output()
+		out, err := exec.CommandContext(ctx, p, "--showmeminfo", "vram", "--json").Output()
 		if err == nil {
-			for _, line := range strings.Split(string(out), "\n") {
-				line = strings.TrimSpace(line)
-				if line == "" || strings.HasPrefix(line, "GPU") || strings.HasPrefix(line, "=") || strings.HasPrefix(line, "device") {
-					continue
-				}
-				parts := strings.Split(line, ",")
-				if len(parts) >= 3 {
-					used, err1 := strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 64)
-					total, err2 := strconv.ParseUint(strings.TrimSpace(parts[2]), 10, 64)
-					if err1 == nil && err2 == nil && total > used {
-						return total - used
-					}
-				}
+			free := parseROCmVRAMFree(out)
+			if free > 0 {
+				return free
 			}
 		}
 	}
@@ -511,21 +502,10 @@ func detectGPU() (model string, vramBytes uint64, sensors string) {
 			}
 		}
 		if model != "" {
-			// Try to get VRAM
-			out2, err2 := exec.Command(p, "--showmeminfo", "vram", "--csv").CombinedOutput()
+			// Try to get VRAM via JSON (stable across rocm-smi versions)
+			out2, err2 := exec.Command(p, "--showmeminfo", "vram", "--json").CombinedOutput()
 			if err2 == nil {
-				for _, line := range strings.Split(string(out2), "\n") {
-					if strings.Contains(line, "Total") {
-						fields := strings.Split(line, ",")
-						for _, f := range fields {
-							f = strings.TrimSpace(f)
-							if v, convErr := strconv.ParseUint(f, 10, 64); convErr == nil && v > 1000 {
-								vramBytes = v
-								break
-							}
-						}
-					}
-				}
+				vramBytes = parseROCmVRAMTotal(out2)
 			}
 			sensors = "amd-rocm model:" + model
 			return model, vramBytes, sensors
@@ -883,6 +863,71 @@ func parseWindowsSizedMemory(value string) uint64 {
 		return uint64(v * 1024)
 	default:
 		return uint64(v)
+	}
+}
+
+// parseROCmVRAMFree parses the JSON output of `rocm-smi --showmeminfo vram --json`
+// and returns the free VRAM in bytes. The JSON structure varies across rocm-smi versions:
+//   - v5+: {"card0": {"VRAM Total Memory (B)": "...", "VRAM Total Used Memory (B)": "..."}}
+//   - older: {"card0": {"vram Total Memory": "...", "vram Total Used Memory": "..."}}
+func parseROCmVRAMFree(data []byte) uint64 {
+	var top map[string]map[string]any
+	if json.Unmarshal(data, &top) != nil {
+		return 0
+	}
+	for _, card := range top {
+		var total, used uint64
+		for key, val := range card {
+			k := strings.ToLower(key)
+			s := strings.TrimSpace(stringVal(val))
+			v, _ := strconv.ParseUint(s, 10, 64)
+			if v == 0 {
+				continue
+			}
+			switch {
+			case strings.Contains(k, "total") && !strings.Contains(k, "used"):
+				total = v
+			case strings.Contains(k, "used"):
+				used = v
+			}
+		}
+		if total > used && total > 0 {
+			return total - used
+		}
+	}
+	return 0
+}
+
+// parseROCmVRAMTotal parses the JSON output of `rocm-smi --showmeminfo vram --json`
+// and returns the total VRAM in bytes.
+func parseROCmVRAMTotal(data []byte) uint64 {
+	var top map[string]map[string]any
+	if json.Unmarshal(data, &top) != nil {
+		return 0
+	}
+	for _, card := range top {
+		for key, val := range card {
+			k := strings.ToLower(key)
+			if strings.Contains(k, "total") && !strings.Contains(k, "used") {
+				s := strings.TrimSpace(stringVal(val))
+				if v, _ := strconv.ParseUint(s, 10, 64); v > 0 {
+					return v
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// stringVal converts a JSON value (string or number) to its string representation.
+func stringVal(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case float64:
+		return strconv.FormatUint(uint64(t), 10)
+	default:
+		return ""
 	}
 }
 
