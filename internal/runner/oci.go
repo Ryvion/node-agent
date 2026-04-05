@@ -82,6 +82,14 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		networkMode = "--network=bridge"
 	}
 
+	// Pull latest image before running (ensures cached stale images are refreshed).
+	pullCtx, pullCancel := context.WithTimeout(ctx, 5*time.Minute)
+	pullCmd := exec.CommandContext(pullCtx, dockerBin, "pull", image)
+	if pullOut, pullErr := pullCmd.CombinedOutput(); pullErr != nil {
+		slog.Warn("docker pull failed (will try cached image)", "image", image, "error", pullErr, "output", string(pullOut[:min(len(pullOut), 200)]))
+	}
+	pullCancel()
+
 	args := []string{"run", "--name", name, "--rm", "-v", workDir + ":/work",
 		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256",
 		"--cpu-shares", "256",
