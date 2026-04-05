@@ -72,7 +72,8 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256",
 		"--cpu-shares", "256",
 		"--cap-drop=ALL",
-		"--security-opt=no-new-privileges:true"}
+		"--security-opt=no-new-privileges:true",
+		"--network=none"}
 	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
 		args = append(args, "--gpus", gpuArg)
 	} else if gpus == "auto" && isROCmAvailable() {
