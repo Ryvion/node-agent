@@ -129,6 +129,9 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	serverPath := filepath.Join(binDir, serverBinaryName())
 	if _, err := os.Stat(serverPath); os.IsNotExist(err) {
+		if err := checkDiskSpace(m.dataDir); err != nil {
+			return fmt.Errorf("disk space check: %w", err)
+		}
 		slog.Info("downloading llama-server", "url", m.serverURL)
 		if err := downloadAndExtractServer(ctx, m.serverURL, serverPath); err != nil {
 			return fmt.Errorf("download llama-server: %w", err)
@@ -178,6 +181,11 @@ func (m *Manager) Start(ctx context.Context) error {
 			}
 			modelPath = filepath.Join(modelDir, cfg.FileName)
 			if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+				if err := checkDiskSpace(m.dataDir); err != nil {
+					slog.Error("disk space check failed before model download", "error", err)
+					time.Sleep(5 * time.Second)
+					continue
+				}
 				slog.Info("downloading model", "model", currentModel, "url", cfg.URL)
 				if err := downloadFile(ctx, cfg.URL, modelPath); err != nil {
 					slog.Error("failed to download model", "error", err)
@@ -287,9 +295,16 @@ func (m *Manager) EnsureCustomModel(ctx context.Context, modelName, modelURL str
 	modelPath := filepath.Join(modelsDir, fileName)
 
 	if _, err := os.Stat(modelPath); err != nil {
+		if err := checkDiskSpace(m.dataDir); err != nil {
+			return fmt.Errorf("disk space check: %w", err)
+		}
 		slog.Info("downloading custom model", "name", modelName, "path", modelPath)
 		if err := downloadFile(ctx, modelURL, modelPath); err != nil {
 			return fmt.Errorf("download custom model: %w", err)
+		}
+		if err := validateGGUF(modelPath); err != nil {
+			os.Remove(modelPath)
+			return fmt.Errorf("invalid custom model file: %w", err)
 		}
 		slog.Info("custom model downloaded", "name", modelName, "path", modelPath)
 	}
@@ -613,7 +628,8 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 30 * time.Minute}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -860,6 +876,9 @@ func (m *Manager) runAMDSmokeTest(ctx context.Context, modelDir string) error {
 		cfg, ok := NativeModels["tinyllama"]
 		if !ok {
 			return fmt.Errorf("tinyllama not in native registry for smoke test")
+		}
+		if err := checkDiskSpace(m.dataDir); err != nil {
+			return fmt.Errorf("disk space check: %w", err)
 		}
 		slog.Info("downloading smoke test model", "model", cfg.FileName)
 		if err := downloadFile(ctx, cfg.URL, testModel); err != nil {

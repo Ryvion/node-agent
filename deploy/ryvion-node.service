@@ -1,0 +1,20 @@
+[Unit]
+Description=Ryvion Node Agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ryvion-node
+Restart=always
+RestartSec=5
+Environment=RYV_HUB_URL=https://ryvion-hub.fly.dev
+# Environment=RYV_BIND_TOKEN=your-token-here
+# Environment=RYV_WALLET=your-wallet-here
+WorkingDirectory=/var/lib/ryvion
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

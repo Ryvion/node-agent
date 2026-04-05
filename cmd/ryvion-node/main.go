@@ -177,7 +177,9 @@ func runNode(ctx context.Context) {
 		}
 		break
 	}
-	slog.Info("register succeeded", "hub", hubURL, "device_type", deviceType, "pubkey", client.PublicKeyHex())
+	bindToken := strings.TrimSpace(os.Getenv("RYV_BIND_TOKEN"))
+	slog.Info("register succeeded", "hub", hubURL, "device_type", deviceType, "pubkey", client.PublicKeyHex(),
+		"bind_token", redact(bindToken))
 	if flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 {
 		slog.Info("GPU utilization cap enabled", "max_gpu_util", flagMaxGPUUtil)
 	}
@@ -239,27 +241,52 @@ func runNode(ctx context.Context) {
 	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr)
 }
 
-// heartbeatLoop sends heartbeats on a fixed 30-second interval, completely
-// independent of the work loop. This ensures the node never goes stale
-// even if a job or long-poll is in progress.
+// heartbeatLoop sends heartbeats on a fixed interval, completely independent
+// of the work loop. Implements a circuit breaker: after 30 consecutive failures
+// (~5 min at 10s), the interval increases to 60s with a warning. Resets on success.
 func heartbeatLoop(ctx context.Context, client *hub.Client) {
-	ticker := time.NewTicker(30 * time.Second)
+	const (
+		normalInterval     = 30 * time.Second
+		backoffInterval    = 60 * time.Second
+		circuitBreakerMax  = 30
+	)
+
+	ticker := time.NewTicker(normalInterval)
 	defer ticker.Stop()
 
+	var consecutiveFailures int
+
 	// Send first heartbeat immediately.
-	sendHeartbeat(ctx, client)
+	if sendHeartbeat(ctx, client) {
+		consecutiveFailures = 0
+	} else {
+		consecutiveFailures++
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sendHeartbeat(ctx, client)
+			if sendHeartbeat(ctx, client) {
+				if consecutiveFailures >= circuitBreakerMax {
+					slog.Info("hub heartbeat recovered after circuit breaker", "prev_failures", consecutiveFailures)
+					ticker.Reset(normalInterval)
+				}
+				consecutiveFailures = 0
+			} else {
+				consecutiveFailures++
+				if consecutiveFailures == circuitBreakerMax {
+					slog.Warn("hub heartbeat circuit breaker tripped — backing off to 60s interval",
+						"consecutive_failures", consecutiveFailures)
+					ticker.Reset(backoffInterval)
+				}
+			}
 		}
 	}
 }
 
-func sendHeartbeat(ctx context.Context, client *hub.Client) {
+func sendHeartbeat(ctx context.Context, client *hub.Client) bool {
 	metrics := hw.SampleMetrics()
 
 	// Cache GPU utilization for the work loop's throttle check.
@@ -281,7 +308,7 @@ func sendHeartbeat(ctx context.Context, client *hub.Client) {
 			operatorRuntimeState.recordHeartbeat(metrics, "", err)
 		}
 		slog.Warn("heartbeat failed", "error", err)
-		return
+		return false
 	}
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.recordHeartbeat(metrics, latest, nil)
@@ -290,6 +317,7 @@ func sendHeartbeat(ctx context.Context, client *hub.Client) {
 	if latest != "" {
 		latestHubVersion.Store(latest)
 	}
+	return true
 }
 
 func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, infMgr *inference.Manager) {
@@ -1111,6 +1139,13 @@ func initLogger() {
 	}
 	logger := slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
+}
+
+func redact(s string) string {
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:4] + "..." + s[len(s)-4:]
 }
 
 func stringValue(v any) string {
