@@ -79,7 +79,19 @@ func Upload(ctx context.Context, client *hub.Client, jobID, filePath string) (*U
 		}
 	}
 
-	resp, err := client.Do(req)
+	// Use a dedicated HTTP client for uploads — the hub client has a 30s timeout
+	// which is too short for large artifacts (models can be 500MB+).
+	uploadClient := &http.Client{Timeout: 30 * time.Minute}
+	if strings.HasPrefix(uploadToken.PutURL, "/") {
+		// Hub proxy path — use the hub client (with auth headers)
+		uploadClient = nil
+	}
+	var resp *http.Response
+	if uploadClient != nil {
+		resp, err = uploadClient.Do(req)
+	} else {
+		resp, err = client.Do(req)
+	}
 	if err != nil {
 		return nil, err
 	}
