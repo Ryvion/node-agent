@@ -83,10 +83,12 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	}
 
 	// Pull latest image before running (ensures cached stale images are refreshed).
-	pullCtx, pullCancel := context.WithTimeout(ctx, 5*time.Minute)
+	pullCtx, pullCancel := context.WithTimeout(ctx, 15*time.Minute)
 	pullCmd := exec.CommandContext(pullCtx, dockerBin, "pull", image)
 	if pullOut, pullErr := pullCmd.CombinedOutput(); pullErr != nil {
 		slog.Warn("docker pull failed (will try cached image)", "image", image, "error", pullErr, "output", string(pullOut[:min(len(pullOut), 200)]))
+	} else {
+		slog.Info("docker pull succeeded", "image", image)
 	}
 	pullCancel()
 
@@ -142,7 +144,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	result := &Result{
 		Hash:       hash,
 		ExitCode:   exitCode,
-		Logs:       out.Tail(4096),
+		Logs:       out.Tail(32768),
 		OutputPath: artifactPath,
 		Duration:   duration,
 		Metrics:    metrics,
