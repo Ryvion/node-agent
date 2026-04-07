@@ -365,8 +365,13 @@ func (m *Manager) runServer(ctx context.Context) error {
 }
 
 // useContainerizedInference reports whether Docker is available for sandboxed inference.
+// On Windows, always prefer native mode — Docker Desktop GPU passthrough with Linux
+// containers is unreliable (OOM kills, exit 137). The native llama-server.exe with CUDA works better.
 func (m *Manager) useContainerizedInference() bool {
 	if os.Getenv("RYV_NATIVE_INFERENCE_ONLY") == "1" {
+		return false
+	}
+	if runtime.GOOS == "windows" {
 		return false
 	}
 	cmd := exec.Command("docker", "info")
