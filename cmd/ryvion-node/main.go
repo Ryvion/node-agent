@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -424,12 +426,16 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	// Determine job timeout based on type or explicit env var
 	isStreaming := work.Kind == "inference" && work.Image == "streaming"
 	isTraining := work.Kind == "training"
+	isAgentHosting := work.Kind == "agent_hosting" || isAgentHostingTask(work.SpecJSON)
 	jobTimeout := 10 * time.Minute
 	if isStreaming {
 		jobTimeout = 30 * time.Minute // Streaming inference often takes much longer context generation
 	}
 	if isTraining {
 		jobTimeout = 4 * time.Hour // Training/fine-tuning jobs can take hours
+	}
+	if isAgentHosting {
+		jobTimeout = 720 * time.Hour // 30 days max — agents run until stopped by hub
 	}
 	if v := strings.TrimSpace(os.Getenv("RYV_JOB_TIMEOUT")); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
@@ -451,6 +457,57 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 			}
 			return
 		}
+	}
+
+	// Agent hosting: long-running container with health monitoring
+	if isAgentHosting {
+		slog.Info("starting agent hosting job", "job_id", work.JobID, "image", work.Image)
+
+		healthFn := func(uptimeSeconds int) {
+			if err := client.ReportAgentHealth(runCtx, extractDeploymentID(work.SpecJSON), uptimeSeconds); err != nil {
+				slog.Warn("agent health report failed", "job_id", work.JobID, "error", err)
+			}
+		}
+
+		result, runErr := runner.RunAgent(runCtx, work.Image, work.SpecJSON, gpus, healthFn)
+
+		// Submit final receipt with total uptime
+		uptimeSeconds := 0
+		if result != nil {
+			uptimeSeconds = result.UptimeSeconds
+		}
+
+		hash := sha256.Sum256([]byte(work.JobID + fmt.Sprintf("%d", uptimeSeconds)))
+		receipt := hub.Receipt{
+			JobID:         work.JobID,
+			ResultHashHex: hex.EncodeToString(hash[:]),
+			MeteringUnits: uint64(uptimeSeconds),
+			Metadata: map[string]any{
+				"executor":       "agent_hosting",
+				"uptime_seconds": uptimeSeconds,
+				"exit_code":      0,
+			},
+		}
+		if result != nil {
+			receipt.Metadata["exit_code"] = result.ExitCode
+		}
+		if runErr != nil {
+			receipt.Metadata["error"] = runErr.Error()
+		}
+
+		if err := submitReceiptWithRetry(ctx, client, receipt); err != nil {
+			slog.Error("agent receipt submission failed", "job_id", work.JobID, "error", err)
+		} else {
+			slog.Info("agent job completed", "job_id", work.JobID, "uptime_seconds", uptimeSeconds)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, &runnerResultSnapshot{
+				ResultHashHex: hex.EncodeToString(hash[:]),
+				MeteringUnits: uint64(uptimeSeconds),
+				Metadata:      receipt.Metadata,
+			}, runErr)
+		}
+		return
 	}
 
 	// Route streaming inference jobs to persistent llama-server.
@@ -631,6 +688,26 @@ func submitReceiptWithRetry(ctx context.Context, client *hub.Client, receipt hub
 		return nil
 	}
 	return fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+func isAgentHostingTask(specJSON string) bool {
+	var spec struct {
+		Task string `json:"task"`
+	}
+	if json.Unmarshal([]byte(specJSON), &spec) != nil {
+		return false
+	}
+	return spec.Task == "agent_hosting"
+}
+
+func extractDeploymentID(specJSON string) string {
+	var spec struct {
+		DeploymentID string `json:"deployment_id"`
+	}
+	if json.Unmarshal([]byte(specJSON), &spec) != nil {
+		return ""
+	}
+	return spec.DeploymentID
 }
 
 func cleanupOrphanedContainers() {

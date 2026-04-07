@@ -304,6 +304,15 @@ func (c *Client) Attest(ctx context.Context, caps hw.CapSet) error {
 	return nil
 }
 
+// ReportAgentHealth sends a health check for a running agent deployment.
+func (c *Client) ReportAgentHealth(ctx context.Context, deploymentID string, uptimeSeconds int) error {
+	body := map[string]any{
+		"status":         "healthy",
+		"uptime_seconds": uptimeSeconds,
+	}
+	return c.post(ctx, "/api/v1/node/agent-health/"+deploymentID, body, nil)
+}
+
 func (c *Client) SolveChallenge(ctx context.Context) error {
 	var reqResp challengeResponse
 	if err := c.post(ctx, "/api/v1/node/challenge/request", challengeRequest{PublicKeyHex: c.pubHex()}, &reqResp); err != nil {
