@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,8 +25,9 @@ type AgentResult struct {
 
 // RunAgent starts a long-running agent container and monitors it.
 // It blocks until the context is cancelled or the container exits.
-// The healthFn is called every 60 seconds with the current uptime.
-func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(uptimeSeconds int)) (*AgentResult, error) {
+// The healthFn is called periodically with the current uptime. If it returns
+// true, RunAgent stops the container and returns.
+func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(uptimeSeconds int) bool) (*AgentResult, error) {
 	// 1. Parse agent spec
 	var spec struct {
 		Task         string            `json:"task"`
@@ -125,7 +127,10 @@ func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(u
 
 	// 6. Start container
 	slog.Info("agent: starting container", "name", name, "image", image, "deployment_id", spec.DeploymentID)
-	cmd := exec.CommandContext(ctx, dockerBin, args...)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	cmd := exec.CommandContext(runCtx, dockerBin, args...)
 
 	// Capture logs (reuse cappedBuffer from oci.go)
 	var logBuf cappedBuffer
@@ -150,16 +155,21 @@ func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(u
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(60 * time.Second)
+		if healthFn != nil && healthFn(0) {
+			cancelRun()
+			return
+		}
+		ticker := time.NewTicker(agentHealthInterval())
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case <-ticker.C:
 				uptime := int(time.Since(startTime).Seconds())
-				if healthFn != nil {
-					healthFn(uptime)
+				if healthFn != nil && healthFn(uptime) {
+					cancelRun()
+					return
 				}
 			}
 		}
@@ -184,4 +194,22 @@ func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(u
 		UptimeSeconds: uptime,
 		Logs:          logBuf.Tail(65536),
 	}, nil
+}
+
+func agentHealthInterval() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("RYV_AGENT_HEALTH_INTERVAL_SECONDS"))
+	if raw == "" {
+		return 15 * time.Second
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil {
+		return 15 * time.Second
+	}
+	if seconds < 5 {
+		seconds = 5
+	}
+	if seconds > 300 {
+		seconds = 300
+	}
+	return time.Duration(seconds) * time.Second
 }

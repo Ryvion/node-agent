@@ -304,13 +304,27 @@ func (c *Client) Attest(ctx context.Context, caps hw.CapSet) error {
 	return nil
 }
 
-// ReportAgentHealth sends a health check for a running agent deployment.
-func (c *Client) ReportAgentHealth(ctx context.Context, deploymentID string, uptimeSeconds int) error {
-	body := map[string]any{
-		"status":         "healthy",
-		"uptime_seconds": uptimeSeconds,
+// ReportAgentHealth sends a signed health check for a running agent deployment.
+func (c *Client) ReportAgentHealth(ctx context.Context, deploymentID string, uptimeSeconds int) (AgentHealthResponse, error) {
+	deploymentID = strings.TrimSpace(deploymentID)
+	if deploymentID == "" {
+		return AgentHealthResponse{}, fmt.Errorf("deployment_id required")
 	}
-	return c.post(ctx, "/api/v1/node/agent-health/"+deploymentID, body, nil)
+	status := "healthy"
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	body := agentHealthRequest{
+		PublicKeyHex:  pubHex,
+		TimestampMs:   ts,
+		Status:        status,
+		UptimeSeconds: uptimeSeconds,
+		Signature:     c.sign("agent_health", pubHex, deploymentID, strconv.FormatInt(ts, 10), strconv.Itoa(uptimeSeconds), status),
+	}
+	var out AgentHealthResponse
+	if err := c.post(ctx, "/api/v1/node/agent-health/"+deploymentID, body, &out); err != nil {
+		return AgentHealthResponse{}, err
+	}
+	return out, nil
 }
 
 func (c *Client) SolveChallenge(ctx context.Context) error {
@@ -709,6 +723,13 @@ type HealthReport struct {
 	Message     string
 }
 
+type AgentHealthResponse struct {
+	OK         bool   `json:"ok"`
+	ShouldStop bool   `json:"should_stop"`
+	Status     string `json:"status"`
+	JobStatus  string `json:"job_status"`
+}
+
 type UploadToken struct {
 	OK        bool   `json:"ok"`
 	Provider  string `json:"provider"`
@@ -798,6 +819,14 @@ type healthRequest struct {
 	DockerGPU    bool   `json:"docker_gpu"`
 	Message      string `json:"message"`
 	Signature    []byte `json:"signature"`
+}
+
+type agentHealthRequest struct {
+	PublicKeyHex  string `json:"public_key_hex"`
+	TimestampMs   int64  `json:"timestamp_ms"`
+	Status        string `json:"status"`
+	UptimeSeconds int    `json:"uptime_seconds"`
+	Signature     []byte `json:"signature"`
 }
 
 type uploadPrepareRequest struct {

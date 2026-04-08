@@ -248,9 +248,9 @@ func runNode(ctx context.Context) {
 // (~5 min at 10s), the interval increases to 60s with a warning. Resets on success.
 func heartbeatLoop(ctx context.Context, client *hub.Client) {
 	const (
-		normalInterval     = 30 * time.Second
-		backoffInterval    = 60 * time.Second
-		circuitBreakerMax  = 30
+		normalInterval    = 30 * time.Second
+		backoffInterval   = 60 * time.Second
+		circuitBreakerMax = 30
 	)
 
 	ticker := time.NewTicker(normalInterval)
@@ -463,10 +463,17 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	if isAgentHosting {
 		slog.Info("starting agent hosting job", "job_id", work.JobID, "image", work.Image)
 
-		healthFn := func(uptimeSeconds int) {
-			if err := client.ReportAgentHealth(runCtx, extractDeploymentID(work.SpecJSON), uptimeSeconds); err != nil {
+		healthFn := func(uptimeSeconds int) bool {
+			resp, err := client.ReportAgentHealth(runCtx, extractDeploymentID(work.SpecJSON), uptimeSeconds)
+			if err != nil {
 				slog.Warn("agent health report failed", "job_id", work.JobID, "error", err)
+				return false
 			}
+			if resp.ShouldStop {
+				slog.Info("hub requested agent stop", "job_id", work.JobID, "deployment_id", extractDeploymentID(work.SpecJSON), "status", resp.Status, "job_status", resp.JobStatus)
+				return true
+			}
+			return false
 		}
 
 		result, runErr := runner.RunAgent(runCtx, work.Image, work.SpecJSON, gpus, healthFn)

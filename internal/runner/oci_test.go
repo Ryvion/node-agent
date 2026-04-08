@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResolveWorkBasePrefersExplicitEnv(t *testing.T) {
@@ -162,5 +163,17 @@ func TestCopyArtifactFindsNamedOutputFromMetrics(t *testing.T) {
 	}
 	if string(got) != string(output) {
 		t.Fatalf("artifact mismatch: got=%q want=%q", string(got), string(output))
+	}
+}
+
+func TestAgentHealthIntervalClampsOperatorOverride(t *testing.T) {
+	t.Setenv("RYV_AGENT_HEALTH_INTERVAL_SECONDS", "1")
+	if got := agentHealthInterval(); got != 5*time.Second {
+		t.Fatalf("expected minimum 5s interval, got %v", got)
+	}
+
+	t.Setenv("RYV_AGENT_HEALTH_INTERVAL_SECONDS", "999")
+	if got := agentHealthInterval(); got != 300*time.Second {
+		t.Fatalf("expected maximum 300s interval, got %v", got)
 	}
 }

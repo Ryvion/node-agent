@@ -228,6 +228,68 @@ func TestSubmitReceiptSignsExpectedMessage(t *testing.T) {
 	}
 }
 
+func TestReportAgentHealthSignsExpectedMessageAndReturnsStop(t *testing.T) {
+	pub, priv := testKeyPair()
+	pubHex := hex.EncodeToString(pub)
+	deploymentID := "agd_test"
+	var (
+		mu         sync.Mutex
+		handlerErr error
+	)
+	setHandlerErr := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if handlerErr == nil {
+			handlerErr = err
+		}
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/agent-health/"+deploymentID {
+			setHandlerErr(fmt.Errorf("unexpected path: %s", r.URL.Path))
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			PublicKeyHex  string `json:"public_key_hex"`
+			TimestampMs   int64  `json:"timestamp_ms"`
+			Status        string `json:"status"`
+			UptimeSeconds int    `json:"uptime_seconds"`
+			Signature     []byte `json:"signature"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			setHandlerErr(fmt.Errorf("decode request: %w", err))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.PublicKeyHex != pubHex {
+			setHandlerErr(fmt.Errorf("public key mismatch: %s", req.PublicKeyHex))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		msg := signPayload("agent_health", pubHex, deploymentID, strconv.FormatInt(req.TimestampMs, 10), strconv.Itoa(req.UptimeSeconds), req.Status)
+		if !ed25519.Verify(pub, msg, req.Signature) {
+			setHandlerErr(fmt.Errorf("invalid agent health signature"))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"should_stop":true,"status":"stopped","job_status":"failed"}`))
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	resp, err := c.ReportAgentHealth(context.Background(), deploymentID, 15)
+	if err != nil {
+		t.Fatalf("report agent health failed: %v", err)
+	}
+	if !resp.ShouldStop || resp.Status != "stopped" || resp.JobStatus != "failed" {
+		t.Fatalf("unexpected health response: %+v", resp)
+	}
+	if handlerErr != nil {
+		t.Fatalf("handler failed: %v", handlerErr)
+	}
+}
+
 func testKeyPair() (ed25519.PublicKey, ed25519.PrivateKey) {
 	seed := make([]byte, ed25519.SeedSize)
 	for i := range seed {
