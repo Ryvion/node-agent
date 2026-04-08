@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -175,5 +177,84 @@ func TestAgentHealthIntervalClampsOperatorOverride(t *testing.T) {
 	t.Setenv("RYV_AGENT_HEALTH_INTERVAL_SECONDS", "999")
 	if got := agentHealthInterval(); got != 300*time.Second {
 		t.Fatalf("expected maximum 300s interval, got %v", got)
+	}
+}
+
+func TestValidateDownloadURLRejectsLoopbackTargets(t *testing.T) {
+	t.Parallel()
+
+	if err := validateDownloadURL("https://127.0.0.1/file", false); err == nil {
+		t.Fatal("expected loopback download target to be rejected")
+	}
+	if err := validateDownloadURL("http://127.0.0.1/file", true); err != nil {
+		t.Fatalf("expected loopback download target to be allowed when explicitly enabled, got %v", err)
+	}
+}
+
+func TestValidateAgentImageRefRequiresDigestOrManagedVersionedTag(t *testing.T) {
+	t.Parallel()
+
+	if err := validateAgentImageRef("ghcr.io/ryvion/agent-runner:0.1.0"); err != nil {
+		t.Fatalf("expected managed versioned tag to be allowed, got %v", err)
+	}
+	if err := validateAgentImageRef("ghcr.io/ryvion/agent-runner:latest"); err == nil {
+		t.Fatal("expected managed latest tag to be rejected")
+	}
+	if err := validateAgentImageRef("docker.io/library/python:3.12"); err == nil {
+		t.Fatal("expected unpinned third-party tag to be rejected")
+	}
+	if err := validateAgentImageRef("docker.io/library/python@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
+		t.Fatalf("expected digest-pinned third-party image to be allowed, got %v", err)
+	}
+}
+
+func TestVerifyAgentImageSignatureUsesKeylessDefaultsForManagedImages(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "cosign-args.txt")
+	cosignPath := filepath.Join(tmp, "cosign")
+	script := "#!/bin/sh\nprintf '%s\n' \"$@\" > \"" + logPath + "\"\n"
+	if err := os.WriteFile(cosignPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake cosign: %v", err)
+	}
+
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := verifyAgentImageSignature(context.Background(), "ghcr.io/ryvion/agent-runner:0.1.1"); err != nil {
+		t.Fatalf("expected verification to succeed, got %v", err)
+	}
+
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read cosign args: %v", err)
+	}
+	args := strings.Split(strings.TrimSpace(string(got)), "\n")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"verify",
+		"--output",
+		"json",
+		"--certificate-identity-regexp",
+		agentCosignIdentityRegex(),
+		"--certificate-oidc-issuer",
+		agentCosignOIDCIssuer(),
+		"ghcr.io/ryvion/agent-runner:0.1.1",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected cosign args %q in %q", want, joined)
+		}
+	}
+}
+
+func TestVerifyAgentImageSignatureCanBeDisabled(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("RYV_REQUIRE_AGENT_SIGNATURES", "0")
+	if err := verifyAgentImageSignature(context.Background(), "ghcr.io/ryvion/agent-runner:0.1.1"); err != nil {
+		t.Fatalf("expected signature verification to be skipped, got %v", err)
+	}
+}
+
+func TestVerifyAgentImageSignatureSkipsLegacyManagedTagByDefault(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if err := verifyAgentImageSignature(context.Background(), "ghcr.io/ryvion/agent-runner:0.1.0"); err != nil {
+		t.Fatalf("expected legacy managed tag to skip signature verification, got %v", err)
 	}
 }

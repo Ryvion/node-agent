@@ -690,6 +690,10 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		Addr:              "127.0.0.1:" + port,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	go func() {
 		<-ctx.Done()

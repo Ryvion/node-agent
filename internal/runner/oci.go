@@ -194,11 +194,14 @@ func prefetchPayloadURL(ctx context.Context, specJSON, workDir string) error {
 }
 
 func downloadToFile(ctx context.Context, rawURL, dest string) error {
+	if err := validateDownloadURL(rawURL, allowLoopbackDownloads()); err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 10 * time.Minute}
+	client := restrictedHTTPClient(10*time.Minute, allowLoopbackDownloads())
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

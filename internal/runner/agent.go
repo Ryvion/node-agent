@@ -28,6 +28,13 @@ type AgentResult struct {
 // The healthFn is called periodically with the current uptime. If it returns
 // true, RunAgent stops the container and returns.
 func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(uptimeSeconds int) bool) (*AgentResult, error) {
+	if err := validateAgentImageRef(image); err != nil {
+		return nil, fmt.Errorf("invalid agent image: %w", err)
+	}
+	if err := verifyAgentImageSignature(ctx, image); err != nil {
+		return nil, fmt.Errorf("verify agent image signature: %w", err)
+	}
+
 	// 1. Parse agent spec
 	var spec struct {
 		Task         string            `json:"task"`
