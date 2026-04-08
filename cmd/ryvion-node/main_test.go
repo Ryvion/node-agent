@@ -133,6 +133,22 @@ func TestDetectDockerRuntimeWithProbesReportsGPUReadiness(t *testing.T) {
 	}
 }
 
+func TestDockerRuntimeUnavailableErrorMatchesNamedPipeFailure(t *testing.T) {
+	err := fmt.Errorf("docker run failed")
+	logs := "failed to connect to the docker API at npipe:////./pipe/docker_engine; check if the daemon is running"
+	if !dockerRuntimeUnavailableError(err, logs) {
+		t.Fatal("expected named pipe docker daemon failure to be detected")
+	}
+}
+
+func TestDockerRuntimeUnavailableErrorIgnoresRegularContainerFailures(t *testing.T) {
+	err := fmt.Errorf("exit status 1")
+	logs := "Traceback: model weights missing"
+	if dockerRuntimeUnavailableError(err, logs) {
+		t.Fatal("expected ordinary container error to not be treated as docker daemon failure")
+	}
+}
+
 func TestPublicAIOptInEnabled(t *testing.T) {
 	t.Setenv("RYV_PUBLIC_AI", "")
 	if !publicAIOptInEnabled() {

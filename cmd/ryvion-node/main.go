@@ -562,6 +562,9 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	}
 	if runErr != nil {
 		slog.Warn("container exited with error", "job_id", work.JobID, "exit_code", result.ExitCode, "error", runErr)
+		if dockerRuntimeUnavailableError(runErr, result.Logs) {
+			reportDockerRuntimeDegraded(client, infMgr)
+		}
 	}
 
 	resultHash := result.Hash
@@ -813,6 +816,49 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 		DockerGPU:   dockerCLI && dockerReady && dockerGPU,
 		Message:     strings.Join(parts, ","),
 	}
+}
+
+func dockerRuntimeUnavailableError(runErr error, logs string) bool {
+	text := strings.ToLower(strings.TrimSpace(logs))
+	if runErr != nil {
+		text = text + "\n" + strings.ToLower(runErr.Error())
+	}
+	for _, needle := range []string{
+		"failed to connect to the docker api",
+		"cannot connect to the docker daemon",
+		"docker daemon is not running",
+		"error during connect",
+		"pipe/docker_engine",
+	} {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func reportDockerRuntimeDegraded(client *hub.Client, infMgr *inference.Manager) {
+	if client == nil {
+		return
+	}
+	caps := hw.CapSet{}
+	if operatorRuntimeState != nil {
+		caps = operatorRuntimeState.caps
+	}
+	report := buildHealthReport(caps, infMgr)
+	if !strings.Contains(strings.ToLower(report.Message), "docker-ready:0") {
+		return
+	}
+	if operatorRuntimeState != nil {
+		operatorRuntimeState.recordHealthReport(report)
+	}
+	reportCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.SendHealthReport(reportCtx, report); err != nil {
+		slog.Warn("immediate docker health downgrade failed", "error", err)
+		return
+	}
+	slog.Warn("reported degraded docker runtime health")
 }
 
 func publicAIOptInEnabled() bool {
