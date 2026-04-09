@@ -64,7 +64,7 @@ func main() {
 	}
 
 	versionFlag := flag.Bool("version", false, "Print version and exit")
-	flag.StringVar(&flagHub, "hub", "https://ryvion-hub.fly.dev", "Hub orchestrator base URL")
+	flag.StringVar(&flagHub, "hub", "https://api.ryvion.ai", "Hub orchestrator base URL")
 	flag.StringVar(&flagDevice, "type", "", "Node device type (gpu|cpu|mobile|iot)")
 	flag.StringVar(&flagCountry, "country", "", "Declared ISO 3166-1 alpha-2 country code for sovereign routing")
 	flag.StringVar(&flagReferral, "referral", "", "Optional referral code")

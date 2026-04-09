@@ -25,7 +25,7 @@ func runClaim() {
 
 	hubURL := strings.TrimSpace(os.Getenv("RYV_HUB_URL"))
 	if hubURL == "" {
-		hubURL = "https://ryvion-hub.fly.dev"
+		hubURL = "https://api.ryvion.ai"
 	}
 
 	pub, priv, err := nodekey.LoadOrCreate(strings.TrimSpace(os.Getenv("RYV_KEY_PATH")))

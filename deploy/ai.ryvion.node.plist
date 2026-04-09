@@ -15,7 +15,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>RYV_HUB_URL</key>
-        <string>https://ryvion-hub.fly.dev</string>
+        <string>https://api.ryvion.ai</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>/usr/local/var/ryvion</string>

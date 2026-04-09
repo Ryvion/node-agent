@@ -12,7 +12,7 @@ curl -L https://github.com/Ryvion/node-agent/releases/latest/download/ryvion-nod
 chmod +x ryvion-node
 
 # Start the node (generates an Ed25519 key on first run)
-./ryvion-node -hub https://ryvion-hub.fly.dev
+./ryvion-node -hub https://api.ryvion.ai
 ```
 
 The node will:
@@ -33,7 +33,7 @@ All configuration is via flags or environment variables:
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `-hub` | `RYV_HUB_URL` | `https://ryvion-hub.fly.dev` | Hub orchestrator URL |
+| `-hub` | `RYV_HUB_URL` | `https://api.ryvion.ai` | Hub orchestrator URL |
 | `-device` | `RYV_DEVICE_TYPE` | auto-detected | Device type: `gpu`, `cpu`, `mobile`, `iot` |
 | `-gpus` | `RYV_GPUS` | auto-detected | GPU configuration |
 | `-country` | `RYV_DECLARED_COUNTRY` | — | ISO country code for jurisdiction routing |
