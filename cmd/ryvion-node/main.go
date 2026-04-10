@@ -545,7 +545,21 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	}
 
 	if strings.TrimSpace(work.Image) == "" || strings.TrimSpace(work.SpecJSON) == "" {
-		slog.Warn("received work assignment without container spec", "job_id", work.JobID)
+		slog.Warn("received work assignment without container spec, fast-rejecting", "job_id", work.JobID)
+		rejectHash := sha256.Sum256([]byte(work.JobID + ":missing_spec"))
+		rejectReceipt := hub.Receipt{
+			JobID:         work.JobID,
+			ResultHashHex: hex.EncodeToString(rejectHash[:]),
+			MeteringUnits: 0,
+			Metadata: map[string]any{
+				"executor":  "node_agent",
+				"exit_code": 1,
+				"error":     "missing container image or spec",
+			},
+		}
+		if err := submitReceiptWithRetry(runCtx, client, rejectReceipt); err != nil {
+			slog.Error("fast-reject receipt submission failed", "job_id", work.JobID, "error", err)
+		}
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.finishJob(work, nil, fmt.Errorf("missing container image or spec"))
 		}
