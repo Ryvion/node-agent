@@ -179,6 +179,10 @@ func DetectTEE() (bool, string) {
 	if _, err := os.Stat("/sys/firmware/tdx"); err == nil {
 		return true, "tdx"
 	}
+	// Apple Silicon (M1/M2/M3/M4) — Secure Enclave coprocessor with isolated cryptographic execution
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		return true, "apple-se"
+	}
 	return false, ""
 }
 
