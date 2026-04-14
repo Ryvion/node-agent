@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,12 +19,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/blob"
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/nodekey"
-	"github.com/Ryvion/node-agent/internal/runner"
+	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	"github.com/Ryvion/node-agent/internal/update"
 )
 
@@ -68,7 +65,7 @@ func main() {
 	flag.StringVar(&flagDevice, "type", "", "Node device type (gpu|cpu|mobile|iot)")
 	flag.StringVar(&flagCountry, "country", "", "Declared ISO 3166-1 alpha-2 country code for sovereign routing")
 	flag.StringVar(&flagReferral, "referral", "", "Optional referral code")
-	flag.StringVar(&flagGPUs, "gpus", "auto", "Docker --gpus value (auto|all|none|device list)")
+	flag.StringVar(&flagGPUs, "gpus", "auto", "Managed OCI GPU selection value (auto|all|none|device list)")
 	flag.StringVar(&flagUIPort, "ui-port", defaultOperatorAPIPort, "Local operator API port (set 0 to disable)")
 	flag.Float64Var(&flagMaxGPUUtil, "max-gpu-util", 90, "Skip jobs when GPU utilization exceeds this % (0=disabled)")
 	flag.Parse()
@@ -106,7 +103,6 @@ func main() {
 func runNode(ctx context.Context) {
 	ensureServiceRecovery()
 	cleanupOrphanedContainers()
-	ensureDockerGPURuntime()
 
 	hubURL := strings.TrimSpace(flagHub)
 	if envHub := strings.TrimSpace(os.Getenv("RYV_HUB_URL")); envHub != "" {
@@ -132,6 +128,11 @@ func runNode(ctx context.Context) {
 		hub.WithAdminKey(os.Getenv("RYV_ADMIN_KEY")),
 		hub.WithUserAgent("ryvion-node/"+version),
 	)
+	runtimeContract, err := resolveRuntimeContractMetadata(version)
+	if err != nil {
+		slog.Warn("failed to load runtime contract metadata, falling back to local defaults", "error", err)
+	}
+	runtimeMgr := newRuntimeManager(version, runtimeContract)
 
 	caps := hw.DetectCaps(flagDevice)
 	deviceType := resolveDeviceType(flagDevice, caps)
@@ -139,12 +140,18 @@ func runNode(ctx context.Context) {
 	if envCountry := strings.TrimSpace(os.Getenv("RYV_DECLARED_COUNTRY")); envCountry != "" {
 		declaredCountry = envCountry
 	}
+	publicAIOptIn, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		slog.Warn("failed to load operator preferences, defaulting public participation to off", "error", err)
+	}
 
-	operatorRuntimeState = newOperatorRuntime(version, hubURL, deviceType, declaredCountry, caps, client)
+	operatorRuntimeState = newOperatorRuntime(version, hubURL, deviceType, declaredCountry, publicAIOptIn, caps, client)
+	operatorRuntimeState.setRuntimeManager(runtimeMgr)
 	startOperatorAPIServer(ctx, operatorRuntimeState, operatorAPIPort(flagUIPort))
 
 	// Retry registration with backoff — on Windows the service starts before
-	// Docker/WSL2/network are ready, so the first attempts will fail.  Keep
+	// Windows service startup can race the managed runtime, WSL2, and network.
+	// Keep
 	// the process alive so SCM doesn't exhaust its restart budget.
 	regBackoff := 5 * time.Second
 	for {
@@ -225,7 +232,7 @@ func runNode(ctx context.Context) {
 				slog.Error("health report goroutine panic", "error", r)
 			}
 		}()
-		healthReportLoop(ctx, client, caps, infMgr)
+		healthReportLoop(ctx, client, caps, infMgr, runtimeMgr)
 	}()
 
 	// Independent heartbeat goroutine — keeps node "online" regardless of
@@ -240,7 +247,7 @@ func runNode(ctx context.Context) {
 	}()
 
 	// Work loop — fetch and process jobs.
-	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr)
+	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr, runtimeMgr, strings.TrimSpace(caps.GPUModel) != "")
 }
 
 // heartbeatLoop sends heartbeats on a fixed interval, completely independent
@@ -322,12 +329,12 @@ func sendHeartbeat(ctx context.Context, client *hub.Client) bool {
 	return true
 }
 
-func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, infMgr *inference.Manager) {
+func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	send := func() {
-		report := buildHealthReport(caps, infMgr)
+		report := buildHealthReport(caps, infMgr, runtimeMgr)
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.recordHealthReport(report)
 		}
@@ -350,7 +357,7 @@ func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, i
 }
 
 // workLoop fetches and processes jobs. Heartbeats are handled separately.
-func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, infMgr *inference.Manager) {
+func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) {
 	var lastUpdateAttempt time.Time
 	backoff := 5 * time.Second
 	maxBackoff := 2 * time.Minute
@@ -413,20 +420,21 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		}
 
 		jobActive.Store(1)
-		processWork(ctx, client, work, gpus, infMgr)
+		processWork(ctx, client, work, gpus, infMgr, runtimeMgr, gpuDetected)
 		jobActive.Store(0)
 	}
 }
 
-func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, infMgr *inference.Manager) {
+func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) {
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.startJob(work)
 	}
 
 	// Determine job timeout based on type or explicit env var
-	isStreaming := work.Kind == "inference" && work.Image == "streaming"
+	executorKind := executorKindForAssignment(work)
+	isStreaming := executorKind == executorKindNativeStreaming
 	isTraining := work.Kind == "training"
-	isAgentHosting := work.Kind == "agent_hosting" || isAgentHostingTask(work.SpecJSON)
+	isAgentHosting := executorKind == executorKindAgentHosting
 	jobTimeout := 10 * time.Minute
 	if isStreaming {
 		jobTimeout = 30 * time.Minute // Streaming inference often takes much longer context generation
@@ -459,191 +467,30 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		}
 	}
 
-	// Agent hosting: long-running container with health monitoring
-	if isAgentHosting {
-		slog.Info("starting agent hosting job", "job_id", work.JobID, "image", work.Image)
-
-		healthFn := func(uptimeSeconds int) bool {
-			resp, err := client.ReportAgentHealth(runCtx, extractDeploymentID(work.SpecJSON), uptimeSeconds)
-			if err != nil {
-				slog.Warn("agent health report failed", "job_id", work.JobID, "error", err)
-				return false
-			}
-			if resp.ShouldStop {
-				slog.Info("hub requested agent stop", "job_id", work.JobID, "deployment_id", extractDeploymentID(work.SpecJSON), "status", resp.Status, "job_status", resp.JobStatus)
-				return true
-			}
-			return false
-		}
-
-		result, runErr := runner.RunAgent(runCtx, work.Image, work.SpecJSON, gpus, healthFn)
-
-		// Submit final receipt with total uptime
-		uptimeSeconds := 0
-		if result != nil {
-			uptimeSeconds = result.UptimeSeconds
-		}
-
-		hash := sha256.Sum256([]byte(work.JobID + fmt.Sprintf("%d", uptimeSeconds)))
-		receipt := hub.Receipt{
-			JobID:         work.JobID,
-			ResultHashHex: hex.EncodeToString(hash[:]),
-			MeteringUnits: uint64(uptimeSeconds),
-			Metadata: map[string]any{
-				"executor":       "agent_hosting",
-				"uptime_seconds": uptimeSeconds,
-				"exit_code":      0,
-			},
-		}
-		if result != nil {
-			receipt.Metadata["exit_code"] = result.ExitCode
-		}
-		if runErr != nil {
-			receipt.Metadata["error"] = runErr.Error()
-		}
-
-		if err := submitReceiptWithRetry(ctx, client, receipt); err != nil {
-			slog.Error("agent receipt submission failed", "job_id", work.JobID, "error", err)
-		} else {
-			slog.Info("agent job completed", "job_id", work.JobID, "uptime_seconds", uptimeSeconds)
-		}
-		if operatorRuntimeState != nil {
-			operatorRuntimeState.finishJob(work, &runnerResultSnapshot{
-				ResultHashHex: hex.EncodeToString(hash[:]),
-				MeteringUnits: uint64(uptimeSeconds),
-				Metadata:      receipt.Metadata,
-			}, runErr)
-		}
-		return
-	}
-
-	// Route streaming inference jobs to persistent llama-server.
-	// "streaming" is a pseudo-image, not a real container — never fall through to OCI runner.
-	if isStreaming {
-		if !infMgr.Healthy() {
-			err := fmt.Errorf("inference manager is not healthy")
-			slog.Warn("streaming job received but inference manager not healthy", "job_id", work.JobID)
-			relayStreamingFailure(runCtx, client, work.JobID, err)
-			if operatorRuntimeState != nil {
-				operatorRuntimeState.finishJob(work, nil, err)
-			}
-			return
-		}
-		slog.Info("routing to inference manager", "job_id", work.JobID)
-		if err := infMgr.RunStreamingJob(runCtx, client, work.JobID, work.SpecJSON); err != nil {
-			slog.Warn("streaming inference failed", "job_id", work.JobID, "error", err)
-			relayStreamingFailure(runCtx, client, work.JobID, err)
-			if operatorRuntimeState != nil {
-				operatorRuntimeState.finishJob(work, nil, err)
-			}
-			return
-		}
-		if operatorRuntimeState != nil {
-			operatorRuntimeState.finishJob(work, nil, nil)
-		}
-		return
-	}
-
-	if strings.TrimSpace(work.Image) == "" || strings.TrimSpace(work.SpecJSON) == "" {
-		slog.Warn("received work assignment without container spec, fast-rejecting", "job_id", work.JobID)
-		rejectHash := sha256.Sum256([]byte(work.JobID + ":missing_spec"))
-		rejectReceipt := hub.Receipt{
-			JobID:         work.JobID,
-			ResultHashHex: hex.EncodeToString(rejectHash[:]),
-			MeteringUnits: 0,
-			Metadata: map[string]any{
-				"executor":  "node_agent",
-				"exit_code": 1,
-				"error":     "missing container image or spec",
-			},
-		}
-		if err := submitReceiptWithRetry(runCtx, client, rejectReceipt); err != nil {
-			slog.Error("fast-reject receipt submission failed", "job_id", work.JobID, "error", err)
-		}
-		if operatorRuntimeState != nil {
-			operatorRuntimeState.finishJob(work, nil, fmt.Errorf("missing container image or spec"))
-		}
-		return
-	}
-
-	result, runErr := runner.Run(runCtx, work.Image, work.SpecJSON, gpus)
-	if result == nil {
-		slog.Warn("runner failed", "job_id", work.JobID, "error", runErr)
-		if operatorRuntimeState != nil {
-			operatorRuntimeState.finishJob(work, nil, runErr)
-		}
-		return
-	}
+	engine := selectExecutionEngine(work)
+	slog.Info("dispatching work", "job_id", work.JobID, "executor_kind", engine.Kind(), "assurance_class", assuranceClassForAssignment(work))
+	result, runErr := engine.Execute(runCtx, work, executionContext{
+		client:         client,
+		gpus:           gpus,
+		infMgr:         infMgr,
+		runtimeManager: runtimeMgr,
+		gpuDetected:    gpuDetected,
+	})
 	if runErr != nil {
-		slog.Warn("container exited with error", "job_id", work.JobID, "exit_code", result.ExitCode, "error", runErr)
-		if dockerRuntimeUnavailableError(runErr, result.Logs) {
-			reportDockerRuntimeDegraded(client, infMgr)
+		if engine.Kind() == executorKindManagedOCI && result != nil && managedOCIRuntimeUnavailableError(runErr, stringValue(result.Metadata["stderr_tail"])) {
+			reportManagedOCIRuntimeDegraded(client, infMgr, runtimeMgr)
 		}
-	}
-
-	resultHash := result.Hash
-	metadata := map[string]any{
-		"executor":    "oci",
-		"duration_ms": result.Duration.Milliseconds(),
-		"exit_code":   result.ExitCode,
-		"stderr_tail": result.Logs,
-		"metrics":     result.Metrics,
-	}
-
-	if strings.TrimSpace(result.OutputPath) != "" {
-		uploadRes, uploadErr := blob.Upload(runCtx, client, work.JobID, result.OutputPath)
-		if uploadErr != nil {
-			slog.Warn("artifact upload failed", "job_id", work.JobID, "error", uploadErr)
-		} else {
-			metadata["blob_url"] = uploadRes.URL
-			metadata["object_key"] = uploadRes.Key
-			if strings.TrimSpace(uploadRes.Key) != "" {
-				metadata["manifest_key"] = uploadRes.Key + ".manifest.json"
-			}
-			if strings.TrimSpace(uploadRes.Hash) != "" {
-				metadata["artifact_sha256"] = uploadRes.Hash
-				resultHash = uploadRes.Hash
-			}
-		}
-		_ = os.Remove(result.OutputPath)
-	}
-
-	units := uint64(work.Units)
-	if units == 0 {
-		units = 1
-	}
-	receipt := hub.Receipt{
-		JobID:         work.JobID,
-		ResultHashHex: resultHash,
-		MeteringUnits: units,
-		Metadata:      metadata,
-	}
-	if err := submitReceiptWithRetry(ctx, client, receipt); err != nil {
-		slog.Error("submit receipt failed after retries", "job_id", work.JobID, "error", err)
+		slog.Warn("job execution failed", "job_id", work.JobID, "executor_kind", engine.Kind(), "error", runErr)
 		if operatorRuntimeState != nil {
-			operatorRuntimeState.finishJob(work, &runnerResultSnapshot{
-				DurationMs:    result.Duration.Milliseconds(),
-				ResultHashHex: resultHash,
-				ExitCode:      result.ExitCode,
-				MeteringUnits: units,
-				BlobURL:       stringValue(metadata["blob_url"]),
-				ObjectKey:     stringValue(metadata["object_key"]),
-				Metadata:      metadata,
-			}, err)
+			operatorRuntimeState.finishJob(work, result, runErr)
 		}
 		return
 	}
-	slog.Info("job completed", "job_id", work.JobID, "hash", resultHash, "units", units)
+	if result != nil {
+		slog.Info("job completed", "job_id", work.JobID, "executor_kind", engine.Kind(), "hash", result.ResultHashHex, "units", result.MeteringUnits)
+	}
 	if operatorRuntimeState != nil {
-		operatorRuntimeState.finishJob(work, &runnerResultSnapshot{
-			DurationMs:    result.Duration.Milliseconds(),
-			ResultHashHex: resultHash,
-			ExitCode:      result.ExitCode,
-			MeteringUnits: units,
-			BlobURL:       stringValue(metadata["blob_url"]),
-			ObjectKey:     stringValue(metadata["object_key"]),
-			Metadata:      metadata,
-		}, runErr)
+		operatorRuntimeState.finishJob(work, result, nil)
 	}
 }
 
@@ -735,13 +582,15 @@ func extractDeploymentID(specJSON string) string {
 }
 
 func cleanupOrphanedContainers() {
-	dockerBin := resolveDockerCLI()
-	if dockerBin == "" {
+	executor, err := runtimeexec.ResolveExecutor(runtime.GOOS, os.Getenv)
+	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, dockerBin, "ps", "-q", "--filter", "name=ryv_").CombinedOutput()
+	psArgs := append([]string{}, executor.PrefixArgs...)
+	psArgs = append(psArgs, "ps", "-q", "--filter", "name=ryv_")
+	out, err := exec.CommandContext(ctx, executor.Command, psArgs...).CombinedOutput()
 	if err != nil {
 		return
 	}
@@ -753,13 +602,17 @@ func cleanupOrphanedContainers() {
 		id = strings.TrimSpace(id)
 		if id != "" {
 			slog.Info("killing orphaned container", "id", id)
-			exec.Command(dockerBin, "kill", id).Run()
-			exec.Command(dockerBin, "rm", "-f", id).Run()
+			killArgs := append([]string{}, executor.PrefixArgs...)
+			killArgs = append(killArgs, "kill", id)
+			exec.Command(executor.Command, killArgs...).Run()
+			rmArgs := append([]string{}, executor.PrefixArgs...)
+			rmArgs = append(rmArgs, "rm", "-f", id)
+			exec.Command(executor.Command, rmArgs...).Run()
 		}
 	}
 }
 
-func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthReport {
+func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *runtimeManager) hub.HealthReport {
 	gpuReady := strings.TrimSpace(caps.GPUModel) != ""
 	parts := []string{}
 	nativeSupported := inference.NativeRuntimeAvailable()
@@ -770,7 +623,8 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	ffmpegOK := commandExists("ffmpeg")
 	pdalOK := commandExists("pdal")
 	open3dOK := commandExists("open3d") || pythonModuleAvailable("open3d")
-	dockerCLI, dockerReady, dockerGPU, dockerParts := detectDockerRuntimeWithProbes(gpuReady, resolveDockerCLI, testDockerDaemon, testDockerGPU)
+	runtimeTokens := runtimeMgr.StatusTokens(gpuReady)
+	runtimeSnap := runtimeMgr.Snapshot(gpuReady)
 
 	if gpuReady {
 		parts = append(parts, "gpu-detect:ok")
@@ -778,7 +632,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 		parts = append(parts, "gpu-detect:missing")
 	}
 
-	parts = append(parts, dockerParts...)
+	parts = append(parts, runtimeTokens...)
 
 	if gpuReady {
 		parts = append(parts, "gpu_model:"+caps.GPUModel)
@@ -807,6 +661,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	} else {
 		parts = append(parts, "native-inference:unsupported")
 	}
+	parts = append(parts, boolStatusToken("cap:native_streaming", nativeReady))
 	if publicAIReady {
 		parts = append(parts, "public-ai-ready:1")
 	} else {
@@ -827,12 +682,12 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager) hub.HealthRepo
 	return hub.HealthReport{
 		TimestampMs: time.Now().UnixMilli(),
 		GPUReady:    gpuReady,
-		DockerGPU:   dockerCLI && dockerReady && dockerGPU,
+		RuntimeGPU:  runtimeSnap.GPUReady,
 		Message:     strings.Join(parts, ","),
 	}
 }
 
-func dockerRuntimeUnavailableError(runErr error, logs string) bool {
+func managedOCIRuntimeUnavailableError(runErr error, logs string) bool {
 	text := strings.ToLower(strings.TrimSpace(logs))
 	if runErr != nil {
 		text = text + "\n" + strings.ToLower(runErr.Error())
@@ -851,7 +706,7 @@ func dockerRuntimeUnavailableError(runErr error, logs string) bool {
 	return false
 }
 
-func reportDockerRuntimeDegraded(client *hub.Client, infMgr *inference.Manager) {
+func reportManagedOCIRuntimeDegraded(client *hub.Client, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
 	if client == nil {
 		return
 	}
@@ -859,8 +714,8 @@ func reportDockerRuntimeDegraded(client *hub.Client, infMgr *inference.Manager) 
 	if operatorRuntimeState != nil {
 		caps = operatorRuntimeState.caps
 	}
-	report := buildHealthReport(caps, infMgr)
-	if !strings.Contains(strings.ToLower(report.Message), "docker-ready:0") {
+	report := buildHealthReport(caps, infMgr, runtimeMgr)
+	if !strings.Contains(strings.ToLower(report.Message), "runtime-ready:0") {
 		return
 	}
 	if operatorRuntimeState != nil {
@@ -869,58 +724,39 @@ func reportDockerRuntimeDegraded(client *hub.Client, infMgr *inference.Manager) 
 	reportCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := client.SendHealthReport(reportCtx, report); err != nil {
-		slog.Warn("immediate docker health downgrade failed", "error", err)
+		slog.Warn("immediate managed OCI runtime downgrade failed", "error", err)
 		return
 	}
-	slog.Warn("reported degraded docker runtime health")
+	slog.Warn("reported degraded managed OCI runtime health")
 }
 
 func publicAIOptInEnabled() bool {
-	raw := strings.TrimSpace(os.Getenv("RYV_PUBLIC_AI"))
-	if raw == "" {
-		return true // default ON — operators opt out with RYV_PUBLIC_AI=0
+	if operatorRuntimeState != nil {
+		return operatorRuntimeState.publicAIOptInEnabled()
 	}
-	switch strings.ToLower(raw) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+	enabled, err := resolveInitialPublicAIOptIn()
+	if err != nil {
 		return false
 	}
+	return enabled
 }
 
-func detectDockerRuntimeWithProbes(gpuReady bool, resolve func() string, daemonCheck func(string) bool, gpuCheck func(string) bool) (bool, bool, bool, []string) {
-	dockerBin := strings.TrimSpace(resolve())
-	if dockerBin == "" {
-		parts := []string{"docker-cli:missing", "docker-ready:0", "docker:missing"}
-		if gpuReady {
-			parts = append(parts, "docker-gpu:missing")
-		}
-		return false, false, false, parts
+func detectManagedOCIBackendWithProbes(gpuDetected bool, resolve func() string, readyCheck func(string) bool, gpuCheck func(string) bool) (bool, bool, bool) {
+	backendBin := strings.TrimSpace(resolve())
+	if backendBin == "" {
+		return false, false, false
 	}
 
-	daemonReady := daemonCheck(dockerBin)
-	parts := []string{"docker-cli:present"}
-	if daemonReady {
-		parts = append(parts, "docker-ready:1", "docker:ok")
-	} else {
-		parts = append(parts, "docker-ready:0", "docker:unavailable")
-		if gpuReady {
-			parts = append(parts, "docker-gpu:unavailable")
-		}
-		return true, false, false, parts
+	runtimeReady := readyCheck(backendBin)
+	if !runtimeReady {
+		return true, false, false
 	}
 
-	if !gpuReady {
-		return true, true, false, parts
+	if !gpuDetected {
+		return true, true, false
 	}
 
-	dockerGPU := gpuCheck(dockerBin)
-	if dockerGPU {
-		parts = append(parts, "docker-gpu:ok")
-	} else {
-		parts = append(parts, "docker-gpu:failed")
-	}
-	return true, true, dockerGPU, parts
+	return true, true, gpuCheck(backendBin)
 }
 
 func detectAvailableDiskGB() uint64 {
@@ -976,229 +812,66 @@ func pythonModuleAvailable(module string) bool {
 	return cmd.Run() == nil
 }
 
-// ensureDockerGPURuntime auto-installs nvidia-container-toolkit on Linux if an
-// NVIDIA GPU is detected and Docker is available but GPU passthrough fails.
-// This runs once at startup so operators don't need to know about the toolkit.
-func ensureDockerGPURuntime() {
-	if runtime.GOOS != "linux" {
-		return
-	}
-	// Only needed for NVIDIA GPUs.
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
-		return
-	}
-	dockerBin := resolveDockerCLI()
-	if dockerBin == "" {
-		return
-	}
-	if !testDockerDaemon(dockerBin) {
-		// Try starting Docker daemon.
-		slog.Info("Docker not running, attempting to start")
-		if out, err := exec.Command("sudo", "systemctl", "start", "docker").CombinedOutput(); err != nil {
-			slog.Warn("failed to start Docker", "error", err, "output", strings.TrimSpace(string(out)))
-			return
-		}
-		time.Sleep(2 * time.Second)
-		if !testDockerDaemon(dockerBin) {
-			return
-		}
-	}
-	// Docker is running — check if GPU passthrough already works.
-	if testDockerGPUNvidia(dockerBin) {
-		slog.Info("Docker GPU passthrough already configured")
-		return
-	}
-	slog.Info("NVIDIA GPU detected but Docker GPU passthrough failed, installing nvidia-container-toolkit")
-
-	// Check if nvidia-ctk is already installed (just not configured).
-	if _, err := exec.LookPath("nvidia-ctk"); err == nil {
-		slog.Info("nvidia-ctk found, configuring runtime")
-		if configureNvidiaDockerRuntime(dockerBin) {
-			return
-		}
-	}
-
-	// Install nvidia-container-toolkit via package manager.
-	if installNvidiaContainerToolkit() {
-		configureNvidiaDockerRuntime(dockerBin)
-	}
-}
-
-func installNvidiaContainerToolkit() bool {
-	// Detect package manager and install.
-	if _, err := exec.LookPath("apt-get"); err == nil {
-		return installNvidiaCTKApt()
-	}
-	if _, err := exec.LookPath("dnf"); err == nil {
-		return installNvidiaCTKDnf()
-	}
-	if _, err := exec.LookPath("yum"); err == nil {
-		return installNvidiaCTKYum()
-	}
-	slog.Warn("no supported package manager found for nvidia-container-toolkit install")
-	return false
-}
-
-func installNvidiaCTKApt() bool {
-	steps := []struct {
-		name string
-		cmd  []string
-	}{
-		{"add NVIDIA GPG key", []string{"bash", "-c",
-			`curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null`}},
-		{"add NVIDIA repo", []string{"bash", "-c",
-			`curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list`}},
-		{"apt update", []string{"apt-get", "update", "-qq"}},
-		{"install toolkit", []string{"apt-get", "install", "-y", "-qq", "nvidia-container-toolkit"}},
-	}
-	for _, s := range steps {
-		slog.Info("nvidia-container-toolkit setup", "step", s.name)
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		out, err := exec.CommandContext(ctx, "sudo", s.cmd...).CombinedOutput()
-		cancel()
-		if err != nil {
-			slog.Warn("nvidia-container-toolkit install failed", "step", s.name, "error", err, "output", strings.TrimSpace(string(out)))
-			return false
-		}
-	}
-	slog.Info("nvidia-container-toolkit installed via apt")
-	return true
-}
-
-func installNvidiaCTKDnf() bool {
-	steps := []struct {
-		name string
-		cmd  []string
-	}{
-		{"add NVIDIA repo", []string{"bash", "-c",
-			`curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | tee /etc/yum.repos.d/nvidia-container-toolkit.repo`}},
-		{"install toolkit", []string{"dnf", "install", "-y", "nvidia-container-toolkit"}},
-	}
-	for _, s := range steps {
-		slog.Info("nvidia-container-toolkit setup", "step", s.name)
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		out, err := exec.CommandContext(ctx, "sudo", s.cmd...).CombinedOutput()
-		cancel()
-		if err != nil {
-			slog.Warn("nvidia-container-toolkit install failed", "step", s.name, "error", err, "output", strings.TrimSpace(string(out)))
-			return false
-		}
-	}
-	slog.Info("nvidia-container-toolkit installed via dnf")
-	return true
-}
-
-func installNvidiaCTKYum() bool {
-	steps := []struct {
-		name string
-		cmd  []string
-	}{
-		{"add NVIDIA repo", []string{"bash", "-c",
-			`curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | tee /etc/yum.repos.d/nvidia-container-toolkit.repo`}},
-		{"install toolkit", []string{"yum", "install", "-y", "nvidia-container-toolkit"}},
-	}
-	for _, s := range steps {
-		slog.Info("nvidia-container-toolkit setup", "step", s.name)
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		out, err := exec.CommandContext(ctx, "sudo", s.cmd...).CombinedOutput()
-		cancel()
-		if err != nil {
-			slog.Warn("nvidia-container-toolkit install failed", "step", s.name, "error", err, "output", strings.TrimSpace(string(out)))
-			return false
-		}
-	}
-	slog.Info("nvidia-container-toolkit installed via yum")
-	return true
-}
-
-func configureNvidiaDockerRuntime(dockerBin string) bool {
-	slog.Info("configuring NVIDIA Docker runtime")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	out, err := exec.CommandContext(ctx, "sudo", "nvidia-ctk", "runtime", "configure", "--runtime=docker").CombinedOutput()
-	cancel()
-	if err != nil {
-		slog.Warn("nvidia-ctk configure failed", "error", err, "output", strings.TrimSpace(string(out)))
-		return false
-	}
-	// Restart Docker to pick up new runtime config.
-	slog.Info("restarting Docker to apply NVIDIA runtime")
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
-	out2, err2 := exec.CommandContext(ctx2, "sudo", "systemctl", "restart", "docker").CombinedOutput()
-	cancel2()
-	if err2 != nil {
-		slog.Warn("Docker restart failed", "error", err2, "output", strings.TrimSpace(string(out2)))
-		return false
-	}
-	time.Sleep(3 * time.Second)
-	// Verify it worked.
-	if testDockerGPUNvidia(dockerBin) {
-		slog.Info("Docker GPU passthrough configured successfully")
-		return true
-	}
-	slog.Warn("Docker GPU passthrough still failing after toolkit install")
-	return false
-}
-
-func testDockerDaemon(dockerBin string) bool {
-	if strings.TrimSpace(dockerBin) == "" {
+func testOCIBackendReady(backendBin string) bool {
+	if strings.TrimSpace(backendBin) == "" {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, dockerBin, "version", "--format", "{{.Server.Version}}").CombinedOutput()
+	out, err := exec.CommandContext(ctx, backendBin, "version", "--format", "{{.Server.Version}}").CombinedOutput()
 	if err != nil {
-		slog.Debug("docker daemon check failed", "error", err, "output", strings.TrimSpace(string(out)))
+		slog.Debug("managed OCI backend health check failed", "error", err, "output", strings.TrimSpace(string(out)))
 		return false
 	}
 	return strings.TrimSpace(string(out)) != ""
 }
 
-// testDockerGPU checks if Docker can access the GPU by running a minimal container.
-// Tries NVIDIA (--gpus all) first, then ROCm (--device=/dev/kfd + /dev/dri) for AMD.
-func testDockerGPU(dockerBin string) bool {
-	if strings.TrimSpace(dockerBin) == "" {
+// testManagedOCIGPU checks if the current OCI backend can access the GPU by
+// running a minimal container. It tries NVIDIA first, then ROCm for AMD.
+func testManagedOCIGPU(backendBin string) bool {
+	if strings.TrimSpace(backendBin) == "" {
 		return false
 	}
-	if testDockerGPUNvidia(dockerBin) {
+	if testManagedOCIGPUNvidia(backendBin) {
 		return true
 	}
-	return testDockerGPURocm(dockerBin)
+	return testManagedOCIGPURocm(backendBin)
 }
 
-func testDockerGPUNvidia(dockerBin string) bool {
+func testManagedOCIGPUNvidia(backendBin string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, dockerBin, "run", "--rm", "--gpus", "all",
+	out, err := exec.CommandContext(ctx, backendBin, "run", "--rm", "--gpus", "all",
 		"nvidia/cuda:12.4.1-base-ubuntu22.04", "nvidia-smi", "--query-gpu=name", "--format=csv,noheader").CombinedOutput()
 	if err != nil {
-		slog.Debug("docker NVIDIA GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
+		slog.Debug("managed OCI NVIDIA GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
 		return false
 	}
 	result := strings.TrimSpace(string(out))
-	slog.Info("docker NVIDIA GPU test passed", "gpu", result)
+	slog.Info("managed OCI NVIDIA GPU test passed", "gpu", result)
 	return result != ""
 }
 
-func testDockerGPURocm(dockerBin string) bool {
+func testManagedOCIGPURocm(backendBin string) bool {
 	// Check if ROCm devices exist before pulling a container image.
 	if _, err := os.Stat("/dev/kfd"); err != nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, dockerBin, "run", "--rm",
+	out, err := exec.CommandContext(ctx, backendBin, "run", "--rm",
 		"--device=/dev/kfd", "--device=/dev/dri",
 		"rocm/rocm-terminal:latest", "rocm-smi", "--showproductname").CombinedOutput()
 	if err != nil {
-		slog.Debug("docker ROCm GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
+		slog.Debug("managed OCI ROCm GPU test failed", "error", err, "output", strings.TrimSpace(string(out)))
 		return false
 	}
 	result := strings.TrimSpace(string(out))
-	slog.Info("docker ROCm GPU test passed", "output", result)
+	slog.Info("managed OCI ROCm GPU test passed", "output", result)
 	return result != ""
 }
 
-func resolveDockerCLI() string {
+func resolveOCIBackendCLI() string {
 	if p, err := exec.LookPath("docker"); err == nil {
 		return p
 	}

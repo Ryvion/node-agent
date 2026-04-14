@@ -291,9 +291,9 @@ func TestStress_ServerErrorHandling(t *testing.T) {
 	// Register should return error, not panic
 	t.Run("register_500", func(t *testing.T) {
 		err := c.Register(ctx, Capabilities{
-			GPUModel: "RTX 4090",
-			CPUCores: 16,
-			RAMBytes: 64,
+			GPUModel:  "RTX 4090",
+			CPUCores:  16,
+			RAMBytes:  64,
 			VRAMBytes: 24,
 		}, "gpu", "", "US")
 		if err == nil {
@@ -340,7 +340,7 @@ func TestStress_ServerErrorHandling(t *testing.T) {
 		err := c.SendHealthReport(ctx, HealthReport{
 			TimestampMs: time.Now().UnixMilli(),
 			GPUReady:    true,
-			DockerGPU:   false,
+			RuntimeGPU:  false,
 			Message:     "test",
 		})
 		if err == nil {

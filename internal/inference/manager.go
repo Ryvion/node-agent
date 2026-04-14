@@ -364,8 +364,8 @@ func (m *Manager) runServer(ctx context.Context) error {
 	return m.runServerNative(ctx, modelPath, port)
 }
 
-// useContainerizedInference reports whether Docker is available for sandboxed inference.
-// On Windows, always prefer native mode — Docker Desktop GPU passthrough with Linux
+// useContainerizedInference reports whether a managed OCI backend is available for sandboxed inference.
+// On Windows, always prefer native mode — native inference is more reliable than GPU passthrough through the container backend
 // containers is unreliable (OOM kills, exit 137). The native llama-server.exe with CUDA works better.
 func (m *Manager) useContainerizedInference() bool {
 	if os.Getenv("RYV_NATIVE_INFERENCE_ONLY") == "1" {
@@ -380,7 +380,7 @@ func (m *Manager) useContainerizedInference() bool {
 	return cmd.Run() == nil
 }
 
-// runServerContainerized runs llama-server inside a Docker container with GPU passthrough.
+// runServerContainerized runs llama-server inside the container backend with GPU passthrough.
 func (m *Manager) runServerContainerized(ctx context.Context, modelPath, port string) error {
 	serverCtx, cancel := context.WithCancel(ctx)
 	m.mu.Lock()

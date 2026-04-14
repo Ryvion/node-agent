@@ -2,7 +2,7 @@
 
 The Ryvion node agent turns any machine with a GPU into a compute node on the [Ryvion](https://ryvion.com) distributed inference network.
 
-It registers with the hub orchestrator, sends signed heartbeats, polls for jobs, runs OCI container workloads via Docker, and submits cryptographically signed receipts.
+It registers with the hub orchestrator, sends signed heartbeats, polls for jobs, runs OCI container workloads through the managed execution runtime, and submits cryptographically signed receipts.
 
 ## Quickstart
 
@@ -18,13 +18,13 @@ chmod +x ryvion-node
 The node will:
 1. Generate an Ed25519 keypair (stored in `~/.ryvion/node.key`)
 2. Register with the hub and begin sending heartbeats
-3. Poll for jobs and execute them in Docker containers
+3. Poll for jobs and execute them through the managed OCI runtime
 4. Submit signed receipts for completed work
 
 ## Requirements
 
-- Linux (amd64) with Docker installed
-- NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU workloads
+- Linux (amd64) with the Ryvion managed execution runtime installed
+- NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) when the runtime backend is configured for NVIDIA GPU workloads
 - CPU-only mode works without a GPU
 
 ## Configuration

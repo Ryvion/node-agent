@@ -20,6 +20,6 @@ Go 1.24 cross-platform agent. Runs natively on operator machines, polls hub for 
 - Build: `go build ./...` must pass for Linux, macOS, AND Windows
 - Cross-compile check: `GOOS=windows go build ./...`
 - Zero external dependencies (Go stdlib + x/sys only)
-- Windows: ALWAYS use native llama-server (Docker GPU unreliable)
+- Windows: ALWAYS use native llama-server for native inference; managed OCI workloads go through the runtime wrapper because Windows GPU passthrough remains less predictable than native execution
 - Container security: --cap-drop=ALL, --network=none (except finetune/agent_hosting → bridge)
 - Commits: Keep messages SHORT, no Co-Authored-By

@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"reflect"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/hub"
+	"github.com/Ryvion/node-agent/internal/runtimeexec"
 )
 
 // fakeClient implements a minimal receipt submitter that fails N times then succeeds.
@@ -87,8 +88,8 @@ func TestJobActiveFlag_PreventsUpdate(t *testing.T) {
 	}
 }
 
-func TestDetectDockerRuntimeWithProbesWithoutDaemonRejectsCPUContainerWork(t *testing.T) {
-	cli, ready, gpu, parts := detectDockerRuntimeWithProbes(false,
+func TestDetectManagedOCIBackendWithProbesWithoutDaemonRejectsCPUContainerWork(t *testing.T) {
+	cli, ready, gpu := detectManagedOCIBackendWithProbes(false,
 		func() string { return "/usr/bin/docker" },
 		func(string) bool { return false },
 		func(string) bool {
@@ -98,61 +99,68 @@ func TestDetectDockerRuntimeWithProbesWithoutDaemonRejectsCPUContainerWork(t *te
 	)
 
 	if !cli {
-		t.Fatal("expected docker CLI to be detected")
+		t.Fatal("expected OCI backend CLI to be detected")
 	}
 	if ready {
-		t.Fatal("expected docker daemon to be unavailable")
+		t.Fatal("expected managed OCI backend to be unavailable")
 	}
 	if gpu {
-		t.Fatal("expected docker GPU check to be false")
-	}
-	want := []string{"docker-cli:present", "docker-ready:0", "docker:unavailable"}
-	if !reflect.DeepEqual(parts, want) {
-		t.Fatalf("unexpected docker parts: got=%v want=%v", parts, want)
+		t.Fatal("expected managed OCI GPU check to be false")
 	}
 }
 
-func TestDetectDockerRuntimeWithProbesReportsGPUReadiness(t *testing.T) {
-	cli, ready, gpu, parts := detectDockerRuntimeWithProbes(true,
+func TestDetectManagedOCIBackendWithProbesReportsGPUReadiness(t *testing.T) {
+	cli, ready, gpu := detectManagedOCIBackendWithProbes(true,
 		func() string { return "/usr/bin/docker" },
 		func(string) bool { return true },
 		func(bin string) bool {
 			if bin != "/usr/bin/docker" {
-				t.Fatalf("unexpected docker bin %q", bin)
+				t.Fatalf("unexpected OCI backend bin %q", bin)
 			}
 			return true
 		},
 	)
 
 	if !cli || !ready || !gpu {
-		t.Fatalf("expected docker CLI, daemon, and GPU to be ready, got cli=%v ready=%v gpu=%v", cli, ready, gpu)
-	}
-	want := []string{"docker-cli:present", "docker-ready:1", "docker:ok", "docker-gpu:ok"}
-	if !reflect.DeepEqual(parts, want) {
-		t.Fatalf("unexpected docker parts: got=%v want=%v", parts, want)
+		t.Fatalf("expected managed OCI backend and GPU to be ready, got cli=%v ready=%v gpu=%v", cli, ready, gpu)
 	}
 }
 
-func TestDockerRuntimeUnavailableErrorMatchesNamedPipeFailure(t *testing.T) {
+func TestManagedOCIRuntimeUnavailableErrorMatchesNamedPipeFailure(t *testing.T) {
 	err := fmt.Errorf("docker run failed")
-	logs := "failed to connect to the docker API at npipe:////./pipe/docker_engine; check if the daemon is running"
-	if !dockerRuntimeUnavailableError(err, logs) {
-		t.Fatal("expected named pipe docker daemon failure to be detected")
+	logs := "failed to connect to the docker API at npipe:////./pipe/oci_linux_adapter; check if the daemon is running"
+	if !managedOCIRuntimeUnavailableError(err, logs) {
+		t.Fatal("expected named pipe OCI backend failure to be detected")
 	}
 }
 
-func TestDockerRuntimeUnavailableErrorIgnoresRegularContainerFailures(t *testing.T) {
+func TestManagedOCIRuntimeUnavailableErrorIgnoresRegularContainerFailures(t *testing.T) {
 	err := fmt.Errorf("exit status 1")
 	logs := "Traceback: model weights missing"
-	if dockerRuntimeUnavailableError(err, logs) {
-		t.Fatal("expected ordinary container error to not be treated as docker daemon failure")
+	if managedOCIRuntimeUnavailableError(err, logs) {
+		t.Fatal("expected ordinary container error to not be treated as OCI backend failure")
 	}
 }
 
 func TestPublicAIOptInEnabled(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	prevState := operatorRuntimeState
+	operatorRuntimeState = nil
+	defer func() {
+		operatorRuntimeState = prevState
+	}()
+
 	t.Setenv("RYV_PUBLIC_AI", "")
-	if !publicAIOptInEnabled() {
-		t.Fatal("expected public AI to default to true (opt-out model)")
+	if publicAIOptInEnabled() {
+		t.Fatal("expected public AI to default to false (explicit opt-in)")
 	}
 
 	t.Setenv("RYV_PUBLIC_AI", "1")
@@ -169,6 +177,183 @@ func TestPublicAIOptInEnabled(t *testing.T) {
 	if publicAIOptInEnabled() {
 		t.Fatal("expected public AI opt-in to disable on no")
 	}
+}
+
+func TestResolveInitialPublicAIOptInUsesSavedPreferences(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: true}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected saved operator preference to enable public AI opt-in")
+	}
+}
+
+func TestResolveInitialPublicAIOptInPrefersEnvOverride(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: false}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	t.Setenv("RYV_PUBLIC_AI", "1")
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected env override to take precedence over saved preferences")
+	}
+}
+
+func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_RUNTIME_CHANNEL", "")
+	t.Setenv("RYV_RUNTIME_CHANNEL_VERSION", "")
+	t.Setenv("RYV_RUNTIME_PROVIDER", "")
+	t.Setenv("RYV_RUNTIME_MODE", "")
+	t.Setenv("RYV_RUNTIME_SOURCE", "")
+	t.Setenv("RYV_RUNTIME_ARTIFACT", "")
+	t.Setenv("RYV_RUNTIME_MANIFEST_HASH", "")
+
+	want := operatorPreferences{
+		PublicAIOptIn:         true,
+		RuntimeChannel:        "managed_oci_v1",
+		RuntimeChannelVersion: "2026.04.14",
+		RuntimeProvider:       "oci_linux_adapter",
+		RuntimeMode:           "host_package",
+		RuntimeSource:         "ryvion_runtime_kit",
+		RuntimeArtifact:       "ryvion-runtime-kit-linux-amd64-2026.04.14.tar.gz",
+		RuntimeManifestHash:   "abc123",
+	}
+	if err := saveOperatorPreferences(want); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveRuntimeContractMetadata("dev")
+	if err != nil {
+		t.Fatalf("resolveRuntimeContractMetadata() error = %v", err)
+	}
+	if got.Channel != want.RuntimeChannel || got.Version != want.RuntimeChannelVersion || got.Provider != want.RuntimeProvider || got.Mode != want.RuntimeMode || got.Source != want.RuntimeSource || got.Artifact != want.RuntimeArtifact || got.ManifestHash != want.RuntimeManifestHash {
+		t.Fatalf("unexpected runtime metadata: %+v", got)
+	}
+}
+
+func TestResolveRuntimeContractMetadataPrefersEnvOverride(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	if err := saveOperatorPreferences(operatorPreferences{
+		RuntimeChannel:        "managed_oci_v1",
+		RuntimeChannelVersion: "2026.04.14",
+		RuntimeProvider:       "oci_linux_adapter",
+		RuntimeMode:           "host_package",
+		RuntimeSource:         "ryvion_runtime_kit",
+		RuntimeArtifact:       "ryvion-runtime-kit-linux-amd64-2026.04.14.tar.gz",
+		RuntimeManifestHash:   "abc123",
+	}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	t.Setenv("RYV_RUNTIME_PROVIDER", "oci_desktop_adapter")
+	t.Setenv("RYV_RUNTIME_MODE", "desktop")
+	t.Setenv("RYV_RUNTIME_SOURCE", "signed_release_channel")
+	t.Setenv("RYV_RUNTIME_ARTIFACT", "ryvion-runtime-kit-windows-amd64-2026.04.14.zip")
+	got, err := resolveRuntimeContractMetadata("dev")
+	if err != nil {
+		t.Fatalf("resolveRuntimeContractMetadata() error = %v", err)
+	}
+	if got.Provider != "oci_desktop_adapter" || got.Mode != "desktop" || got.Source != "signed_release_channel" || got.Artifact != "ryvion-runtime-kit-windows-amd64-2026.04.14.zip" {
+		t.Fatalf("expected env override to win, got %+v", got)
+	}
+}
+
+func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		return runtimeexec.Status{
+			BinaryPath:   "/opt/ryvion/runtime/ryvion-runtime",
+			BackendPath:  "/usr/bin/docker",
+			CLIInstalled: true,
+			Ready:        true,
+			GPUReady:     true,
+			Health:       "ready",
+		}, true
+	}
+	defer func() {
+		probeManagedRuntimeStatus = prevProbe
+	}()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Channel:      "managed_oci_v1",
+		Version:      "2026.04.14.1",
+		Provider:     "oci_linux_adapter",
+		Mode:         "host_package",
+		Source:       "ryvion_runtime_kit",
+		Artifact:     "ryvion-runtime-kit-linux-amd64-2026.04.14.1.tar.gz",
+		Binary:       "/opt/ryvion/runtime/ryvion-runtime",
+		ManifestHash: "abc123",
+	})
+
+	snap := runtimeMgr.Snapshot(true)
+	if !snap.Ready || !snap.GPUReady || !snap.CLIInstalled {
+		t.Fatalf("expected wrapper snapshot to be ready, got %+v", snap)
+	}
+	if snap.Binary != "/opt/ryvion/runtime/ryvion-runtime" || snap.Backend != "/usr/bin/docker" {
+		t.Fatalf("unexpected wrapper paths: %+v", snap)
+	}
+
+	tokens := runtimeMgr.StatusTokens(true)
+	if !containsToken(tokens, "runtime-binary:/opt/ryvion/runtime/ryvion-runtime") {
+		t.Fatalf("expected runtime binary token, got %v", tokens)
+	}
+	if !containsToken(tokens, "runtime-backend:/usr/bin/docker") {
+		t.Fatalf("expected runtime backend token, got %v", tokens)
+	}
+}
+
+func containsToken(tokens []string, want string) bool {
+	for _, token := range tokens {
+		if token == want {
+			return true
+		}
+	}
+	return false
 }
 
 // submitReceiptWithRetryTestable is the same logic as submitReceiptWithRetry

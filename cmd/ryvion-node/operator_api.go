@@ -34,6 +34,7 @@ type operatorRuntime struct {
 	deviceType      string
 	declaredCountry string
 	publicKeyHex    string
+	publicAIOptIn   bool
 	caps            hw.CapSet
 	client          *hub.Client
 
@@ -51,12 +52,15 @@ type operatorRuntime struct {
 	currentJob        *operatorJob
 	recentJobs        []operatorJob
 	infMgr            *inference.Manager
+	runtimeMgr        *runtimeManager
 }
 
 type operatorJob struct {
 	JobID          string         `json:"job_id"`
 	Kind           string         `json:"kind"`
 	Image          string         `json:"image,omitempty"`
+	ExecutorKind   string         `json:"executor_kind,omitempty"`
+	AssuranceClass string         `json:"assurance_class,omitempty"`
 	Status         string         `json:"status"`
 	StartedAt      time.Time      `json:"started_at"`
 	CompletedAt    time.Time      `json:"completed_at,omitempty"`
@@ -102,11 +106,23 @@ type operatorMachine struct {
 type operatorRuntimeInfo struct {
 	LocalAPIURL              string `json:"local_api_url"`
 	StatusMessage            string `json:"status_message,omitempty"`
-	DockerCLIPresent         bool   `json:"docker_cli_present"`
-	DockerReady              bool   `json:"docker_ready"`
-	DockerGPUEnabled         bool   `json:"docker_gpu_enabled"`
+	RuntimeReady             bool   `json:"runtime_ready"`
+	RuntimeGPUReady          bool   `json:"runtime_gpu_ready"`
+	RuntimeHealth            string `json:"runtime_health,omitempty"`
+	RuntimeVersion           string `json:"runtime_version,omitempty"`
+	RuntimeChannel           string `json:"runtime_channel,omitempty"`
+	RuntimeProvider          string `json:"runtime_provider,omitempty"`
+	RuntimeMode              string `json:"runtime_mode,omitempty"`
+	RuntimeSource            string `json:"runtime_source,omitempty"`
+	RuntimeArtifact          string `json:"runtime_artifact,omitempty"`
+	RuntimeBinary            string `json:"runtime_binary,omitempty"`
+	RuntimeBackend           string `json:"runtime_backend,omitempty"`
+	RuntimeBackendPresent    bool   `json:"runtime_backend_present"`
+	RuntimeManifestHash      string `json:"runtime_manifest_hash,omitempty"`
+	ManagedOCIGPUReady       bool   `json:"managed_oci_gpu_ready"`
 	GPUReady                 bool   `json:"gpu_ready"`
 	SpatialReady             bool   `json:"spatial_ready"`
+	PublicAIOptIn            bool   `json:"public_ai_opt_in"`
 	PublicAIReady            bool   `json:"public_ai_ready"`
 	NativeInferenceSupported bool   `json:"native_inference_supported"`
 	NativeInferenceReady     bool   `json:"native_inference_ready"`
@@ -160,13 +176,14 @@ type logRing struct {
 	limit   int
 }
 
-func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, caps hw.CapSet, client *hub.Client) *operatorRuntime {
+func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, publicAIOptIn bool, caps hw.CapSet, client *hub.Client) *operatorRuntime {
 	return &operatorRuntime{
 		version:         strings.TrimSpace(version),
 		hubURL:          strings.TrimSpace(hubURL),
 		deviceType:      strings.TrimSpace(deviceType),
 		declaredCountry: strings.ToUpper(strings.TrimSpace(declaredCountry)),
 		publicKeyHex:    client.PublicKeyHex(),
+		publicAIOptIn:   publicAIOptIn,
 		caps:            caps,
 		client:          client,
 		recentJobs:      make([]operatorJob, 0, 20),
@@ -228,6 +245,45 @@ func (s *operatorRuntime) setInferenceManager(infMgr *inference.Manager) {
 	s.infMgr = infMgr
 }
 
+func (s *operatorRuntime) setRuntimeManager(runtimeMgr *runtimeManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runtimeMgr = runtimeMgr
+}
+
+func (s *operatorRuntime) publicAIOptInEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.publicAIOptIn
+}
+
+func (s *operatorRuntime) updatePublicAIOptIn(enabled bool) error {
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: enabled}); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.publicAIOptIn = enabled
+	caps := s.caps
+	infMgr := s.infMgr
+	runtimeMgr := s.runtimeMgr
+	client := s.client
+	s.mu.Unlock()
+
+	report := buildHealthReport(caps, infMgr, runtimeMgr)
+	s.recordHealthReport(report)
+
+	if client != nil {
+		reportCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := client.SendHealthReport(reportCtx, report); err != nil {
+			slog.Warn("public AI preference health sync failed", "error", err)
+		}
+	}
+
+	return nil
+}
+
 func (s *operatorRuntime) setRegistered(ok bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -265,11 +321,13 @@ func (s *operatorRuntime) startJob(work *hub.WorkAssignment) {
 		return
 	}
 	job := operatorJob{
-		JobID:     strings.TrimSpace(work.JobID),
-		Kind:      strings.TrimSpace(work.Kind),
-		Image:     strings.TrimSpace(work.Image),
-		Status:    "running",
-		StartedAt: time.Now(),
+		JobID:          strings.TrimSpace(work.JobID),
+		Kind:           strings.TrimSpace(work.Kind),
+		Image:          strings.TrimSpace(work.Image),
+		ExecutorKind:   executorKindForAssignment(work),
+		AssuranceClass: assuranceClassForAssignment(work),
+		Status:         "running",
+		StartedAt:      time.Now(),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -285,12 +343,14 @@ func (s *operatorRuntime) finishJob(work *hub.WorkAssignment, result *runnerResu
 	defer s.mu.Unlock()
 
 	job := operatorJob{
-		JobID:       strings.TrimSpace(work.JobID),
-		Kind:        strings.TrimSpace(work.Kind),
-		Image:       strings.TrimSpace(work.Image),
-		Status:      "completed",
-		StartedAt:   now,
-		CompletedAt: now,
+		JobID:          strings.TrimSpace(work.JobID),
+		Kind:           strings.TrimSpace(work.Kind),
+		Image:          strings.TrimSpace(work.Image),
+		ExecutorKind:   executorKindForAssignment(work),
+		AssuranceClass: assuranceClassForAssignment(work),
+		Status:         "completed",
+		StartedAt:      now,
+		CompletedAt:    now,
 	}
 	if s.currentJob != nil && s.currentJob.JobID == job.JobID {
 		job.StartedAt = s.currentJob.StartedAt
@@ -376,6 +436,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	copy(recent, s.recentJobs)
 	report := s.lastHealthReport
 	infMgr := s.infMgr
+	publicAIOptIn := s.publicAIOptIn
 	s.mu.RUnlock()
 
 	var currentJob *operatorJob
@@ -384,23 +445,38 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		currentJob = &cp
 	}
 
+	nativeSupported := inference.NativeRuntimeAvailable()
+	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
+
 	runtimeInfo := operatorRuntimeInfo{
 		LocalAPIURL:              fmt.Sprintf("http://127.0.0.1:%s", apiPort),
 		StatusMessage:            report.Message,
-		DockerCLIPresent:         statusToken(report.Message, "docker-cli:present"),
-		DockerReady:              statusToken(report.Message, "docker-ready:1"),
-		DockerGPUEnabled:         statusToken(report.Message, "docker-gpu:ok"),
+		RuntimeReady:             statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1"),
+		RuntimeGPUReady:          statusToken(report.Message, "runtime-gpu-ready:1") || statusToken(report.Message, "docker-gpu:ok"),
+		RuntimeHealth:            statusTokenValue(report.Message, "runtime-health:"),
+		RuntimeVersion:           statusTokenValue(report.Message, "runtime-version:"),
+		RuntimeChannel:           statusTokenValue(report.Message, "runtime-channel:"),
+		RuntimeProvider:          statusTokenValue(report.Message, "runtime-provider:"),
+		RuntimeMode:              statusTokenValue(report.Message, "runtime-mode:"),
+		RuntimeSource:            statusTokenValue(report.Message, "runtime-source:"),
+		RuntimeArtifact:          statusTokenValue(report.Message, "runtime-artifact:"),
+		RuntimeBinary:            statusTokenValue(report.Message, "runtime-binary:"),
+		RuntimeBackend:           statusTokenValue(report.Message, "runtime-backend:"),
+		RuntimeManifestHash:      statusTokenValue(report.Message, "runtime-manifest-hash:"),
 		GPUReady:                 report.GPUReady,
 		SpatialReady:             statusToken(report.Message, "spatial-ready:1"),
-		PublicAIReady:            statusToken(report.Message, "public-ai-ready:1"),
-		NativeInferenceSupported: statusToken(report.Message, "native-inference:supported"),
-		NativeInferenceReady:     statusToken(report.Message, "native-inference-ready:1"),
-		PublicInferenceReady:     statusToken(report.Message, "public-inference-ready:1"),
+		PublicAIOptIn:            publicAIOptIn,
+		PublicAIReady:            publicAIOptIn,
+		NativeInferenceSupported: nativeSupported,
+		NativeInferenceReady:     nativeReady,
+		PublicInferenceReady:     publicAIOptIn && nativeReady,
 		DiskGB:                   statusTokenUint(report.Message, "disk_gb:"),
 	}
 	if infMgr != nil {
 		runtimeInfo.NativeModel = infMgr.ModelName()
 	}
+	runtimeInfo.RuntimeBackendPresent = runtimeInfo.RuntimeBackend != ""
+	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
 
 	return operatorStatusResponse{
 		Version:          s.version,
@@ -449,41 +525,45 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	lastPayoutErr := s.lastPayoutError
 	report := s.lastHealthReport
 	infMgr := s.infMgr
+	publicAIOptIn := s.publicAIOptIn
 	s.mu.RUnlock()
+
+	nativeReady := inference.NativeRuntimeAvailable() && infMgr != nil && infMgr.Healthy()
+	publicInferenceReady := publicAIOptIn && nativeReady
 
 	runtimeChecks := []operatorDiagnosticCheck{
 		{
-			Key:      "docker_cli",
-			Label:    "Docker CLI",
-			Ready:    statusToken(report.Message, "docker-cli:present"),
-			Detail:   "Required to inspect and run container-backed workloads.",
+			Key:      "runtime_cli",
+			Label:    "Execution runtime",
+			Ready:    statusTokenValue(report.Message, "runtime-backend:") != "",
+			Detail:   "Required to inspect and run managed OCI workloads.",
 			Severity: "warn",
 		},
 		{
-			Key:      "docker_runtime",
-			Label:    "Docker runtime",
-			Ready:    statusToken(report.Message, "docker-ready:1"),
-			Detail:   "Required for video transcode, embeddings, and other OCI workloads.",
+			Key:      "managed_runtime",
+			Label:    "Managed OCI runtime",
+			Ready:    statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1"),
+			Detail:   "Required for video transcode, embeddings, agent hosting, and other OCI workloads.",
 			Severity: "warn",
 		},
 		{
 			Key:      "gpu_runtime",
 			Label:    "GPU runtime",
-			Ready:    report.GPUReady || statusToken(report.Message, "docker-gpu:ok"),
+			Ready:    report.GPUReady || statusToken(report.Message, "runtime-gpu-ready:1") || statusToken(report.Message, "docker-gpu:ok"),
 			Detail:   "Required for GPU-backed workload classes.",
 			Severity: "neutral",
 		},
 		{
 			Key:      "public_ai_opt_in",
 			Label:    "Public AI opt-in",
-			Ready:    statusToken(report.Message, "public-ai-ready:1"),
+			Ready:    publicAIOptIn,
 			Detail:   "Required before buyer-facing AI jobs can land on this machine.",
 			Severity: "warn",
 		},
 		{
 			Key:      "native_inference",
 			Label:    "Native inference",
-			Ready:    statusToken(report.Message, "public-inference-ready:1"),
+			Ready:    publicInferenceReady,
 			Detail:   "Required before public chat inference can use the native runtime on this machine.",
 			Severity: "neutral",
 		},
@@ -518,20 +598,20 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	}
 
 	recommendations := make([]string, 0, 6)
-	if !statusToken(report.Message, "docker-ready:1") {
-		recommendations = append(recommendations, "Start Docker before login so container-backed workloads can land immediately.")
+	if !statusToken(report.Message, "runtime-ready:1") && !statusToken(report.Message, "docker-ready:1") {
+		recommendations = append(recommendations, "Repair or start the execution runtime before login so managed OCI workloads can land immediately.")
 	}
-	if !statusToken(report.Message, "native-inference-ready:1") {
+	if !nativeReady {
 		recommendations = append(recommendations, "Load or repair the native model path if you want low-latency gateway inference without OCI startup.")
 	}
-	if statusToken(report.Message, "native-inference-ready:1") && !statusToken(report.Message, "public-inference-ready:1") {
-		recommendations = append(recommendations, "Set RYV_PUBLIC_AI=1 only on machines you explicitly want exposed to buyer-facing AI jobs.")
+	if nativeReady && !publicInferenceReady {
+		recommendations = append(recommendations, "Enable public participation only on machines you explicitly want exposed to buyer-facing AI jobs.")
 	}
 	if strings.TrimSpace(declaredCountry) == "" {
 		recommendations = append(recommendations, "Declare country on the node runtime before pursuing sovereign routing or country-restricted workloads.")
 	}
 	if len(issues) == 0 && len(recommendations) == 0 {
-		recommendations = append(recommendations, "Runtime posture is clean. Keep Docker and the node service running to preserve workload eligibility.")
+		recommendations = append(recommendations, "Runtime posture is clean. Keep the node service and execution runtime healthy to preserve workload eligibility.")
 	}
 
 	return operatorDiagnosticsResponse{
@@ -571,6 +651,24 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 			"current_job": current,
 			"jobs":        jobs,
 		})
+	})
+	mux.HandleFunc("POST /api/v1/operator/preferences/public-ai", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
+			return
+		}
+		if body.Enabled == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "enabled required"})
+			return
+		}
+		if err := state.updatePublicAIOptIn(*body.Enabled); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, state.statusSnapshot(port))
 	})
 	mux.HandleFunc("GET /api/v1/operator/logs", func(w http.ResponseWriter, r *http.Request) {
 		limit := 200
@@ -777,6 +875,20 @@ func statusTokenUint(msg, prefix string) uint64 {
 		}
 	}
 	return 0
+}
+
+func statusTokenValue(msg, prefix string) string {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if prefix == "" {
+		return ""
+	}
+	for _, part := range strings.Split(msg, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(strings.ToLower(part), prefix) {
+			return strings.TrimSpace(part[len(prefix):])
+		}
+	}
+	return ""
 }
 
 func splitStatusTokens(msg string) []string {

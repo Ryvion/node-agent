@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Ryvion/node-agent/internal/runtimeexec"
 )
 
 type Result struct {
@@ -59,13 +61,13 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		slog.Warn("payload prefetch failed (non-fatal)", "error", err)
 	}
 
-	dockerBin, err := resolveDocker()
+	ociExec, err := resolveOCIExecutor()
 	if err != nil {
-		return nil, fmt.Errorf("docker not found: %w", err)
+		return nil, fmt.Errorf("OCI runtime not found: %w", err)
 	}
 
 	name := fmt.Sprintf("ryv_%s", filepath.Base(workDir))
-	defer exec.Command(dockerBin, "rm", "-f", name).Run()
+	defer exec.Command(ociExec.command, ociCommandArgs(ociExec, "rm", "-f", name)...).Run()
 
 	memLimit := strings.TrimSpace(os.Getenv("RYV_CONTAINER_MEMORY"))
 	if memLimit == "" {
@@ -82,13 +84,13 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		networkMode = "--network=bridge"
 	}
 
-	// Pull latest image before running (ensures cached stale images are refreshed).
+	// Pull the latest OCI image before running so cached stale images are refreshed.
 	pullCtx, pullCancel := context.WithTimeout(ctx, 15*time.Minute)
-	pullCmd := exec.CommandContext(pullCtx, dockerBin, "pull", image)
+	pullCmd := exec.CommandContext(pullCtx, ociExec.command, ociCommandArgs(ociExec, "pull", image)...)
 	if pullOut, pullErr := pullCmd.CombinedOutput(); pullErr != nil {
-		slog.Warn("docker pull failed (will try cached image)", "image", image, "error", pullErr, "output", string(pullOut[:min(len(pullOut), 200)]))
+		slog.Warn("managed OCI image pull failed (will try cached image)", "image", image, "error", pullErr, "output", string(pullOut[:min(len(pullOut), 200)]))
 	} else {
-		slog.Info("docker pull succeeded", "image", image)
+		slog.Info("managed OCI image pull succeeded", "image", image)
 	}
 	pullCancel()
 
@@ -107,7 +109,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	args = append(args, image)
 
 	start := time.Now()
-	cmd := exec.CommandContext(ctx, dockerBin, args...)
+	cmd := exec.CommandContext(ctx, ociExec.command, ociCommandArgs(ociExec, args...)...)
 	var out cappedBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -116,7 +118,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 
 	if ctx.Err() != nil {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := exec.CommandContext(killCtx, dockerBin, "kill", name).Run(); err != nil {
+		if err := exec.CommandContext(killCtx, ociExec.command, ociCommandArgs(ociExec, "kill", name)...).Run(); err != nil {
 			slog.Warn("failed to kill timed-out container", "name", name, "error", err)
 		}
 		killCancel()
@@ -251,23 +253,22 @@ func resolveWorkBase(goos string, getenv func(string) string) string {
 	return filepath.Join(programData, "Ryvion", "work")
 }
 
-// resolveDocker finds the docker binary, checking well-known paths if it's
-// not on the current PATH (common when running as a background service).
-func resolveDocker() (string, error) {
-	if p, err := exec.LookPath("docker"); err == nil {
-		return p, nil
+type ociExecutor struct {
+	command    string
+	prefixArgs []string
+}
+
+func resolveOCIExecutor() (ociExecutor, error) {
+	execConfig, err := runtimeexec.ResolveExecutor(runtime.GOOS, os.Getenv)
+	if err != nil {
+		return ociExecutor{}, err
 	}
-	for _, p := range []string{
-		"/usr/local/bin/docker",
-		"/opt/homebrew/bin/docker",
-		"/usr/bin/docker",
-		"/snap/bin/docker",
-	} {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("docker not found in PATH or common locations")
+	return ociExecutor{command: execConfig.Command, prefixArgs: execConfig.PrefixArgs}, nil
+}
+
+func ociCommandArgs(executor ociExecutor, args ...string) []string {
+	out := append([]string{}, executor.prefixArgs...)
+	return append(out, args...)
 }
 
 func resolveGPUFlag(gpus string) string {

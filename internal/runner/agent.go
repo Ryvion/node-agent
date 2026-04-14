@@ -66,16 +66,16 @@ func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(u
 		return nil, fmt.Errorf("write job.json: %w", err)
 	}
 
-	// 3. Resolve docker binary
-	dockerBin, err := resolveDocker()
+	// 3. Resolve the managed OCI executor.
+	ociExec, err := resolveOCIExecutor()
 	if err != nil {
-		return nil, fmt.Errorf("docker not found: %w", err)
+		return nil, fmt.Errorf("OCI runtime not found: %w", err)
 	}
 
 	// 4. Pull image
 	slog.Info("agent: pulling image", "image", image)
 	pullCtx, pullCancel := context.WithTimeout(ctx, 15*time.Minute)
-	pullCmd := exec.CommandContext(pullCtx, dockerBin, "pull", image)
+	pullCmd := exec.CommandContext(pullCtx, ociExec.command, ociCommandArgs(ociExec, "pull", image)...)
 	pullCmd.Stdout = io.Discard
 	pullCmd.Stderr = io.Discard
 	if err := pullCmd.Run(); err != nil {
@@ -83,7 +83,7 @@ func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(u
 	}
 	pullCancel()
 
-	// 5. Build docker run args
+	// 5. Build OCI runtime args
 	name := "ryv_agent_" + spec.DeploymentID
 
 	memLimit := strings.TrimSpace(os.Getenv("RYV_CONTAINER_MEMORY"))
@@ -137,7 +137,7 @@ func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(u
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	cmd := exec.CommandContext(runCtx, dockerBin, args...)
+	cmd := exec.CommandContext(runCtx, ociExec.command, ociCommandArgs(ociExec, args...)...)
 
 	// Capture logs (reuse cappedBuffer from oci.go)
 	var logBuf cappedBuffer
@@ -152,8 +152,8 @@ func RunAgent(ctx context.Context, image, specJSON, gpus string, healthFn func(u
 	// Ensure container is cleaned up on exit
 	defer func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_ = exec.CommandContext(killCtx, dockerBin, "stop", "--time", "10", name).Run()
-		_ = exec.CommandContext(killCtx, dockerBin, "rm", "-f", name).Run()
+		_ = exec.CommandContext(killCtx, ociExec.command, ociCommandArgs(ociExec, "stop", "--time", "10", name)...).Run()
+		_ = exec.CommandContext(killCtx, ociExec.command, ociCommandArgs(ociExec, "rm", "-f", name)...).Run()
 		killCancel()
 	}()
 

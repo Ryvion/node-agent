@@ -201,14 +201,17 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 		return nil, fmt.Errorf("work assignment missing job_id")
 	}
 	return &WorkAssignment{
-		JobID:        out.JobID,
-		JobPubkey:    out.JobPubkey,
-		Kind:         out.Kind,
-		PayloadURL:   out.PayloadURL,
-		PricePerUnit: out.PricePerUnit,
-		Units:        out.Units,
-		Image:        out.Image,
-		SpecJSON:     out.SpecJSON,
+		JobID:               out.JobID,
+		JobPubkey:           out.JobPubkey,
+		Kind:                out.Kind,
+		PayloadURL:          out.PayloadURL,
+		PricePerUnit:        out.PricePerUnit,
+		Units:               out.Units,
+		Image:               out.Image,
+		SpecJSON:            out.SpecJSON,
+		ExecutorKind:        out.ExecutorKind,
+		AssuranceClass:      out.AssuranceClass,
+		RuntimeRequirements: out.RuntimeRequirements,
 	}, nil
 }
 
@@ -354,7 +357,7 @@ func (c *Client) SendHealthReport(ctx context.Context, report HealthReport) erro
 		PublicKeyHex: pubHex,
 		TimestampMs:  ts,
 		GPUReady:     report.GPUReady,
-		DockerGPU:    report.DockerGPU,
+		RuntimeGPU:   report.RuntimeGPU,
 		Message:      message,
 	}
 	body.Signature = c.sign(
@@ -362,7 +365,7 @@ func (c *Client) SendHealthReport(ctx context.Context, report HealthReport) erro
 		pubHex,
 		strconv.FormatInt(ts, 10),
 		boolAsInt(report.GPUReady),
-		boolAsInt(report.DockerGPU),
+		boolAsInt(report.RuntimeGPU),
 		message,
 	)
 	return c.post(ctx, "/api/v1/node/health", body, nil)
@@ -699,14 +702,30 @@ type Metrics struct {
 }
 
 type WorkAssignment struct {
-	JobID        string
-	JobPubkey    string
-	Kind         string
-	PayloadURL   string
-	PricePerUnit uint64
-	Units        uint32
-	Image        string
-	SpecJSON     string
+	JobID               string
+	JobPubkey           string
+	Kind                string
+	PayloadURL          string
+	PricePerUnit        uint64
+	Units               uint32
+	Image               string
+	SpecJSON            string
+	ExecutorKind        string
+	AssuranceClass      string
+	RuntimeRequirements RuntimeRequirements
+}
+
+type RuntimeRequirements struct {
+	NeedsGPU             bool     `json:"needs_gpu,omitempty"`
+	NeedsManagedOCI      bool     `json:"needs_managed_oci,omitempty"`
+	NeedsManagedOCIGPU   bool     `json:"needs_managed_oci_gpu,omitempty"`
+	NeedsNativeStreaming bool     `json:"needs_native_streaming,omitempty"`
+	NeedsAgentHosting    bool     `json:"needs_agent_hosting,omitempty"`
+	Tooling              []string `json:"tooling,omitempty"`
+	MinDiskGB            uint64   `json:"min_disk_gb,omitempty"`
+	MinVRAMMB            uint32   `json:"min_vram_mb,omitempty"`
+	Jurisdiction         string   `json:"jurisdiction,omitempty"`
+	TrustLevel           string   `json:"trust_level,omitempty"`
 }
 
 type Receipt struct {
@@ -719,7 +738,7 @@ type Receipt struct {
 type HealthReport struct {
 	TimestampMs int64
 	GPUReady    bool
-	DockerGPU   bool
+	RuntimeGPU  bool
 	Message     string
 }
 
@@ -769,15 +788,18 @@ type heartbeatRequest struct {
 }
 
 type workResponse struct {
-	HasWork      *bool  `json:"has_work"`
-	JobID        string `json:"job_id"`
-	JobPubkey    string `json:"job_pubkey"`
-	Kind         string `json:"kind"`
-	PayloadURL   string `json:"payload_url"`
-	PricePerUnit uint64 `json:"price_per_unit"`
-	Units        uint32 `json:"units"`
-	Image        string `json:"image"`
-	SpecJSON     string `json:"spec_json"`
+	HasWork             *bool               `json:"has_work"`
+	JobID               string              `json:"job_id"`
+	JobPubkey           string              `json:"job_pubkey"`
+	Kind                string              `json:"kind"`
+	PayloadURL          string              `json:"payload_url"`
+	PricePerUnit        uint64              `json:"price_per_unit"`
+	Units               uint32              `json:"units"`
+	Image               string              `json:"image"`
+	SpecJSON            string              `json:"spec_json"`
+	ExecutorKind        string              `json:"executor_kind"`
+	AssuranceClass      string              `json:"assurance_class"`
+	RuntimeRequirements RuntimeRequirements `json:"runtime_requirements"`
 }
 
 type receiptRequest struct {
@@ -816,7 +838,7 @@ type healthRequest struct {
 	PublicKeyHex string `json:"public_key_hex"`
 	TimestampMs  int64  `json:"timestamp_ms"`
 	GPUReady     bool   `json:"gpu_ready"`
-	DockerGPU    bool   `json:"docker_gpu"`
+	RuntimeGPU   bool   `json:"runtime_gpu"`
 	Message      string `json:"message"`
 	Signature    []byte `json:"signature"`
 }
