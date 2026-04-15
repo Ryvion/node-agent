@@ -23,6 +23,7 @@ type runtimeSnapshot struct {
 	CLIInstalled bool
 	Ready        bool
 	GPUReady     bool
+	Warming      bool
 	Health       string
 	Version      string
 	Channel      string
@@ -74,10 +75,15 @@ func (m *runtimeManager) Snapshot(gpuDetected bool) runtimeSnapshot {
 	}
 	engine := sanitizeStatusValue(firstNonEmpty(m.contract.Engine, runtimeexec.ResolveEnginePath(runtime.GOOS, os.Getenv)))
 	engineKind := sanitizeStatusValue(firstNonEmpty(m.contract.EngineKind, runtimeexec.EngineKind(engine)))
+	warming := runtimeWarmingHeuristic(runtime.GOOS, backendCLI, runtimeReady, health, m.contract.Backend, engineKind)
+	if warming {
+		health = "warming"
+	}
 	return runtimeSnapshot{
 		CLIInstalled: backendCLI,
 		Ready:        runtimeReady,
 		GPUReady:     runtimeGPUReady,
+		Warming:      warming,
 		Health:       health,
 		Version:      version,
 		Channel:      sanitizeStatusValue(m.contract.Channel),
@@ -120,12 +126,20 @@ func (m *runtimeManager) snapshotFromManagedRuntimeWrapper(gpuDetected bool) (ru
 	if manifestHash == "" {
 		manifestHash = computeRuntimeManifestHash(m.contract)
 	}
+	health := sanitizeStatusValue(status.Health)
+	engineKind := sanitizeStatusValue(firstNonEmpty(status.EngineKind, runtimeexec.EngineKind(status.EnginePath), m.contract.EngineKind))
+	backend := sanitizeStatusValue(firstNonEmpty(status.BackendPath, m.contract.Backend))
+	warming := runtimeWarmingHeuristic(runtime.GOOS, status.CLIInstalled, status.Ready, health, backend, engineKind)
+	if warming {
+		health = "warming"
+	}
 
 	return runtimeSnapshot{
 		CLIInstalled: status.CLIInstalled,
 		Ready:        status.Ready,
 		GPUReady:     status.GPUReady,
-		Health:       sanitizeStatusValue(status.Health),
+		Warming:      warming,
+		Health:       health,
 		Version:      version,
 		Channel:      sanitizeStatusValue(m.contract.Channel),
 		Provider:     sanitizeStatusValue(m.contract.Provider),
@@ -133,9 +147,9 @@ func (m *runtimeManager) snapshotFromManagedRuntimeWrapper(gpuDetected bool) (ru
 		Source:       sanitizeStatusValue(m.contract.Source),
 		Artifact:     sanitizeStatusValue(m.contract.Artifact),
 		Binary:       sanitizeStatusValue(status.BinaryPath),
-		Backend:      sanitizeStatusValue(firstNonEmpty(status.BackendPath, m.contract.Backend)),
+		Backend:      backend,
 		Engine:       sanitizeStatusValue(firstNonEmpty(status.EnginePath, m.contract.Engine)),
-		EngineKind:   sanitizeStatusValue(firstNonEmpty(status.EngineKind, runtimeexec.EngineKind(status.EnginePath), m.contract.EngineKind)),
+		EngineKind:   engineKind,
 		ManifestHash: manifestHash,
 	}, true
 }
@@ -145,6 +159,7 @@ func (m *runtimeManager) StatusTokens(gpuDetected bool) []string {
 	return []string{
 		boolStatusToken("runtime-ready", snap.Ready),
 		boolStatusToken("runtime-gpu-ready", snap.GPUReady),
+		boolStatusToken("runtime-warming", snap.Warming),
 		"runtime-health:" + sanitizeStatusValue(snap.Health),
 		"runtime-version:" + sanitizeStatusValue(snap.Version),
 		"runtime-manifest-hash:" + sanitizeStatusValue(snap.ManifestHash),
@@ -169,6 +184,7 @@ func (m *runtimeManager) ReceiptMetadata(gpuDetected bool) map[string]any {
 		"runtime_version":       snap.Version,
 		"runtime_manifest_hash": snap.ManifestHash,
 		"runtime_health":        snap.Health,
+		"runtime_warming":       snap.Warming,
 		"runtime_channel":       snap.Channel,
 		"runtime_provider":      snap.Provider,
 		"runtime_mode":          snap.Mode,
@@ -179,6 +195,22 @@ func (m *runtimeManager) ReceiptMetadata(gpuDetected bool) map[string]any {
 		"runtime_engine":        snap.Engine,
 		"runtime_engine_kind":   snap.EngineKind,
 	}
+}
+
+func runtimeWarmingHeuristic(goos string, cliInstalled bool, ready bool, health string, backend string, engineKind string) bool {
+	if ready {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(health), "warming") {
+		return true
+	}
+	if goos != "windows" || !cliInstalled {
+		return false
+	}
+	if strings.TrimSpace(backend) == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(engineKind), "podman")
 }
 
 func boolStatusToken(prefix string, ready bool) string {

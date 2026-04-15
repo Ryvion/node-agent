@@ -108,7 +108,10 @@ type operatorRuntimeInfo struct {
 	StatusMessage            string `json:"status_message,omitempty"`
 	RuntimeReady             bool   `json:"runtime_ready"`
 	RuntimeGPUReady          bool   `json:"runtime_gpu_ready"`
+	RuntimeWarming           bool   `json:"runtime_warming"`
 	RuntimeHealth            string `json:"runtime_health,omitempty"`
+	RuntimePosture           string `json:"runtime_posture,omitempty"`
+	RuntimeDetail            string `json:"runtime_detail,omitempty"`
 	RuntimeVersion           string `json:"runtime_version,omitempty"`
 	RuntimeChannel           string `json:"runtime_channel,omitempty"`
 	RuntimeProvider          string `json:"runtime_provider,omitempty"`
@@ -474,14 +477,19 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
 	runtimeReady := statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1")
 	runtimeGPUReady := statusToken(report.Message, "runtime-gpu-ready:1") || statusToken(report.Message, "docker-gpu:ok")
-	sovereignReviewReady, sovereignStatus, sovereignDetail := deriveSovereignPosture(registered, s.declaredCountry, runtimeReady, nativeReady)
+	runtimeHealth := statusTokenValue(report.Message, "runtime-health:")
+	runtimePosture, runtimeDetail, runtimeWarming := deriveRuntimePosture(runtimeReady, runtimeHealth)
+	sovereignReviewReady, sovereignStatus, sovereignDetail := deriveSovereignPosture(registered, s.declaredCountry, runtimeReady, runtimeHealth, nativeReady)
 
 	runtimeInfo := operatorRuntimeInfo{
 		LocalAPIURL:              fmt.Sprintf("http://127.0.0.1:%s", apiPort),
 		StatusMessage:            report.Message,
 		RuntimeReady:             runtimeReady,
 		RuntimeGPUReady:          runtimeGPUReady,
-		RuntimeHealth:            statusTokenValue(report.Message, "runtime-health:"),
+		RuntimeWarming:           runtimeWarming,
+		RuntimeHealth:            runtimeHealth,
+		RuntimePosture:           runtimePosture,
+		RuntimeDetail:            runtimeDetail,
 		RuntimeVersion:           statusTokenValue(report.Message, "runtime-version:"),
 		RuntimeChannel:           statusTokenValue(report.Message, "runtime-channel:"),
 		RuntimeProvider:          statusTokenValue(report.Message, "runtime-provider:"),
@@ -565,7 +573,17 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	nativeReady := inference.NativeRuntimeAvailable() && infMgr != nil && infMgr.Healthy()
 	publicInferenceReady := publicAIOptIn && nativeReady
 	runtimeReady := statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1")
-	sovereignReviewReady, _, sovereignDetail := deriveSovereignPosture(registered, declaredCountry, runtimeReady, nativeReady)
+	runtimeHealth := statusTokenValue(report.Message, "runtime-health:")
+	runtimePosture, runtimeDetail, runtimeWarming := deriveRuntimePosture(runtimeReady, runtimeHealth)
+	sovereignReviewReady, _, sovereignDetail := deriveSovereignPosture(registered, declaredCountry, runtimeReady, runtimeHealth, nativeReady)
+	managedRuntimeDetail := "Required for video transcode, embeddings, agent hosting, and other OCI workloads."
+	if runtimeWarming {
+		managedRuntimeDetail = runtimeDetail
+	}
+	managedRuntimeSeverity := "warn"
+	if runtimeWarming {
+		managedRuntimeSeverity = "neutral"
+	}
 
 	runtimeChecks := []operatorDiagnosticCheck{
 		{
@@ -578,9 +596,9 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 		{
 			Key:      "managed_runtime",
 			Label:    "Managed OCI runtime",
-			Ready:    statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1"),
-			Detail:   "Required for video transcode, embeddings, agent hosting, and other OCI workloads.",
-			Severity: "warn",
+			Ready:    runtimeReady,
+			Detail:   managedRuntimeDetail,
+			Severity: managedRuntimeSeverity,
 		},
 		{
 			Key:      "gpu_runtime",
@@ -641,8 +659,12 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	}
 
 	recommendations := make([]string, 0, 6)
-	if !statusToken(report.Message, "runtime-ready:1") && !statusToken(report.Message, "docker-ready:1") {
-		recommendations = append(recommendations, "Repair or start the execution runtime before login so managed OCI workloads can land immediately.")
+	if !runtimeReady {
+		if runtimeWarming {
+			recommendations = append(recommendations, "Leave the node online while the managed runtime finishes first-run startup, then refresh status before attempting repair again.")
+		} else {
+			recommendations = append(recommendations, "Repair or start the execution runtime before login so managed OCI workloads can land immediately.")
+		}
 	}
 	if !nativeReady {
 		recommendations = append(recommendations, "Load or repair the native model path if you want low-latency gateway inference without OCI startup.")
@@ -652,6 +674,9 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	}
 	if strings.TrimSpace(declaredCountry) == "" {
 		recommendations = append(recommendations, "Declare country on the node runtime before pursuing sovereign routing or country-restricted workloads.")
+	}
+	if runtimePosture == "warming" && len(issues) == 0 {
+		recommendations = append(recommendations, "Managed OCI runtime is still warming in the background. Gateway-native inference can continue using the local model path while OCI startup finishes.")
 	}
 	if len(issues) == 0 && len(recommendations) == 0 {
 		recommendations = append(recommendations, "Runtime posture is clean. Keep the node service and execution runtime healthy to preserve workload eligibility.")
@@ -673,7 +698,23 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	}
 }
 
-func deriveSovereignPosture(registered bool, declaredCountry string, runtimeReady bool, nativeReady bool) (bool, string, string) {
+func deriveRuntimePosture(runtimeReady bool, runtimeHealth string) (string, string, bool) {
+	health := strings.ToLower(strings.TrimSpace(runtimeHealth))
+	switch {
+	case runtimeReady || health == "ready":
+		return "ready", "Managed OCI runtime is ready for container-backed workloads.", false
+	case health == "warming":
+		return "warming", "Managed OCI runtime is installed and still finishing background startup.", true
+	case health == "degraded":
+		return "degraded", "Managed OCI runtime is installed but not yet healthy for OCI workloads.", false
+	case health == "missing", health == "":
+		return "unavailable", "Managed OCI runtime is not available on this machine.", false
+	default:
+		return health, fmt.Sprintf("Managed OCI runtime health is reported as %s.", health), false
+	}
+}
+
+func deriveSovereignPosture(registered bool, declaredCountry string, runtimeReady bool, runtimeHealth string, nativeReady bool) (bool, string, string) {
 	if strings.TrimSpace(declaredCountry) == "" {
 		return false, "country_missing", "Declare country before sovereign routing review can begin."
 	}
@@ -681,6 +722,9 @@ func deriveSovereignPosture(registered bool, declaredCountry string, runtimeRead
 		return false, "registration_pending", "The node must register successfully before sovereign routing review can proceed."
 	}
 	if !runtimeReady && !nativeReady {
+		if strings.EqualFold(strings.TrimSpace(runtimeHealth), "warming") {
+			return false, "runtime_warming", "Managed execution runtime is still warming in the background. Sovereign review can continue once local runtime readiness turns green, or sooner if native inference becomes healthy."
+		}
 		return false, "runtime_unavailable", "Bring either the native inference path or the managed execution runtime online before sovereign workloads can be considered."
 	}
 	return true, "review_ready", "Local prerequisites are satisfied. Final sovereign eligibility still depends on hub trust review and jurisdiction policy."

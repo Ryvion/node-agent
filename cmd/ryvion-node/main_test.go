@@ -421,6 +421,17 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 	}
 }
 
+func TestRuntimeWarmingHeuristicWindowsPodman(t *testing.T) {
+	t.Parallel()
+
+	if !runtimeWarmingHeuristic("windows", true, false, "degraded", `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd`, "podman") {
+		t.Fatal("expected Windows Podman runtime to be treated as warming during first-run startup")
+	}
+	if runtimeWarmingHeuristic("linux", true, false, "degraded", "/opt/ryvion/runtime/backend/ryvion-oci", "podman") {
+		t.Fatal("did not expect non-Windows runtime to be treated as warming")
+	}
+}
+
 func containsToken(tokens []string, want string) bool {
 	for _, token := range tokens {
 		if token == want {

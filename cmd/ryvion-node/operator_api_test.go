@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Ryvion/node-agent/internal/hub"
 )
 
 func TestAllowLocalOrigin(t *testing.T) {
@@ -121,6 +123,7 @@ func TestDeriveSovereignPosture(t *testing.T) {
 		registered      bool
 		declaredCountry string
 		runtimeReady    bool
+		runtimeHealth   string
 		nativeReady     bool
 		wantReady       bool
 		wantStatus      string
@@ -141,6 +144,13 @@ func TestDeriveSovereignPosture(t *testing.T) {
 			registered:      true,
 			declaredCountry: "CA",
 			wantStatus:      "runtime_unavailable",
+		},
+		{
+			name:            "runtime warming surfaces warmup posture",
+			registered:      true,
+			declaredCountry: "CA",
+			runtimeHealth:   "warming",
+			wantStatus:      "runtime_warming",
 		},
 		{
 			name:            "local prerequisites satisfied",
@@ -164,7 +174,7 @@ func TestDeriveSovereignPosture(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotReady, gotStatus, gotDetail := deriveSovereignPosture(tc.registered, tc.declaredCountry, tc.runtimeReady, tc.nativeReady)
+			gotReady, gotStatus, gotDetail := deriveSovereignPosture(tc.registered, tc.declaredCountry, tc.runtimeReady, tc.runtimeHealth, tc.nativeReady)
 			if gotReady != tc.wantReady {
 				t.Fatalf("ready = %v, want %v", gotReady, tc.wantReady)
 			}
@@ -175,6 +185,69 @@ func TestDeriveSovereignPosture(t *testing.T) {
 				t.Fatal("expected non-empty detail")
 			}
 		})
+	}
+}
+
+func TestDeriveRuntimePosture(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		runtimeReady  bool
+		runtimeHealth string
+		wantPosture   string
+		wantWarming   bool
+	}{
+		{name: "ready wins", runtimeReady: true, runtimeHealth: "degraded", wantPosture: "ready"},
+		{name: "warming posture", runtimeHealth: "warming", wantPosture: "warming", wantWarming: true},
+		{name: "missing defaults to unavailable", wantPosture: "unavailable"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotPosture, gotDetail, gotWarming := deriveRuntimePosture(tc.runtimeReady, tc.runtimeHealth)
+			if gotPosture != tc.wantPosture {
+				t.Fatalf("posture = %q, want %q", gotPosture, tc.wantPosture)
+			}
+			if gotWarming != tc.wantWarming {
+				t.Fatalf("warming = %v, want %v", gotWarming, tc.wantWarming)
+			}
+			if gotDetail == "" {
+				t.Fatal("expected non-empty detail")
+			}
+		})
+	}
+}
+
+func TestOperatorStatusSnapshotMarksRuntimeWarmup(t *testing.T) {
+	t.Parallel()
+
+	state := &operatorRuntime{
+		version:         "dev",
+		hubURL:          "https://api.ryvion.ai",
+		deviceType:      "desktop",
+		declaredCountry: "CA",
+		publicKeyHex:    "abc123",
+		registered:      true,
+		lastHealthReport: hub.HealthReport{
+			Message: "runtime-ready:0,runtime-health:warming,runtime-backend:/opt/ryvion/runtime/backend/ryvion-oci,runtime-engine-kind:podman",
+		},
+	}
+
+	status := state.statusSnapshot("45890")
+	if !status.Runtime.RuntimeWarming {
+		t.Fatal("expected runtime_warming to be true")
+	}
+	if status.Runtime.RuntimePosture != "warming" {
+		t.Fatalf("runtime_posture = %q, want %q", status.Runtime.RuntimePosture, "warming")
+	}
+	if status.Runtime.RuntimeDetail == "" {
+		t.Fatal("expected runtime detail to be populated")
+	}
+	if status.Runtime.SovereignStatus != "runtime_warming" {
+		t.Fatalf("sovereign_status = %q, want %q", status.Runtime.SovereignStatus, "runtime_warming")
 	}
 }
 
