@@ -292,6 +292,8 @@ func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
 	t.Setenv("RYV_RUNTIME_SOURCE", "")
 	t.Setenv("RYV_RUNTIME_ARTIFACT", "")
 	t.Setenv("RYV_RUNTIME_BACKEND_BINARY", "")
+	t.Setenv("RYV_RUNTIME_ENGINE_BINARY", "")
+	t.Setenv("RYV_RUNTIME_ENGINE_KIND", "")
 	t.Setenv("RYV_RUNTIME_MANIFEST_HASH", "")
 
 	want := operatorPreferences{
@@ -303,6 +305,8 @@ func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
 		RuntimeSource:         "ryvion_runtime_kit",
 		RuntimeArtifact:       "ryvion-runtime-kit-linux-amd64-2026.04.14.tar.gz",
 		RuntimeBackendBinary:  "/opt/ryvion/runtime/backend/ryvion-oci",
+		RuntimeEngineBinary:   "/usr/bin/podman",
+		RuntimeEngineKind:     "podman",
 		RuntimeManifestHash:   "abc123",
 	}
 	if err := saveOperatorPreferences(want); err != nil {
@@ -313,7 +317,7 @@ func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveRuntimeContractMetadata() error = %v", err)
 	}
-	if got.Channel != want.RuntimeChannel || got.Version != want.RuntimeChannelVersion || got.Provider != want.RuntimeProvider || got.Mode != want.RuntimeMode || got.Source != want.RuntimeSource || got.Artifact != want.RuntimeArtifact || got.Backend != want.RuntimeBackendBinary || got.ManifestHash != want.RuntimeManifestHash {
+	if got.Channel != want.RuntimeChannel || got.Version != want.RuntimeChannelVersion || got.Provider != want.RuntimeProvider || got.Mode != want.RuntimeMode || got.Source != want.RuntimeSource || got.Artifact != want.RuntimeArtifact || got.Backend != want.RuntimeBackendBinary || got.Engine != want.RuntimeEngineBinary || got.EngineKind != want.RuntimeEngineKind || got.ManifestHash != want.RuntimeManifestHash {
 		t.Fatalf("unexpected runtime metadata: %+v", got)
 	}
 }
@@ -336,6 +340,8 @@ func TestResolveRuntimeContractMetadataPrefersEnvOverride(t *testing.T) {
 		RuntimeSource:         "ryvion_runtime_kit",
 		RuntimeArtifact:       "ryvion-runtime-kit-linux-amd64-2026.04.14.tar.gz",
 		RuntimeBackendBinary:  "/opt/ryvion/runtime/backend/ryvion-oci",
+		RuntimeEngineBinary:   "/usr/bin/podman",
+		RuntimeEngineKind:     "podman",
 		RuntimeManifestHash:   "abc123",
 	}); err != nil {
 		t.Fatalf("saveOperatorPreferences() error = %v", err)
@@ -346,11 +352,16 @@ func TestResolveRuntimeContractMetadataPrefersEnvOverride(t *testing.T) {
 	t.Setenv("RYV_RUNTIME_SOURCE", "signed_release_channel")
 	t.Setenv("RYV_RUNTIME_ARTIFACT", "ryvion-runtime-kit-windows-amd64-2026.04.14.zip")
 	t.Setenv("RYV_RUNTIME_BACKEND_BINARY", `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd`)
+	t.Setenv("RYV_RUNTIME_ENGINE_BINARY", `C:\Program Files\RedHat\Podman\podman.exe`)
+	t.Setenv("RYV_RUNTIME_ENGINE_KIND", "podman")
 	got, err := resolveRuntimeContractMetadata("dev")
 	if err != nil {
 		t.Fatalf("resolveRuntimeContractMetadata() error = %v", err)
 	}
-	if got.Provider != "oci_desktop_adapter" || got.Mode != "desktop" || got.Source != "signed_release_channel" || got.Artifact != "ryvion-runtime-kit-windows-amd64-2026.04.14.zip" || got.Backend != `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd` {
+	if got.Provider != "oci_desktop_adapter" || got.Mode != "desktop" || got.Source != "signed_release_channel" || got.Artifact != "ryvion-runtime-kit-windows-amd64-2026.04.14.zip" {
+		t.Fatalf("expected env override to win, got %+v", got)
+	}
+	if got.Backend != `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd` || got.Engine != `C:\Program Files\RedHat\Podman\podman.exe` || got.EngineKind != "podman" {
 		t.Fatalf("expected env override to win, got %+v", got)
 	}
 }
@@ -361,6 +372,8 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 		return runtimeexec.Status{
 			BinaryPath:   "/opt/ryvion/runtime/ryvion-runtime",
 			BackendPath:  "/opt/ryvion/runtime/backend/ryvion-oci",
+			EnginePath:   "/usr/bin/podman",
+			EngineKind:   "podman",
 			CLIInstalled: true,
 			Ready:        true,
 			GPUReady:     true,
@@ -380,6 +393,8 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 		Artifact:     "ryvion-runtime-kit-linux-amd64-2026.04.14.1.tar.gz",
 		Binary:       "/opt/ryvion/runtime/ryvion-runtime",
 		Backend:      "/opt/ryvion/runtime/backend/ryvion-oci",
+		Engine:       "/usr/bin/podman",
+		EngineKind:   "podman",
 		ManifestHash: "abc123",
 	})
 
@@ -387,7 +402,7 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 	if !snap.Ready || !snap.GPUReady || !snap.CLIInstalled {
 		t.Fatalf("expected wrapper snapshot to be ready, got %+v", snap)
 	}
-	if snap.Binary != "/opt/ryvion/runtime/ryvion-runtime" || snap.Backend != "/opt/ryvion/runtime/backend/ryvion-oci" {
+	if snap.Binary != "/opt/ryvion/runtime/ryvion-runtime" || snap.Backend != "/opt/ryvion/runtime/backend/ryvion-oci" || snap.Engine != "/usr/bin/podman" || snap.EngineKind != "podman" {
 		t.Fatalf("unexpected wrapper paths: %+v", snap)
 	}
 
@@ -397,6 +412,12 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 	}
 	if !containsToken(tokens, "runtime-backend:/opt/ryvion/runtime/backend/ryvion-oci") {
 		t.Fatalf("expected runtime backend token, got %v", tokens)
+	}
+	if !containsToken(tokens, "runtime-engine:/usr/bin/podman") {
+		t.Fatalf("expected runtime engine token, got %v", tokens)
+	}
+	if !containsToken(tokens, "runtime-engine-kind:podman") {
+		t.Fatalf("expected runtime engine kind token, got %v", tokens)
 	}
 }
 

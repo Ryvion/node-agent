@@ -20,6 +20,8 @@ type Executor struct {
 type Status struct {
 	BinaryPath   string `json:"binary_path"`
 	BackendPath  string `json:"backend_path"`
+	EnginePath   string `json:"engine_path"`
+	EngineKind   string `json:"engine_kind"`
 	CLIInstalled bool   `json:"cli_installed"`
 	Ready        bool   `json:"ready"`
 	GPUReady     bool   `json:"gpu_ready"`
@@ -65,6 +67,41 @@ func ResolveBackendPath(goos string, getenv func(string) string) string {
 		return "/opt/ryvion/runtime/backend/ryvion-oci"
 	default:
 		return ""
+	}
+}
+
+func ResolveEnginePath(goos string, getenv func(string) string) string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if value := strings.TrimSpace(getenv("RYV_RUNTIME_ENGINE_BINARY")); value != "" {
+		if _, err := os.Stat(value); err == nil {
+			return value
+		}
+	}
+	engine, err := resolveOCIEngineCLI(goos, getenv)
+	if err != nil {
+		return ""
+	}
+	return engine
+}
+
+func EngineKind(path string) string {
+	name := strings.ToLower(strings.TrimSpace(filepath.Base(path)))
+	if name == "" || name == "." {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(name, "podman"):
+		return "podman"
+	case strings.HasPrefix(name, "docker"):
+		return "docker"
+	case strings.HasPrefix(name, "nerdctl"):
+		return "nerdctl"
+	case name == "":
+		return ""
+	default:
+		return "unknown"
 	}
 }
 
@@ -132,6 +169,12 @@ func ProbeStatus(ctx context.Context, goos string, getenv func(string) string, b
 	}
 	if strings.TrimSpace(status.BinaryPath) == "" {
 		status.BinaryPath = binary
+	}
+	if strings.TrimSpace(status.EnginePath) == "" {
+		status.EnginePath = ResolveEnginePath(goos, getenv)
+	}
+	if strings.TrimSpace(status.EngineKind) == "" {
+		status.EngineKind = EngineKind(status.EnginePath)
 	}
 	status.Health = strings.TrimSpace(status.Health)
 	if status.Health == "" {
@@ -227,6 +270,9 @@ func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error
 			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "Docker", "Docker", "resources", "docker.exe"),
 			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "RedHat", "Podman", "podman.exe"),
 			filepath.Join(strings.TrimSpace(getenv("ProgramW6432")), "RedHat", "Podman", "podman.exe"),
+			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "RedHat", "Podman Desktop", "podman.exe"),
+			filepath.Join(strings.TrimSpace(getenv("ProgramW6432")), "RedHat", "Podman Desktop", "podman.exe"),
+			filepath.Join(strings.TrimSpace(getenv("LOCALAPPDATA")), "Microsoft", "WinGet", "Links", "podman.exe"),
 		}
 	}
 	for _, candidate := range candidates {

@@ -117,6 +117,8 @@ type operatorRuntimeInfo struct {
 	RuntimeArtifact          string `json:"runtime_artifact,omitempty"`
 	RuntimeBinary            string `json:"runtime_binary,omitempty"`
 	RuntimeBackend           string `json:"runtime_backend,omitempty"`
+	RuntimeEngine            string `json:"runtime_engine,omitempty"`
+	RuntimeEngineKind        string `json:"runtime_engine_kind,omitempty"`
 	RuntimeBackendPresent    bool   `json:"runtime_backend_present"`
 	RuntimeManifestHash      string `json:"runtime_manifest_hash,omitempty"`
 	ManagedOCIGPUReady       bool   `json:"managed_oci_gpu_ready"`
@@ -488,6 +490,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		RuntimeArtifact:          statusTokenValue(report.Message, "runtime-artifact:"),
 		RuntimeBinary:            statusTokenValue(report.Message, "runtime-binary:"),
 		RuntimeBackend:           statusTokenValue(report.Message, "runtime-backend:"),
+		RuntimeEngine:            statusTokenValue(report.Message, "runtime-engine:"),
+		RuntimeEngineKind:        statusTokenValue(report.Message, "runtime-engine-kind:"),
 		RuntimeManifestHash:      statusTokenValue(report.Message, "runtime-manifest-hash:"),
 		GPUReady:                 report.GPUReady,
 		SpatialReady:             statusToken(report.Message, "spatial-ready:1"),

@@ -20,6 +20,8 @@ type operatorPreferences struct {
 	RuntimeArtifact       string `json:"runtime_artifact,omitempty"`
 	RuntimeBinary         string `json:"runtime_binary,omitempty"`
 	RuntimeBackendBinary  string `json:"runtime_backend_binary,omitempty"`
+	RuntimeEngineBinary   string `json:"runtime_engine_binary,omitempty"`
+	RuntimeEngineKind     string `json:"runtime_engine_kind,omitempty"`
 	RuntimeManifestHash   string `json:"runtime_manifest_hash,omitempty"`
 }
 
@@ -32,6 +34,8 @@ type runtimeContractMetadata struct {
 	Artifact     string
 	Binary       string
 	Backend      string
+	Engine       string
+	EngineKind   string
 	ManifestHash string
 }
 
@@ -167,6 +171,8 @@ func resolveRuntimeContractMetadata(defaultVersion string) (runtimeContractMetad
 		Artifact:     strings.TrimSpace(prefs.RuntimeArtifact),
 		Binary:       strings.TrimSpace(prefs.RuntimeBinary),
 		Backend:      strings.TrimSpace(prefs.RuntimeBackendBinary),
+		Engine:       strings.TrimSpace(prefs.RuntimeEngineBinary),
+		EngineKind:   strings.TrimSpace(prefs.RuntimeEngineKind),
 		ManifestHash: strings.TrimSpace(prefs.RuntimeManifestHash),
 	}
 
@@ -194,6 +200,12 @@ func resolveRuntimeContractMetadata(defaultVersion string) (runtimeContractMetad
 	if value := strings.TrimSpace(os.Getenv("RYV_RUNTIME_BACKEND_BINARY")); value != "" {
 		meta.Backend = value
 	}
+	if value := strings.TrimSpace(os.Getenv("RYV_RUNTIME_ENGINE_BINARY")); value != "" {
+		meta.Engine = value
+	}
+	if value := strings.TrimSpace(os.Getenv("RYV_RUNTIME_ENGINE_KIND")); value != "" {
+		meta.EngineKind = value
+	}
 	if value := strings.TrimSpace(os.Getenv("RYV_RUNTIME_MANIFEST_HASH")); value != "" {
 		meta.ManifestHash = value
 	}
@@ -216,6 +228,7 @@ func computeRuntimeManifestHash(meta runtimeContractMetadata) string {
 		strings.TrimSpace(meta.Source),
 		strings.TrimSpace(meta.Artifact),
 		strings.TrimSpace(meta.Binary),
+		strings.TrimSpace(meta.Backend),
 	}, "|")
 	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])

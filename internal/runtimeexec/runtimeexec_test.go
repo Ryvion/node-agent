@@ -41,3 +41,18 @@ func TestResolveBackendCommandPrefersRyvionBackendShim(t *testing.T) {
 		t.Fatalf("ResolveBackendCommand() = %q, want %q", got, backend)
 	}
 }
+
+func TestEngineKindDetectsKnownBackends(t *testing.T) {
+	cases := map[string]string{
+		"/usr/bin/podman":   "podman",
+		"/usr/bin/docker":   "docker",
+		"/usr/bin/nerdctl":  "nerdctl",
+		"/opt/ryvion/thing": "unknown",
+		"":                  "",
+	}
+	for input, want := range cases {
+		if got := EngineKind(input); got != want {
+			t.Fatalf("EngineKind(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

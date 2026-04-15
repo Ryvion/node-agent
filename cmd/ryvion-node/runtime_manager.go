@@ -32,6 +32,8 @@ type runtimeSnapshot struct {
 	Artifact     string
 	Binary       string
 	Backend      string
+	Engine       string
+	EngineKind   string
 	ManifestHash string
 }
 
@@ -70,6 +72,8 @@ func (m *runtimeManager) Snapshot(gpuDetected bool) runtimeSnapshot {
 	if manifestHash == "" {
 		manifestHash = computeRuntimeManifestHash(m.contract)
 	}
+	engine := sanitizeStatusValue(firstNonEmpty(m.contract.Engine, runtimeexec.ResolveEnginePath(runtime.GOOS, os.Getenv)))
+	engineKind := sanitizeStatusValue(firstNonEmpty(m.contract.EngineKind, runtimeexec.EngineKind(engine)))
 	return runtimeSnapshot{
 		CLIInstalled: backendCLI,
 		Ready:        runtimeReady,
@@ -83,6 +87,8 @@ func (m *runtimeManager) Snapshot(gpuDetected bool) runtimeSnapshot {
 		Artifact:     sanitizeStatusValue(m.contract.Artifact),
 		Binary:       sanitizeStatusValue(m.contract.Binary),
 		Backend:      sanitizeStatusValue(m.contract.Backend),
+		Engine:       engine,
+		EngineKind:   engineKind,
 		ManifestHash: manifestHash,
 	}
 }
@@ -128,6 +134,8 @@ func (m *runtimeManager) snapshotFromManagedRuntimeWrapper(gpuDetected bool) (ru
 		Artifact:     sanitizeStatusValue(m.contract.Artifact),
 		Binary:       sanitizeStatusValue(status.BinaryPath),
 		Backend:      sanitizeStatusValue(firstNonEmpty(status.BackendPath, m.contract.Backend)),
+		Engine:       sanitizeStatusValue(firstNonEmpty(status.EnginePath, m.contract.Engine)),
+		EngineKind:   sanitizeStatusValue(firstNonEmpty(status.EngineKind, runtimeexec.EngineKind(status.EnginePath), m.contract.EngineKind)),
 		ManifestHash: manifestHash,
 	}, true
 }
@@ -147,6 +155,8 @@ func (m *runtimeManager) StatusTokens(gpuDetected bool) []string {
 		"runtime-artifact:" + sanitizeStatusValue(snap.Artifact),
 		"runtime-binary:" + sanitizeStatusValue(snap.Binary),
 		"runtime-backend:" + sanitizeStatusValue(snap.Backend),
+		"runtime-engine:" + sanitizeStatusValue(snap.Engine),
+		"runtime-engine-kind:" + sanitizeStatusValue(snap.EngineKind),
 		boolStatusToken("cap:managed_oci_cpu", snap.Ready),
 		boolStatusToken("cap:managed_oci_gpu", snap.GPUReady),
 		boolStatusToken("cap:agent_hosting", snap.Ready),
@@ -166,6 +176,8 @@ func (m *runtimeManager) ReceiptMetadata(gpuDetected bool) map[string]any {
 		"runtime_artifact":      snap.Artifact,
 		"runtime_binary":        snap.Binary,
 		"runtime_backend":       snap.Backend,
+		"runtime_engine":        snap.Engine,
+		"runtime_engine_kind":   snap.EngineKind,
 	}
 }
 
