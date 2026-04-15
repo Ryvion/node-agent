@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Ryvion/node-agent/internal/runtimeexec"
 )
 
 const (
@@ -374,7 +376,11 @@ func (m *Manager) useContainerizedInference() bool {
 	if runtime.GOOS == "windows" {
 		return false
 	}
-	cmd := exec.Command("docker", "info")
+	backend, err := runtimeexec.ResolveBackendCommand(runtime.GOOS, os.Getenv)
+	if err != nil {
+		return false
+	}
+	cmd := exec.Command(backend, "info")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run() == nil
@@ -437,7 +443,13 @@ func (m *Manager) runServerContainerized(ctx context.Context, modelPath, port st
 		"port", port,
 	)
 
-	cmd := exec.CommandContext(serverCtx, "docker", args...)
+	ociExec, err := runtimeexec.ResolveExecutor(runtime.GOOS, os.Getenv)
+	if err != nil {
+		slog.Warn("containerized inference executor unavailable, falling back to native", "error", err)
+		return m.runServerNative(ctx, modelPath, port)
+	}
+	execArgs := append(append([]string{}, ociExec.PrefixArgs...), args...)
+	cmd := exec.CommandContext(serverCtx, ociExec.Command, execArgs...)
 	// Send container output to a log file
 	logPath := filepath.Join(m.dataDir, "llama-server.log")
 	if logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
@@ -463,7 +475,8 @@ func (m *Manager) runServerContainerized(ctx context.Context, modelPath, port st
 	waitErr := cmd.Wait()
 
 	// Clean up container on exit (may already be removed by --rm, but be safe)
-	cleanup := exec.Command("docker", "rm", "-f", "ryvion-inference")
+	cleanupArgs := append(append([]string{}, ociExec.PrefixArgs...), "rm", "-f", "ryvion-inference")
+	cleanup := exec.Command(ociExec.Command, cleanupArgs...)
 	cleanup.Stdout = io.Discard
 	cleanup.Stderr = io.Discard
 	cleanup.Run()

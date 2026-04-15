@@ -880,24 +880,11 @@ func testManagedOCIGPURocm(backendBin string) bool {
 }
 
 func resolveOCIBackendCLI() string {
-	if p, err := exec.LookPath("docker"); err == nil {
-		return p
+	backend, err := runtimeexec.ResolveBackendCommand(runtime.GOOS, os.Getenv)
+	if err != nil {
+		return ""
 	}
-	if runtime.GOOS == "windows" {
-		candidates := []string{
-			filepath.Join(os.Getenv("ProgramFiles"), "Docker", "Docker", "resources", "bin", "docker.exe"),
-			filepath.Join(os.Getenv("ProgramW6432"), "Docker", "Docker", "resources", "bin", "docker.exe"),
-		}
-		for _, candidate := range candidates {
-			if candidate == "" {
-				continue
-			}
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-		}
-	}
-	return ""
+	return backend
 }
 
 func resolveWindowsSystemTool(name string) string {

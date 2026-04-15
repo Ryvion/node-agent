@@ -291,6 +291,7 @@ func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
 	t.Setenv("RYV_RUNTIME_MODE", "")
 	t.Setenv("RYV_RUNTIME_SOURCE", "")
 	t.Setenv("RYV_RUNTIME_ARTIFACT", "")
+	t.Setenv("RYV_RUNTIME_BACKEND_BINARY", "")
 	t.Setenv("RYV_RUNTIME_MANIFEST_HASH", "")
 
 	want := operatorPreferences{
@@ -301,6 +302,7 @@ func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
 		RuntimeMode:           "host_package",
 		RuntimeSource:         "ryvion_runtime_kit",
 		RuntimeArtifact:       "ryvion-runtime-kit-linux-amd64-2026.04.14.tar.gz",
+		RuntimeBackendBinary:  "/opt/ryvion/runtime/backend/ryvion-oci",
 		RuntimeManifestHash:   "abc123",
 	}
 	if err := saveOperatorPreferences(want); err != nil {
@@ -311,7 +313,7 @@ func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveRuntimeContractMetadata() error = %v", err)
 	}
-	if got.Channel != want.RuntimeChannel || got.Version != want.RuntimeChannelVersion || got.Provider != want.RuntimeProvider || got.Mode != want.RuntimeMode || got.Source != want.RuntimeSource || got.Artifact != want.RuntimeArtifact || got.ManifestHash != want.RuntimeManifestHash {
+	if got.Channel != want.RuntimeChannel || got.Version != want.RuntimeChannelVersion || got.Provider != want.RuntimeProvider || got.Mode != want.RuntimeMode || got.Source != want.RuntimeSource || got.Artifact != want.RuntimeArtifact || got.Backend != want.RuntimeBackendBinary || got.ManifestHash != want.RuntimeManifestHash {
 		t.Fatalf("unexpected runtime metadata: %+v", got)
 	}
 }
@@ -333,6 +335,7 @@ func TestResolveRuntimeContractMetadataPrefersEnvOverride(t *testing.T) {
 		RuntimeMode:           "host_package",
 		RuntimeSource:         "ryvion_runtime_kit",
 		RuntimeArtifact:       "ryvion-runtime-kit-linux-amd64-2026.04.14.tar.gz",
+		RuntimeBackendBinary:  "/opt/ryvion/runtime/backend/ryvion-oci",
 		RuntimeManifestHash:   "abc123",
 	}); err != nil {
 		t.Fatalf("saveOperatorPreferences() error = %v", err)
@@ -342,11 +345,12 @@ func TestResolveRuntimeContractMetadataPrefersEnvOverride(t *testing.T) {
 	t.Setenv("RYV_RUNTIME_MODE", "desktop")
 	t.Setenv("RYV_RUNTIME_SOURCE", "signed_release_channel")
 	t.Setenv("RYV_RUNTIME_ARTIFACT", "ryvion-runtime-kit-windows-amd64-2026.04.14.zip")
+	t.Setenv("RYV_RUNTIME_BACKEND_BINARY", `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd`)
 	got, err := resolveRuntimeContractMetadata("dev")
 	if err != nil {
 		t.Fatalf("resolveRuntimeContractMetadata() error = %v", err)
 	}
-	if got.Provider != "oci_desktop_adapter" || got.Mode != "desktop" || got.Source != "signed_release_channel" || got.Artifact != "ryvion-runtime-kit-windows-amd64-2026.04.14.zip" {
+	if got.Provider != "oci_desktop_adapter" || got.Mode != "desktop" || got.Source != "signed_release_channel" || got.Artifact != "ryvion-runtime-kit-windows-amd64-2026.04.14.zip" || got.Backend != `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd` {
 		t.Fatalf("expected env override to win, got %+v", got)
 	}
 }
@@ -356,7 +360,7 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
 		return runtimeexec.Status{
 			BinaryPath:   "/opt/ryvion/runtime/ryvion-runtime",
-			BackendPath:  "/usr/bin/docker",
+			BackendPath:  "/opt/ryvion/runtime/backend/ryvion-oci",
 			CLIInstalled: true,
 			Ready:        true,
 			GPUReady:     true,
@@ -375,6 +379,7 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 		Source:       "ryvion_runtime_kit",
 		Artifact:     "ryvion-runtime-kit-linux-amd64-2026.04.14.1.tar.gz",
 		Binary:       "/opt/ryvion/runtime/ryvion-runtime",
+		Backend:      "/opt/ryvion/runtime/backend/ryvion-oci",
 		ManifestHash: "abc123",
 	})
 
@@ -382,7 +387,7 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 	if !snap.Ready || !snap.GPUReady || !snap.CLIInstalled {
 		t.Fatalf("expected wrapper snapshot to be ready, got %+v", snap)
 	}
-	if snap.Binary != "/opt/ryvion/runtime/ryvion-runtime" || snap.Backend != "/usr/bin/docker" {
+	if snap.Binary != "/opt/ryvion/runtime/ryvion-runtime" || snap.Backend != "/opt/ryvion/runtime/backend/ryvion-oci" {
 		t.Fatalf("unexpected wrapper paths: %+v", snap)
 	}
 
@@ -390,7 +395,7 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 	if !containsToken(tokens, "runtime-binary:/opt/ryvion/runtime/ryvion-runtime") {
 		t.Fatalf("expected runtime binary token, got %v", tokens)
 	}
-	if !containsToken(tokens, "runtime-backend:/usr/bin/docker") {
+	if !containsToken(tokens, "runtime-backend:/opt/ryvion/runtime/backend/ryvion-oci") {
 		t.Fatalf("expected runtime backend token, got %v", tokens)
 	}
 }

@@ -19,6 +19,7 @@ type operatorPreferences struct {
 	RuntimeSource         string `json:"runtime_source,omitempty"`
 	RuntimeArtifact       string `json:"runtime_artifact,omitempty"`
 	RuntimeBinary         string `json:"runtime_binary,omitempty"`
+	RuntimeBackendBinary  string `json:"runtime_backend_binary,omitempty"`
 	RuntimeManifestHash   string `json:"runtime_manifest_hash,omitempty"`
 }
 
@@ -30,6 +31,7 @@ type runtimeContractMetadata struct {
 	Source       string
 	Artifact     string
 	Binary       string
+	Backend      string
 	ManifestHash string
 }
 
@@ -164,6 +166,7 @@ func resolveRuntimeContractMetadata(defaultVersion string) (runtimeContractMetad
 		Source:       strings.TrimSpace(prefs.RuntimeSource),
 		Artifact:     strings.TrimSpace(prefs.RuntimeArtifact),
 		Binary:       strings.TrimSpace(prefs.RuntimeBinary),
+		Backend:      strings.TrimSpace(prefs.RuntimeBackendBinary),
 		ManifestHash: strings.TrimSpace(prefs.RuntimeManifestHash),
 	}
 
@@ -187,6 +190,9 @@ func resolveRuntimeContractMetadata(defaultVersion string) (runtimeContractMetad
 	}
 	if value := strings.TrimSpace(os.Getenv("RYV_RUNTIME_BINARY")); value != "" {
 		meta.Binary = value
+	}
+	if value := strings.TrimSpace(os.Getenv("RYV_RUNTIME_BACKEND_BINARY")); value != "" {
+		meta.Backend = value
 	}
 	if value := strings.TrimSpace(os.Getenv("RYV_RUNTIME_MANIFEST_HASH")); value != "" {
 		meta.ManifestHash = value

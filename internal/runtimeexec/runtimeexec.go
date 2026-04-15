@@ -47,6 +47,36 @@ func ResolveBinaryPath(goos string, getenv func(string) string) string {
 	}
 }
 
+func ResolveBackendPath(goos string, getenv func(string) string) string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if value := strings.TrimSpace(getenv("RYV_RUNTIME_BACKEND_BINARY")); value != "" {
+		return value
+	}
+	switch goos {
+	case "windows":
+		programFiles := strings.TrimSpace(getenv("ProgramFiles"))
+		if programFiles == "" {
+			programFiles = `C:\Program Files`
+		}
+		return filepath.Join(programFiles, "Ryvion", "runtime", "backend", "ryvion-oci.cmd")
+	case "linux":
+		return "/opt/ryvion/runtime/backend/ryvion-oci"
+	default:
+		return ""
+	}
+}
+
+func ResolveBackendCommand(goos string, getenv func(string) string) (string, error) {
+	if backend := strings.TrimSpace(ResolveBackendPath(goos, getenv)); backend != "" {
+		if _, err := os.Stat(backend); err == nil {
+			return backend, nil
+		}
+	}
+	return resolveOCIEngineCLI(goos, getenv)
+}
+
 func ResolveExecutor(goos string, getenv func(string) string) (Executor, error) {
 	binary := ResolveBinaryPath(goos, getenv)
 	if binary != "" {
@@ -63,7 +93,7 @@ func ResolveExecutor(goos string, getenv func(string) string) (Executor, error) 
 		}
 	}
 
-	backendBin, err := resolveOCIBackendCLI(goos, getenv)
+	backendBin, err := ResolveBackendCommand(goos, getenv)
 	if err != nil {
 		return Executor{}, err
 	}
@@ -158,17 +188,36 @@ func resolvePowerShell(getenv func(string) string) (string, error) {
 	return "", fmt.Errorf("powershell not found")
 }
 
-func resolveOCIBackendCLI(goos string, getenv func(string) string) (string, error) {
-	if p, err := exec.LookPath("docker"); err == nil {
-		return p, nil
-	}
+func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
+	if value := strings.TrimSpace(getenv("RYV_RUNTIME_ENGINE_BINARY")); value != "" {
+		if _, err := os.Stat(value); err == nil {
+			return value, nil
+		}
+	}
+	engineCandidates := []string{"docker", "nerdctl", "podman"}
+	if goos == "linux" {
+		engineCandidates = []string{"nerdctl", "podman", "docker"}
+	}
+	for _, candidate := range engineCandidates {
+		if p, err := exec.LookPath(candidate); err == nil {
+			return p, nil
+		}
+	}
 	candidates := []string{
+		"/usr/local/bin/nerdctl",
+		"/usr/local/bin/podman",
 		"/usr/local/bin/docker",
+		"/opt/homebrew/bin/nerdctl",
+		"/opt/homebrew/bin/podman",
 		"/opt/homebrew/bin/docker",
+		"/usr/bin/nerdctl",
+		"/usr/bin/podman",
 		"/usr/bin/docker",
+		"/snap/bin/nerdctl",
+		"/snap/bin/podman",
 		"/snap/bin/docker",
 	}
 	if goos == "windows" {
@@ -176,6 +225,8 @@ func resolveOCIBackendCLI(goos string, getenv func(string) string) (string, erro
 			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "Docker", "Docker", "resources", "bin", "docker.exe"),
 			filepath.Join(strings.TrimSpace(getenv("ProgramW6432")), "Docker", "Docker", "resources", "bin", "docker.exe"),
 			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "Docker", "Docker", "resources", "docker.exe"),
+			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "RedHat", "Podman", "podman.exe"),
+			filepath.Join(strings.TrimSpace(getenv("ProgramW6432")), "RedHat", "Podman", "podman.exe"),
 		}
 	}
 	for _, candidate := range candidates {
@@ -186,5 +237,5 @@ func resolveOCIBackendCLI(goos string, getenv func(string) string) (string, erro
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("managed OCI backend not found on %s", goos)
+	return "", fmt.Errorf("managed OCI engine not found on %s", goos)
 }

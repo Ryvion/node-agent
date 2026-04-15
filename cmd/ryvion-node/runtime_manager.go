@@ -82,6 +82,7 @@ func (m *runtimeManager) Snapshot(gpuDetected bool) runtimeSnapshot {
 		Source:       sanitizeStatusValue(m.contract.Source),
 		Artifact:     sanitizeStatusValue(m.contract.Artifact),
 		Binary:       sanitizeStatusValue(m.contract.Binary),
+		Backend:      sanitizeStatusValue(m.contract.Backend),
 		ManifestHash: manifestHash,
 	}
 }
@@ -126,7 +127,7 @@ func (m *runtimeManager) snapshotFromManagedRuntimeWrapper(gpuDetected bool) (ru
 		Source:       sanitizeStatusValue(m.contract.Source),
 		Artifact:     sanitizeStatusValue(m.contract.Artifact),
 		Binary:       sanitizeStatusValue(status.BinaryPath),
-		Backend:      sanitizeStatusValue(status.BackendPath),
+		Backend:      sanitizeStatusValue(firstNonEmpty(status.BackendPath, m.contract.Backend)),
 		ManifestHash: manifestHash,
 	}, true
 }
@@ -182,4 +183,13 @@ func sanitizeStatusValue(v string) string {
 	}
 	replacer := strings.NewReplacer(",", "_", " ", "_")
 	return replacer.Replace(v)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

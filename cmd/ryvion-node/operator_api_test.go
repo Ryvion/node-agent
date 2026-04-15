@@ -211,6 +211,7 @@ func TestUpdatePublicAIOptInPreservesOtherPreferences(t *testing.T) {
 		RuntimeMode:           "host_package",
 		RuntimeSource:         "ryvion_runtime_kit",
 		RuntimeArtifact:       "artifact.tar.gz",
+		RuntimeBackendBinary:  "/opt/ryvion/runtime/backend/ryvion-oci",
 		RuntimeManifestHash:   "abc123",
 	}); err != nil {
 		t.Fatalf("saveOperatorPreferences() error = %v", err)
