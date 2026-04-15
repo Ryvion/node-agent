@@ -227,6 +227,54 @@ func TestResolveInitialPublicAIOptInPrefersEnvOverride(t *testing.T) {
 	}
 }
 
+func TestResolveInitialDeclaredCountryUsesSavedPreferences(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_DECLARED_COUNTRY", "")
+	if err := saveOperatorPreferences(operatorPreferences{DeclaredCountry: "ca"}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveInitialDeclaredCountry("")
+	if err != nil {
+		t.Fatalf("resolveInitialDeclaredCountry() error = %v", err)
+	}
+	if got != "CA" {
+		t.Fatalf("declared country = %q, want %q", got, "CA")
+	}
+}
+
+func TestResolveInitialDeclaredCountryPrefersEnvOverride(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	if err := saveOperatorPreferences(operatorPreferences{DeclaredCountry: "CA"}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	t.Setenv("RYV_DECLARED_COUNTRY", "de")
+	got, err := resolveInitialDeclaredCountry("")
+	if err != nil {
+		t.Fatalf("resolveInitialDeclaredCountry() error = %v", err)
+	}
+	if got != "DE" {
+		t.Fatalf("declared country = %q, want %q", got, "DE")
+	}
+}
+
 func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
 	prevResolver := operatorConfigPathResolver
 	configPath := filepath.Join(t.TempDir(), "config.json")

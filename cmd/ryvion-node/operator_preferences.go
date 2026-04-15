@@ -11,6 +11,7 @@ import (
 
 type operatorPreferences struct {
 	PublicAIOptIn         bool   `json:"public_ai_opt_in"`
+	DeclaredCountry       string `json:"declared_country,omitempty"`
 	RuntimeChannel        string `json:"runtime_channel,omitempty"`
 	RuntimeChannelVersion string `json:"runtime_channel_version,omitempty"`
 	RuntimeProvider       string `json:"runtime_provider,omitempty"`
@@ -103,6 +104,18 @@ func saveOperatorPreferences(prefs operatorPreferences) error {
 	return nil
 }
 
+func mutateOperatorPreferences(mutator func(*operatorPreferences)) (operatorPreferences, error) {
+	prefs, err := loadOperatorPreferences()
+	if err != nil {
+		return operatorPreferences{}, err
+	}
+	mutator(&prefs)
+	if err := saveOperatorPreferences(prefs); err != nil {
+		return operatorPreferences{}, err
+	}
+	return prefs, nil
+}
+
 func resolveInitialPublicAIOptIn() (bool, error) {
 	if raw := strings.TrimSpace(os.Getenv("RYV_PUBLIC_AI")); raw != "" {
 		return parsePublicAIOptIn(raw), nil
@@ -112,6 +125,20 @@ func resolveInitialPublicAIOptIn() (bool, error) {
 		return false, err
 	}
 	return prefs.PublicAIOptIn, nil
+}
+
+func resolveInitialDeclaredCountry(flagValue string) (string, error) {
+	if raw := strings.TrimSpace(os.Getenv("RYV_DECLARED_COUNTRY")); raw != "" {
+		return strings.ToUpper(raw), nil
+	}
+	if raw := strings.TrimSpace(flagValue); raw != "" {
+		return strings.ToUpper(raw), nil
+	}
+	prefs, err := loadOperatorPreferences()
+	if err != nil {
+		return "", err
+	}
+	return strings.ToUpper(strings.TrimSpace(prefs.DeclaredCountry)), nil
 }
 
 func parsePublicAIOptIn(raw string) bool {

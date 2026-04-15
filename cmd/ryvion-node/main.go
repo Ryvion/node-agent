@@ -59,6 +59,10 @@ func main() {
 		runClaim()
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "identity" {
+		runIdentity()
+		return
+	}
 
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.StringVar(&flagHub, "hub", "https://api.ryvion.ai", "Hub orchestrator base URL")
@@ -136,9 +140,13 @@ func runNode(ctx context.Context) {
 
 	caps := hw.DetectCaps(flagDevice)
 	deviceType := resolveDeviceType(flagDevice, caps)
-	declaredCountry := strings.TrimSpace(flagCountry)
-	if envCountry := strings.TrimSpace(os.Getenv("RYV_DECLARED_COUNTRY")); envCountry != "" {
-		declaredCountry = envCountry
+	declaredCountry, err := resolveInitialDeclaredCountry(flagCountry)
+	if err != nil {
+		slog.Warn("failed to load declared country preference, defaulting to flag/env value", "error", err)
+		declaredCountry = strings.TrimSpace(flagCountry)
+		if envCountry := strings.TrimSpace(os.Getenv("RYV_DECLARED_COUNTRY")); envCountry != "" {
+			declaredCountry = envCountry
+		}
 	}
 	publicAIOptIn, err := resolveInitialPublicAIOptIn()
 	if err != nil {

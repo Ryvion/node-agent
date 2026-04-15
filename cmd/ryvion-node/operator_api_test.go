@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -109,5 +110,125 @@ func TestSplitStatusTokens(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("token %d: expected %q, got %q", i, want[i], got[i])
 		}
+	}
+}
+
+func TestDeriveSovereignPosture(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		registered      bool
+		declaredCountry string
+		runtimeReady    bool
+		nativeReady     bool
+		wantReady       bool
+		wantStatus      string
+	}{
+		{
+			name:       "missing country blocks review",
+			registered: true,
+			wantStatus: "country_missing",
+		},
+		{
+			name:            "registration pending blocks review",
+			declaredCountry: "CA",
+			runtimeReady:    true,
+			wantStatus:      "registration_pending",
+		},
+		{
+			name:            "runtime unavailable blocks review",
+			registered:      true,
+			declaredCountry: "CA",
+			wantStatus:      "runtime_unavailable",
+		},
+		{
+			name:            "local prerequisites satisfied",
+			registered:      true,
+			declaredCountry: "CA",
+			runtimeReady:    true,
+			wantReady:       true,
+			wantStatus:      "review_ready",
+		},
+		{
+			name:            "native path also satisfies prerequisites",
+			registered:      true,
+			declaredCountry: "DE",
+			nativeReady:     true,
+			wantReady:       true,
+			wantStatus:      "review_ready",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotReady, gotStatus, gotDetail := deriveSovereignPosture(tc.registered, tc.declaredCountry, tc.runtimeReady, tc.nativeReady)
+			if gotReady != tc.wantReady {
+				t.Fatalf("ready = %v, want %v", gotReady, tc.wantReady)
+			}
+			if gotStatus != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", gotStatus, tc.wantStatus)
+			}
+			if gotDetail == "" {
+				t.Fatal("expected non-empty detail")
+			}
+		})
+	}
+}
+
+func TestNormalizeDeclaredCountry(t *testing.T) {
+	t.Parallel()
+
+	if got := normalizeDeclaredCountry("ca"); got != "CA" {
+		t.Fatalf("normalizeDeclaredCountry() = %q, want %q", got, "CA")
+	}
+	if got := normalizeDeclaredCountry(" c1 "); got != "" {
+		t.Fatalf("normalizeDeclaredCountry() = %q, want empty", got)
+	}
+	if got := normalizeDeclaredCountry("CAN"); got != "" {
+		t.Fatalf("normalizeDeclaredCountry() = %q, want empty", got)
+	}
+}
+
+func TestUpdatePublicAIOptInPreservesOtherPreferences(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	if err := saveOperatorPreferences(operatorPreferences{
+		PublicAIOptIn:         false,
+		DeclaredCountry:       "CA",
+		RuntimeChannel:        "managed_oci_v1",
+		RuntimeChannelVersion: "2026.04.14",
+		RuntimeProvider:       "oci_linux_adapter",
+		RuntimeMode:           "host_package",
+		RuntimeSource:         "ryvion_runtime_kit",
+		RuntimeArtifact:       "artifact.tar.gz",
+		RuntimeManifestHash:   "abc123",
+	}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	state := &operatorRuntime{}
+	if err := state.updatePublicAIOptIn(true); err != nil {
+		t.Fatalf("updatePublicAIOptIn() error = %v", err)
+	}
+
+	got, err := loadOperatorPreferences()
+	if err != nil {
+		t.Fatalf("loadOperatorPreferences() error = %v", err)
+	}
+	if !got.PublicAIOptIn {
+		t.Fatal("expected public AI opt-in to be updated")
+	}
+	if got.DeclaredCountry != "CA" || got.RuntimeChannel != "managed_oci_v1" || got.RuntimeArtifact != "artifact.tar.gz" {
+		t.Fatalf("expected unrelated preferences to be preserved, got %+v", got)
 	}
 }

@@ -127,6 +127,9 @@ type operatorRuntimeInfo struct {
 	NativeInferenceSupported bool   `json:"native_inference_supported"`
 	NativeInferenceReady     bool   `json:"native_inference_ready"`
 	PublicInferenceReady     bool   `json:"public_inference_ready"`
+	SovereignReviewReady     bool   `json:"sovereign_review_ready"`
+	SovereignStatus          string `json:"sovereign_status,omitempty"`
+	SovereignDetail          string `json:"sovereign_detail,omitempty"`
 	NativeModel              string `json:"native_model,omitempty"`
 	DiskGB                   uint64 `json:"disk_gb,omitempty"`
 }
@@ -258,7 +261,9 @@ func (s *operatorRuntime) publicAIOptInEnabled() bool {
 }
 
 func (s *operatorRuntime) updatePublicAIOptIn(enabled bool) error {
-	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: enabled}); err != nil {
+	if _, err := mutateOperatorPreferences(func(prefs *operatorPreferences) {
+		prefs.PublicAIOptIn = enabled
+	}); err != nil {
 		return err
 	}
 
@@ -269,6 +274,10 @@ func (s *operatorRuntime) updatePublicAIOptIn(enabled bool) error {
 	runtimeMgr := s.runtimeMgr
 	client := s.client
 	s.mu.Unlock()
+
+	if runtimeMgr == nil {
+		return nil
+	}
 
 	report := buildHealthReport(caps, infMgr, runtimeMgr)
 	s.recordHealthReport(report)
@@ -281,6 +290,20 @@ func (s *operatorRuntime) updatePublicAIOptIn(enabled bool) error {
 		}
 	}
 
+	return nil
+}
+
+func (s *operatorRuntime) updateDeclaredCountry(country string) error {
+	country = normalizeDeclaredCountry(country)
+	if _, err := mutateOperatorPreferences(func(prefs *operatorPreferences) {
+		prefs.DeclaredCountry = country
+	}); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.declaredCountry = country
+	s.mu.Unlock()
 	return nil
 }
 
@@ -447,12 +470,15 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 
 	nativeSupported := inference.NativeRuntimeAvailable()
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
+	runtimeReady := statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1")
+	runtimeGPUReady := statusToken(report.Message, "runtime-gpu-ready:1") || statusToken(report.Message, "docker-gpu:ok")
+	sovereignReviewReady, sovereignStatus, sovereignDetail := deriveSovereignPosture(registered, s.declaredCountry, runtimeReady, nativeReady)
 
 	runtimeInfo := operatorRuntimeInfo{
 		LocalAPIURL:              fmt.Sprintf("http://127.0.0.1:%s", apiPort),
 		StatusMessage:            report.Message,
-		RuntimeReady:             statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1"),
-		RuntimeGPUReady:          statusToken(report.Message, "runtime-gpu-ready:1") || statusToken(report.Message, "docker-gpu:ok"),
+		RuntimeReady:             runtimeReady,
+		RuntimeGPUReady:          runtimeGPUReady,
 		RuntimeHealth:            statusTokenValue(report.Message, "runtime-health:"),
 		RuntimeVersion:           statusTokenValue(report.Message, "runtime-version:"),
 		RuntimeChannel:           statusTokenValue(report.Message, "runtime-channel:"),
@@ -470,6 +496,9 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		NativeInferenceSupported: nativeSupported,
 		NativeInferenceReady:     nativeReady,
 		PublicInferenceReady:     publicAIOptIn && nativeReady,
+		SovereignReviewReady:     sovereignReviewReady,
+		SovereignStatus:          sovereignStatus,
+		SovereignDetail:          sovereignDetail,
 		DiskGB:                   statusTokenUint(report.Message, "disk_gb:"),
 	}
 	if infMgr != nil {
@@ -516,6 +545,7 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	version := s.version
 	latestVersion := s.latestVersion
 	declaredCountry := s.declaredCountry
+	registered := s.registered
 	lastHeartbeatAt := s.lastHeartbeatAt
 	lastHeartbeatErr := s.lastHeartbeatErr
 	lastRegisterErr := s.lastRegisterError
@@ -530,6 +560,8 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 
 	nativeReady := inference.NativeRuntimeAvailable() && infMgr != nil && infMgr.Healthy()
 	publicInferenceReady := publicAIOptIn && nativeReady
+	runtimeReady := statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1")
+	sovereignReviewReady, _, sovereignDetail := deriveSovereignPosture(registered, declaredCountry, runtimeReady, nativeReady)
 
 	runtimeChecks := []operatorDiagnosticCheck{
 		{
@@ -565,6 +597,13 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 			Label:    "Native inference",
 			Ready:    publicInferenceReady,
 			Detail:   "Required before public chat inference can use the native runtime on this machine.",
+			Severity: "neutral",
+		},
+		{
+			Key:      "sovereign_review",
+			Label:    "Sovereign review posture",
+			Ready:    sovereignReviewReady,
+			Detail:   sovereignDetail,
 			Severity: "neutral",
 		},
 		{
@@ -630,6 +669,35 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	}
 }
 
+func deriveSovereignPosture(registered bool, declaredCountry string, runtimeReady bool, nativeReady bool) (bool, string, string) {
+	if strings.TrimSpace(declaredCountry) == "" {
+		return false, "country_missing", "Declare country before sovereign routing review can begin."
+	}
+	if !registered {
+		return false, "registration_pending", "The node must register successfully before sovereign routing review can proceed."
+	}
+	if !runtimeReady && !nativeReady {
+		return false, "runtime_unavailable", "Bring either the native inference path or the managed execution runtime online before sovereign workloads can be considered."
+	}
+	return true, "review_ready", "Local prerequisites are satisfied. Final sovereign eligibility still depends on hub trust review and jurisdiction policy."
+}
+
+func normalizeDeclaredCountry(raw string) string {
+	value := strings.ToUpper(strings.TrimSpace(raw))
+	if value == "" {
+		return ""
+	}
+	if len(value) != 2 {
+		return ""
+	}
+	for _, r := range value {
+		if r < 'A' || r > 'Z' {
+			return ""
+		}
+	}
+	return value
+}
+
 func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port string) {
 	if state == nil || strings.TrimSpace(port) == "" || port == "0" {
 		return
@@ -665,6 +733,29 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 			return
 		}
 		if err := state.updatePublicAIOptIn(*body.Enabled); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, state.statusSnapshot(port))
+	})
+	mux.HandleFunc("POST /api/v1/operator/preferences/declared-country", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Country *string `json:"country"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
+			return
+		}
+		if body.Country == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "country required"})
+			return
+		}
+		rawCountry := strings.TrimSpace(*body.Country)
+		if rawCountry != "" && normalizeDeclaredCountry(rawCountry) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "country must be an ISO 3166-1 alpha-2 code"})
+			return
+		}
+		if err := state.updateDeclaredCountry(rawCountry); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}

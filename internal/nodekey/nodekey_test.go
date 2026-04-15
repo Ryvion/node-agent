@@ -47,3 +47,22 @@ func TestLoadOrCreateCreatesAndReloads(t *testing.T) {
 		t.Fatalf("private key changed across reload")
 	}
 }
+
+func TestPublicKeyHexMatchesLoadedPublicKey(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "node-key")
+
+	pub, _, err := LoadOrCreate(path)
+	if err != nil {
+		t.Fatalf("load/create failed: %v", err)
+	}
+
+	got, err := PublicKeyHex(path)
+	if err != nil {
+		t.Fatalf("public key hex failed: %v", err)
+	}
+	want := hex.EncodeToString(pub)
+	if got != want {
+		t.Fatalf("public key hex = %q, want %q", got, want)
+	}
+}
