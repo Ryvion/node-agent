@@ -201,8 +201,11 @@ func runtimeWarmingHeuristic(goos string, cliInstalled bool, ready bool, health 
 	if ready {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(health), "warming") {
+	switch strings.ToLower(strings.TrimSpace(health)) {
+	case "warming":
 		return true
+	case "degraded", "missing", "ready":
+		return false
 	}
 	if goos != "windows" || !cliInstalled {
 		return false
