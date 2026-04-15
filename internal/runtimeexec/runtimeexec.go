@@ -41,7 +41,7 @@ func ResolveBinaryPath(goos string, getenv func(string) string) string {
 		if programFiles == "" {
 			programFiles = `C:\Program Files`
 		}
-		return filepath.Join(programFiles, "Ryvion", "runtime", "ryvion-runtime.ps1")
+		return filepath.Join(programFiles, "Ryvion", "runtime", "ryvion-runtime.cmd")
 	case "linux":
 		return "/opt/ryvion/runtime/ryvion-runtime"
 	default:
@@ -196,6 +196,17 @@ func wrapperCommand(goos string, getenv func(string) string, binary string, subc
 	}
 	switch goos {
 	case "windows":
+		ext := strings.ToLower(filepath.Ext(binary))
+		if ext == ".cmd" || ext == ".bat" {
+			comspec := strings.TrimSpace(getenv("ComSpec"))
+			if comspec == "" {
+				comspec = filepath.Join(strings.TrimSpace(getenv("SystemRoot")), "System32", "cmd.exe")
+			}
+			if strings.TrimSpace(comspec) == "" {
+				comspec = "cmd.exe"
+			}
+			return comspec, []string{"/c", binary, subcommand}, nil
+		}
 		shell, err := resolvePowerShell(getenv)
 		if err != nil {
 			return "", nil, err
