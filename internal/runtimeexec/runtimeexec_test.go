@@ -56,3 +56,30 @@ func TestEngineKindDetectsKnownBackends(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveOCIEngineCLIWindowsFindsLocalAppDataPodman(t *testing.T) {
+	temp := t.TempDir()
+	podman := filepath.Join(temp, "Programs", "RedHat", "Podman Desktop", "podman.exe")
+	if err := os.MkdirAll(filepath.Dir(podman), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(podman, []byte(""), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	getenv := func(key string) string {
+		switch key {
+		case "LOCALAPPDATA":
+			return temp
+		default:
+			return ""
+		}
+	}
+
+	got, err := resolveOCIEngineCLI("windows", getenv)
+	if err != nil {
+		t.Fatalf("resolveOCIEngineCLI() error = %v", err)
+	}
+	if got != podman {
+		t.Fatalf("resolveOCIEngineCLI() = %q, want %q", got, podman)
+	}
+}

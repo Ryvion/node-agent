@@ -244,6 +244,9 @@ func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error
 	if goos == "linux" {
 		engineCandidates = []string{"nerdctl", "podman", "docker"}
 	}
+	if goos == "windows" {
+		engineCandidates = []string{"podman"}
+	}
 	for _, candidate := range engineCandidates {
 		if p, err := exec.LookPath(candidate); err == nil {
 			return p, nil
@@ -265,13 +268,14 @@ func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error
 	}
 	if goos == "windows" {
 		candidates = []string{
-			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "Docker", "Docker", "resources", "bin", "docker.exe"),
-			filepath.Join(strings.TrimSpace(getenv("ProgramW6432")), "Docker", "Docker", "resources", "bin", "docker.exe"),
-			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "Docker", "Docker", "resources", "docker.exe"),
 			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "RedHat", "Podman", "podman.exe"),
 			filepath.Join(strings.TrimSpace(getenv("ProgramW6432")), "RedHat", "Podman", "podman.exe"),
 			filepath.Join(strings.TrimSpace(getenv("ProgramFiles")), "RedHat", "Podman Desktop", "podman.exe"),
 			filepath.Join(strings.TrimSpace(getenv("ProgramW6432")), "RedHat", "Podman Desktop", "podman.exe"),
+			filepath.Join(strings.TrimSpace(getenv("LOCALAPPDATA")), "Programs", "RedHat", "Podman", "podman.exe"),
+			filepath.Join(strings.TrimSpace(getenv("LOCALAPPDATA")), "Programs", "RedHat", "Podman Desktop", "podman.exe"),
+			filepath.Join(strings.TrimSpace(getenv("LOCALAPPDATA")), "Programs", "Podman", "podman.exe"),
+			filepath.Join(strings.TrimSpace(getenv("LOCALAPPDATA")), "Programs", "Podman Desktop", "podman.exe"),
 			filepath.Join(strings.TrimSpace(getenv("LOCALAPPDATA")), "Microsoft", "WinGet", "Links", "podman.exe"),
 		}
 	}
