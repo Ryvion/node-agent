@@ -258,11 +258,6 @@ func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error
 	if goos == "windows" {
 		engineCandidates = []string{"podman"}
 	}
-	for _, candidate := range engineCandidates {
-		if p, err := exec.LookPath(candidate); err == nil {
-			return p, nil
-		}
-	}
 	candidates := []string{
 		"/usr/local/bin/nerdctl",
 		"/usr/local/bin/podman",
@@ -296,6 +291,11 @@ func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error
 		}
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
+		}
+	}
+	for _, candidate := range engineCandidates {
+		if p, err := exec.LookPath(candidate); err == nil {
+			return p, nil
 		}
 	}
 	return "", fmt.Errorf("managed OCI engine not found on %s", goos)
