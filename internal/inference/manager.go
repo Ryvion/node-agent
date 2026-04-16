@@ -31,16 +31,38 @@ const (
 	startupTimeout    = 120 * time.Second
 )
 
+// ModelMode distinguishes chat-style decoder models from encoder models that
+// llama-server serves via its /v1/embeddings endpoint. An empty Mode defaults
+// to chat — preserving the prior ModelConfig shape.
+type ModelMode string
+
+const (
+	ModeChat      ModelMode = ""
+	ModeEmbedding ModelMode = "embedding"
+)
+
 type ModelConfig struct {
 	FileName string
 	URL      string
+	// Mode switches llama-server between chat/completion serving (default)
+	// and embedding serving (--embedding flag, /v1/embeddings endpoint).
+	Mode ModelMode
 }
 
 // NativeModels maps UI model names to GGUF downloads
 var NativeModels = map[string]ModelConfig{
-	"ryvion-llama-3.2-3b": {"Llama-3.2-3B-Instruct-Q4_K_M.gguf", "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
-	"phi-4":               {"phi-4-Q4_K_M.gguf", "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf"},
-	"tinyllama":           {"tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
+	"ryvion-llama-3.2-3b": {FileName: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
+	"phi-4":               {FileName: "phi-4-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf"},
+	"tinyllama":           {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
+	// Phase 1c: native embeddings. nomic-embed-text-v1.5 is 137M params,
+	// 768-dim, matches OpenAI text-embedding-3-small quality on MTEB, and
+	// the Q4_K_M GGUF is ~90MB. llama-server serves it via /v1/embeddings
+	// when launched with --embedding.
+	"nomic-embed-text-v1.5": {
+		FileName: "nomic-embed-text-v1.5.Q4_K_M.gguf",
+		URL:      "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf",
+		Mode:     ModeEmbedding,
+	},
 }
 
 // platformServerURL returns the correct llama.cpp release URL for the current OS/arch.
@@ -90,6 +112,7 @@ type Manager struct {
 	cancel          context.CancelFunc
 	activeModelName string
 	activeModelPath string
+	activeModelMode ModelMode
 }
 
 func New(dataDir string) *Manager {
@@ -174,6 +197,7 @@ func (m *Manager) Start(ctx context.Context) error {
 				modelPath = customPath
 			}
 		}
+		var activeMode ModelMode
 		if modelPath == "" {
 			// Native registry model
 			cfg, ok := NativeModels[currentModel]
@@ -181,6 +205,7 @@ func (m *Manager) Start(ctx context.Context) error {
 				currentModel = "ryvion-llama-3.2-3b"
 				cfg = NativeModels[currentModel]
 			}
+			activeMode = cfg.Mode
 			modelPath = filepath.Join(modelDir, cfg.FileName)
 			if _, err := os.Stat(modelPath); os.IsNotExist(err) {
 				if err := checkDiskSpace(m.dataDir); err != nil {
@@ -200,9 +225,10 @@ func (m *Manager) Start(ctx context.Context) error {
 
 		m.mu.Lock()
 		m.activeModelPath = modelPath
+		m.activeModelMode = activeMode
 		m.mu.Unlock()
 
-		slog.Info("starting llama-server", "port", m.port, "model", modelPath)
+		slog.Info("starting llama-server", "port", m.port, "model", modelPath, "mode", string(activeMode))
 		if err := m.runServer(ctx); err != nil {
 			slog.Warn("llama-server exited", "error", err)
 		}
@@ -506,6 +532,16 @@ func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) e
 		"--threads", m.threads,
 		"--ctx-size", m.ctxSize,
 		"--log-disable",
+	}
+
+	m.mu.RLock()
+	mode := m.activeModelMode
+	m.mu.RUnlock()
+	if mode == ModeEmbedding {
+		// --embedding routes the server's /v1/embeddings endpoint at this
+		// model. Pooling=mean is the sensible default for encoder-style
+		// models like nomic-embed-text / bge.
+		args = append(args, "--embedding", "--pooling", "mean")
 	}
 
 	// GPU offloading: Metal on macOS, CUDA on Linux/Windows
