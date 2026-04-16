@@ -45,11 +45,46 @@ type runtimeManager struct {
 
 var probeManagedRuntimeStatus = runtimeexec.ProbeStatus
 
+// ociLaneDisabled reports whether the operator has opted out of the managed
+// OCI (container) lane entirely via RYV_DISABLE_OCI=1. When disabled, the
+// runtime manager never probes Podman/Docker and reports the node as
+// native-only. Phase 1 of the Docker-free native path.
+func ociLaneDisabled() bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("RYV_DISABLE_OCI")))
+	switch raw {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func newRuntimeManager(version string, contract runtimeContractMetadata) *runtimeManager {
 	return &runtimeManager{version: strings.TrimSpace(version), contract: contract}
 }
 
 func (m *runtimeManager) Snapshot(gpuDetected bool) runtimeSnapshot {
+	if ociLaneDisabled() {
+		version := sanitizeStatusValue(m.contract.Version)
+		if version == "" {
+			version = sanitizeStatusValue(m.version)
+		}
+		if version == "" {
+			version = "dev"
+		}
+		return runtimeSnapshot{
+			CLIInstalled: false,
+			Ready:        false,
+			GPUReady:     false,
+			Warming:      false,
+			Health:       "disabled",
+			Version:      version,
+			Channel:      sanitizeStatusValue(m.contract.Channel),
+			Provider:     sanitizeStatusValue(m.contract.Provider),
+			Mode:         "native_only",
+			Source:       "operator_opt_out",
+			ManifestHash: sanitizeStatusValue(m.contract.ManifestHash),
+		}
+	}
 	if snap, ok := m.snapshotFromManagedRuntimeWrapper(gpuDetected); ok {
 		return snap
 	}
@@ -156,7 +191,7 @@ func (m *runtimeManager) snapshotFromManagedRuntimeWrapper(gpuDetected bool) (ru
 
 func (m *runtimeManager) StatusTokens(gpuDetected bool) []string {
 	snap := m.Snapshot(gpuDetected)
-	return []string{
+	tokens := []string{
 		boolStatusToken("runtime-ready", snap.Ready),
 		boolStatusToken("runtime-gpu-ready", snap.GPUReady),
 		boolStatusToken("runtime-warming", snap.Warming),
@@ -176,6 +211,10 @@ func (m *runtimeManager) StatusTokens(gpuDetected bool) []string {
 		boolStatusToken("cap:managed_oci_gpu", snap.GPUReady),
 		boolStatusToken("cap:agent_hosting", snap.Ready),
 	}
+	if ociLaneDisabled() {
+		tokens = append(tokens, "oci-lane:disabled")
+	}
+	return tokens
 }
 
 func (m *runtimeManager) ReceiptMetadata(gpuDetected bool) map[string]any {

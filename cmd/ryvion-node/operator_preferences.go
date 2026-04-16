@@ -130,7 +130,27 @@ func resolveInitialPublicAIOptIn() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return prefs.PublicAIOptIn, nil
+	if prefs.PublicAIOptIn {
+		return true, nil
+	}
+	// Operators who explicitly disable the managed OCI lane are clearly here to
+	// run native inference; auto-opt them into the public AI lane so they earn
+	// streaming work without a second toggle. Phase 1 friction removal.
+	if ociLaneDisabledFromEnv() {
+		return true, nil
+	}
+	return false, nil
+}
+
+// ociLaneDisabledFromEnv mirrors the logic in runtime_manager.go without
+// importing it here (operator_preferences.go is loaded before the runtime
+// manager is constructed).
+func ociLaneDisabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_DISABLE_OCI"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func resolveInitialDeclaredCountry(flagValue string) (string, error) {

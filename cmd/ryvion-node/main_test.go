@@ -421,6 +421,62 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 	}
 }
 
+func TestResolveInitialPublicAIOptInAutoEnablesWhenOCIDisabled(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) { return configPath, nil }
+	defer func() { operatorConfigPathResolver = prevResolver }()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	t.Setenv("RYV_DISABLE_OCI", "1")
+
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected disabled OCI lane to auto-opt the node into public AI streaming work")
+	}
+}
+
+func TestOCILaneDisabledSkipsManagedRuntimeProbe(t *testing.T) {
+	t.Setenv("RYV_DISABLE_OCI", "1")
+
+	called := false
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		called = true
+		return runtimeexec.Status{CLIInstalled: true, Ready: true, GPUReady: true, Health: "ready"}, true
+	}
+	defer func() { probeManagedRuntimeStatus = prevProbe }()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Channel: "managed_oci_v1",
+		Version: "2026.04.16.10",
+	})
+	snap := runtimeMgr.Snapshot(true)
+	if called {
+		t.Fatal("managed runtime probe should be skipped when RYV_DISABLE_OCI=1")
+	}
+	if snap.Ready || snap.GPUReady || snap.CLIInstalled {
+		t.Fatalf("expected disabled snapshot to report no managed OCI capability, got %+v", snap)
+	}
+	if snap.Health != "disabled" || snap.Mode != "native_only" || snap.Source != "operator_opt_out" {
+		t.Fatalf("expected disabled/native-only snapshot, got %+v", snap)
+	}
+
+	tokens := runtimeMgr.StatusTokens(true)
+	if !containsToken(tokens, "oci-lane:disabled") {
+		t.Fatalf("expected oci-lane:disabled token, got %v", tokens)
+	}
+	if !containsToken(tokens, "runtime-health:disabled") {
+		t.Fatalf("expected runtime-health:disabled token, got %v", tokens)
+	}
+	if !containsToken(tokens, "cap:managed_oci_cpu:0") {
+		t.Fatalf("expected cap:managed_oci_cpu:0 token, got %v", tokens)
+	}
+}
+
 func TestRuntimeWarmingHeuristicWindowsPodman(t *testing.T) {
 	t.Parallel()
 
