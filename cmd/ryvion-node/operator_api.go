@@ -734,7 +734,7 @@ func deriveRuntimePosture(runtimeReady bool, runtimeHealth string) (string, stri
 
 func deriveSovereignPosture(registered bool, declaredCountry string, runtimeReady bool, runtimeHealth string, nativeReady bool) (bool, string, string) {
 	if strings.TrimSpace(declaredCountry) == "" {
-		return false, "country_missing", "Declare country before sovereign routing review can begin."
+		return false, "country_missing", "Declare country before sovereign routing review can begin. Set RYV_DECLARED_COUNTRY=CA or save the ISO country code in Operator Settings."
 	}
 	if !registered {
 		return false, "registration_pending", "The node must register successfully before sovereign routing review can proceed."

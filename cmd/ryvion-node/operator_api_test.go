@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Ryvion/node-agent/internal/hub"
@@ -130,11 +131,13 @@ func TestDeriveSovereignPosture(t *testing.T) {
 		nativeReady     bool
 		wantReady       bool
 		wantStatus      string
+		wantDetailPart  string
 	}{
 		{
-			name:       "missing country blocks review",
-			registered: true,
-			wantStatus: "country_missing",
+			name:           "missing country blocks review",
+			registered:     true,
+			wantStatus:     "country_missing",
+			wantDetailPart: "RYV_DECLARED_COUNTRY",
 		},
 		{
 			name:            "registration pending blocks review",
@@ -186,6 +189,9 @@ func TestDeriveSovereignPosture(t *testing.T) {
 			}
 			if gotDetail == "" {
 				t.Fatal("expected non-empty detail")
+			}
+			if tc.wantDetailPart != "" && !strings.Contains(gotDetail, tc.wantDetailPart) {
+				t.Fatalf("detail = %q, want substring %q", gotDetail, tc.wantDetailPart)
 			}
 		})
 	}
@@ -280,9 +286,9 @@ func TestOperatorStatusSnapshotRefreshesRuntimeReport(t *testing.T) {
 		deviceType:   "gpu",
 		publicKeyHex: "abc123",
 		caps: hw.CapSet{
-			CPUCores: 16,
-			RAMBytes: 32 << 30,
-			GPUModel: "RTX",
+			CPUCores:  16,
+			RAMBytes:  32 << 30,
+			GPUModel:  "RTX",
 			VRAMBytes: 16 << 30,
 		},
 		runtimeMgr: newRuntimeManager("dev", runtimeContractMetadata{
