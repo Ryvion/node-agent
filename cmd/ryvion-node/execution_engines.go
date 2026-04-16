@@ -80,6 +80,23 @@ func (streamingEngine) Execute(ctx context.Context, work *hub.WorkAssignment, ex
 		relayStreamingFailure(ctx, execCtx.client, work.JobID, err)
 		return nil, err
 	}
+	// Phase 1c.2: if the hub tagged the spec as task=embedding, run a
+	// one-shot embedding through llama-server's /v1/embeddings and submit
+	// the vector inline in the receipt. No SSE relay required — the hub
+	// polls receipts and returns the vector to the buyer synchronously.
+	if inference.IsEmbeddingJob(work.SpecJSON) {
+		if err := execCtx.infMgr.RunEmbeddingJob(ctx, execCtx.client, work.JobID, work.SpecJSON); err != nil {
+			return nil, err
+		}
+		return &runnerResultSnapshot{
+			MeteringUnits: 1,
+			Metadata: receiptMetadataBase(
+				work,
+				execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+				map[string]any{"executor": "llama-server", "task": "embedding"},
+			),
+		}, nil
+	}
 	if err := execCtx.infMgr.RunStreamingJob(ctx, execCtx.client, work.JobID, work.SpecJSON); err != nil {
 		relayStreamingFailure(ctx, execCtx.client, work.JobID, err)
 		return nil, err

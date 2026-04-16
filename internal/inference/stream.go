@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -40,7 +41,18 @@ type specPayload struct {
 	ModelURL    string        `json:"model_url,omitempty"`    // Presigned download URL for custom models
 	ModelFormat string        `json:"model_format,omitempty"` // "gguf", "onnx", etc.
 	ModelName   string        `json:"model_name,omitempty"`   // Human-readable name
-	Task        string        `json:"task,omitempty"`         // "custom_inference" for custom models
+	Task        string        `json:"task,omitempty"`         // "custom_inference", "embedding"
+	Input       string        `json:"input,omitempty"`        // Text input for embedding tasks
+}
+
+// IsEmbeddingJob returns true when the hub-provided spec_json asks the node
+// to produce an embedding vector rather than a chat completion.
+func IsEmbeddingJob(specJSON string) bool {
+	var s specPayload
+	if err := json.Unmarshal([]byte(specJSON), &s); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(s.Task), "embedding")
 }
 
 // RunStreamingJob handles an inference job by calling the local llama-server
@@ -229,4 +241,128 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 
 	slog.Info("streaming inference complete", "job_id", jobID, "duration", duration, "tokens_approx", fullContent.Len())
 	return nil
+}
+
+// embedRequest and embedResponse are the OpenAI-compatible shapes that
+// llama-server speaks at its /v1/embeddings endpoint.
+type embedRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+type embedResponse struct {
+	Object string `json:"object"`
+	Data   []struct {
+		Object    string    `json:"object"`
+		Index     int       `json:"index"`
+		Embedding []float32 `json:"embedding"`
+	} `json:"data"`
+	Model string `json:"model"`
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+// RunEmbeddingJob handles a native embedding job. The manager hot-swaps to
+// the requested embedding model (if not already loaded), posts to the local
+// llama-server /v1/embeddings endpoint, and submits a receipt with the
+// vector inline in metadata. No SSE relay — embeddings are one-shot.
+func (m *Manager) RunEmbeddingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string) error {
+	start := time.Now()
+
+	var spec specPayload
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return fmt.Errorf("parse spec_json: %w", err)
+	}
+	input := strings.TrimSpace(spec.Input)
+	if input == "" {
+		return fmt.Errorf("embedding spec missing input")
+	}
+	modelName := strings.TrimSpace(spec.Model)
+	if modelName == "" {
+		modelName = "nomic-embed-text-v1.5"
+	}
+	if cfg, ok := NativeModels[modelName]; !ok || cfg.Mode != ModeEmbedding {
+		return fmt.Errorf("model %q is not a registered native embedding model", modelName)
+	}
+	if err := m.EnsureModel(ctx, modelName); err != nil {
+		return fmt.Errorf("ensure embedding model %s: %w", modelName, err)
+	}
+
+	reqBody, err := json.Marshal(embedRequest{Model: modelName, Input: input})
+	if err != nil {
+		return fmt.Errorf("marshal embed request: %w", err)
+	}
+	url := m.ServerURL() + "/v1/embeddings"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return fmt.Errorf("llama-server embed request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("llama-server embed returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return fmt.Errorf("read embed response: %w", err)
+	}
+	var embResp embedResponse
+	if err := json.Unmarshal(body, &embResp); err != nil {
+		return fmt.Errorf("decode embed response: %w", err)
+	}
+	if len(embResp.Data) == 0 || len(embResp.Data[0].Embedding) == 0 {
+		return fmt.Errorf("llama-server returned empty embedding")
+	}
+	vector := embResp.Data[0].Embedding
+
+	// Hash the raw vector bytes for the receipt — buyer can reverify by
+	// recomputing sha256(float32 little-endian of returned vector).
+	hasher := sha256.New()
+	for _, v := range vector {
+		var buf [4]byte
+		binaryLittleEndianPutFloat32(buf[:], v)
+		hasher.Write(buf[:])
+	}
+	resultHash := hex.EncodeToString(hasher.Sum(nil))
+	duration := time.Since(start)
+
+	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
+		JobID:         jobID,
+		ResultHashHex: resultHash,
+		MeteringUnits: 1,
+		Metadata: map[string]any{
+			"executor":      "llama-server",
+			"task":          "embedding",
+			"model":         modelName,
+			"duration_ms":   duration.Milliseconds(),
+			"exit_code":     0,
+			"dimensions":    len(vector),
+			"prompt_tokens": embResp.Usage.PromptTokens,
+			"embedding":     vector,
+		},
+	}); err != nil {
+		return fmt.Errorf("submit embed receipt: %w", err)
+	}
+
+	slog.Info("native embedding complete", "job_id", jobID, "model", modelName, "dims", len(vector), "duration", duration)
+	return nil
+}
+
+// binaryLittleEndianPutFloat32 writes a float32 in little-endian bytes.
+// Used for deterministic receipt hashing of the output vector.
+func binaryLittleEndianPutFloat32(dst []byte, v float32) {
+	bits := math.Float32bits(v)
+	dst[0] = byte(bits)
+	dst[1] = byte(bits >> 8)
+	dst[2] = byte(bits >> 16)
+	dst[3] = byte(bits >> 24)
 }
