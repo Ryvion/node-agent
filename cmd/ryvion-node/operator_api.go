@@ -464,8 +464,11 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	copy(recent, s.recentJobs)
 	report := s.lastHealthReport
 	infMgr := s.infMgr
+	runtimeMgr := s.runtimeMgr
 	publicAIOptIn := s.publicAIOptIn
 	s.mu.RUnlock()
+
+	report = freshOperatorHealthReport(caps, infMgr, runtimeMgr, report)
 
 	var currentJob *operatorJob
 	if current != nil {
@@ -556,6 +559,7 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	s.mu.RLock()
 	version := s.version
 	latestVersion := s.latestVersion
+	caps := s.caps
 	declaredCountry := s.declaredCountry
 	registered := s.registered
 	lastHeartbeatAt := s.lastHeartbeatAt
@@ -567,8 +571,11 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	lastPayoutErr := s.lastPayoutError
 	report := s.lastHealthReport
 	infMgr := s.infMgr
+	runtimeMgr := s.runtimeMgr
 	publicAIOptIn := s.publicAIOptIn
 	s.mu.RUnlock()
+
+	report = freshOperatorHealthReport(caps, infMgr, runtimeMgr, report)
 
 	nativeReady := inference.NativeRuntimeAvailable() && infMgr != nil && infMgr.Healthy()
 	publicInferenceReady := publicAIOptIn && nativeReady
@@ -696,6 +703,17 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 		LastClaimAt:     lastClaimAt,
 		LastPayoutAt:    lastPayoutAt,
 	}
+}
+
+func freshOperatorHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *runtimeManager, fallback hub.HealthReport) hub.HealthReport {
+	if runtimeMgr == nil {
+		return fallback
+	}
+	report := buildHealthReport(caps, infMgr, runtimeMgr)
+	if strings.TrimSpace(report.Message) == "" {
+		return fallback
+	}
+	return report
 }
 
 func deriveRuntimePosture(runtimeReady bool, runtimeHealth string) (string, string, bool) {

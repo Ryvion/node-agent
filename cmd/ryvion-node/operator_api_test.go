@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/Ryvion/node-agent/internal/hub"
+	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/node-agent/internal/runtimeexec"
 )
 
 func TestAllowLocalOrigin(t *testing.T) {
@@ -248,6 +251,70 @@ func TestOperatorStatusSnapshotMarksRuntimeWarmup(t *testing.T) {
 	}
 	if status.Runtime.SovereignStatus != "runtime_warming" {
 		t.Fatalf("sovereign_status = %q, want %q", status.Runtime.SovereignStatus, "runtime_warming")
+	}
+}
+
+func TestOperatorStatusSnapshotRefreshesRuntimeReport(t *testing.T) {
+	t.Parallel()
+
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		return runtimeexec.Status{
+			BinaryPath:   `C:\Program Files\Ryvion\runtime\ryvion-runtime.cmd`,
+			BackendPath:  `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd`,
+			EnginePath:   `C:\Program Files\RedHat\Podman\podman.exe`,
+			EngineKind:   "podman",
+			CLIInstalled: true,
+			Ready:        true,
+			GPUReady:     false,
+			Health:       "ready",
+		}, true
+	}
+	defer func() {
+		probeManagedRuntimeStatus = prevProbe
+	}()
+
+	state := &operatorRuntime{
+		version:      "dev",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		caps: hw.CapSet{
+			CPUCores: 16,
+			RAMBytes: 32 << 30,
+			GPUModel: "RTX",
+			VRAMBytes: 16 << 30,
+		},
+		runtimeMgr: newRuntimeManager("dev", runtimeContractMetadata{
+			Channel:      "managed_oci_v1",
+			Version:      "2026.04.15.21",
+			Provider:     "oci_desktop_adapter",
+			Mode:         "host_package",
+			Source:       "ryvion_runtime_kit",
+			Artifact:     "ryvion-runtime-kit-windows-amd64-2026.04.15.21.zip",
+			Binary:       `C:\Program Files\Ryvion\runtime\ryvion-runtime.cmd`,
+			Backend:      `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd`,
+			Engine:       `C:\Program Files\RedHat\Podman\podman.exe`,
+			EngineKind:   "podman",
+			ManifestHash: "freshhash",
+		}),
+		lastHealthReport: hub.HealthReport{
+			Message: "runtime-ready:0,runtime-health:warming,runtime-version:2026.04.15.20,runtime-artifact:ryvion-runtime-kit-windows-amd64-2026.04.15.20.zip",
+		},
+	}
+
+	status := state.statusSnapshot("45890")
+	if !status.Runtime.RuntimeReady {
+		t.Fatal("expected live runtime probe to refresh runtime_ready")
+	}
+	if status.Runtime.RuntimePosture != "ready" {
+		t.Fatalf("runtime_posture = %q, want %q", status.Runtime.RuntimePosture, "ready")
+	}
+	if status.Runtime.RuntimeVersion != "2026.04.15.21" {
+		t.Fatalf("runtime_version = %q, want %q", status.Runtime.RuntimeVersion, "2026.04.15.21")
+	}
+	if status.Runtime.RuntimeArtifact != "ryvion-runtime-kit-windows-amd64-2026.04.15.21.zip" {
+		t.Fatalf("runtime_artifact = %q", status.Runtime.RuntimeArtifact)
 	}
 }
 
