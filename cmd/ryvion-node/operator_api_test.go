@@ -123,56 +123,90 @@ func TestDeriveSovereignPosture(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		registered      bool
-		declaredCountry string
-		runtimeReady    bool
-		runtimeHealth   string
-		nativeReady     bool
-		wantReady       bool
-		wantStatus      string
-		wantDetailPart  string
+		name              string
+		registered        bool
+		declaredCountry   string
+		verifiedCountry   string
+		locationApproved  bool
+		sovereignVerified bool
+		trustReason       string
+		runtimeReady      bool
+		runtimeHealth     string
+		nativeReady       bool
+		wantReady         bool
+		wantStatus        string
+		wantDetailPart    string
 	}{
 		{
 			name:           "missing country blocks review",
 			registered:     true,
 			wantStatus:     "country_missing",
-			wantDetailPart: "RYV_DECLARED_COUNTRY",
+			wantDetailPart: "infer it automatically",
 		},
 		{
-			name:            "registration pending blocks review",
-			declaredCountry: "CA",
-			runtimeReady:    true,
-			wantStatus:      "registration_pending",
+			name:              "registration pending blocks review",
+			verifiedCountry:   "CA",
+			locationApproved:  true,
+			sovereignVerified: true,
+			declaredCountry:   "CA",
+			runtimeReady:      true,
+			wantStatus:        "registration_pending",
 		},
 		{
-			name:            "runtime unavailable blocks review",
+			name:              "runtime unavailable blocks review",
+			registered:        true,
+			verifiedCountry:   "CA",
+			locationApproved:  true,
+			sovereignVerified: true,
+			wantStatus:        "runtime_unavailable",
+		},
+		{
+			name:              "runtime warming surfaces warmup posture",
+			registered:        true,
+			verifiedCountry:   "CA",
+			locationApproved:  true,
+			sovereignVerified: true,
+			runtimeHealth:     "warming",
+			wantStatus:        "runtime_warming",
+		},
+		{
+			name:              "local prerequisites satisfied",
+			registered:        true,
+			verifiedCountry:   "CA",
+			locationApproved:  true,
+			sovereignVerified: true,
+			runtimeReady:      true,
+			wantReady:         true,
+			wantStatus:        "review_ready",
+			wantDetailPart:    "Hub-verified country CA",
+		},
+		{
+			name:              "native path also satisfies prerequisites",
+			registered:        true,
+			verifiedCountry:   "DE",
+			locationApproved:  true,
+			sovereignVerified: true,
+			nativeReady:       true,
+			wantReady:         true,
+			wantStatus:        "review_ready",
+		},
+		{
+			name:              "country mismatch is surfaced explicitly",
+			registered:        true,
+			declaredCountry:   "CA",
+			verifiedCountry:   "US",
+			locationApproved:  false,
+			sovereignVerified: false,
+			wantStatus:        "country_mismatch",
+			wantDetailPart:    "Declared country CA does not match hub-verified country US",
+		},
+		{
+			name:            "verified country without approval stays pending",
 			registered:      true,
-			declaredCountry: "CA",
-			wantStatus:      "runtime_unavailable",
-		},
-		{
-			name:            "runtime warming surfaces warmup posture",
-			registered:      true,
-			declaredCountry: "CA",
-			runtimeHealth:   "warming",
-			wantStatus:      "runtime_warming",
-		},
-		{
-			name:            "local prerequisites satisfied",
-			registered:      true,
-			declaredCountry: "CA",
-			runtimeReady:    true,
-			wantReady:       true,
-			wantStatus:      "review_ready",
-		},
-		{
-			name:            "native path also satisfies prerequisites",
-			registered:      true,
-			declaredCountry: "DE",
-			nativeReady:     true,
-			wantReady:       true,
-			wantStatus:      "review_ready",
+			verifiedCountry: "CA",
+			trustReason:     "eligible for public workloads; sovereign approval has not been granted",
+			wantStatus:      "trust_review_pending",
+			wantDetailPart:  "public workloads",
 		},
 	}
 
@@ -180,7 +214,7 @@ func TestDeriveSovereignPosture(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotReady, gotStatus, gotDetail := deriveSovereignPosture(tc.registered, tc.declaredCountry, tc.runtimeReady, tc.runtimeHealth, tc.nativeReady)
+			gotReady, gotStatus, gotDetail := deriveSovereignPosture(tc.registered, tc.declaredCountry, tc.verifiedCountry, tc.locationApproved, tc.sovereignVerified, tc.trustReason, tc.runtimeReady, tc.runtimeHealth, tc.nativeReady)
 			if gotReady != tc.wantReady {
 				t.Fatalf("ready = %v, want %v", gotReady, tc.wantReady)
 			}

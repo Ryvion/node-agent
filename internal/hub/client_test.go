@@ -170,6 +170,49 @@ func TestFetchWorkNoWork(t *testing.T) {
 	}
 }
 
+func TestHeartbeatParsesVerifiedLocation(t *testing.T) {
+	pub, priv := testKeyPair()
+	pubHex := hex.EncodeToString(pub)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			PublicKeyHex string `json:"public_key_hex"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.PublicKeyHex != pubHex {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"latest_version":      "v1.2.48",
+			"country_code":        "CA",
+			"location_approved":   true,
+			"sovereign_verified":  true,
+			"verification_source": "geoip_country_fallback",
+			"trust_reason":        "declared country matches observed network country",
+		})
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	resp, err := c.Heartbeat(context.Background(), Metrics{TimestampMs: 123})
+	if err != nil {
+		t.Fatalf("heartbeat failed: %v", err)
+	}
+	if resp.LatestVersion != "v1.2.48" {
+		t.Fatalf("latest version = %q, want %q", resp.LatestVersion, "v1.2.48")
+	}
+	if resp.CountryCode != "CA" || !resp.LocationApproved || !resp.SovereignVerified {
+		t.Fatalf("unexpected heartbeat response: %+v", resp)
+	}
+}
+
 func TestSubmitReceiptSignsExpectedMessage(t *testing.T) {
 	pub, priv := testKeyPair()
 	pubHex := hex.EncodeToString(pub)

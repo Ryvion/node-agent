@@ -312,7 +312,7 @@ func sendHeartbeat(ctx context.Context, client *hub.Client) bool {
 	// Report whether the node is self-throttling due to operator GPU usage.
 	throttled := flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 && metrics.GPUUtil > flagMaxGPUUtil
 
-	latest, err := client.Heartbeat(ctx, hub.Metrics{
+	heartbeat, err := client.Heartbeat(ctx, hub.Metrics{
 		TimestampMs:  time.Now().UnixMilli(),
 		CPUUtil:      metrics.CPUUtil,
 		MemUtil:      metrics.MemUtil,
@@ -322,17 +322,17 @@ func sendHeartbeat(ctx context.Context, client *hub.Client) bool {
 	})
 	if err != nil {
 		if operatorRuntimeState != nil {
-			operatorRuntimeState.recordHeartbeat(metrics, "", err)
+			operatorRuntimeState.recordHeartbeat(metrics, hub.HeartbeatResponse{}, err)
 		}
 		slog.Warn("heartbeat failed", "error", err)
 		return false
 	}
 	if operatorRuntimeState != nil {
-		operatorRuntimeState.recordHeartbeat(metrics, latest, nil)
+		operatorRuntimeState.recordHeartbeat(metrics, heartbeat, nil)
 	}
 	// Store latest version for work loop update checks.
-	if latest != "" {
-		latestHubVersion.Store(latest)
+	if heartbeat.LatestVersion != "" {
+		latestHubVersion.Store(heartbeat.LatestVersion)
 	}
 	return true
 }

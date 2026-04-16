@@ -29,14 +29,19 @@ var (
 type operatorRuntime struct {
 	mu sync.RWMutex
 
-	version         string
-	hubURL          string
-	deviceType      string
-	declaredCountry string
-	publicKeyHex    string
-	publicAIOptIn   bool
-	caps            hw.CapSet
-	client          *hub.Client
+	version            string
+	hubURL             string
+	deviceType         string
+	declaredCountry    string
+	verifiedCountry    string
+	locationApproved   bool
+	sovereignVerified  bool
+	verificationSource string
+	trustReason        string
+	publicKeyHex       string
+	publicAIOptIn      bool
+	caps               hw.CapSet
+	client             *hub.Client
 
 	registered        bool
 	lastRegisterError string
@@ -80,6 +85,7 @@ type operatorStatusResponse struct {
 	PublicKeyHex     string              `json:"public_key_hex"`
 	DeviceType       string              `json:"device_type"`
 	DeclaredCountry  string              `json:"declared_country,omitempty"`
+	VerifiedCountry  string              `json:"verified_country,omitempty"`
 	Registered       bool                `json:"registered"`
 	RegisterError    string              `json:"register_error,omitempty"`
 	LatestVersion    string              `json:"latest_version,omitempty"`
@@ -135,6 +141,11 @@ type operatorRuntimeInfo struct {
 	SovereignReviewReady     bool   `json:"sovereign_review_ready"`
 	SovereignStatus          string `json:"sovereign_status,omitempty"`
 	SovereignDetail          string `json:"sovereign_detail,omitempty"`
+	VerifiedCountry          string `json:"verified_country,omitempty"`
+	LocationApproved         bool   `json:"location_approved"`
+	SovereignVerified        bool   `json:"sovereign_verified"`
+	VerificationSource       string `json:"verification_source,omitempty"`
+	TrustReason              string `json:"trust_reason,omitempty"`
 	NativeModel              string `json:"native_model,omitempty"`
 	DiskGB                   uint64 `json:"disk_gb,omitempty"`
 }
@@ -167,6 +178,7 @@ type operatorDiagnosticsResponse struct {
 	LatestVersion   string                    `json:"latest_version,omitempty"`
 	LocalAPIURL     string                    `json:"local_api_url"`
 	DeclaredCountry string                    `json:"declared_country,omitempty"`
+	VerifiedCountry string                    `json:"verified_country,omitempty"`
 	RuntimeChecks   []operatorDiagnosticCheck `json:"runtime_checks"`
 	Recommendations []string                  `json:"recommendations"`
 	Issues          []operatorDiagnosticIssue `json:"issues"`
@@ -323,7 +335,7 @@ func (s *operatorRuntime) setRegistered(ok bool, err error) {
 	s.lastRegisterError = ""
 }
 
-func (s *operatorRuntime) recordHeartbeat(metrics hw.Metrics, latestVersion string, err error) {
+func (s *operatorRuntime) recordHeartbeat(metrics hw.Metrics, heartbeat hub.HeartbeatResponse, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastMetrics = metrics
@@ -333,9 +345,14 @@ func (s *operatorRuntime) recordHeartbeat(metrics hw.Metrics, latestVersion stri
 	}
 	s.lastHeartbeatAt = time.Now()
 	s.lastHeartbeatErr = ""
-	if latestVersion != "" {
-		s.latestVersion = latestVersion
+	if heartbeat.LatestVersion != "" {
+		s.latestVersion = heartbeat.LatestVersion
 	}
+	s.verifiedCountry = normalizeDeclaredCountry(heartbeat.CountryCode)
+	s.locationApproved = heartbeat.LocationApproved
+	s.sovereignVerified = heartbeat.SovereignVerified
+	s.verificationSource = strings.TrimSpace(heartbeat.VerificationSource)
+	s.trustReason = strings.TrimSpace(heartbeat.TrustReason)
 }
 
 func (s *operatorRuntime) recordHealthReport(report hub.HealthReport) {
@@ -462,6 +479,12 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	current := s.currentJob
 	recent := make([]operatorJob, len(s.recentJobs))
 	copy(recent, s.recentJobs)
+	declaredCountry := s.declaredCountry
+	verifiedCountry := s.verifiedCountry
+	locationApproved := s.locationApproved
+	sovereignVerified := s.sovereignVerified
+	verificationSource := s.verificationSource
+	trustReason := s.trustReason
 	report := s.lastHealthReport
 	infMgr := s.infMgr
 	runtimeMgr := s.runtimeMgr
@@ -482,7 +505,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeGPUReady := statusToken(report.Message, "runtime-gpu-ready:1") || statusToken(report.Message, "docker-gpu:ok")
 	runtimeHealth := statusTokenValue(report.Message, "runtime-health:")
 	runtimePosture, runtimeDetail, runtimeWarming := deriveRuntimePosture(runtimeReady, runtimeHealth)
-	sovereignReviewReady, sovereignStatus, sovereignDetail := deriveSovereignPosture(registered, s.declaredCountry, runtimeReady, runtimeHealth, nativeReady)
+	sovereignReviewReady, sovereignStatus, sovereignDetail := deriveSovereignPosture(registered, declaredCountry, verifiedCountry, locationApproved, sovereignVerified, trustReason, runtimeReady, runtimeHealth, nativeReady)
 
 	runtimeInfo := operatorRuntimeInfo{
 		LocalAPIURL:              fmt.Sprintf("http://127.0.0.1:%s", apiPort),
@@ -514,6 +537,11 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		SovereignReviewReady:     sovereignReviewReady,
 		SovereignStatus:          sovereignStatus,
 		SovereignDetail:          sovereignDetail,
+		VerifiedCountry:          verifiedCountry,
+		LocationApproved:         locationApproved,
+		SovereignVerified:        sovereignVerified,
+		VerificationSource:       verificationSource,
+		TrustReason:              trustReason,
 		DiskGB:                   statusTokenUint(report.Message, "disk_gb:"),
 	}
 	if infMgr != nil {
@@ -527,7 +555,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		HubURL:           s.hubURL,
 		PublicKeyHex:     s.publicKeyHex,
 		DeviceType:       s.deviceType,
-		DeclaredCountry:  s.declaredCountry,
+		DeclaredCountry:  declaredCountry,
+		VerifiedCountry:  verifiedCountry,
 		Registered:       registered,
 		RegisterError:    registerErr,
 		LatestVersion:    latestVersion,
@@ -561,6 +590,10 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	latestVersion := s.latestVersion
 	caps := s.caps
 	declaredCountry := s.declaredCountry
+	verifiedCountry := s.verifiedCountry
+	locationApproved := s.locationApproved
+	sovereignVerified := s.sovereignVerified
+	trustReason := s.trustReason
 	registered := s.registered
 	lastHeartbeatAt := s.lastHeartbeatAt
 	lastHeartbeatErr := s.lastHeartbeatErr
@@ -582,7 +615,7 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	runtimeReady := statusToken(report.Message, "runtime-ready:1") || statusToken(report.Message, "docker-ready:1")
 	runtimeHealth := statusTokenValue(report.Message, "runtime-health:")
 	runtimePosture, runtimeDetail, runtimeWarming := deriveRuntimePosture(runtimeReady, runtimeHealth)
-	sovereignReviewReady, _, sovereignDetail := deriveSovereignPosture(registered, declaredCountry, runtimeReady, runtimeHealth, nativeReady)
+	sovereignReviewReady, _, sovereignDetail := deriveSovereignPosture(registered, declaredCountry, verifiedCountry, locationApproved, sovereignVerified, trustReason, runtimeReady, runtimeHealth, nativeReady)
 	managedRuntimeDetail := "Required for video transcode, embeddings, agent hosting, and other OCI workloads."
 	if runtimeWarming {
 		managedRuntimeDetail = runtimeDetail
@@ -679,8 +712,8 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	if nativeReady && !publicInferenceReady {
 		recommendations = append(recommendations, "Enable public participation only on machines you explicitly want exposed to buyer-facing AI jobs.")
 	}
-	if strings.TrimSpace(declaredCountry) == "" {
-		recommendations = append(recommendations, "Declare country on the node runtime before pursuing sovereign routing or country-restricted workloads.")
+	if strings.TrimSpace(verifiedCountry) == "" && strings.TrimSpace(declaredCountry) == "" {
+		recommendations = append(recommendations, "Wait for hub location verification or set an ISO country code on the node if you need a local sovereign posture hint immediately.")
 	}
 	if runtimePosture == "warming" && len(issues) == 0 {
 		recommendations = append(recommendations, "Managed OCI runtime is still warming in the background. Gateway-native inference can continue using the local model path while OCI startup finishes.")
@@ -694,6 +727,7 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 		LatestVersion:   latestVersion,
 		LocalAPIURL:     fmt.Sprintf("http://127.0.0.1:%s", apiPort),
 		DeclaredCountry: declaredCountry,
+		VerifiedCountry: verifiedCountry,
 		RuntimeChecks:   runtimeChecks,
 		Recommendations: recommendations,
 		Issues:          issues,
@@ -732,18 +766,32 @@ func deriveRuntimePosture(runtimeReady bool, runtimeHealth string) (string, stri
 	}
 }
 
-func deriveSovereignPosture(registered bool, declaredCountry string, runtimeReady bool, runtimeHealth string, nativeReady bool) (bool, string, string) {
-	if strings.TrimSpace(declaredCountry) == "" {
-		return false, "country_missing", "Declare country before sovereign routing review can begin. Set RYV_DECLARED_COUNTRY=CA or save the ISO country code in Operator Settings."
+func deriveSovereignPosture(registered bool, declaredCountry string, verifiedCountry string, locationApproved bool, sovereignVerified bool, trustReason string, runtimeReady bool, runtimeHealth string, nativeReady bool) (bool, string, string) {
+	declaredCountry = normalizeDeclaredCountry(declaredCountry)
+	verifiedCountry = normalizeDeclaredCountry(verifiedCountry)
+	if declaredCountry != "" && verifiedCountry != "" && declaredCountry != verifiedCountry {
+		return false, "country_mismatch", fmt.Sprintf("Declared country %s does not match hub-verified country %s. Fix the local setting or investigate location verification before sovereign routing.", declaredCountry, verifiedCountry)
+	}
+	if verifiedCountry == "" && declaredCountry == "" {
+		return false, "country_missing", "Country has not been verified by the hub yet. Ryvion should infer it automatically from network verification, but you can set RYV_DECLARED_COUNTRY=CA or save the ISO country code in Operator Settings as a fallback hint."
 	}
 	if !registered {
 		return false, "registration_pending", "The node must register successfully before sovereign routing review can proceed."
+	}
+	if verifiedCountry != "" && (!locationApproved || !sovereignVerified) {
+		if strings.TrimSpace(trustReason) != "" {
+			return false, "trust_review_pending", trustReason
+		}
+		return false, "trust_review_pending", "Hub location verification is present, but sovereign approval has not been granted yet."
 	}
 	if !runtimeReady && !nativeReady {
 		if strings.EqualFold(strings.TrimSpace(runtimeHealth), "warming") {
 			return false, "runtime_warming", "Managed execution runtime is still warming in the background. Sovereign review can continue once local runtime readiness turns green, or sooner if native inference becomes healthy."
 		}
 		return false, "runtime_unavailable", "Bring either the native inference path or the managed execution runtime online before sovereign workloads can be considered."
+	}
+	if verifiedCountry != "" {
+		return true, "review_ready", fmt.Sprintf("Hub-verified country %s is present and local runtime prerequisites are satisfied. Final sovereign eligibility still depends on hub trust review and jurisdiction policy.", verifiedCountry)
 	}
 	return true, "review_ready", "Local prerequisites are satisfied. Final sovereign eligibility still depends on hub trust review and jurisdiction policy."
 }

@@ -117,7 +117,7 @@ func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, re
 	return c.post(ctx, "/api/v1/node/register", body, nil)
 }
 
-func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (string, error) {
+func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (HeartbeatResponse, error) {
 	pubHex := c.pubHex()
 	ts := metrics.TimestampMs
 	if ts == 0 {
@@ -142,11 +142,9 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (string, error)
 		formatFloatJSON(body.GPUUtil),
 		formatFloatJSON(body.PowerWatts),
 	)
-	var resp struct {
-		LatestVersion string `json:"latest_version"`
-	}
+	var resp HeartbeatResponse
 	err := c.post(ctx, "/api/v1/node/heartbeat", body, &resp)
-	return resp.LatestVersion, err
+	return resp, err
 }
 
 func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
@@ -747,6 +745,15 @@ type AgentHealthResponse struct {
 	ShouldStop bool   `json:"should_stop"`
 	Status     string `json:"status"`
 	JobStatus  string `json:"job_status"`
+}
+
+type HeartbeatResponse struct {
+	LatestVersion      string `json:"latest_version,omitempty"`
+	CountryCode        string `json:"country_code,omitempty"`
+	LocationApproved   bool   `json:"location_approved,omitempty"`
+	SovereignVerified  bool   `json:"sovereign_verified,omitempty"`
+	VerificationSource string `json:"verification_source,omitempty"`
+	TrustReason        string `json:"trust_reason,omitempty"`
 }
 
 type UploadToken struct {
