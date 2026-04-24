@@ -718,6 +718,7 @@ type RuntimeRequirements struct {
 	NeedsManagedOCI      bool     `json:"needs_managed_oci,omitempty"`
 	NeedsManagedOCIGPU   bool     `json:"needs_managed_oci_gpu,omitempty"`
 	NeedsNativeStreaming bool     `json:"needs_native_streaming,omitempty"`
+	NeedsNativeReport    bool     `json:"needs_native_report,omitempty"`
 	NeedsAgentHosting    bool     `json:"needs_agent_hosting,omitempty"`
 	Tooling              []string `json:"tooling,omitempty"`
 	MinDiskGB            uint64   `json:"min_disk_gb,omitempty"`

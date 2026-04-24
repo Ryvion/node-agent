@@ -28,11 +28,13 @@ type executionEngine interface {
 }
 
 type streamingEngine struct{}
+type nativeReportEngine struct{}
 type managedOCIEngine struct{}
 type agentHostingEngine struct{}
 
-func (streamingEngine) Kind() string  { return executorKindNativeStreaming }
-func (managedOCIEngine) Kind() string { return executorKindManagedOCI }
+func (streamingEngine) Kind() string    { return executorKindNativeStreaming }
+func (nativeReportEngine) Kind() string { return executorKindNativeReport }
+func (managedOCIEngine) Kind() string   { return executorKindManagedOCI }
 func (agentHostingEngine) Kind() string {
 	return executorKindAgentHosting
 }
@@ -41,6 +43,8 @@ func selectExecutionEngine(work *hub.WorkAssignment) executionEngine {
 	switch executorKindForAssignment(work) {
 	case executorKindNativeStreaming:
 		return streamingEngine{}
+	case executorKindNativeReport:
+		return nativeReportEngine{}
 	case executorKindAgentHosting:
 		return agentHostingEngine{}
 	default:
@@ -60,6 +64,9 @@ func executorKindForAssignment(work *hub.WorkAssignment) string {
 	}
 	if strings.EqualFold(strings.TrimSpace(work.Image), "streaming") {
 		return executorKindNativeStreaming
+	}
+	if strings.EqualFold(strings.TrimSpace(work.Image), executorKindNativeReport) {
+		return executorKindNativeReport
 	}
 	return executorKindManagedOCI
 }

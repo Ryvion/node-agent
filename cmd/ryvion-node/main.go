@@ -441,11 +441,15 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	// Determine job timeout based on type or explicit env var
 	executorKind := executorKindForAssignment(work)
 	isStreaming := executorKind == executorKindNativeStreaming
+	isNativeReport := executorKind == executorKindNativeReport
 	isTraining := work.Kind == "training"
 	isAgentHosting := executorKind == executorKindAgentHosting
 	jobTimeout := 10 * time.Minute
 	if isStreaming {
 		jobTimeout = 30 * time.Minute // Streaming inference often takes much longer context generation
+	}
+	if isNativeReport {
+		jobTimeout = 15 * time.Minute
 	}
 	if isTraining {
 		jobTimeout = 4 * time.Hour // Training/fine-tuning jobs can take hours
@@ -670,6 +674,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		parts = append(parts, "native-inference:unsupported")
 	}
 	parts = append(parts, boolStatusToken("cap:native_streaming", nativeReady))
+	parts = append(parts, "cap:native_report:1")
 	if publicAIReady {
 		parts = append(parts, "public-ai-ready:1")
 	} else {

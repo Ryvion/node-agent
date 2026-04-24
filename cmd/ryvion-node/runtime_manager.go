@@ -12,6 +12,7 @@ import (
 
 const (
 	executorKindNativeStreaming = "native_streaming"
+	executorKindNativeReport    = "native_report"
 	executorKindManagedOCI      = "managed_oci"
 	executorKindAgentHosting    = "agent_hosting"
 
