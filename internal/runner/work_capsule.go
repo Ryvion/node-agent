@@ -25,6 +25,7 @@ type WorkCapsuleSpec struct {
 	RepositoryID   string   `json:"repository_connection_id"`
 	Goal           string   `json:"goal"`
 	RepoURL        string   `json:"repo_url"`
+	RepoToken      string   `json:"repo_token"`
 	BaseBranch     string   `json:"base_branch"`
 	WorkBranch     string   `json:"work_branch"`
 	SiteURL        string   `json:"site_url"`
@@ -116,7 +117,7 @@ func RunWorkCapsule(ctx context.Context, specJSON string) (*Result, error) {
 		if strings.TrimSpace(spec.BaseBranch) != "" {
 			args = append(args, "--branch", spec.BaseBranch)
 		}
-		args = append(args, githubCloneRemote(spec.RepoURL, firstNonEmpty(os.Getenv("RYV_WORK_GITHUB_TOKEN"), os.Getenv("GITHUB_TOKEN"))), repoDir)
+		args = append(args, githubCloneRemote(spec.RepoURL, firstNonEmpty(spec.RepoToken, os.Getenv("RYV_WORK_GITHUB_TOKEN"), os.Getenv("GITHUB_TOKEN"))), repoDir)
 		rec := runCommand(ctx, workDir, "git", args, "repo", &log)
 		records = append(records, rec)
 		if rec.ExitCode != 0 {
@@ -1098,7 +1099,10 @@ func pushWorkBranch(ctx context.Context, repoDir string, spec WorkCapsuleSpec, r
 			return delivery
 		}
 	}
-	token := strings.TrimSpace(os.Getenv("RYV_WORK_GITHUB_TOKEN"))
+	token := strings.TrimSpace(spec.RepoToken)
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("RYV_WORK_GITHUB_TOKEN"))
+	}
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	}
@@ -1256,7 +1260,7 @@ func addZipFile(zw *zip.Writer, name, path string) error {
 }
 
 func redactSecrets(s string) string {
-	replacements := []string{"token=", "api_key=", "apikey=", "authorization:", "bearer ", "password=", "secret=", "github_token=", "gh_token="}
+	replacements := []string{"token=", "api_key=", "apikey=", "authorization:", "bearer ", "password=", "secret=", "github_token=", "gh_token=", "repo_token="}
 	out := s
 	lower := strings.ToLower(out)
 	for _, needle := range replacements {

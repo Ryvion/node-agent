@@ -143,8 +143,8 @@ func TestWorkCapsuleCommandEnvDropsControlPlaneSecrets(t *testing.T) {
 }
 
 func TestRedactSecretsCoversBearerAndGitHubToken(t *testing.T) {
-	redacted := redactSecrets("Authorization: Bearer abc123 github_token=ghp_secret")
-	if strings.Contains(redacted, "abc123") || strings.Contains(redacted, "ghp_secret") {
+	redacted := redactSecrets("Authorization: Bearer abc123 github_token=ghp_secret repo_token=ghp_repo")
+	if strings.Contains(redacted, "abc123") || strings.Contains(redacted, "ghp_secret") || strings.Contains(redacted, "ghp_repo") {
 		t.Fatalf("redacted output leaked secret: %q", redacted)
 	}
 }
