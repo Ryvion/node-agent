@@ -320,7 +320,8 @@ func blockedWorkCommandReason(command string) string {
 		"terraform apply", "tofu apply", "pulumi up", "aws cloudformation deploy",
 		"npm publish", "pnpm publish", "yarn publish", "cargo publish",
 		"git push", "docker push", "gh release create",
-		"sudo ", "chmod -r 777 /", "rm -rf /", "rm -fr /",
+		"git reset --hard", "git clean -fd", "git clean -xdf",
+		"sudo ", "chmod -r 777", "rm -rf /", "rm -fr /", "rm -rf .git", "rm -fr .git",
 	}
 	for _, needle := range blocked {
 		if strings.Contains(normalized, needle) {
@@ -345,6 +346,7 @@ func runCommand(ctx context.Context, dir, name string, args []string, phase stri
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	cmd.Env = workCapsuleCommandEnv(os.Environ())
 	var out cappedBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -1199,21 +1201,42 @@ func addZipFile(zw *zip.Writer, name, path string) error {
 }
 
 func redactSecrets(s string) string {
-	replacements := []string{"token=", "api_key=", "apikey=", "authorization:", "password=", "secret="}
+	replacements := []string{"token=", "api_key=", "apikey=", "authorization:", "bearer ", "password=", "secret=", "github_token=", "gh_token="}
 	out := s
 	lower := strings.ToLower(out)
 	for _, needle := range replacements {
+		searchFrom := 0
 		for {
-			idx := strings.Index(lower, needle)
+			idx := strings.Index(lower[searchFrom:], needle)
 			if idx < 0 {
 				break
 			}
-			end := idx + len(needle)
+			idx += searchFrom
+			start := idx + len(needle)
+			for start < len(out) && isWorkCapsuleSpace(out[start]) {
+				start++
+			}
+			if strings.HasPrefix(strings.ToLower(out[start:]), "[redacted]") {
+				searchFrom = start + len("[redacted]")
+				continue
+			}
+			end := start
+			if needle == "authorization:" && strings.HasPrefix(strings.ToLower(out[start:]), "bearer") {
+				end = start + len("bearer")
+				for end < len(out) && isWorkCapsuleSpace(out[end]) {
+					end++
+				}
+			}
 			for end < len(out) && out[end] != ' ' && out[end] != '\n' && out[end] != '\r' && out[end] != '\t' {
 				end++
 			}
-			out = out[:idx+len(needle)] + "[redacted]" + out[end:]
+			if end == start {
+				searchFrom = start
+				continue
+			}
+			out = out[:start] + "[redacted]" + out[end:]
 			lower = strings.ToLower(out)
+			searchFrom = start + len("[redacted]")
 		}
 	}
 	if idx := strings.Index(strings.ToLower(out), "x-access-token:"); idx >= 0 {
@@ -1225,6 +1248,36 @@ func redactSecrets(s string) string {
 		out = out[:start] + "[redacted]" + out[end:]
 	}
 	return out
+}
+
+func isWorkCapsuleSpace(b byte) bool {
+	return b == ' ' || b == '\n' || b == '\r' || b == '\t'
+}
+
+func workCapsuleCommandEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if blockedWorkCapsuleEnvName(name) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func blockedWorkCapsuleEnvName(name string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(name))
+	switch normalized {
+	case "GITHUB_TOKEN", "GH_TOKEN", "RYV_WORK_GITHUB_TOKEN", "RYVION_NODE_TOKEN", "RYVION_API_KEY",
+		"HUB_TOKEN", "NODE_PRIVATE_KEY", "ED25519_PRIVATE_KEY":
+		return true
+	default:
+		return strings.HasPrefix(normalized, "RYVION_SECRET_") || strings.HasPrefix(normalized, "RYV_SECRET_")
+	}
 }
 
 func defaultString(value, fallback string) string {

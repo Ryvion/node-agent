@@ -70,6 +70,10 @@ func TestValidateWorkCapsuleCommandsBlocksDirectDeploy(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "vercel deploy") {
 		t.Fatalf("err = %v, want vercel deploy block", err)
 	}
+	err = validateWorkCapsuleCommands(WorkCapsuleSpec{Commands: []string{"git reset --hard HEAD"}})
+	if err == nil || !strings.Contains(err.Error(), "git reset --hard") {
+		t.Fatalf("err = %v, want reset block", err)
+	}
 	if err := validateWorkCapsuleCommands(WorkCapsuleSpec{ProfileOnly: true, Commands: []string{"vercel deploy --prod"}}); err != nil {
 		t.Fatalf("profile-only preflight should skip command policy, got %v", err)
 	}
@@ -90,6 +94,32 @@ func TestSummarizeWorkRiskProfileOnly(t *testing.T) {
 	level, summary := summarizeWorkRisk(WorkCapsuleSpec{ProfileOnly: true}, nil, 0, nil, repositoryProfile{})
 	if level != "low" || !strings.Contains(summary, "preflight") {
 		t.Fatalf("risk = %s/%q, want low preflight", level, summary)
+	}
+}
+
+func TestWorkCapsuleCommandEnvDropsControlPlaneSecrets(t *testing.T) {
+	env := workCapsuleCommandEnv([]string{
+		"PATH=/usr/bin",
+		"GITHUB_TOKEN=secret",
+		"RYV_WORK_GITHUB_TOKEN=secret",
+		"OPENAI_API_KEY=model-key",
+		"RYVION_SECRET_INTERNAL=secret",
+	})
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "PATH=/usr/bin") || !strings.Contains(joined, "OPENAI_API_KEY=model-key") {
+		t.Fatalf("env = %v, want safe runtime vars preserved", env)
+	}
+	for _, forbidden := range []string{"GITHUB_TOKEN", "RYV_WORK_GITHUB_TOKEN", "RYVION_SECRET_INTERNAL"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("env leaked %s: %v", forbidden, env)
+		}
+	}
+}
+
+func TestRedactSecretsCoversBearerAndGitHubToken(t *testing.T) {
+	redacted := redactSecrets("Authorization: Bearer abc123 github_token=ghp_secret")
+	if strings.Contains(redacted, "abc123") || strings.Contains(redacted, "ghp_secret") {
+		t.Fatalf("redacted output leaked secret: %q", redacted)
 	}
 }
 
