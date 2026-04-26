@@ -26,6 +26,7 @@ type Result struct {
 	OutputPath string
 	Duration   time.Duration
 	Metrics    map[string]any
+	Metadata   map[string]any
 }
 
 // Run executes an OCI image with /work mounted and specJSON written to /work/job.json.

@@ -31,6 +31,7 @@ type streamingEngine struct{}
 type nativeReportEngine struct{}
 type managedOCIEngine struct{}
 type agentHostingEngine struct{}
+type workCapsuleEngine struct{}
 
 func (streamingEngine) Kind() string    { return executorKindNativeStreaming }
 func (nativeReportEngine) Kind() string { return executorKindNativeReport }
@@ -38,6 +39,7 @@ func (managedOCIEngine) Kind() string   { return executorKindManagedOCI }
 func (agentHostingEngine) Kind() string {
 	return executorKindAgentHosting
 }
+func (workCapsuleEngine) Kind() string { return executorKindWorkCapsule }
 
 func selectExecutionEngine(work *hub.WorkAssignment) executionEngine {
 	switch executorKindForAssignment(work) {
@@ -47,6 +49,8 @@ func selectExecutionEngine(work *hub.WorkAssignment) executionEngine {
 		return nativeReportEngine{}
 	case executorKindAgentHosting:
 		return agentHostingEngine{}
+	case executorKindWorkCapsule:
+		return workCapsuleEngine{}
 	default:
 		return managedOCIEngine{}
 	}
@@ -58,6 +62,9 @@ func executorKindForAssignment(work *hub.WorkAssignment) string {
 	}
 	if kind := strings.TrimSpace(work.ExecutorKind); kind != "" {
 		return kind
+	}
+	if strings.EqualFold(strings.TrimSpace(work.Kind), executorKindWorkCapsule) || isWorkCapsuleTask(work.SpecJSON) {
+		return executorKindWorkCapsule
 	}
 	if strings.EqualFold(strings.TrimSpace(work.Kind), executorKindAgentHosting) || isAgentHostingTask(work.SpecJSON) {
 		return executorKindAgentHosting
@@ -248,6 +255,90 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 		ResultHashHex: resultHash,
 		ExitCode:      result.ExitCode,
 		MeteringUnits: units,
+		BlobURL:       stringValue(metadata["blob_url"]),
+		ObjectKey:     stringValue(metadata["object_key"]),
+		Metadata:      metadata,
+	}, runErr
+}
+
+func (workCapsuleEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {
+	if strings.TrimSpace(work.SpecJSON) == "" {
+		rejectHash := sha256.Sum256([]byte(work.JobID + ":missing_work_capsule_spec"))
+		receipt := hub.Receipt{
+			JobID:         work.JobID,
+			ResultHashHex: hex.EncodeToString(rejectHash[:]),
+			MeteringUnits: 0,
+			Metadata: receiptMetadataBase(
+				work,
+				execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+				map[string]any{
+					"executor":   executorKindWorkCapsule,
+					"work_type":  "certified_change",
+					"exit_code":  1,
+					"error":      "missing work capsule spec",
+					"risk_level": "high",
+				},
+			),
+		}
+		if err := submitReceiptWithRetry(ctx, execCtx.client, receipt); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("missing work capsule spec")
+	}
+	result, runErr := runner.RunWorkCapsule(ctx, work.SpecJSON)
+	if result == nil {
+		return nil, runErr
+	}
+	resultHash := result.Hash
+	metadata := receiptMetadataBase(
+		work,
+		execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+		result.Metadata,
+		map[string]any{
+			"executor":    executorKindWorkCapsule,
+			"work_type":   "certified_change",
+			"duration_ms": result.Duration.Milliseconds(),
+			"exit_code":   result.ExitCode,
+			"stderr_tail": result.Logs,
+		},
+	)
+	if strings.TrimSpace(result.OutputPath) != "" {
+		uploadRes, uploadErr := blob.Upload(ctx, execCtx.client, work.JobID, result.OutputPath)
+		if uploadErr == nil {
+			metadata["blob_url"] = uploadRes.URL
+			metadata["object_key"] = uploadRes.Key
+			if strings.TrimSpace(uploadRes.Key) != "" {
+				metadata["manifest_key"] = uploadRes.Key + ".manifest.json"
+			}
+			if strings.TrimSpace(uploadRes.Hash) != "" {
+				metadata["artifact_sha256"] = uploadRes.Hash
+				resultHash = uploadRes.Hash
+			}
+		}
+		_ = os.Remove(result.OutputPath)
+	}
+	receipt := hub.Receipt{
+		JobID:         work.JobID,
+		ResultHashHex: resultHash,
+		MeteringUnits: 1,
+		Metadata:      metadata,
+	}
+	if err := submitReceiptWithRetry(ctx, execCtx.client, receipt); err != nil {
+		return &runnerResultSnapshot{
+			DurationMs:    result.Duration.Milliseconds(),
+			ResultHashHex: resultHash,
+			ExitCode:      result.ExitCode,
+			MeteringUnits: 1,
+			BlobURL:       stringValue(metadata["blob_url"]),
+			ObjectKey:     stringValue(metadata["object_key"]),
+			Metadata:      metadata,
+		}, err
+	}
+	return &runnerResultSnapshot{
+		DurationMs:    result.Duration.Milliseconds(),
+		ResultHashHex: resultHash,
+		ExitCode:      result.ExitCode,
+		MeteringUnits: 1,
 		BlobURL:       stringValue(metadata["blob_url"]),
 		ObjectKey:     stringValue(metadata["object_key"]),
 		Metadata:      metadata,

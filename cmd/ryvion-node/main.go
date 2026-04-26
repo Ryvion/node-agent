@@ -583,6 +583,17 @@ func isAgentHostingTask(specJSON string) bool {
 	return spec.Task == "agent_hosting"
 }
 
+func isWorkCapsuleTask(specJSON string) bool {
+	var spec struct {
+		Task     string `json:"task"`
+		WorkType string `json:"work_type"`
+	}
+	if json.Unmarshal([]byte(specJSON), &spec) != nil {
+		return false
+	}
+	return spec.Task == executorKindWorkCapsule || spec.WorkType == "certified_change"
+}
+
 func extractDeploymentID(specJSON string) string {
 	var spec struct {
 		DeploymentID string `json:"deployment_id"`
@@ -635,6 +646,12 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	ffmpegOK := commandExists("ffmpeg")
 	pdalOK := commandExists("pdal")
 	open3dOK := commandExists("open3d") || pythonModuleAvailable("open3d")
+	gitOK := commandExists("git")
+	nodeOK := commandExists("node")
+	playwrightOK := commandExists("playwright") || commandExists("npx")
+	codexOK := commandExists("codex")
+	claudeOK := commandExists("claude") || commandExists("claude-code")
+	geminiOK := commandExists("gemini") || commandExists("gemini-cli")
 	runtimeTokens := runtimeMgr.StatusTokens(gpuReady)
 	runtimeSnap := runtimeMgr.Snapshot(gpuReady)
 
@@ -661,6 +678,24 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	}
 	if open3dOK {
 		parts = append(parts, "tool:open3d")
+	}
+	if gitOK {
+		parts = append(parts, "tool:git")
+	}
+	if nodeOK {
+		parts = append(parts, "tool:node")
+	}
+	if playwrightOK {
+		parts = append(parts, "tool:playwright")
+	}
+	if codexOK {
+		parts = append(parts, "tool:codex")
+	}
+	if claudeOK {
+		parts = append(parts, "tool:claude-code")
+	}
+	if geminiOK {
+		parts = append(parts, "tool:gemini-cli")
 	}
 	spatialReady := ffmpegOK && (pdalOK || open3dOK) && diskGB >= 50 && (gpuReady || caps.CPUCores >= 8)
 	if spatialReady {

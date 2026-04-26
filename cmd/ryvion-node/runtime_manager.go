@@ -15,9 +15,11 @@ const (
 	executorKindNativeReport    = "native_report"
 	executorKindManagedOCI      = "managed_oci"
 	executorKindAgentHosting    = "agent_hosting"
+	executorKindWorkCapsule     = "work_capsule"
 
 	assuranceClassVerifiedGateway    = "verified_gateway"
 	assuranceClassSovereignExecution = "sovereign_execution"
+	assuranceClassCertifiedWork      = "certified_work"
 )
 
 type runtimeSnapshot struct {
@@ -211,6 +213,7 @@ func (m *runtimeManager) StatusTokens(gpuDetected bool) []string {
 		boolStatusToken("cap:managed_oci_cpu", snap.Ready),
 		boolStatusToken("cap:managed_oci_gpu", snap.GPUReady),
 		boolStatusToken("cap:agent_hosting", snap.Ready),
+		boolStatusToken("cap:work_capsule", snap.Ready && commandExists("git")),
 	}
 	if ociLaneDisabled() {
 		tokens = append(tokens, "oci-lane:disabled")
