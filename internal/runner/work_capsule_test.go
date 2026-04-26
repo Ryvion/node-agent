@@ -79,6 +79,32 @@ func TestValidateWorkCapsuleCommandsBlocksDirectDeploy(t *testing.T) {
 	}
 }
 
+func TestValidateWorkCapsuleBranchPolicyBlocksUnsafePushTargets(t *testing.T) {
+	err := validateWorkCapsuleBranchPolicy(WorkCapsuleSpec{
+		RepoURL:    "https://github.com/acme/product",
+		BaseBranch: "main",
+		WorkBranch: "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), "differ from base") {
+		t.Fatalf("err = %v, want base/work branch mismatch", err)
+	}
+	err = validateWorkCapsuleBranchPolicy(WorkCapsuleSpec{
+		RepoURL:    "https://github.com/acme/product",
+		BaseBranch: "main",
+		WorkBranch: "feature/direct",
+	})
+	if err == nil || !strings.Contains(err.Error(), "ryvion/ prefix") {
+		t.Fatalf("err = %v, want ryvion prefix block", err)
+	}
+	if err := validateWorkCapsuleBranchPolicy(WorkCapsuleSpec{
+		RepoURL:    "https://github.com/acme/product",
+		BaseBranch: "main",
+		WorkBranch: "ryvion/safe-change",
+	}); err != nil {
+		t.Fatalf("safe branch rejected: %v", err)
+	}
+}
+
 func TestSupportedWorkCapsuleAdapterAllowlist(t *testing.T) {
 	for _, adapter := range []string{"custom-command", "codex", "claude-code", "gemini-cli", "noop", "none"} {
 		if !supportedWorkCapsuleAdapter(adapter) {
@@ -120,6 +146,16 @@ func TestRedactSecretsCoversBearerAndGitHubToken(t *testing.T) {
 	redacted := redactSecrets("Authorization: Bearer abc123 github_token=ghp_secret")
 	if strings.Contains(redacted, "abc123") || strings.Contains(redacted, "ghp_secret") {
 		t.Fatalf("redacted output leaked secret: %q", redacted)
+	}
+}
+
+func TestRedactSecretsCoversRepeatedXAccessTokenURLs(t *testing.T) {
+	redacted := redactSecrets("https://x-access-token:one@github.com/acme/a.git https://x-access-token:two@github.com/acme/b.git")
+	if strings.Contains(redacted, "one") || strings.Contains(redacted, "two") {
+		t.Fatalf("redacted output leaked repeated token: %q", redacted)
+	}
+	if got := strings.Count(redacted, "x-access-token:[redacted]@"); got != 2 {
+		t.Fatalf("redacted token count = %d, want 2 in %q", got, redacted)
 	}
 }
 

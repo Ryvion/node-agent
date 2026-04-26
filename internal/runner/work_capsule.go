@@ -105,6 +105,10 @@ func RunWorkCapsule(ctx context.Context, specJSON string) (*Result, error) {
 		_, _ = log.Write([]byte(err.Error() + "\n"))
 		return workCapsuleResult(workDir, repoDir, spec, records, baseCommit, headCommit, 2, start, log.Tail(32768), evaluateDelivery(spec), err)
 	}
+	if err := validateWorkCapsuleBranchPolicy(spec); err != nil {
+		_, _ = log.Write([]byte(err.Error() + "\n"))
+		return workCapsuleResult(workDir, repoDir, spec, records, baseCommit, headCommit, 2, start, log.Tail(32768), evaluateDelivery(spec), err)
+	}
 
 	if strings.TrimSpace(spec.RepoURL) != "" {
 		repoDir = filepath.Join(workDir, "repo")
@@ -244,6 +248,8 @@ func workCapsuleResult(workDir, repoDir string, spec WorkCapsuleSpec, records []
 		"test_output_hash":         logHash,
 		"risk_level":               riskLevel,
 		"risk_summary":             riskSummary,
+		"execution_isolation":      "host_process_enterprise_only",
+		"isolation_notes":          "Commands executed on an enterprise-trusted node host workspace; managed OCI capsule execution is required before enabling third-party operator pools.",
 	}
 	resultJSON, _ := json.MarshalIndent(resultDoc, "", "  ")
 	diffPath := filepath.Join(workDir, "diff.patch")
@@ -304,6 +310,55 @@ func validateWorkCapsuleCommands(spec WorkCapsuleSpec) error {
 	for _, command := range append(append([]string{}, spec.Commands...), spec.TestCommands...) {
 		if reason := blockedWorkCommandReason(command); reason != "" {
 			return fmt.Errorf("work capsule command blocked: %s", reason)
+		}
+	}
+	return nil
+}
+
+func validateWorkCapsuleBranchPolicy(spec WorkCapsuleSpec) error {
+	if strings.TrimSpace(spec.RepoURL) == "" {
+		return nil
+	}
+	if err := validateWorkCapsuleGitRef(spec.BaseBranch, false); err != nil {
+		return fmt.Errorf("invalid base branch: %w", err)
+	}
+	if spec.ProfileOnly {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(spec.BaseBranch), strings.TrimSpace(spec.WorkBranch)) {
+		return fmt.Errorf("work branch must differ from base branch")
+	}
+	if err := validateWorkCapsuleGitRef(spec.WorkBranch, true); err != nil {
+		return fmt.Errorf("invalid work branch: %w", err)
+	}
+	return nil
+}
+
+func validateWorkCapsuleGitRef(branch string, requireRyvionPrefix bool) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return fmt.Errorf("branch is required")
+	}
+	if len(branch) > 128 {
+		return fmt.Errorf("branch is too long")
+	}
+	if requireRyvionPrefix && !strings.HasPrefix(strings.ToLower(branch), "ryvion/") {
+		return fmt.Errorf("work branches must use the ryvion/ prefix")
+	}
+	if strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") || strings.HasPrefix(branch, "-") {
+		return fmt.Errorf("branch has an unsafe boundary")
+	}
+	if strings.Contains(branch, "..") || strings.Contains(branch, "//") || strings.Contains(branch, "@{") ||
+		strings.HasSuffix(branch, ".") || strings.HasSuffix(branch, ".lock") {
+		return fmt.Errorf("branch contains an unsafe git ref sequence")
+	}
+	for _, r := range branch {
+		if r <= 32 || r == 127 {
+			return fmt.Errorf("branch contains control or whitespace characters")
+		}
+		switch r {
+		case '\\', '~', '^', ':', '?', '*', '[', ']':
+			return fmt.Errorf("branch contains unsupported git ref characters")
 		}
 	}
 	return nil
@@ -1060,7 +1115,7 @@ func pushWorkBranch(ctx context.Context, repoDir string, spec WorkCapsuleSpec, r
 			return delivery
 		}
 	}
-	rec := runCommand(ctx, repoDir, "git", []string{"push", "-u", "origin", spec.WorkBranch}, "delivery", log)
+	rec := runCommand(ctx, repoDir, "git", []string{"push", "-u", "origin", "HEAD:refs/heads/" + spec.WorkBranch}, "delivery", log)
 	*records = append(*records, rec)
 	if rec.ExitCode != 0 {
 		delivery["error"] = "git push failed"
@@ -1239,13 +1294,24 @@ func redactSecrets(s string) string {
 			searchFrom = start + len("[redacted]")
 		}
 	}
-	if idx := strings.Index(strings.ToLower(out), "x-access-token:"); idx >= 0 {
+	searchFrom := 0
+	for {
+		idx := strings.Index(strings.ToLower(out[searchFrom:]), "x-access-token:")
+		if idx < 0 {
+			break
+		}
+		idx += searchFrom
 		start := idx + len("x-access-token:")
 		end := start
 		for end < len(out) && out[end] != '@' && out[end] != ' ' && out[end] != '\n' && out[end] != '\r' && out[end] != '\t' {
 			end++
 		}
+		if end == start {
+			searchFrom = start
+			continue
+		}
 		out = out[:start] + "[redacted]" + out[end:]
+		searchFrom = start + len("[redacted]")
 	}
 	return out
 }
