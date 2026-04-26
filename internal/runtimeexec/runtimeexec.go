@@ -141,6 +141,18 @@ func ResolveExecutor(goos string, getenv func(string) string) (Executor, error) 
 	}, nil
 }
 
+func allowDockerFallback(getenv func(string) string) bool {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	switch strings.ToLower(strings.TrimSpace(getenv("RYV_ALLOW_DOCKER_FALLBACK"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func ProbeStatus(ctx context.Context, goos string, getenv func(string) string, binary string) (Status, bool) {
 	if getenv == nil {
 		getenv = os.Getenv
@@ -251,9 +263,10 @@ func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error
 			return value, nil
 		}
 	}
-	engineCandidates := []string{"docker", "nerdctl", "podman"}
-	if goos == "linux" {
-		engineCandidates = []string{"nerdctl", "podman", "docker"}
+	engineCandidates := []string{"nerdctl", "podman"}
+	dockerFallback := allowDockerFallback(getenv)
+	if dockerFallback {
+		engineCandidates = append(engineCandidates, "docker")
 	}
 	if goos == "windows" {
 		engineCandidates = []string{"podman"}
@@ -261,16 +274,20 @@ func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error
 	candidates := []string{
 		"/usr/local/bin/nerdctl",
 		"/usr/local/bin/podman",
-		"/usr/local/bin/docker",
 		"/opt/homebrew/bin/nerdctl",
 		"/opt/homebrew/bin/podman",
-		"/opt/homebrew/bin/docker",
 		"/usr/bin/nerdctl",
 		"/usr/bin/podman",
-		"/usr/bin/docker",
 		"/snap/bin/nerdctl",
 		"/snap/bin/podman",
-		"/snap/bin/docker",
+	}
+	if dockerFallback {
+		candidates = append(candidates,
+			"/usr/local/bin/docker",
+			"/opt/homebrew/bin/docker",
+			"/usr/bin/docker",
+			"/snap/bin/docker",
+		)
 	}
 	if goos == "windows" {
 		candidates = []string{
@@ -298,5 +315,8 @@ func resolveOCIEngineCLI(goos string, getenv func(string) string) (string, error
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("managed OCI engine not found on %s", goos)
+	if dockerFallback {
+		return "", fmt.Errorf("Ryvion Runtime engine not found on %s; install Podman/nerdctl or set RYV_RUNTIME_ENGINE_BINARY", goos)
+	}
+	return "", fmt.Errorf("Ryvion Runtime engine not found on %s; install Podman/nerdctl or set RYV_RUNTIME_ENGINE_BINARY (Docker compatibility requires RYV_ALLOW_DOCKER_FALLBACK=1)", goos)
 }

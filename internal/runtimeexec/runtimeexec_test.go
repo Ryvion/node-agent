@@ -3,6 +3,7 @@ package runtimeexec
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +82,44 @@ func TestResolveOCIEngineCLIWindowsFindsLocalAppDataPodman(t *testing.T) {
 	}
 	if got != podman {
 		t.Fatalf("resolveOCIEngineCLI() = %q, want %q", got, podman)
+	}
+}
+
+func TestResolveOCIEngineCLIDoesNotUseDockerByDefault(t *testing.T) {
+	temp := t.TempDir()
+	docker := filepath.Join(temp, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", temp)
+	t.Setenv("RYV_ALLOW_DOCKER_FALLBACK", "")
+
+	got, err := resolveOCIEngineCLI("linux", os.Getenv)
+	if err == nil {
+		if strings.HasPrefix(strings.ToLower(filepath.Base(got)), "docker") {
+			t.Fatalf("docker engine %q should not be selected by default", got)
+		}
+		t.Skipf("host has a non-Docker managed runtime engine available: %s", got)
+	}
+	if !strings.Contains(err.Error(), "RYV_ALLOW_DOCKER_FALLBACK=1") {
+		t.Fatalf("error = %q, want Docker fallback guidance", err.Error())
+	}
+}
+
+func TestResolveOCIEngineCLIAllowsDockerFallbackWhenExplicit(t *testing.T) {
+	temp := t.TempDir()
+	docker := filepath.Join(temp, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", temp)
+	t.Setenv("RYV_ALLOW_DOCKER_FALLBACK", "1")
+
+	got, err := resolveOCIEngineCLI("linux", os.Getenv)
+	if err != nil {
+		t.Fatalf("resolveOCIEngineCLI() error = %v", err)
+	}
+	if !strings.HasPrefix(strings.ToLower(filepath.Base(got)), "docker") {
+		t.Fatalf("resolveOCIEngineCLI() = %q, want Docker fallback engine", got)
 	}
 }
