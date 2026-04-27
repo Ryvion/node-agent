@@ -45,6 +45,10 @@ const (
 type ModelConfig struct {
 	FileName string
 	URL      string
+	// PlatformPath points at a Ryvion hub model artifact endpoint. It lets the
+	// platform handle gated/model-license downloads instead of asking each
+	// operator to configure third-party tokens.
+	PlatformPath string
 	// Mode switches llama-server between chat/completion serving (default)
 	// and embedding serving (--embedding flag, /v1/embeddings endpoint).
 	Mode                    ModelMode
@@ -59,6 +63,7 @@ var NativeModels = map[string]ModelConfig{
 	"gemma-3-27b-it": {
 		FileName:                "gemma-3-27b-it-q4_0.gguf",
 		URL:                     "https://huggingface.co/google/gemma-3-27b-it-qat-q4_0-gguf/resolve/main/gemma-3-27b-it-q4_0.gguf",
+		PlatformPath:            "/api/v1/node/models/gemma-3-27b-it/download",
 		MinVRAMBytes:            16 * 1024 * 1024 * 1024,
 		RequiresHuggingFaceAuth: true,
 	},
@@ -86,7 +91,7 @@ func SupportedNativeChatModels(vramBytes uint64) []string {
 		if cfg.MinVRAMBytes > 0 && vramBytes < cfg.MinVRAMBytes {
 			continue
 		}
-		if cfg.RequiresHuggingFaceAuth && huggingFaceToken() == "" {
+		if cfg.RequiresHuggingFaceAuth && huggingFaceToken() == "" && !platformManagedGatedModelsEnabled() {
 			continue
 		}
 		out = append(out, id)
@@ -135,6 +140,8 @@ type Manager struct {
 	ctxSize    string
 	serverURL  string
 	serverPath string
+	hubURL     string
+	nodeToken  func(int64) string
 
 	mu              sync.RWMutex
 	healthy         bool
@@ -143,6 +150,14 @@ type Manager struct {
 	activeModelName string
 	activeModelPath string
 	activeModelMode ModelMode
+}
+
+func (m *Manager) SetHubAuth(hubURL string, nodeAuthToken func(int64) string) {
+	if m == nil {
+		return
+	}
+	m.hubURL = strings.TrimRight(strings.TrimSpace(hubURL), "/")
+	m.nodeToken = nodeAuthToken
 }
 
 func New(dataDir string) *Manager {
@@ -243,8 +258,9 @@ func (m *Manager) Start(ctx context.Context) error {
 					time.Sleep(5 * time.Second)
 					continue
 				}
-				slog.Info("downloading model", "model", currentModel, "url", cfg.URL)
-				if err := downloadFile(ctx, cfg.URL, modelPath); err != nil {
+				downloadURL := m.modelDownloadURL(cfg)
+				slog.Info("downloading model", "model", currentModel, "url", redactDownloadURL(downloadURL))
+				if err := m.downloadModelFile(ctx, downloadURL, modelPath); err != nil {
 					slog.Error("failed to download model", "error", err)
 					time.Sleep(5 * time.Second)
 					continue
@@ -707,12 +723,37 @@ func checkHealth(ctx context.Context, client *http.Client, url string) bool {
 
 // downloadFile downloads a URL to a local file with progress logging.
 func downloadFile(ctx context.Context, url, dst string) error {
+	return downloadFileWithAuth(ctx, url, dst, attachModelDownloadAuth)
+}
+
+func (m *Manager) modelDownloadURL(cfg ModelConfig) string {
+	if platformManagedGatedModelsEnabled() && strings.TrimSpace(cfg.PlatformPath) != "" && strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
+		return strings.TrimRight(m.hubURL, "/") + cfg.PlatformPath
+	}
+	return cfg.URL
+}
+
+func (m *Manager) downloadModelFile(ctx context.Context, url, dst string) error {
+	return downloadFileWithAuth(ctx, url, dst, m.attachModelDownloadAuth)
+}
+
+func (m *Manager) attachModelDownloadAuth(req *http.Request, rawURL string) {
+	attachModelDownloadAuth(req, rawURL)
+	if req == nil || m == nil || m.nodeToken == nil || !isRyvionModelArtifactURL(rawURL) {
+		return
+	}
+	req.Header.Set("X-Node-Token", m.nodeToken(0))
+}
+
+func downloadFileWithAuth(ctx context.Context, url, dst string, attachAuth func(*http.Request, string)) error {
 	tmp := dst + ".tmp"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	attachModelDownloadAuth(req, url)
+	if attachAuth != nil {
+		attachAuth(req, url)
+	}
 	client := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -720,6 +761,9 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if isRyvionModelArtifactURL(url) {
+			return fmt.Errorf("download %s: HTTP %d (Ryvion platform model artifact unavailable; hub must configure model cache or upstream model token)", url, resp.StatusCode)
+		}
 		if isHuggingFaceURL(url) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			return fmt.Errorf("download %s: HTTP %d (Hugging Face access denied; accept the model license and set HF_TOKEN or HUGGINGFACE_TOKEN for gated models)", url, resp.StatusCode)
 		}
@@ -760,8 +804,24 @@ func huggingFaceToken() string {
 	return token
 }
 
+func platformManagedGatedModelsEnabled() bool {
+	return strings.TrimSpace(os.Getenv("RYV_DISABLE_PLATFORM_MODEL_DOWNLOADS")) != "1"
+}
+
 func isHuggingFaceURL(url string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(url)), "huggingface.co/")
+}
+
+func isRyvionModelArtifactURL(raw string) bool {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	return strings.Contains(lower, "/api/v1/node/models/") && strings.Contains(lower, "/download")
+}
+
+func redactDownloadURL(raw string) string {
+	if strings.Contains(raw, "?") {
+		return strings.SplitN(raw, "?", 2)[0] + "?..."
+	}
+	return raw
 }
 
 type progressWriter struct {

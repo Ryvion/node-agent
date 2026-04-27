@@ -30,9 +30,27 @@ func TestSupportedNativeChatModelsRequiresTokenForGatedGemma(t *testing.T) {
 	t.Setenv("HUGGINGFACE_TOKEN", "")
 
 	models := SupportedNativeChatModels(16 * 1024 * 1024 * 1024)
+	found := false
 	for _, model := range models {
 		if model == "gemma-3-27b-it" {
-			t.Fatal("expected gated Gemma model to stay hidden without a Hugging Face token")
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected gated Gemma model to be advertised through Ryvion platform-managed model downloads")
+	}
+}
+
+func TestSupportedNativeChatModelsCanDisablePlatformGatedModels(t *testing.T) {
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("HUGGINGFACE_TOKEN", "")
+	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_DOWNLOADS", "1")
+
+	models := SupportedNativeChatModels(16 * 1024 * 1024 * 1024)
+	for _, model := range models {
+		if model == "gemma-3-27b-it" {
+			t.Fatal("expected gated Gemma model to stay hidden when platform downloads are disabled and no local token is configured")
 		}
 	}
 }

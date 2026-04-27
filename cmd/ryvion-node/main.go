@@ -217,6 +217,7 @@ func runNode(ctx context.Context) {
 	// Start persistent inference manager
 	dataDir := strings.TrimSpace(os.Getenv("RYV_DATA_DIR"))
 	infMgr := inference.New(dataDir)
+	infMgr.SetHubAuth(hubURL, client.NodeAuthToken)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
