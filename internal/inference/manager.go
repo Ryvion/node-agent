@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -46,14 +47,22 @@ type ModelConfig struct {
 	URL      string
 	// Mode switches llama-server between chat/completion serving (default)
 	// and embedding serving (--embedding flag, /v1/embeddings endpoint).
-	Mode ModelMode
+	Mode                    ModelMode
+	MinVRAMBytes            uint64
+	RequiresHuggingFaceAuth bool
 }
 
 // NativeModels maps UI model names to GGUF downloads
 var NativeModels = map[string]ModelConfig{
 	"ryvion-llama-3.2-3b": {FileName: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
-	"phi-4":               {FileName: "phi-4-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf"},
-	"tinyllama":           {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
+	"phi-4":               {FileName: "phi-4-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf", MinVRAMBytes: 8 * 1024 * 1024 * 1024},
+	"gemma-3-27b-it": {
+		FileName:                "gemma-3-27b-it-q4_0.gguf",
+		URL:                     "https://huggingface.co/google/gemma-3-27b-it-qat-q4_0-gguf/resolve/main/gemma-3-27b-it-q4_0.gguf",
+		MinVRAMBytes:            16 * 1024 * 1024 * 1024,
+		RequiresHuggingFaceAuth: true,
+	},
+	"tinyllama": {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
 	// Phase 1c: native embeddings. nomic-embed-text-v1.5 is 137M params,
 	// 768-dim, matches OpenAI text-embedding-3-small quality on MTEB, and
 	// the Q4_K_M GGUF is ~90MB. llama-server serves it via /v1/embeddings
@@ -63,6 +72,27 @@ var NativeModels = map[string]ModelConfig{
 		URL:      "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.Q4_K_M.gguf",
 		Mode:     ModeEmbedding,
 	},
+}
+
+// SupportedNativeChatModels returns chat models this node is willing to advertise
+// to the hub. Large gated models stay hidden unless local hardware is realistically
+// capable; the hub then uses these tokens as a hard capability gate.
+func SupportedNativeChatModels(vramBytes uint64) []string {
+	out := make([]string, 0, len(NativeModels))
+	for id, cfg := range NativeModels {
+		if cfg.Mode == ModeEmbedding {
+			continue
+		}
+		if cfg.MinVRAMBytes > 0 && vramBytes < cfg.MinVRAMBytes {
+			continue
+		}
+		if cfg.RequiresHuggingFaceAuth && huggingFaceToken() == "" {
+			continue
+		}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // platformServerURL returns the correct llama.cpp release URL for the current OS/arch.
@@ -682,6 +712,7 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	if err != nil {
 		return err
 	}
+	attachModelDownloadAuth(req, url)
 	client := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -689,6 +720,9 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if isHuggingFaceURL(url) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			return fmt.Errorf("download %s: HTTP %d (Hugging Face access denied; accept the model license and set HF_TOKEN or HUGGINGFACE_TOKEN for gated models)", url, resp.StatusCode)
+		}
 		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
 
@@ -706,6 +740,28 @@ func downloadFile(ctx context.Context, url, dst string) error {
 	}
 	f.Close()
 	return os.Rename(tmp, dst)
+}
+
+func attachModelDownloadAuth(req *http.Request, url string) {
+	if req == nil || !isHuggingFaceURL(url) {
+		return
+	}
+	token := huggingFaceToken()
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func huggingFaceToken() string {
+	token := strings.TrimSpace(os.Getenv("HF_TOKEN"))
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("HUGGINGFACE_TOKEN"))
+	}
+	return token
+}
+
+func isHuggingFaceURL(url string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(url)), "huggingface.co/")
 }
 
 type progressWriter struct {

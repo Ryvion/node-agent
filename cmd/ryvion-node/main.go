@@ -723,6 +723,9 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	}
 	if publicInferenceReady {
 		parts = append(parts, "public-inference-ready:1")
+		for _, modelID := range inference.SupportedNativeChatModels(caps.VRAMBytes) {
+			parts = append(parts, "model:"+modelID)
+		}
 	} else {
 		parts = append(parts, "public-inference-ready:0")
 	}
