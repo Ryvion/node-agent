@@ -113,6 +113,61 @@ func TestRegisterSignsExpectedMessage(t *testing.T) {
 	}
 }
 
+func TestSendHealthReportUsesManagedOCIField(t *testing.T) {
+	pub, priv := testKeyPair()
+	var (
+		mu         sync.Mutex
+		handlerErr error
+	)
+	setHandlerErr := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if handlerErr == nil {
+			handlerErr = err
+		}
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/health" {
+			setHandlerErr(fmt.Errorf("unexpected path: %s", r.URL.Path))
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			setHandlerErr(fmt.Errorf("decode request: %w", err))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := req["runtime_gpu"]; ok {
+			setHandlerErr(fmt.Errorf("legacy runtime_gpu field should not be sent"))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if got, ok := req["managed_oci_gpu_ready"].(bool); !ok || !got {
+			setHandlerErr(fmt.Errorf("managed_oci_gpu_ready = %v, want true", req["managed_oci_gpu_ready"]))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	err := c.SendHealthReport(context.Background(), HealthReport{
+		TimestampMs: 123,
+		GPUReady:    true,
+		RuntimeGPU:  true,
+		Message:     "runtime-ready:1",
+	})
+	if err != nil {
+		t.Fatalf("send health report failed: %v", err)
+	}
+	if handlerErr != nil {
+		t.Fatalf("handler failed: %v", handlerErr)
+	}
+}
+
 func TestFetchWorkNoWork(t *testing.T) {
 	pub, priv := testKeyPair()
 	pubHex := hex.EncodeToString(pub)

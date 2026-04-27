@@ -846,7 +846,7 @@ type healthRequest struct {
 	PublicKeyHex string `json:"public_key_hex"`
 	TimestampMs  int64  `json:"timestamp_ms"`
 	GPUReady     bool   `json:"gpu_ready"`
-	RuntimeGPU   bool   `json:"runtime_gpu"`
+	RuntimeGPU   bool   `json:"managed_oci_gpu_ready"`
 	Message      string `json:"message"`
 	Signature    []byte `json:"signature"`
 }
