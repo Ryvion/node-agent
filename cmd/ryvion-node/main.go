@@ -716,6 +716,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	} else {
 		parts = append(parts, "public-ai-ready:0")
 	}
+	parts = append(parts, boolStatusToken("cap:image_gen", publicAIReady && runtimeSnap.GPUReady))
 	if nativeReady {
 		parts = append(parts, "native-inference-ready:1")
 		parts = append(parts, "native-model:"+infMgr.ModelName())
