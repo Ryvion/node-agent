@@ -10,6 +10,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +30,8 @@ const (
 	flux2Klein4BMinRAMGB       = 16
 	flux2Klein4BMinCPUCores    = 4
 	flux2Klein4BMinDiskGB      = 40
+	flux2Klein4BReadyMarker    = ".model-flux2-klein-ready-v1"
+	flux2Klein4BWarmingMarker  = ".model-flux2-klein-warming"
 )
 
 type ryvionRuntimeSpec struct {
@@ -300,10 +303,45 @@ func localFlux2KleinReady(caps hw.CapSet, diskGB uint64, gpuReady bool) bool {
 	if diskGB < flux2Klein4BMinDiskGB {
 		return false
 	}
-	if _, ok := resolveFlux2LocalHelper(); ok {
-		return localFlux2KleinHardwareEligible(caps, gpuReady)
+	if runtimeFixturesEnabled() && localFlux2KleinHardwareEligible(caps, gpuReady) {
+		return true
 	}
-	return runtimeFixturesEnabled() && localFlux2KleinHardwareEligible(caps, gpuReady)
+	if _, ok := resolveFlux2LocalHelper(); !ok {
+		return false
+	}
+	return localFlux2KleinHardwareEligible(caps, gpuReady) && localFlux2KleinModelCacheReady()
+}
+
+func localFlux2KleinPreparing(caps hw.CapSet, diskGB uint64, gpuReady bool) bool {
+	if diskGB < flux2Klein4BMinDiskGB || !localFlux2KleinHardwareEligible(caps, gpuReady) {
+		return false
+	}
+	if _, ok := resolveFlux2LocalHelper(); !ok {
+		return false
+	}
+	if localFlux2KleinModelCacheReady() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(imageRuntimeRoot(), flux2Klein4BWarmingMarker)); err == nil {
+		return true
+	}
+	return false
+}
+
+func localFlux2KleinModelCacheReady() bool {
+	info, err := os.Stat(filepath.Join(imageRuntimeRoot(), flux2Klein4BReadyMarker))
+	return err == nil && !info.IsDir()
+}
+
+func imageRuntimeRoot() string {
+	if root := strings.TrimSpace(os.Getenv("RYVION_IMAGE_RUNTIME_ROOT")); root != "" {
+		return root
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return filepath.Join(os.TempDir(), "ryvion-image-runtime")
+	}
+	return filepath.Join(home, ".ryvion", "image-runtime")
 }
 
 func localFlux2KleinHardwareEligible(caps hw.CapSet, gpuReady bool) bool {
@@ -346,6 +384,46 @@ func ensureUserImageRuntimeHelper() error {
 	return os.WriteFile(path, desired, 0o700)
 }
 
+func startUserImageRuntimePrewarm(ctx context.Context, caps hw.CapSet, diskGB uint64, gpuReady bool) {
+	if runtime.GOOS != "darwin" || !publicAIOptInEnabled() {
+		return
+	}
+	if diskGB < flux2Klein4BMinDiskGB || !localFlux2KleinHardwareEligible(caps, gpuReady) || localFlux2KleinModelCacheReady() {
+		return
+	}
+	helper, ok := resolveFlux2LocalHelper()
+	if !ok {
+		return
+	}
+	go func() {
+		root := imageRuntimeRoot()
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			slog.Warn("image runtime prewarm skipped; failed to create runtime root", "error", err)
+			return
+		}
+		warming := filepath.Join(root, flux2Klein4BWarmingMarker)
+		logPath := filepath.Join(root, "prewarm.log")
+		_ = os.WriteFile(warming, []byte(time.Now().UTC().Format(time.RFC3339)), 0o600)
+		defer os.Remove(warming)
+
+		prewarmCtx, cancel := context.WithTimeout(ctx, 3*time.Hour)
+		defer cancel()
+		cmd := exec.CommandContext(prewarmCtx, helper, "--prepare", "--model", flux2Klein4BLocalModel)
+		var buf bytes.Buffer
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
+		start := time.Now()
+		slog.Info("image runtime prewarm started", "model", flux2Klein4BLocalModel)
+		err := cmd.Run()
+		_ = os.WriteFile(logPath, []byte(tailString(buf.String(), 65536)), 0o600)
+		if err != nil {
+			slog.Warn("image runtime prewarm failed", "model", flux2Klein4BLocalModel, "duration", time.Since(start), "error", err)
+			return
+		}
+		slog.Info("image runtime prewarm completed", "model", flux2Klein4BLocalModel, "duration", time.Since(start))
+	}()
+}
+
 func darwinImageRuntimeHelperScript() string {
 	return `#!/usr/bin/env bash
 set -euo pipefail
@@ -355,6 +433,7 @@ PROMPT=""
 OUTPUT=""
 WIDTH="1024"
 HEIGHT="1024"
+PREPARE="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -363,11 +442,12 @@ while [[ $# -gt 0 ]]; do
     --output) OUTPUT="${2:-}"; shift 2 ;;
     --width) WIDTH="${2:-1024}"; shift 2 ;;
     --height) HEIGHT="${2:-1024}"; shift 2 ;;
+    --prepare) PREPARE="1"; shift ;;
     *) shift ;;
   esac
 done
 
-if [[ -z "$PROMPT" || -z "$OUTPUT" ]]; then
+if [[ "$PREPARE" != "1" && ( -z "$PROMPT" || -z "$OUTPUT" ) ]]; then
   echo "prompt and output are required" >&2
   exit 2
 fi
@@ -381,7 +461,10 @@ VENV="$ROOT/venv"
 BOOTSTRAP="$ROOT/bootstrap"
 CACHE="$ROOT/hf-cache"
 MARKER="$ROOT/.deps-flux2-klein-v2"
+READY_MARKER="$ROOT/.model-flux2-klein-ready-v1"
 mkdir -p "$ROOT" "$CACHE"
+
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 
 python_ok() {
   "$1" - <<'PY' >/dev/null 2>&1
@@ -469,9 +552,11 @@ fi
 
 RUN_SCRIPT="$ROOT/run_flux2_klein.py"
 cat > "$RUN_SCRIPT" <<'PY'
+import os
 import sys
 import torch
 from diffusers import Flux2KleinPipeline
+from huggingface_hub import snapshot_download
 
 model, prompt, output, width, height, cache_dir = sys.argv[1:7]
 width = int(width)
@@ -484,8 +569,15 @@ if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
 else:
     device = "cpu"
     dtype = torch.float32
+repo_id = "black-forest-labs/FLUX.2-klein-4B"
+local_dir = snapshot_download(
+    repo_id,
+    cache_dir=cache_dir,
+    token=os.environ.get("HF_TOKEN") or None,
+    resume_download=True,
+)
 pipe = Flux2KleinPipeline.from_pretrained(
-    "black-forest-labs/FLUX.2-klein-4B",
+    local_dir,
     torch_dtype=dtype,
     cache_dir=cache_dir,
 )
@@ -502,6 +594,36 @@ image = pipe(
 image.save(output)
 print(f"runtime.image: wrote {output} on {device}")
 PY
+
+PREPARE_SCRIPT="$ROOT/prepare_flux2_klein.py"
+cat > "$PREPARE_SCRIPT" <<'PY'
+import os
+import sys
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+model, cache_dir, ready_marker = sys.argv[1:4]
+if model != "flux-2-klein-4b-local":
+    raise SystemExit(f"unsupported model {model}")
+local_dir = snapshot_download(
+    "black-forest-labs/FLUX.2-klein-4B",
+    cache_dir=cache_dir,
+    token=os.environ.get("HF_TOKEN") or None,
+    resume_download=True,
+)
+Path(ready_marker).write_text(local_dir, encoding="utf-8")
+print(f"runtime.image: model cache ready at {local_dir}")
+PY
+
+if [[ "$PREPARE" == "1" ]]; then
+  "$PY" "$PREPARE_SCRIPT" "$MODEL" "$CACHE" "$READY_MARKER"
+  exit 0
+fi
+
+if [[ ! -f "$READY_MARKER" ]]; then
+  echo "runtime.image: model cache not ready; preparing now"
+  "$PY" "$PREPARE_SCRIPT" "$MODEL" "$CACHE" "$READY_MARKER"
+fi
 
 "$PY" "$RUN_SCRIPT" "$MODEL" "$PROMPT" "$OUTPUT" "$WIDTH" "$HEIGHT" "$CACHE"
 `

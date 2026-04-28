@@ -238,6 +238,7 @@ func runNode(ctx context.Context) {
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.setInferenceManager(infMgr)
 	}
+	startUserImageRuntimePrewarm(ctx, caps, detectAvailableDiskGB(), strings.TrimSpace(caps.GPUModel) != "")
 
 	// Health report loop keeps scheduler-facing capability flags up to date
 	// (for example native inference readiness).
@@ -678,6 +679,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	runtimeTokens := runtimeMgr.StatusTokens(gpuReady)
 	runtimeSnap := runtimeMgr.Snapshot(gpuReady)
 	localFluxReady := publicAIReady && localFlux2KleinReady(caps, diskGB, gpuReady)
+	localFluxPreparing := publicAIReady && localFlux2KleinPreparing(caps, diskGB, gpuReady)
 
 	if gpuReady {
 		parts = append(parts, "gpu-detect:ok")
@@ -741,6 +743,9 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	}
 	parts = append(parts, boolStatusToken("cap:image_gen", publicAIReady && (runtimeSnap.GPUReady || localFluxReady)))
 	parts = append(parts, boolStatusToken("cap:ryvion_runtime", localFluxReady))
+	if localFluxPreparing {
+		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel+":preparing:1")
+	}
 	if localFluxReady {
 		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel)
 		parts = append(parts, "model:"+flux2Klein4BLocalModel)
