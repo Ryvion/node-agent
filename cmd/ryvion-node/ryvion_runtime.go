@@ -19,12 +19,15 @@ import (
 
 	"github.com/Ryvion/node-agent/internal/blob"
 	"github.com/Ryvion/node-agent/internal/hub"
+	"github.com/Ryvion/node-agent/internal/hw"
 )
 
 const (
 	runtimeTaskImageGeneration = "image_generation"
 	flux2Klein4BLocalModel     = "flux-2-klein-4b-local"
 	flux2Klein4BMinVRAMMB      = 13000
+	flux2Klein4BMinRAMGB       = 16
+	flux2Klein4BMinCPUCores    = 4
 	flux2Klein4BMinDiskGB      = 40
 )
 
@@ -213,22 +216,35 @@ func resolveFlux2LocalHelper() (string, bool) {
 }
 
 func defaultImageRuntimeHelperPaths() []string {
+	paths := []string{}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		switch runtime.GOOS {
+		case "windows":
+			paths = append(paths,
+				filepath.Join(home, ".ryvion", "runtime", "helpers", "ryvion-image-runtime.cmd"),
+				filepath.Join(home, ".ryvion", "runtime", "helpers", "ryvion-image-runtime.ps1"),
+			)
+		default:
+			paths = append(paths, filepath.Join(home, ".ryvion", "runtime", "helpers", "ryvion-image-runtime"))
+		}
+	}
 	switch runtime.GOOS {
 	case "windows":
 		root := strings.TrimSpace(os.Getenv("ProgramFiles"))
 		if root == "" {
 			root = `C:\Program Files`
 		}
-		return []string{
+		paths = append(paths,
 			filepath.Join(root, "Ryvion", "runtime", "helpers", "ryvion-image-runtime.exe"),
 			filepath.Join(root, "Ryvion", "runtime", "helpers", "ryvion-image-runtime.cmd"),
-		}
+		)
 	default:
-		return []string{
+		paths = append(paths,
 			"/opt/ryvion/runtime/helpers/ryvion-image-runtime",
 			"/usr/local/bin/ryvion-image-runtime",
-		}
+		)
 	}
+	return paths
 }
 
 func runFlux2LocalHelper(ctx context.Context, helper string, spec ryvionRuntimeSpec, outputPath string) (string, error) {
@@ -267,20 +283,147 @@ func runtimeFixturesEnabled() bool {
 	}
 }
 
-func localFlux2KleinReady(capsVRAMBytes uint64, diskGB uint64, gpuReady bool) bool {
-	if !gpuReady {
-		return false
-	}
-	if capsVRAMBytes/1024/1024 < flux2Klein4BMinVRAMMB {
-		return false
-	}
+func localFlux2KleinReady(caps hw.CapSet, diskGB uint64, gpuReady bool) bool {
 	if diskGB < flux2Klein4BMinDiskGB {
 		return false
 	}
 	if _, ok := resolveFlux2LocalHelper(); ok {
+		return localFlux2KleinHardwareEligible(caps, gpuReady)
+	}
+	return runtimeFixturesEnabled() && localFlux2KleinHardwareEligible(caps, gpuReady)
+}
+
+func localFlux2KleinHardwareEligible(caps hw.CapSet, gpuReady bool) bool {
+	if gpuReady && caps.VRAMBytes/1024/1024 >= flux2Klein4BMinVRAMMB {
 		return true
 	}
-	return runtimeFixturesEnabled()
+	if caps.RAMBytes/1024/1024/1024 < flux2Klein4BMinRAMGB {
+		return false
+	}
+	if caps.CPUCores < flux2Klein4BMinCPUCores {
+		return false
+	}
+	if runtime.GOOS == "darwin" {
+		return true
+	}
+	return caps.RAMBytes/1024/1024/1024 >= 32 && caps.CPUCores >= 8
+}
+
+func ensureUserImageRuntimeHelper() error {
+	if _, ok := resolveFlux2LocalHelper(); ok {
+		return nil
+	}
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".ryvion", "runtime", "helpers", "ryvion-image-runtime")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(darwinImageRuntimeHelperScript()), 0o700)
+}
+
+func darwinImageRuntimeHelperScript() string {
+	return `#!/usr/bin/env bash
+set -euo pipefail
+
+MODEL="flux-2-klein-4b-local"
+PROMPT=""
+OUTPUT=""
+WIDTH="1024"
+HEIGHT="1024"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model) MODEL="${2:-}"; shift 2 ;;
+    --prompt) PROMPT="${2:-}"; shift 2 ;;
+    --output) OUTPUT="${2:-}"; shift 2 ;;
+    --width) WIDTH="${2:-1024}"; shift 2 ;;
+    --height) HEIGHT="${2:-1024}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [[ -z "$PROMPT" || -z "$OUTPUT" ]]; then
+  echo "prompt and output are required" >&2
+  exit 2
+fi
+if [[ "$MODEL" != "flux-2-klein-4b-local" ]]; then
+  echo "unsupported model: $MODEL" >&2
+  exit 2
+fi
+
+ROOT="${RYVION_IMAGE_RUNTIME_ROOT:-$HOME/.ryvion/image-runtime}"
+VENV="$ROOT/venv"
+CACHE="$ROOT/hf-cache"
+MARKER="$ROOT/.deps-flux2-klein-v1"
+mkdir -p "$ROOT" "$CACHE"
+
+if command -v python3.12 >/dev/null 2>&1; then
+  PYTHON="$(command -v python3.12)"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON="$(command -v python3)"
+else
+  echo "Python 3.12 or python3 is required for Ryvion image runtime." >&2
+  exit 127
+fi
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+  echo "runtime.image: creating Python environment"
+  "$PYTHON" -m venv "$VENV"
+fi
+PY="$VENV/bin/python"
+
+if [[ ! -f "$MARKER" ]]; then
+  echo "runtime.image: installing FLUX.2 klein runtime dependencies"
+  "$PY" -m pip install --upgrade pip
+  "$PY" -m pip install --upgrade torch torchvision
+  "$PY" -m pip install --upgrade git+https://github.com/huggingface/diffusers.git transformers accelerate safetensors pillow protobuf sentencepiece huggingface_hub
+  touch "$MARKER"
+fi
+
+RUN_SCRIPT="$ROOT/run_flux2_klein.py"
+cat > "$RUN_SCRIPT" <<'PY'
+import sys
+import torch
+from diffusers import Flux2KleinPipeline
+
+model, prompt, output, width, height, cache_dir = sys.argv[1:7]
+width = int(width)
+height = int(height)
+if model != "flux-2-klein-4b-local":
+    raise SystemExit(f"unsupported model {model}")
+if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+    device = "mps"
+    dtype = torch.float16
+else:
+    device = "cpu"
+    dtype = torch.float32
+pipe = Flux2KleinPipeline.from_pretrained(
+    "black-forest-labs/FLUX.2-klein-4B",
+    torch_dtype=dtype,
+    cache_dir=cache_dir,
+)
+pipe = pipe.to(device)
+generator = torch.Generator(device="cpu").manual_seed(0)
+image = pipe(
+    prompt=prompt,
+    height=height,
+    width=width,
+    guidance_scale=1.0,
+    num_inference_steps=4 if device == "mps" else 2,
+    generator=generator,
+).images[0]
+image.save(output)
+print(f"runtime.image: wrote {output} on {device}")
+PY
+
+"$PY" "$RUN_SCRIPT" "$MODEL" "$PROMPT" "$OUTPUT" "$WIDTH" "$HEIGHT" "$CACHE"
+`
 }
 
 func executableExists(path string) bool {

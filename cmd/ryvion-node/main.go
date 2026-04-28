@@ -140,6 +140,9 @@ func runNode(ctx context.Context) {
 	if err := syncManagedRuntimeFromHub(ctx, hubURL, runtimeMgr); err != nil {
 		slog.Warn("managed runtime auto-sync failed; continuing with current runtime", "error", err)
 	}
+	if err := ensureUserImageRuntimeHelper(); err != nil {
+		slog.Warn("image runtime helper bootstrap failed; local image jobs may stay unavailable", "error", err)
+	}
 
 	caps := hw.DetectCaps(flagDevice)
 	deviceType := resolveDeviceType(flagDevice, caps)
@@ -457,7 +460,7 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		jobTimeout = 15 * time.Minute
 	}
 	if isRyvionRuntime {
-		jobTimeout = 45 * time.Minute
+		jobTimeout = 2 * time.Hour
 	}
 	if isTraining {
 		jobTimeout = 4 * time.Hour // Training/fine-tuning jobs can take hours
@@ -674,7 +677,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	geminiOK := commandExists("gemini") || commandExists("gemini-cli")
 	runtimeTokens := runtimeMgr.StatusTokens(gpuReady)
 	runtimeSnap := runtimeMgr.Snapshot(gpuReady)
-	localFluxReady := publicAIReady && localFlux2KleinReady(caps.VRAMBytes, diskGB, gpuReady)
+	localFluxReady := publicAIReady && localFlux2KleinReady(caps, diskGB, gpuReady)
 
 	if gpuReady {
 		parts = append(parts, "gpu-detect:ok")
@@ -741,7 +744,13 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	if localFluxReady {
 		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel)
 		parts = append(parts, "model:"+flux2Klein4BLocalModel)
-		parts = append(parts, fmt.Sprintf("runtime:image:%s:min_vram_mb:%d", flux2Klein4BLocalModel, flux2Klein4BMinVRAMMB))
+		if gpuReady && caps.VRAMBytes/1024/1024 >= flux2Klein4BMinVRAMMB {
+			parts = append(parts, fmt.Sprintf("runtime:image:%s:min_vram_mb:%d", flux2Klein4BLocalModel, flux2Klein4BMinVRAMMB))
+		} else {
+			parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel+":mode:cpu")
+			parts = append(parts, fmt.Sprintf("runtime:image:%s:min_ram_gb:%d", flux2Klein4BLocalModel, flux2Klein4BMinRAMGB))
+			parts = append(parts, fmt.Sprintf("runtime:image:%s:min_cpu_cores:%d", flux2Klein4BLocalModel, flux2Klein4BMinCPUCores))
+		}
 	}
 	if nativeReady {
 		parts = append(parts, "native-inference-ready:1")

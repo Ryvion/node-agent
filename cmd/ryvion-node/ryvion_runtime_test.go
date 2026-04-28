@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -33,6 +34,7 @@ func TestBuildHealthReportAdvertisesLocalFluxOnlyWhenRuntimeReady(t *testing.T) 
 		GPUModel:  "RTX 4070 Ti Super",
 		VRAMBytes: 16 * 1024 * 1024 * 1024,
 		CPUCores:  16,
+		RAMBytes:  32 * 1024 * 1024 * 1024,
 	}
 	report := buildHealthReport(caps, nil, newRuntimeManager("test", runtimeContractMetadata{}))
 	for _, want := range []string{
@@ -61,4 +63,36 @@ func TestBuildHealthReportDoesNotAdvertiseLocalFluxOnSmallGPU(t *testing.T) {
 	if strings.Contains(report.Message, "runtime:image:flux-2-klein-4b-local") {
 		t.Fatalf("small GPU should not advertise local FLUX, got %s", report.Message)
 	}
+}
+
+func TestBuildHealthReportAdvertisesLocalFluxOnHighMemoryCPU(t *testing.T) {
+	t.Setenv("RYV_PUBLIC_AI", "1")
+	t.Setenv("RYV_DISABLE_OCI", "1")
+	t.Setenv("RYV_ENABLE_RUNTIME_FIXTURES", "1")
+	if disk := detectAvailableDiskGB(); disk < flux2Klein4BMinDiskGB {
+		t.Skipf("host test disk below local FLUX readiness threshold: %dGB", disk)
+	}
+	if runtimeGOOS() == "darwin" {
+		t.Skip("darwin path has a lower memory threshold; covered by production helper bootstrap")
+	}
+
+	caps := hw.CapSet{
+		CPUCores: 8,
+		RAMBytes: 32 * 1024 * 1024 * 1024,
+	}
+	report := buildHealthReport(caps, nil, newRuntimeManager("test", runtimeContractMetadata{}))
+	for _, want := range []string{
+		"cap:ryvion_runtime:1",
+		"cap:image_gen:1",
+		"runtime:image:flux-2-klein-4b-local",
+		"runtime:image:flux-2-klein-4b-local:mode:cpu",
+	} {
+		if !strings.Contains(report.Message, want) {
+			t.Fatalf("expected health report to contain %q, got %s", want, report.Message)
+		}
+	}
+}
+
+func runtimeGOOS() string {
+	return strings.ToLower(strings.TrimSpace(runtime.GOOS))
 }
