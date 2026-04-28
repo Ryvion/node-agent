@@ -137,6 +137,9 @@ func runNode(ctx context.Context) {
 		slog.Warn("failed to load runtime contract metadata, falling back to local defaults", "error", err)
 	}
 	runtimeMgr := newRuntimeManager(version, runtimeContract)
+	if err := syncManagedRuntimeFromHub(ctx, hubURL, runtimeMgr); err != nil {
+		slog.Warn("managed runtime auto-sync failed; continuing with current runtime", "error", err)
+	}
 
 	caps := hw.DetectCaps(flagDevice)
 	deviceType := resolveDeviceType(flagDevice, caps)

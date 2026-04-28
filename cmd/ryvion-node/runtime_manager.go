@@ -66,6 +66,13 @@ func newRuntimeManager(version string, contract runtimeContractMetadata) *runtim
 	return &runtimeManager{version: strings.TrimSpace(version), contract: contract}
 }
 
+func (m *runtimeManager) UpdateContract(contract runtimeContractMetadata) {
+	if m == nil {
+		return
+	}
+	m.contract = contract
+}
+
 func (m *runtimeManager) Snapshot(gpuDetected bool) runtimeSnapshot {
 	if ociLaneDisabled() {
 		version := sanitizeStatusValue(m.contract.Version)
