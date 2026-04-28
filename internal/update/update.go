@@ -147,24 +147,124 @@ func replaceUnix(exePath string, data []byte) error {
 	dir := filepath.Dir(exePath)
 	tmp, err := os.CreateTemp(dir, ".ryvion-node-update-*")
 	if err != nil {
+		if runtime.GOOS == "darwin" && os.IsPermission(err) {
+			return replaceDarwinUserManaged(exePath, data)
+		}
 		return fmt.Errorf("create temp binary: %w", err)
 	}
 	tmpPath := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
+		if runtime.GOOS == "darwin" && os.IsPermission(err) {
+			return replaceDarwinUserManaged(exePath, data)
+		}
 		return fmt.Errorf("write temp binary: %w", err)
 	}
 	tmp.Close()
 	if err := os.Chmod(tmpPath, 0755); err != nil {
 		os.Remove(tmpPath)
+		if runtime.GOOS == "darwin" && os.IsPermission(err) {
+			return replaceDarwinUserManaged(exePath, data)
+		}
 		return fmt.Errorf("chmod: %w", err)
 	}
 	if err := os.Rename(tmpPath, exePath); err != nil {
 		os.Remove(tmpPath)
+		if runtime.GOOS == "darwin" && os.IsPermission(err) {
+			return replaceDarwinUserManaged(exePath, data)
+		}
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil
+}
+
+func replaceDarwinUserManaged(previousExePath string, data []byte) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home for user-managed update: %w", err)
+	}
+	binDir := filepath.Join(home, ".ryvion", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return fmt.Errorf("create user-managed binary dir: %w", err)
+	}
+	target := filepath.Join(binDir, "ryvion-node")
+	tmp, err := os.CreateTemp(binDir, ".ryvion-node-update-*")
+	if err != nil {
+		return fmt.Errorf("create user-managed temp binary: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write user-managed binary: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close user-managed binary: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod user-managed binary: %w", err)
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("install user-managed binary: %w", err)
+	}
+	if err := rewriteDarwinLaunchAgentBinary(home, previousExePath, target); err != nil {
+		return err
+	}
+	slog.Info("installed update into user-managed macOS path", "path", target)
+	return nil
+}
+
+func rewriteDarwinLaunchAgentBinary(home, previousExePath, target string) error {
+	plistPath := filepath.Join(home, "Library", "LaunchAgents", "com.ryvion.node.plist")
+	body, err := os.ReadFile(plistPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Warn("macOS LaunchAgent plist not found after user-managed update", "path", plistPath)
+			return nil
+		}
+		return fmt.Errorf("read macOS LaunchAgent plist: %w", err)
+	}
+	next, changed := rewriteLaunchAgentBinaryContent(string(body), previousExePath, target)
+	if !changed {
+		slog.Warn("macOS LaunchAgent plist did not contain previous binary path", "path", plistPath, "previous", previousExePath, "target", target)
+		return nil
+	}
+	if err := os.WriteFile(plistPath, []byte(next), 0o644); err != nil {
+		return fmt.Errorf("write macOS LaunchAgent plist: %w", err)
+	}
+	return nil
+}
+
+func rewriteLaunchAgentBinaryContent(content, previousExePath, target string) (string, bool) {
+	previousExePath = strings.TrimSpace(previousExePath)
+	target = strings.TrimSpace(target)
+	if content == "" || target == "" {
+		return content, false
+	}
+	if previousExePath != "" && strings.Contains(content, previousExePath) {
+		return strings.Replace(content, previousExePath, target, 1), true
+	}
+	const programArgs = "<key>ProgramArguments</key>"
+	idx := strings.Index(content, programArgs)
+	if idx < 0 {
+		return content, false
+	}
+	rest := content[idx+len(programArgs):]
+	startRel := strings.Index(rest, "<string>")
+	if startRel < 0 {
+		return content, false
+	}
+	valueStart := idx + len(programArgs) + startRel + len("<string>")
+	endRel := strings.Index(content[valueStart:], "</string>")
+	if endRel < 0 {
+		return content, false
+	}
+	valueEnd := valueStart + endRel
+	return content[:valueStart] + target + content[valueEnd:], true
 }
 
 func replaceWindows(exePath string, data []byte) error {

@@ -79,6 +79,41 @@ func TestFetchExpectedChecksumRejectsInvalidSignature(t *testing.T) {
 	}
 }
 
+func TestRewriteLaunchAgentBinaryContentReplacesExistingPath(t *testing.T) {
+	input := `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ryvion-node</string>
+        <string>-ui-port</string>
+        <string>45890</string>
+    </array>
+</dict>
+</plist>`
+	got, changed := rewriteLaunchAgentBinaryContent(input, "/usr/local/bin/ryvion-node", "/Users/daniel/.ryvion/bin/ryvion-node")
+	if !changed {
+		t.Fatal("expected plist content to change")
+	}
+	if !strings.Contains(got, "<string>/Users/daniel/.ryvion/bin/ryvion-node</string>") {
+		t.Fatalf("expected new binary path in plist, got:\n%s", got)
+	}
+	if strings.Contains(got, "<string>/usr/local/bin/ryvion-node</string>") {
+		t.Fatalf("old binary path still present:\n%s", got)
+	}
+}
+
+func TestRewriteLaunchAgentBinaryContentFallsBackToFirstProgramArgument(t *testing.T) {
+	input := `<plist version="1.0"><dict><key>ProgramArguments</key><array><string>/old/path</string><string>-ui-port</string></array></dict></plist>`
+	got, changed := rewriteLaunchAgentBinaryContent(input, "/different/path", "/Users/daniel/.ryvion/bin/ryvion-node")
+	if !changed {
+		t.Fatal("expected fallback replacement to change content")
+	}
+	if !strings.Contains(got, "<string>/Users/daniel/.ryvion/bin/ryvion-node</string>") {
+		t.Fatalf("expected fallback binary path replacement, got %s", got)
+	}
+}
+
 func TestSecureHexEqual(t *testing.T) {
 	a := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	if !secureHexEqual(a, a) {
