@@ -14,6 +14,7 @@ const (
 	executorKindNativeStreaming = "native_streaming"
 	executorKindNativeReport    = "native_report"
 	executorKindManagedOCI      = "managed_oci"
+	executorKindRyvionRuntime   = "ryvion_runtime"
 	executorKindAgentHosting    = "agent_hosting"
 	executorKindWorkCapsule     = "work_capsule"
 

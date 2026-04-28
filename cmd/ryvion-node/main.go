@@ -443,6 +443,7 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	executorKind := executorKindForAssignment(work)
 	isStreaming := executorKind == executorKindNativeStreaming
 	isNativeReport := executorKind == executorKindNativeReport
+	isRyvionRuntime := executorKind == executorKindRyvionRuntime
 	isTraining := work.Kind == "training"
 	isAgentHosting := executorKind == executorKindAgentHosting
 	jobTimeout := 10 * time.Minute
@@ -451,6 +452,9 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	}
 	if isNativeReport {
 		jobTimeout = 15 * time.Minute
+	}
+	if isRyvionRuntime {
+		jobTimeout = 45 * time.Minute
 	}
 	if isTraining {
 		jobTimeout = 4 * time.Hour // Training/fine-tuning jobs can take hours
@@ -595,6 +599,18 @@ func isWorkCapsuleTask(specJSON string) bool {
 	return spec.Task == executorKindWorkCapsule || spec.WorkType == "certified_change"
 }
 
+func isRyvionRuntimeTask(specJSON string) bool {
+	var spec struct {
+		ExecutorKind string `json:"executor_kind"`
+		RuntimeTask  string `json:"runtime_task"`
+	}
+	if json.Unmarshal([]byte(specJSON), &spec) != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(spec.ExecutorKind), executorKindRyvionRuntime) ||
+		strings.TrimSpace(spec.RuntimeTask) != ""
+}
+
 func extractDeploymentID(specJSON string) string {
 	var spec struct {
 		DeploymentID string `json:"deployment_id"`
@@ -655,6 +671,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	geminiOK := commandExists("gemini") || commandExists("gemini-cli")
 	runtimeTokens := runtimeMgr.StatusTokens(gpuReady)
 	runtimeSnap := runtimeMgr.Snapshot(gpuReady)
+	localFluxReady := publicAIReady && localFlux2KleinReady(caps.VRAMBytes, diskGB, gpuReady)
 
 	if gpuReady {
 		parts = append(parts, "gpu-detect:ok")
@@ -716,7 +733,13 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	} else {
 		parts = append(parts, "public-ai-ready:0")
 	}
-	parts = append(parts, boolStatusToken("cap:image_gen", publicAIReady && runtimeSnap.GPUReady))
+	parts = append(parts, boolStatusToken("cap:image_gen", publicAIReady && (runtimeSnap.GPUReady || localFluxReady)))
+	parts = append(parts, boolStatusToken("cap:ryvion_runtime", localFluxReady))
+	if localFluxReady {
+		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel)
+		parts = append(parts, "model:"+flux2Klein4BLocalModel)
+		parts = append(parts, fmt.Sprintf("runtime:image:%s:min_vram_mb:%d", flux2Klein4BLocalModel, flux2Klein4BMinVRAMMB))
+	}
 	if nativeReady {
 		parts = append(parts, "native-inference-ready:1")
 		parts = append(parts, "native-model:"+infMgr.ModelName())

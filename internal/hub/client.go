@@ -717,6 +717,7 @@ type RuntimeRequirements struct {
 	NeedsGPU             bool     `json:"needs_gpu,omitempty"`
 	NeedsManagedOCI      bool     `json:"needs_managed_oci,omitempty"`
 	NeedsManagedOCIGPU   bool     `json:"needs_managed_oci_gpu,omitempty"`
+	NeedsRyvionRuntime   bool     `json:"needs_ryvion_runtime,omitempty"`
 	NeedsNativeStreaming bool     `json:"needs_native_streaming,omitempty"`
 	NeedsNativeReport    bool     `json:"needs_native_report,omitempty"`
 	NeedsAgentHosting    bool     `json:"needs_agent_hosting,omitempty"`

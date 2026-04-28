@@ -30,12 +30,16 @@ type executionEngine interface {
 type streamingEngine struct{}
 type nativeReportEngine struct{}
 type managedOCIEngine struct{}
+type ryvionRuntimeEngine struct{}
 type agentHostingEngine struct{}
 type workCapsuleEngine struct{}
 
 func (streamingEngine) Kind() string    { return executorKindNativeStreaming }
 func (nativeReportEngine) Kind() string { return executorKindNativeReport }
 func (managedOCIEngine) Kind() string   { return executorKindManagedOCI }
+func (ryvionRuntimeEngine) Kind() string {
+	return executorKindRyvionRuntime
+}
 func (agentHostingEngine) Kind() string {
 	return executorKindAgentHosting
 }
@@ -47,6 +51,8 @@ func selectExecutionEngine(work *hub.WorkAssignment) executionEngine {
 		return streamingEngine{}
 	case executorKindNativeReport:
 		return nativeReportEngine{}
+	case executorKindRyvionRuntime:
+		return ryvionRuntimeEngine{}
 	case executorKindAgentHosting:
 		return agentHostingEngine{}
 	case executorKindWorkCapsule:
@@ -69,11 +75,17 @@ func executorKindForAssignment(work *hub.WorkAssignment) string {
 	if strings.EqualFold(strings.TrimSpace(work.Kind), executorKindAgentHosting) || isAgentHostingTask(work.SpecJSON) {
 		return executorKindAgentHosting
 	}
+	if isRyvionRuntimeTask(work.SpecJSON) {
+		return executorKindRyvionRuntime
+	}
 	if strings.EqualFold(strings.TrimSpace(work.Image), "streaming") {
 		return executorKindNativeStreaming
 	}
 	if strings.EqualFold(strings.TrimSpace(work.Image), executorKindNativeReport) {
 		return executorKindNativeReport
+	}
+	if strings.EqualFold(strings.TrimSpace(work.Image), "ryvion-runtime") || strings.EqualFold(strings.TrimSpace(work.Image), executorKindRyvionRuntime) {
+		return executorKindRyvionRuntime
 	}
 	return executorKindManagedOCI
 }
