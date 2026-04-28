@@ -11,6 +11,7 @@ import (
 
 type operatorPreferences struct {
 	PublicAIOptIn         bool   `json:"public_ai_opt_in"`
+	PublicAIOptInSet      bool   `json:"-"`
 	DeclaredCountry       string `json:"declared_country,omitempty"`
 	RuntimeChannel        string `json:"runtime_channel,omitempty"`
 	RuntimeChannelVersion string `json:"runtime_channel_version,omitempty"`
@@ -64,6 +65,10 @@ func loadOperatorPreferences() (operatorPreferences, error) {
 	var prefs operatorPreferences
 	if err := json.Unmarshal(data, &prefs); err != nil {
 		return operatorPreferences{}, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err == nil {
+		_, prefs.PublicAIOptInSet = raw["public_ai_opt_in"]
 	}
 	return prefs, nil
 }
@@ -133,13 +138,20 @@ func resolveInitialPublicAIOptIn() (bool, error) {
 	if prefs.PublicAIOptIn {
 		return true, nil
 	}
+	if prefs.PublicAIOptInSet {
+		return false, nil
+	}
 	// Operators who explicitly disable the managed OCI lane are clearly here to
 	// run native inference; auto-opt them into the public AI lane so they earn
 	// streaming work without a second toggle. Phase 1 friction removal.
 	if ociLaneDisabledFromEnv() {
 		return true, nil
 	}
-	return false, nil
+	// Before operator preferences existed, Ryvion nodes defaulted public AI on
+	// unless RYV_PUBLIC_AI=0 was set. Preserve that behavior for existing config
+	// files that do not contain an explicit public_ai_opt_in decision; otherwise
+	// auto-updates can silently remove working buyer-facing inference capacity.
+	return true, nil
 }
 
 // ociLaneDisabledFromEnv mirrors the logic in runtime_manager.go without

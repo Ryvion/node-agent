@@ -159,8 +159,8 @@ func TestPublicAIOptInEnabled(t *testing.T) {
 	}()
 
 	t.Setenv("RYV_PUBLIC_AI", "")
-	if publicAIOptInEnabled() {
-		t.Fatal("expected public AI to default to false (explicit opt-in)")
+	if !publicAIOptInEnabled() {
+		t.Fatal("expected legacy missing public AI preference to preserve default-on participation")
 	}
 
 	t.Setenv("RYV_PUBLIC_AI", "1")
@@ -200,6 +200,30 @@ func TestResolveInitialPublicAIOptInUsesSavedPreferences(t *testing.T) {
 	}
 	if !got {
 		t.Fatal("expected saved operator preference to enable public AI opt-in")
+	}
+}
+
+func TestResolveInitialPublicAIOptInHonorsExplicitSavedFalse(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: false}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if got {
+		t.Fatal("expected explicit saved false to keep public AI disabled")
 	}
 }
 
