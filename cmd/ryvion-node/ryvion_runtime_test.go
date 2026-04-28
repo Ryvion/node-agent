@@ -119,7 +119,7 @@ func TestBuildHealthReportDoesNotAdvertiseLocalFluxUntilCacheReady(t *testing.T)
 	}
 }
 
-func TestBuildHealthReportAdvertisesLocalFluxOnHighMemoryCPU(t *testing.T) {
+func TestBuildHealthReportKeepsHighMemoryCPUFluxAsPreviewOnly(t *testing.T) {
 	t.Setenv("RYV_PUBLIC_AI", "1")
 	t.Setenv("RYV_DISABLE_OCI", "1")
 	t.Setenv("RYV_ENABLE_RUNTIME_FIXTURES", "1")
@@ -136,14 +136,16 @@ func TestBuildHealthReportAdvertisesLocalFluxOnHighMemoryCPU(t *testing.T) {
 	}
 	report := buildHealthReport(caps, nil, newRuntimeManager("test", runtimeContractMetadata{}))
 	for _, want := range []string{
-		"cap:ryvion_runtime:1",
-		"cap:image_gen:1",
-		"runtime:image:flux-2-klein-4b-local",
-		"runtime:image:flux-2-klein-4b-local:mode:cpu",
+		"cap:ryvion_runtime:0",
+		"cap:image_gen:0",
+		"runtime:image:flux-2-klein-4b-local:mode:cpu-preview",
 	} {
 		if !strings.Contains(report.Message, want) {
 			t.Fatalf("expected health report to contain %q, got %s", want, report.Message)
 		}
+	}
+	if strings.Contains(report.Message, "model:flux-2-klein-4b-local") {
+		t.Fatalf("CPU preview node must not advertise buyer-routable local FLUX model, got %s", report.Message)
 	}
 }
 

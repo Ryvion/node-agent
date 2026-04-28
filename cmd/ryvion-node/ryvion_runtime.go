@@ -328,6 +328,10 @@ func localFlux2KleinPreparing(caps hw.CapSet, diskGB uint64, gpuReady bool) bool
 	return false
 }
 
+func localFlux2KleinFastGPUEligible(caps hw.CapSet, gpuReady bool) bool {
+	return gpuReady && caps.VRAMBytes/1024/1024 >= flux2Klein4BMinVRAMMB
+}
+
 func localFlux2KleinModelCacheReady() bool {
 	info, err := os.Stat(filepath.Join(imageRuntimeRoot(), flux2Klein4BReadyMarker))
 	return err == nil && !info.IsDir()
@@ -336,6 +340,16 @@ func localFlux2KleinModelCacheReady() bool {
 func imageRuntimeRoot() string {
 	if root := strings.TrimSpace(os.Getenv("RYVION_IMAGE_RUNTIME_ROOT")); root != "" {
 		return root
+	}
+	switch runtime.GOOS {
+	case "windows":
+		root := strings.TrimSpace(os.Getenv("ProgramData"))
+		if root == "" {
+			root = `C:\ProgramData`
+		}
+		return filepath.Join(root, "Ryvion", "image-runtime")
+	case "linux":
+		return "/var/lib/ryvion/image-runtime"
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
@@ -385,10 +399,10 @@ func ensureUserImageRuntimeHelper() error {
 }
 
 func startUserImageRuntimePrewarm(ctx context.Context, caps hw.CapSet, diskGB uint64, gpuReady bool) {
-	if runtime.GOOS != "darwin" || !publicAIOptInEnabled() {
+	if !publicAIOptInEnabled() {
 		return
 	}
-	if diskGB < flux2Klein4BMinDiskGB || !localFlux2KleinHardwareEligible(caps, gpuReady) || localFlux2KleinModelCacheReady() {
+	if diskGB < flux2Klein4BMinDiskGB || !localFlux2KleinFastGPUEligible(caps, gpuReady) || localFlux2KleinModelCacheReady() {
 		return
 	}
 	helper, ok := resolveFlux2LocalHelper()
