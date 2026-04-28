@@ -409,7 +409,36 @@ func TestUpdatePublicAIOptInPreservesOtherPreferences(t *testing.T) {
 	if !got.PublicAIOptIn {
 		t.Fatal("expected public AI opt-in to be updated")
 	}
+	if got.PublicAIOptOut {
+		t.Fatal("expected public AI opt-out marker to be cleared when enabled")
+	}
 	if got.DeclaredCountry != "CA" || got.RuntimeChannel != "managed_oci_v1" || got.RuntimeArtifact != "artifact.tar.gz" {
 		t.Fatalf("expected unrelated preferences to be preserved, got %+v", got)
+	}
+}
+
+func TestUpdatePublicAIOptInWritesExplicitOptOutMarker(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	state := &operatorRuntime{}
+	if err := state.updatePublicAIOptIn(false); err != nil {
+		t.Fatalf("updatePublicAIOptIn(false) error = %v", err)
+	}
+	got, err := loadOperatorPreferences()
+	if err != nil {
+		t.Fatalf("loadOperatorPreferences() error = %v", err)
+	}
+	if got.PublicAIOptIn {
+		t.Fatal("expected public AI opt-in false")
+	}
+	if !got.PublicAIOptOut {
+		t.Fatal("expected explicit public AI opt-out marker")
 	}
 }

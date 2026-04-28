@@ -280,6 +280,7 @@ func (s *operatorRuntime) publicAIOptInEnabled() bool {
 func (s *operatorRuntime) updatePublicAIOptIn(enabled bool) error {
 	if _, err := mutateOperatorPreferences(func(prefs *operatorPreferences) {
 		prefs.PublicAIOptIn = enabled
+		prefs.PublicAIOptOut = !enabled
 	}); err != nil {
 		return err
 	}

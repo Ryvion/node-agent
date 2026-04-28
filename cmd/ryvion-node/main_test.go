@@ -203,7 +203,7 @@ func TestResolveInitialPublicAIOptInUsesSavedPreferences(t *testing.T) {
 	}
 }
 
-func TestResolveInitialPublicAIOptInHonorsExplicitSavedFalse(t *testing.T) {
+func TestResolveInitialPublicAIOptInTreatsLegacySavedFalseAsDefaultOn(t *testing.T) {
 	prevResolver := operatorConfigPathResolver
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	operatorConfigPathResolver = func() (string, error) {
@@ -222,8 +222,32 @@ func TestResolveInitialPublicAIOptInHonorsExplicitSavedFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
 	}
+	if !got {
+		t.Fatal("expected legacy saved false without opt-out marker to default public AI on")
+	}
+}
+
+func TestResolveInitialPublicAIOptInHonorsExplicitOptOut(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: false, PublicAIOptOut: true}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
 	if got {
-		t.Fatal("expected explicit saved false to keep public AI disabled")
+		t.Fatal("expected explicit public AI opt-out marker to keep public AI disabled")
 	}
 }
 

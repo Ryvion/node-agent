@@ -12,6 +12,8 @@ import (
 type operatorPreferences struct {
 	PublicAIOptIn         bool   `json:"public_ai_opt_in"`
 	PublicAIOptInSet      bool   `json:"-"`
+	PublicAIOptOut        bool   `json:"public_ai_opt_out,omitempty"`
+	PublicAIOptOutSet     bool   `json:"-"`
 	DeclaredCountry       string `json:"declared_country,omitempty"`
 	RuntimeChannel        string `json:"runtime_channel,omitempty"`
 	RuntimeChannelVersion string `json:"runtime_channel_version,omitempty"`
@@ -69,6 +71,7 @@ func loadOperatorPreferences() (operatorPreferences, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err == nil {
 		_, prefs.PublicAIOptInSet = raw["public_ai_opt_in"]
+		_, prefs.PublicAIOptOutSet = raw["public_ai_opt_out"]
 	}
 	return prefs, nil
 }
@@ -138,9 +141,13 @@ func resolveInitialPublicAIOptIn() (bool, error) {
 	if prefs.PublicAIOptIn {
 		return true, nil
 	}
-	if prefs.PublicAIOptInSet {
+	if prefs.PublicAIOptOutSet && prefs.PublicAIOptOut {
 		return false, nil
 	}
+	// Legacy installers and early operator UI builds could persist
+	// "public_ai_opt_in": false as an implicit default, which silently removed
+	// otherwise-capable nodes from buyer inference. Treat that old shape as
+	// unset; the current explicit opt-out marker above is the durable disable.
 	// Operators who explicitly disable the managed OCI lane are clearly here to
 	// run native inference; auto-opt them into the public AI lane so they earn
 	// streaming work without a second toggle. Phase 1 friction removal.
