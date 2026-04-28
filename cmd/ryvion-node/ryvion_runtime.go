@@ -104,7 +104,7 @@ func runRyvionRuntimeImageGeneration(ctx context.Context, work *hub.WorkAssignme
 		err = fmt.Errorf("local FLUX.2 helper is not installed; node should not advertise runtime:image:%s yet", flux2Klein4BLocalModel)
 	}
 	if err != nil {
-		return submitRyvionRuntimeFailure(ctx, work, execCtx, "runtime_task_failed", err)
+		return submitRyvionRuntimeFailureWithLogs(ctx, work, execCtx, "runtime_task_failed", err, logs, runtimeTaskImageGeneration)
 	}
 
 	uploadRes, uploadErr := blob.Upload(ctx, execCtx.client, work.JobID, outputPath)
@@ -166,23 +166,36 @@ func runRyvionRuntimeImageGeneration(ctx context.Context, work *hub.WorkAssignme
 }
 
 func submitRyvionRuntimeFailure(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext, code string, runErr error) (*runnerResultSnapshot, error) {
+	return submitRyvionRuntimeFailureWithLogs(ctx, work, execCtx, code, runErr, "", "unknown")
+}
+
+func submitRyvionRuntimeFailureWithLogs(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext, code string, runErr error, logs, runtimeTask string) (*runnerResultSnapshot, error) {
 	msg := code
 	if runErr != nil && strings.TrimSpace(runErr.Error()) != "" {
 		msg = runErr.Error()
 	}
+	runtimeTask = strings.TrimSpace(runtimeTask)
+	if runtimeTask == "" {
+		runtimeTask = "unknown"
+	}
 	sum := sha256.Sum256([]byte(work.JobID + ":" + code + ":" + msg))
 	hash := hex.EncodeToString(sum[:])
+	extra := map[string]any{
+		"executor":          executorKindRyvionRuntime,
+		"runtime_task":      runtimeTask,
+		"exit_code":         1,
+		"error_code":        code,
+		"error":             msg,
+		"runtime_event_log": []string{"runtime.task_started", "runtime.task_failed", "receipt.submitted"},
+	}
+	if strings.TrimSpace(logs) != "" {
+		extra["stdout_tail"] = tailString(logs, 4096)
+		extra["stderr_tail"] = tailString(logs, 4096)
+	}
 	metadata := receiptMetadataBase(
 		work,
 		execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
-		map[string]any{
-			"executor":          executorKindRyvionRuntime,
-			"runtime_task":      "unknown",
-			"exit_code":         1,
-			"error_code":        code,
-			"error":             msg,
-			"runtime_event_log": []string{"runtime.task_started", "runtime.task_failed", "receipt.submitted"},
-		},
+		extra,
 	)
 	_ = submitReceiptWithRetry(ctx, execCtx.client, hub.Receipt{
 		JobID:         work.JobID,
@@ -310,8 +323,10 @@ func localFlux2KleinHardwareEligible(caps hw.CapSet, gpuReady bool) bool {
 }
 
 func ensureUserImageRuntimeHelper() error {
-	if _, ok := resolveFlux2LocalHelper(); ok {
-		return nil
+	if strings.TrimSpace(os.Getenv("RYV_FLUX2_HELPER")) != "" {
+		if _, ok := resolveFlux2LocalHelper(); ok {
+			return nil
+		}
 	}
 	if runtime.GOOS != "darwin" {
 		return nil
@@ -321,10 +336,14 @@ func ensureUserImageRuntimeHelper() error {
 		return err
 	}
 	path := filepath.Join(home, ".ryvion", "runtime", "helpers", "ryvion-image-runtime")
+	desired := []byte(darwinImageRuntimeHelperScript())
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, desired) {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(darwinImageRuntimeHelperScript()), 0o700)
+	return os.WriteFile(path, desired, 0o700)
 }
 
 func darwinImageRuntimeHelperScript() string {
@@ -359,27 +378,89 @@ fi
 
 ROOT="${RYVION_IMAGE_RUNTIME_ROOT:-$HOME/.ryvion/image-runtime}"
 VENV="$ROOT/venv"
+BOOTSTRAP="$ROOT/bootstrap"
 CACHE="$ROOT/hf-cache"
-MARKER="$ROOT/.deps-flux2-klein-v1"
+MARKER="$ROOT/.deps-flux2-klein-v2"
 mkdir -p "$ROOT" "$CACHE"
 
-if command -v python3.12 >/dev/null 2>&1; then
-  PYTHON="$(command -v python3.12)"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON="$(command -v python3)"
-else
-  echo "Python 3.12 or python3 is required for Ryvion image runtime." >&2
-  exit 127
+python_ok() {
+  "$1" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+PY
+}
+
+find_python() {
+  for candidate in python3.12 python3.11 python3.10 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      path="$(command -v "$candidate")"
+      if python_ok "$path"; then
+        echo "$path"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+ensure_uv() {
+  if [[ -x "$BOOTSTRAP/bin/uv" ]]; then
+    echo "$BOOTSTRAP/bin/uv"
+    return 0
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    echo "$(command -v uv)"
+    return 0
+  fi
+  bootstrap_python=""
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      bootstrap_python="$(command -v "$candidate")"
+      break
+    fi
+  done
+  if [[ -z "$bootstrap_python" ]]; then
+    echo "Python is required to bootstrap the Ryvion image runtime." >&2
+    exit 127
+  fi
+  rm -rf "$BOOTSTRAP"
+  "$bootstrap_python" -m venv "$BOOTSTRAP"
+  "$BOOTSTRAP/bin/python" -m pip install --upgrade pip uv
+  echo "$BOOTSTRAP/bin/uv"
+}
+
+create_runtime_venv() {
+  rm -rf "$VENV"
+  if PYTHON="$(find_python)"; then
+    "$PYTHON" -m venv "$VENV"
+    return 0
+  fi
+  echo "runtime.image: provisioning Python 3.12 in Ryvion-managed runtime"
+  UV="$(ensure_uv)"
+  "$UV" python install 3.12
+  "$UV" venv "$VENV" --python 3.12
+}
+
+if [[ -x "$VENV/bin/python" ]] && ! python_ok "$VENV/bin/python"; then
+  echo "runtime.image: replacing Python <3.10 environment"
+  rm -rf "$VENV"
+  rm -f "$ROOT"/.deps-flux2-klein-*
 fi
 
 if [[ ! -x "$VENV/bin/python" ]]; then
   echo "runtime.image: creating Python environment"
-  "$PYTHON" -m venv "$VENV"
+  create_runtime_venv
 fi
 PY="$VENV/bin/python"
+if ! python_ok "$PY"; then
+  echo "runtime.image: existing Python environment is incompatible; recreating"
+  create_runtime_venv
+  PY="$VENV/bin/python"
+fi
 
 if [[ ! -f "$MARKER" ]]; then
   echo "runtime.image: installing FLUX.2 klein runtime dependencies"
+  rm -f "$ROOT"/.deps-flux2-klein-*
   "$PY" -m pip install --upgrade pip
   "$PY" -m pip install --upgrade torch torchvision
   "$PY" -m pip install --upgrade git+https://github.com/huggingface/diffusers.git transformers accelerate safetensors pillow protobuf sentencepiece huggingface_hub
