@@ -25,6 +25,19 @@ func TestSupportedNativeChatModelsGatesGemmaByVRAM(t *testing.T) {
 	}
 }
 
+func TestSupportedNativeChatModelsAllowsDriverReservedVRAMOn16GBCards(t *testing.T) {
+	t.Setenv("HF_TOKEN", "test-token")
+
+	reportedVRAM := uint64(17171480576) // RTX 4070 Ti SUPER can report just under exact 16 GiB.
+	models := SupportedNativeChatModels(reportedVRAM)
+	for _, model := range models {
+		if model == "gemma-3-27b-it" {
+			return
+		}
+	}
+	t.Fatalf("expected Gemma 27B to be advertised for 16GB-class GPU with %d reported bytes", reportedVRAM)
+}
+
 func TestSupportedNativeChatModelsRequiresTokenForGatedGemma(t *testing.T) {
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")

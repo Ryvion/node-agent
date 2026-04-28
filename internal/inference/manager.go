@@ -30,6 +30,10 @@ const (
 	defaultCtxSize    = "16384"
 	healthCheckPeriod = 5 * time.Second
 	startupTimeout    = 120 * time.Second
+	// GPU drivers commonly reserve a small slice of VRAM, so a 16 GB card can
+	// report slightly below 16 GiB. Keep model eligibility aligned with the
+	// hub's displayed/capability GB values instead of hiding valid cards.
+	modelVRAMReserveTolerance = 256 * 1024 * 1024
 )
 
 // ModelMode distinguishes chat-style decoder models from encoder models that
@@ -88,7 +92,7 @@ func SupportedNativeChatModels(vramBytes uint64) []string {
 		if cfg.Mode == ModeEmbedding {
 			continue
 		}
-		if cfg.MinVRAMBytes > 0 && vramBytes < cfg.MinVRAMBytes {
+		if !meetsModelVRAMRequirement(vramBytes, cfg.MinVRAMBytes) {
 			continue
 		}
 		if cfg.RequiresHuggingFaceAuth && huggingFaceToken() == "" && !platformManagedGatedModelsEnabled() {
@@ -98,6 +102,19 @@ func SupportedNativeChatModels(vramBytes uint64) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func meetsModelVRAMRequirement(vramBytes, minVRAMBytes uint64) bool {
+	if minVRAMBytes == 0 {
+		return true
+	}
+	if vramBytes >= minVRAMBytes {
+		return true
+	}
+	if minVRAMBytes <= modelVRAMReserveTolerance {
+		return false
+	}
+	return vramBytes+modelVRAMReserveTolerance >= minVRAMBytes
 }
 
 // platformServerURL returns the correct llama.cpp release URL for the current OS/arch.
