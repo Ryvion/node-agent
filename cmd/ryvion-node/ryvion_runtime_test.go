@@ -97,8 +97,8 @@ func TestBuildHealthReportDoesNotAdvertiseLocalFluxUntilCacheReady(t *testing.T)
 	if !strings.Contains(report.Message, "runtime:image:flux-2-klein-4b-local:eligible:1") {
 		t.Fatalf("unprepared fast GPU should advertise prepare eligibility, got %s", report.Message)
 	}
-	if !strings.Contains(report.Message, "cap:ryvion_runtime:0") {
-		t.Fatalf("unprepared model cache should disable ryvion runtime, got %s", report.Message)
+	if !strings.Contains(report.Message, "cap:ryvion_runtime:1") {
+		t.Fatalf("unprepared eligible model cache should enable ryvion runtime for prepare jobs, got %s", report.Message)
 	}
 
 	if err := os.WriteFile(filepath.Join(root, flux2Klein4BWarmingMarker), []byte("warming"), 0o600); err != nil {

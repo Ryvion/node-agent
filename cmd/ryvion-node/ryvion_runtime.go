@@ -735,7 +735,10 @@ width = int(width)
 height = int(height)
 if model != "flux-2-klein-4b-local":
     raise SystemExit(f"unsupported model {model}")
-if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+if torch.cuda.is_available():
+    device = "cuda"
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
     device = "mps"
     dtype = torch.float16
 else:
@@ -754,13 +757,13 @@ pipe = Flux2KleinPipeline.from_pretrained(
     cache_dir=cache_dir,
 )
 pipe = pipe.to(device)
-generator = torch.Generator(device="cpu").manual_seed(0)
+generator = torch.Generator(device=device if device != "mps" else "cpu").manual_seed(0)
 image = pipe(
     prompt=prompt,
     height=height,
     width=width,
     guidance_scale=1.0,
-    num_inference_steps=4 if device == "mps" else 2,
+    num_inference_steps=4 if device != "cpu" else 2,
     generator=generator,
 ).images[0]
 image.save(output)

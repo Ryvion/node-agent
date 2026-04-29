@@ -744,7 +744,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		parts = append(parts, "public-ai-ready:0")
 	}
 	parts = append(parts, boolStatusToken("cap:image_gen", publicAIReady && (runtimeSnap.GPUReady || localFluxReady)))
-	parts = append(parts, boolStatusToken("cap:ryvion_runtime", localFluxReady))
+	parts = append(parts, boolStatusToken("cap:ryvion_runtime", publicAIReady && (localFluxReady || localFluxPreparing || localFluxPrepareEligible)))
 	if localFluxPreparing {
 		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel+":preparing:1")
 	}
