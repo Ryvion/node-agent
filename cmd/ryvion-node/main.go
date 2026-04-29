@@ -681,6 +681,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	localFluxReady := publicAIReady && localFlux2KleinReady(caps, diskGB, gpuReady)
 	localFluxFastReady := localFluxReady && localFlux2KleinFastGPUEligible(caps, gpuReady)
 	localFluxPreparing := publicAIReady && localFlux2KleinFastGPUEligible(caps, gpuReady) && localFlux2KleinPreparing(caps, diskGB, gpuReady)
+	localFluxPrepareEligible := publicAIReady && localFlux2KleinPrepareEligible(caps, diskGB, gpuReady)
 
 	if gpuReady {
 		parts = append(parts, "gpu-detect:ok")
@@ -750,6 +751,9 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	if localFluxFastReady {
 		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel)
 		parts = append(parts, "model:"+flux2Klein4BLocalModel)
+		parts = append(parts, fmt.Sprintf("runtime:image:%s:min_vram_mb:%d", flux2Klein4BLocalModel, flux2Klein4BMinVRAMMB))
+	} else if localFluxPrepareEligible {
+		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel+":eligible:1")
 		parts = append(parts, fmt.Sprintf("runtime:image:%s:min_vram_mb:%d", flux2Klein4BLocalModel, flux2Klein4BMinVRAMMB))
 	} else if localFluxReady {
 		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel+":mode:cpu-preview")

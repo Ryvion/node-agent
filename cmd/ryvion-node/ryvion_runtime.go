@@ -25,24 +25,26 @@ import (
 
 const (
 	runtimeTaskImageGeneration = "image_generation"
+	runtimeTaskPrepare         = "runtime_prepare"
 	flux2Klein4BLocalModel     = "flux-2-klein-4b-local"
 	flux2Klein4BMinVRAMMB      = 13000
 	flux2Klein4BMinRAMGB       = 16
 	flux2Klein4BMinCPUCores    = 4
 	flux2Klein4BMinDiskGB      = 40
-	flux2Klein4BReadyMarker    = ".model-flux2-klein-ready-v1"
+	flux2Klein4BReadyMarker    = ".model-flux2-klein-ready-v2"
 	flux2Klein4BWarmingMarker  = ".model-flux2-klein-warming"
 )
 
 type ryvionRuntimeSpec struct {
-	ExecutorKind string `json:"executor_kind"`
-	RuntimeTask  string `json:"runtime_task"`
-	Model        string `json:"model"`
-	Prompt       string `json:"prompt"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	OutputFile   string `json:"output_file"`
-	Index        int    `json:"index"`
+	ExecutorKind  string `json:"executor_kind"`
+	RuntimeTask   string `json:"runtime_task"`
+	RuntimeFamily string `json:"runtime_family"`
+	Model         string `json:"model"`
+	Prompt        string `json:"prompt"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
+	OutputFile    string `json:"output_file"`
+	Index         int    `json:"index"`
 }
 
 func (ryvionRuntimeEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {
@@ -53,6 +55,8 @@ func (ryvionRuntimeEngine) Execute(ctx context.Context, work *hub.WorkAssignment
 	switch strings.TrimSpace(spec.RuntimeTask) {
 	case runtimeTaskImageGeneration:
 		return runRyvionRuntimeImageGeneration(ctx, work, execCtx, spec)
+	case runtimeTaskPrepare, "prepare":
+		return runRyvionRuntimePrepare(ctx, work, execCtx, spec)
 	default:
 		return submitRyvionRuntimeFailure(ctx, work, execCtx, "unsupported_runtime_task", fmt.Errorf("unsupported runtime task %q", spec.RuntimeTask))
 	}
@@ -68,6 +72,7 @@ func parseRyvionRuntimeSpec(specJSON string) (ryvionRuntimeSpec, error) {
 	}
 	spec.ExecutorKind = strings.TrimSpace(spec.ExecutorKind)
 	spec.RuntimeTask = strings.TrimSpace(spec.RuntimeTask)
+	spec.RuntimeFamily = strings.TrimSpace(spec.RuntimeFamily)
 	spec.Model = strings.TrimSpace(spec.Model)
 	spec.Prompt = strings.TrimSpace(spec.Prompt)
 	spec.OutputFile = strings.TrimSpace(spec.OutputFile)
@@ -84,6 +89,62 @@ func parseRyvionRuntimeSpec(specJSON string) (ryvionRuntimeSpec, error) {
 		return spec, fmt.Errorf("runtime_task required")
 	}
 	return spec, nil
+}
+
+func runRyvionRuntimePrepare(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext, spec ryvionRuntimeSpec) (*runnerResultSnapshot, error) {
+	if !strings.EqualFold(spec.Model, flux2Klein4BLocalModel) {
+		return submitRyvionRuntimeFailure(ctx, work, execCtx, "unsupported_prepare_model", fmt.Errorf("unsupported runtime prepare model %q", spec.Model))
+	}
+	start := time.Now()
+	helper, ok := resolveFlux2LocalHelper()
+	if !ok {
+		return submitRyvionRuntimeFailure(ctx, work, execCtx, "runtime_helper_missing", fmt.Errorf("local FLUX.2 helper is not installed"))
+	}
+	logs, err := runFlux2LocalPrepareHelper(ctx, helper, spec.Model)
+	if err != nil {
+		return submitRyvionRuntimeFailureWithLogs(ctx, work, execCtx, "runtime_prepare_failed", err, logs, runtimeTaskPrepare)
+	}
+	if !localFlux2KleinModelCacheReady() && !runtimeFixturesEnabled() {
+		err := fmt.Errorf("runtime prepare finished but readiness marker %s is missing", flux2Klein4BReadyMarker)
+		return submitRyvionRuntimeFailureWithLogs(ctx, work, execCtx, "runtime_prepare_not_ready", err, logs, runtimeTaskPrepare)
+	}
+	resultHash := hashRuntimePrepareResult(spec.Model, logs)
+	metadata := receiptMetadataBase(
+		work,
+		execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+		map[string]any{
+			"executor":          executorKindRyvionRuntime,
+			"runtime_task":      runtimeTaskPrepare,
+			"runtime_family":    "image_generation",
+			"model":             spec.Model,
+			"duration_ms":       time.Since(start).Milliseconds(),
+			"exit_code":         0,
+			"stdout_tail":       tailString(logs, 4096),
+			"cache_ready":       true,
+			"ready_marker":      filepath.Join(imageRuntimeRoot(), flux2Klein4BReadyMarker),
+			"runtime_event_log": []string{"runtime.prepare_started", "model.download_completed", "runtime.smoke_tested", "receipt.submitted"},
+		},
+	)
+	receipt := hub.Receipt{
+		JobID:         work.JobID,
+		ResultHashHex: resultHash,
+		MeteringUnits: 0,
+		Metadata:      metadata,
+	}
+	if err := submitReceiptWithRetry(ctx, execCtx.client, receipt); err != nil {
+		return &runnerResultSnapshot{
+			DurationMs:    time.Since(start).Milliseconds(),
+			ResultHashHex: resultHash,
+			MeteringUnits: 0,
+			Metadata:      metadata,
+		}, err
+	}
+	return &runnerResultSnapshot{
+		DurationMs:    time.Since(start).Milliseconds(),
+		ResultHashHex: resultHash,
+		MeteringUnits: 0,
+		Metadata:      metadata,
+	}, nil
 }
 
 func runRyvionRuntimeImageGeneration(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext, spec ryvionRuntimeSpec) (*runnerResultSnapshot, error) {
@@ -290,6 +351,37 @@ func runFlux2LocalHelper(ctx context.Context, helper string, spec ryvionRuntimeS
 	return buf.String(), err
 }
 
+func runFlux2LocalPrepareHelper(ctx context.Context, helper string, model string) (string, error) {
+	args := []string{"--prepare", "--model", model}
+	command := helper
+	commandArgs := args
+	lowerHelper := strings.ToLower(helper)
+	if strings.HasSuffix(lowerHelper, ".ps1") {
+		command = "powershell"
+		commandArgs = append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helper}, args...)
+	}
+	if strings.HasSuffix(lowerHelper, ".py") {
+		command = "python"
+		commandArgs = append([]string{helper}, args...)
+	}
+	cmd := exec.CommandContext(ctx, command, commandArgs...)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	return buf.String(), err
+}
+
+func hashRuntimePrepareResult(model string, logs string) string {
+	parts := []string{executorKindRyvionRuntime, runtimeTaskPrepare, strings.TrimSpace(model)}
+	if marker, err := os.ReadFile(filepath.Join(imageRuntimeRoot(), flux2Klein4BReadyMarker)); err == nil {
+		parts = append(parts, string(marker))
+	}
+	parts = append(parts, logs)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
 func runtimeFixturesEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_ENABLE_RUNTIME_FIXTURES"))) {
 	case "1", "true", "yes", "on":
@@ -326,6 +418,19 @@ func localFlux2KleinPreparing(caps hw.CapSet, diskGB uint64, gpuReady bool) bool
 		return true
 	}
 	return false
+}
+
+func localFlux2KleinPrepareEligible(caps hw.CapSet, diskGB uint64, gpuReady bool) bool {
+	if diskGB < flux2Klein4BMinDiskGB {
+		return false
+	}
+	if !localFlux2KleinFastGPUEligible(caps, gpuReady) {
+		return false
+	}
+	if _, ok := resolveFlux2LocalHelper(); !ok {
+		return false
+	}
+	return !localFlux2KleinModelCacheReady()
 }
 
 func localFlux2KleinFastGPUEligible(caps hw.CapSet, gpuReady bool) bool {
@@ -475,7 +580,7 @@ VENV="$ROOT/venv"
 BOOTSTRAP="$ROOT/bootstrap"
 CACHE="$ROOT/hf-cache"
 MARKER="$ROOT/.deps-flux2-klein-v2"
-READY_MARKER="$ROOT/.model-flux2-klein-ready-v1"
+READY_MARKER="$ROOT/.model-flux2-klein-ready-v2"
 mkdir -p "$ROOT" "$CACHE"
 
 export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
@@ -614,6 +719,8 @@ cat > "$PREPARE_SCRIPT" <<'PY'
 import os
 import sys
 from pathlib import Path
+import torch
+from diffusers import Flux2KleinPipeline
 from huggingface_hub import snapshot_download
 
 model, cache_dir, ready_marker = sys.argv[1:4]
@@ -625,8 +732,27 @@ local_dir = snapshot_download(
     token=os.environ.get("HF_TOKEN") or None,
     resume_download=True,
 )
-Path(ready_marker).write_text(local_dir, encoding="utf-8")
-print(f"runtime.image: model cache ready at {local_dir}")
+if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+    device = "mps"
+    dtype = torch.float16
+else:
+    device = "cpu"
+    dtype = torch.float32
+pipe = Flux2KleinPipeline.from_pretrained(local_dir, torch_dtype=dtype, cache_dir=cache_dir)
+pipe = pipe.to(device)
+probe_path = str(Path(ready_marker).with_name("readiness_probe.png"))
+generator = torch.Generator(device="cpu").manual_seed(1)
+image = pipe(
+    prompt="ryvion runtime readiness probe",
+    height=256,
+    width=256,
+    guidance_scale=1.0,
+    num_inference_steps=1,
+    generator=generator,
+).images[0]
+image.save(probe_path)
+Path(ready_marker).write_text(f"{local_dir}\nprobe={probe_path}\n", encoding="utf-8")
+print(f"runtime.image: smoke-tested model cache at {local_dir}")
 PY
 
 if [[ "$PREPARE" == "1" ]]; then

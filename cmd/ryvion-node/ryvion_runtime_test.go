@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -89,8 +90,12 @@ func TestBuildHealthReportDoesNotAdvertiseLocalFluxUntilCacheReady(t *testing.T)
 		RAMBytes:  32 * 1024 * 1024 * 1024,
 	}
 	report := buildHealthReport(caps, nil, newRuntimeManager("test", runtimeContractMetadata{}))
-	if strings.Contains(report.Message, "runtime:image:flux-2-klein-4b-local") {
-		t.Fatalf("unprepared model cache should not advertise local FLUX, got %s", report.Message)
+	if strings.Contains(report.Message, "runtime:image:flux-2-klein-4b-local,") ||
+		strings.HasSuffix(report.Message, "runtime:image:flux-2-klein-4b-local") {
+		t.Fatalf("unprepared model cache should not advertise ready local FLUX, got %s", report.Message)
+	}
+	if !strings.Contains(report.Message, "runtime:image:flux-2-klein-4b-local:eligible:1") {
+		t.Fatalf("unprepared fast GPU should advertise prepare eligibility, got %s", report.Message)
 	}
 	if !strings.Contains(report.Message, "cap:ryvion_runtime:0") {
 		t.Fatalf("unprepared model cache should disable ryvion runtime, got %s", report.Message)
@@ -146,6 +151,53 @@ func TestBuildHealthReportKeepsHighMemoryCPUFluxAsPreviewOnly(t *testing.T) {
 	}
 	if strings.Contains(report.Message, "model:flux-2-klein-4b-local") {
 		t.Fatalf("CPU preview node must not advertise buyer-routable local FLUX model, got %s", report.Message)
+	}
+}
+
+func TestRunFlux2LocalPrepareHelperInvokesPrepare(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixture is POSIX-only")
+	}
+	root := t.TempDir()
+	t.Setenv("RYVION_IMAGE_RUNTIME_ROOT", root)
+	helper := filepath.Join(root, "ryvion-image-runtime")
+	script := `#!/usr/bin/env sh
+set -eu
+prepare=0
+model=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --prepare) prepare=1; shift ;;
+    --model) model="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$prepare" != "1" ]; then
+  echo "missing prepare flag" >&2
+  exit 2
+fi
+if [ "$model" != "flux-2-klein-4b-local" ]; then
+  echo "bad model: $model" >&2
+  exit 2
+fi
+printf "ready\n" > "$RYVION_IMAGE_RUNTIME_ROOT/.model-flux2-klein-ready-v2"
+echo "prepared $model"
+`
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := runFlux2LocalPrepareHelper(context.Background(), helper, flux2Klein4BLocalModel)
+	if err != nil {
+		t.Fatalf("prepare helper failed: %v logs=%s", err, logs)
+	}
+	if !strings.Contains(logs, "prepared flux-2-klein-4b-local") {
+		t.Fatalf("unexpected logs: %s", logs)
+	}
+	if !localFlux2KleinModelCacheReady() {
+		t.Fatal("prepare helper fixture should create ready marker")
+	}
+	if hashRuntimePrepareResult(flux2Klein4BLocalModel, logs) == "" {
+		t.Fatal("prepare hash should not be empty")
 	}
 }
 
