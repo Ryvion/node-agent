@@ -424,7 +424,7 @@ func localFlux2KleinPrepareEligible(caps hw.CapSet, diskGB uint64, gpuReady bool
 	if diskGB < flux2Klein4BMinDiskGB {
 		return false
 	}
-	if !localFlux2KleinFastGPUEligible(caps, gpuReady) {
+	if !localFlux2KleinHardwareEligible(caps, gpuReady) {
 		return false
 	}
 	if _, ok := resolveFlux2LocalHelper(); !ok {
