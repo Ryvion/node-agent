@@ -114,6 +114,46 @@ func TestRewriteLaunchAgentBinaryContentFallsBackToFirstProgramArgument(t *testi
 	}
 }
 
+func TestSplitWindowsServiceImageArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "quoted path with args",
+			in:   `"C:\Program Files\Ryvion\ryvion-node.exe" -hub https://ryvion-hub.fly.dev -ui-port 45890`,
+			want: ` -hub https://ryvion-hub.fly.dev -ui-port 45890`,
+		},
+		{
+			name: "unquoted path with args",
+			in:   `C:\Ryvion\ryvion-node.exe -hub https://ryvion-hub.fly.dev`,
+			want: ` -hub https://ryvion-hub.fly.dev`,
+		},
+		{
+			name: "no args",
+			in:   `"C:\Program Files\Ryvion\ryvion-node.exe"`,
+			want: ``,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := splitWindowsServiceImageArgs(tt.in); got != tt.want {
+				t.Fatalf("args = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWindowsInstallRootFromExe(t *testing.T) {
+	if got := windowsInstallRootFromExe(`C:\Program Files\Ryvion\ryvion-node.exe`); got != `C:\Program Files\Ryvion` {
+		t.Fatalf("install root = %q", got)
+	}
+	if got := windowsInstallRootFromExe(`C:\Program Files\Ryvion\updates\ryvion-node-abcd.exe`); got != `C:\Program Files\Ryvion` {
+		t.Fatalf("staged install root = %q", got)
+	}
+}
+
 func TestSecureHexEqual(t *testing.T) {
 	a := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	if !secureHexEqual(a, a) {

@@ -268,17 +268,133 @@ func rewriteLaunchAgentBinaryContent(content, previousExePath, target string) (s
 }
 
 func replaceWindows(exePath string, data []byte) error {
-	oldPath := exePath + ".old"
-	_ = os.Remove(oldPath)
-	if err := os.Rename(exePath, oldPath); err != nil {
-		return fmt.Errorf("rename old binary: %w", err)
+	installRoot := windowsInstallRootFromExe(exePath)
+	updateDir := filepath.Join(installRoot, "updates")
+	if err := os.MkdirAll(updateDir, 0755); err != nil {
+		return fmt.Errorf("create update dir: %w", err)
 	}
-	if err := os.WriteFile(exePath, data, 0755); err != nil {
-		// Try to restore old binary
-		os.Rename(oldPath, exePath)
-		return fmt.Errorf("write new binary: %w", err)
+
+	sum := sha256.Sum256(data)
+	target := filepath.Join(updateDir, "ryvion-node-"+hex.EncodeToString(sum[:8])+".exe")
+	tmp, err := os.CreateTemp(updateDir, ".ryvion-node-update-*.exe")
+	if err != nil {
+		return fmt.Errorf("create staged binary: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write staged binary: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close staged binary: %w", err)
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("install staged binary: %w", err)
+	}
+
+	serviceName := strings.TrimSpace(os.Getenv("RYVION_WINDOWS_SERVICE"))
+	if serviceName == "" {
+		serviceName = "RyvionNode"
+	}
+	currentImagePath, err := queryWindowsServiceImagePath(serviceName)
+	if err != nil {
+		return fmt.Errorf("query Windows service image path: %w", err)
+	}
+	args := splitWindowsServiceImageArgs(currentImagePath)
+	nextImagePath := quoteWindowsArg(target) + args
+	if err := setWindowsServiceImagePath(serviceName, nextImagePath); err != nil {
+		return fmt.Errorf("set Windows service image path: %w", err)
+	}
+	slog.Info("staged Windows update and rewired service path", "service", serviceName, "target", target)
+	return nil
+}
+
+func windowsInstallRootFromExe(exePath string) string {
+	dir := windowsDirName(exePath)
+	if strings.EqualFold(windowsBaseName(dir), "updates") {
+		parent := windowsDirName(dir)
+		if parent != "." && parent != "" {
+			return parent
+		}
+	}
+	return dir
+}
+
+func windowsDirName(path string) string {
+	path = strings.TrimRight(strings.TrimSpace(path), `\/`)
+	idx := strings.LastIndexAny(path, `\/`)
+	if idx < 0 {
+		return filepath.Dir(path)
+	}
+	return path[:idx]
+}
+
+func windowsBaseName(path string) string {
+	path = strings.TrimRight(strings.TrimSpace(path), `\/`)
+	idx := strings.LastIndexAny(path, `\/`)
+	if idx < 0 {
+		return filepath.Base(path)
+	}
+	return path[idx+1:]
+}
+
+func queryWindowsServiceImagePath(serviceName string) (string, error) {
+	key := `HKLM\SYSTEM\CurrentControlSet\Services\` + serviceName
+	out, err := exec.Command("reg.exe", "query", key, "/v", "ImagePath").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("reg query failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToLower(line), "imagepath") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		return strings.TrimSpace(strings.Join(fields[2:], " ")), nil
+	}
+	return "", fmt.Errorf("ImagePath value not found")
+}
+
+func setWindowsServiceImagePath(serviceName, imagePath string) error {
+	key := `HKLM\SYSTEM\CurrentControlSet\Services\` + serviceName
+	out, err := exec.Command("reg.exe", "add", key, "/v", "ImagePath", "/t", "REG_EXPAND_SZ", "/d", imagePath, "/f").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("reg add failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func splitWindowsServiceImageArgs(imagePath string) string {
+	imagePath = strings.TrimSpace(imagePath)
+	if imagePath == "" {
+		return ""
+	}
+	if strings.HasPrefix(imagePath, `"`) {
+		end := strings.Index(imagePath[1:], `"`)
+		if end >= 0 {
+			return strings.TrimRight(imagePath[end+2:], " \t")
+		}
+	}
+	lower := strings.ToLower(imagePath)
+	if idx := strings.Index(lower, ".exe"); idx >= 0 {
+		return strings.TrimRight(imagePath[idx+4:], " \t")
+	}
+	return ""
+}
+
+func quoteWindowsArg(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return `""`
+	}
+	escaped := strings.ReplaceAll(value, `"`, `\"`)
+	return `"` + escaped + `"`
 }
 
 // Restart restarts the service using the platform's service manager.
