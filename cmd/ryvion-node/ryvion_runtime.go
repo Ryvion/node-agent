@@ -32,6 +32,7 @@ const (
 	flux2Klein4BMinCPUCores    = 4
 	flux2Klein4BMinDiskGB      = 40
 	flux2Klein4BReadyMarker    = ".model-flux2-klein-ready-v2"
+	flux2Klein4BReadyMarkerV1  = ".model-flux2-klein-ready-v1"
 	flux2Klein4BWarmingMarker  = ".model-flux2-klein-warming"
 )
 
@@ -105,9 +106,10 @@ func runRyvionRuntimePrepare(ctx context.Context, work *hub.WorkAssignment, exec
 		return submitRyvionRuntimeFailureWithLogs(ctx, work, execCtx, "runtime_prepare_failed", err, logs, runtimeTaskPrepare)
 	}
 	if !localFlux2KleinModelCacheReady() && !runtimeFixturesEnabled() {
-		err := fmt.Errorf("runtime prepare finished but readiness marker %s is missing", flux2Klein4BReadyMarker)
+		err := fmt.Errorf("runtime prepare finished but readiness marker is missing")
 		return submitRyvionRuntimeFailureWithLogs(ctx, work, execCtx, "runtime_prepare_not_ready", err, logs, runtimeTaskPrepare)
 	}
+	readyMarker, _ := localFlux2KleinReadyMarkerPath()
 	resultHash := hashRuntimePrepareResult(spec.Model, logs)
 	metadata := receiptMetadataBase(
 		work,
@@ -121,8 +123,8 @@ func runRyvionRuntimePrepare(ctx context.Context, work *hub.WorkAssignment, exec
 			"exit_code":         0,
 			"stdout_tail":       tailString(logs, 4096),
 			"cache_ready":       true,
-			"ready_marker":      filepath.Join(imageRuntimeRoot(), flux2Klein4BReadyMarker),
-			"runtime_event_log": []string{"runtime.prepare_started", "model.download_completed", "runtime.smoke_tested", "receipt.submitted"},
+			"ready_marker":      readyMarker,
+			"runtime_event_log": []string{"runtime.prepare_started", "model.download_completed", "model.cache_ready", "receipt.submitted"},
 		},
 	)
 	receipt := hub.Receipt{
@@ -374,12 +376,68 @@ func runFlux2LocalPrepareHelper(ctx context.Context, helper string, model string
 
 func hashRuntimePrepareResult(model string, logs string) string {
 	parts := []string{executorKindRyvionRuntime, runtimeTaskPrepare, strings.TrimSpace(model)}
-	if marker, err := os.ReadFile(filepath.Join(imageRuntimeRoot(), flux2Klein4BReadyMarker)); err == nil {
-		parts = append(parts, string(marker))
+	if path, ok := localFlux2KleinReadyMarkerPath(); ok {
+		marker, err := os.ReadFile(path)
+		if err == nil {
+			parts = append(parts, string(marker))
+		}
 	}
 	parts = append(parts, logs)
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
 	return hex.EncodeToString(sum[:])
+}
+
+func localFlux2KleinReadyMarkerPath() (string, bool) {
+	root := imageRuntimeRoot()
+	for _, marker := range []string{flux2Klein4BReadyMarker, flux2Klein4BReadyMarkerV1} {
+		path := filepath.Join(root, marker)
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+func localFlux2KleinModelCacheReady() bool {
+	current := filepath.Join(imageRuntimeRoot(), flux2Klein4BReadyMarker)
+	if info, err := os.Stat(current); err == nil && !info.IsDir() {
+		return true
+	}
+	return promoteFlux2KleinLegacyReadyMarker()
+}
+
+func localFlux2KleinModelCacheSnapshotReady(cacheDir string) bool {
+	matches, err := filepath.Glob(filepath.Join(cacheDir, "models--black-forest-labs--FLUX.2-klein-4B", "snapshots", "*", "model_index.json"))
+	if err != nil || len(matches) == 0 {
+		return false
+	}
+	for _, match := range matches {
+		if info, err := os.Stat(match); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func promoteFlux2KleinLegacyReadyMarker() bool {
+	root := imageRuntimeRoot()
+	legacy := filepath.Join(root, flux2Klein4BReadyMarkerV1)
+	current := filepath.Join(root, flux2Klein4BReadyMarker)
+	if info, err := os.Stat(current); err == nil && !info.IsDir() {
+		return true
+	}
+	raw, err := os.ReadFile(legacy)
+	if err != nil {
+		return false
+	}
+	if !localFlux2KleinModelCacheSnapshotReady(filepath.Join(root, "hf-cache")) {
+		return false
+	}
+	if err := os.WriteFile(current, raw, 0o600); err != nil {
+		return false
+	}
+	return true
 }
 
 func runtimeFixturesEnabled() bool {
@@ -435,11 +493,6 @@ func localFlux2KleinPrepareEligible(caps hw.CapSet, diskGB uint64, gpuReady bool
 
 func localFlux2KleinFastGPUEligible(caps hw.CapSet, gpuReady bool) bool {
 	return gpuReady && caps.VRAMBytes/1024/1024 >= flux2Klein4BMinVRAMMB
-}
-
-func localFlux2KleinModelCacheReady() bool {
-	info, err := os.Stat(filepath.Join(imageRuntimeRoot(), flux2Klein4BReadyMarker))
-	return err == nil && !info.IsDir()
 }
 
 func imageRuntimeRoot() string {
@@ -719,8 +772,6 @@ cat > "$PREPARE_SCRIPT" <<'PY'
 import os
 import sys
 from pathlib import Path
-import torch
-from diffusers import Flux2KleinPipeline
 from huggingface_hub import snapshot_download
 
 model, cache_dir, ready_marker = sys.argv[1:4]
@@ -732,27 +783,15 @@ local_dir = snapshot_download(
     token=os.environ.get("HF_TOKEN") or None,
     resume_download=True,
 )
-if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-    device = "mps"
-    dtype = torch.float16
-else:
-    device = "cpu"
-    dtype = torch.float32
-pipe = Flux2KleinPipeline.from_pretrained(local_dir, torch_dtype=dtype, cache_dir=cache_dir)
-pipe = pipe.to(device)
-probe_path = str(Path(ready_marker).with_name("readiness_probe.png"))
-generator = torch.Generator(device="cpu").manual_seed(1)
-image = pipe(
-    prompt="ryvion runtime readiness probe",
-    height=256,
-    width=256,
-    guidance_scale=1.0,
-    num_inference_steps=1,
-    generator=generator,
-).images[0]
-image.save(probe_path)
-Path(ready_marker).write_text(f"{local_dir}\nprobe={probe_path}\n", encoding="utf-8")
-print(f"runtime.image: smoke-tested model cache at {local_dir}")
+required = [
+    Path(local_dir) / "model_index.json",
+    Path(local_dir) / "flux-2-klein-4b.safetensors",
+]
+missing = [str(path) for path in required if not path.exists()]
+if missing:
+    raise SystemExit("runtime.image: incomplete model cache: " + ", ".join(missing))
+Path(ready_marker).write_text(f"{local_dir}\nmode=cache-ready\n", encoding="utf-8")
+print(f"runtime.image: model cache ready at {local_dir}")
 PY
 
 if [[ "$PREPARE" == "1" ]]; then

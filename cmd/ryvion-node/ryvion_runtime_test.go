@@ -124,6 +124,28 @@ func TestBuildHealthReportDoesNotAdvertiseLocalFluxUntilCacheReady(t *testing.T)
 	}
 }
 
+func TestLocalFlux2KleinModelCacheReadyPromotesLegacyMarker(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("RYVION_IMAGE_RUNTIME_ROOT", root)
+	snapshot := filepath.Join(root, "hf-cache", "models--black-forest-labs--FLUX.2-klein-4B", "snapshots", "abc123")
+	if err := os.MkdirAll(snapshot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "model_index.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, flux2Klein4BReadyMarkerV1), []byte("legacy-ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if !localFlux2KleinModelCacheReady() {
+		t.Fatal("legacy ready marker with a cached snapshot should be accepted")
+	}
+	if _, err := os.Stat(filepath.Join(root, flux2Klein4BReadyMarker)); err != nil {
+		t.Fatalf("legacy marker should be promoted to current marker: %v", err)
+	}
+}
+
 func TestBuildHealthReportAdvertisesPreparedHighMemoryCPUFluxPreview(t *testing.T) {
 	t.Setenv("RYV_PUBLIC_AI", "1")
 	t.Setenv("RYV_DISABLE_OCI", "1")
