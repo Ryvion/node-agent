@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/hw"
+	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 )
 
 type Client struct {
@@ -132,6 +133,7 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (HeartbeatRespo
 		PowerWatts:     metrics.PowerWatts,
 		GPUThrottled:   metrics.GPUThrottled,
 		SystemTimezone: detectIANATimezone(),
+		V7:             metrics.V7Heartbeat,
 	}
 	body.Signature = c.sign(
 		"heartbeat",
@@ -704,6 +706,7 @@ type Metrics struct {
 	GPUUtil      float64
 	PowerWatts   float64
 	GPUThrottled bool // node is self-throttling due to operator GPU usage
+	V7Heartbeat  *v7heartbeat.V7HeartbeatPayload
 }
 
 type WorkAssignment struct {
@@ -792,15 +795,16 @@ type registerRequest struct {
 }
 
 type heartbeatRequest struct {
-	PublicKeyHex   string  `json:"public_key_hex"`
-	TimestampMs    int64   `json:"timestamp_ms"`
-	CPUUtil        float64 `json:"cpu_util"`
-	MemUtil        float64 `json:"mem_util"`
-	GPUUtil        float64 `json:"gpu_util"`
-	PowerWatts     float64 `json:"power_watts"`
-	GPUThrottled   bool    `json:"gpu_throttled"`
-	SystemTimezone string  `json:"system_timezone,omitempty"`
-	Signature      []byte  `json:"signature"`
+	PublicKeyHex   string                          `json:"public_key_hex"`
+	TimestampMs    int64                           `json:"timestamp_ms"`
+	CPUUtil        float64                         `json:"cpu_util"`
+	MemUtil        float64                         `json:"mem_util"`
+	GPUUtil        float64                         `json:"gpu_util"`
+	PowerWatts     float64                         `json:"power_watts"`
+	GPUThrottled   bool                            `json:"gpu_throttled"`
+	SystemTimezone string                          `json:"system_timezone,omitempty"`
+	V7             *v7heartbeat.V7HeartbeatPayload `json:"v7,omitempty"`
+	Signature      []byte                          `json:"signature"`
 }
 
 type workResponse struct {

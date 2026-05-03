@@ -10,8 +10,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/node-agent/internal/v7/capability"
+	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 )
 
 func TestRegisterSignsExpectedMessage(t *testing.T) {
@@ -268,6 +273,133 @@ func TestHeartbeatParsesVerifiedLocation(t *testing.T) {
 	}
 }
 
+func TestHeartbeatOmitsV7PayloadWhenUnset(t *testing.T) {
+	pub, priv := testKeyPair()
+	var handlerErr error
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			handlerErr = fmt.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			PublicKeyHex string          `json:"public_key_hex"`
+			TimestampMs  int64           `json:"timestamp_ms"`
+			V7           json.RawMessage `json:"v7"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			handlerErr = fmt.Errorf("decode request: %w", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.V7) != 0 {
+			handlerErr = fmt.Errorf("v7 payload should be omitted when unset: %s", string(req.V7))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	if _, err := c.Heartbeat(context.Background(), Metrics{TimestampMs: 123}); err != nil {
+		t.Fatalf("heartbeat failed: %v", err)
+	}
+	if handlerErr != nil {
+		t.Fatalf("handler failed: %v", handlerErr)
+	}
+}
+
+func TestHeartbeatIncludesV7PayloadAndPreservesOldFields(t *testing.T) {
+	pub, priv := testKeyPair()
+	pubHex := hex.EncodeToString(pub)
+	v7Payload := testV7HeartbeatPayload(t)
+	var handlerErr error
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			handlerErr = fmt.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			PublicKeyHex string          `json:"public_key_hex"`
+			TimestampMs  int64           `json:"timestamp_ms"`
+			CPUUtil      float64         `json:"cpu_util"`
+			MemUtil      float64         `json:"mem_util"`
+			GPUUtil      float64         `json:"gpu_util"`
+			PowerWatts   float64         `json:"power_watts"`
+			GPUThrottled bool            `json:"gpu_throttled"`
+			V7           json.RawMessage `json:"v7"`
+			Signature    []byte          `json:"signature"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			handlerErr = fmt.Errorf("decode request: %w", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.PublicKeyHex != pubHex || req.TimestampMs != 456 || req.CPUUtil != 1.25 || req.MemUtil != 2.5 ||
+			req.GPUUtil != 3.75 || req.PowerWatts != 4.5 || !req.GPUThrottled {
+			handlerErr = fmt.Errorf("old heartbeat fields not preserved: %+v", req)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.V7) == 0 {
+			handlerErr = fmt.Errorf("v7 payload missing")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var v7 struct {
+			CapabilityPassport struct {
+				SchemaVersion string `json:"schema_version"`
+			} `json:"capability_passport"`
+		}
+		if err := json.Unmarshal(req.V7, &v7); err != nil {
+			handlerErr = fmt.Errorf("decode v7 payload: %w", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if v7.CapabilityPassport.SchemaVersion != capability.SchemaVersionV1 {
+			handlerErr = fmt.Errorf("passport schema = %q, want %q", v7.CapabilityPassport.SchemaVersion, capability.SchemaVersionV1)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		msg := signPayload(
+			"heartbeat",
+			pubHex,
+			strconv.FormatInt(req.TimestampMs, 10),
+			formatFloatJSON(req.CPUUtil),
+			formatFloatJSON(req.MemUtil),
+			formatFloatJSON(req.GPUUtil),
+			formatFloatJSON(req.PowerWatts),
+		)
+		if !ed25519.Verify(pub, msg, req.Signature) {
+			handlerErr = fmt.Errorf("invalid signature")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	if _, err := c.Heartbeat(context.Background(), Metrics{
+		TimestampMs:  456,
+		CPUUtil:      1.25,
+		MemUtil:      2.5,
+		GPUUtil:      3.75,
+		PowerWatts:   4.5,
+		GPUThrottled: true,
+		V7Heartbeat:  v7Payload,
+	}); err != nil {
+		t.Fatalf("heartbeat failed: %v", err)
+	}
+	if handlerErr != nil {
+		t.Fatalf("handler failed: %v", handlerErr)
+	}
+}
+
 func TestSubmitReceiptSignsExpectedMessage(t *testing.T) {
 	pub, priv := testKeyPair()
 	pubHex := hex.EncodeToString(pub)
@@ -324,6 +456,33 @@ func TestSubmitReceiptSignsExpectedMessage(t *testing.T) {
 	if handlerErr != nil {
 		t.Fatalf("handler failed: %v", handlerErr)
 	}
+}
+
+func testV7HeartbeatPayload(t *testing.T) *v7heartbeat.V7HeartbeatPayload {
+	t.Helper()
+
+	payload, err := v7heartbeat.BuildV7HeartbeatPayload(v7heartbeat.BuildV7HeartbeatPayloadInput{
+		AgentVersion:  "test",
+		NodePublicKey: strings.Repeat("a", 64),
+		OS:            "linux",
+		Arch:          "amd64",
+		HardwareCapabilities: hw.CapSet{
+			CPUCores: 4,
+			RAMBytes: 8 * 1024 * 1024 * 1024,
+		},
+		RuntimeProfile: capability.RuntimeProfile{
+			NativeInferenceSupported: true,
+			SupportedRunnerKinds:     []string{"native_streaming"},
+		},
+		SandboxCapabilitySummary: capability.SandboxCapabilitySummary{
+			RejectsUnsafePickle: true,
+		},
+		CreatedAtUnixMs: 123,
+	})
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	return &payload
 }
 
 func TestReportAgentHealthSignsExpectedMessageAndReturnsStop(t *testing.T) {

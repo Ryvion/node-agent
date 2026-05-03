@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/hub"
+	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 )
 
@@ -36,6 +37,29 @@ func TestSubmitReceiptWithRetry_SucceedsAfterFailures(t *testing.T) {
 	}
 	if got := int(fc.calls.Load()); got != 4 {
 		t.Fatalf("expected 4 calls (3 fail + 1 success), got %d", got)
+	}
+}
+
+func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
+	t.Setenv("RYV_DISABLE_OCI", "1")
+	caps := hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	runtimeMgr := newRuntimeManager("test", runtimeContractMetadata{})
+
+	t.Setenv("RYV_NODE_V7_CAPS", "")
+	if payload := buildOptionalV7HeartbeatPayload("pubkey", caps, "cpu", "ca", nil, runtimeMgr); payload != nil {
+		t.Fatalf("payload = %+v, want nil when RYV_NODE_V7_CAPS is off", payload)
+	}
+
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	payload := buildOptionalV7HeartbeatPayload("pubkey", caps, "cpu", "ca", nil, runtimeMgr)
+	if payload == nil {
+		t.Fatal("payload = nil, want V7 payload when RYV_NODE_V7_CAPS=1")
+	}
+	if payload.CapabilityPassport.NodePublicKey != "pubkey" {
+		t.Fatalf("node public key = %q, want pubkey", payload.CapabilityPassport.NodePublicKey)
 	}
 }
 

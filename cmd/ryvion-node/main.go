@@ -25,6 +25,9 @@ import (
 	"github.com/Ryvion/node-agent/internal/nodekey"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	"github.com/Ryvion/node-agent/internal/update"
+	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
+	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
+	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
 )
 
 // Set via -ldflags at build time.
@@ -259,7 +262,7 @@ func runNode(ctx context.Context) {
 				slog.Error("heartbeat goroutine panic", "error", r)
 			}
 		}()
-		heartbeatLoop(ctx, client)
+		heartbeatLoop(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
 	}()
 
 	// Work loop — fetch and process jobs.
@@ -269,7 +272,7 @@ func runNode(ctx context.Context) {
 // heartbeatLoop sends heartbeats on a fixed interval, completely independent
 // of the work loop. Implements a circuit breaker: after 30 consecutive failures
 // (~5 min at 10s), the interval increases to 60s with a warning. Resets on success.
-func heartbeatLoop(ctx context.Context, client *hub.Client) {
+func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
 	const (
 		normalInterval    = 30 * time.Second
 		backoffInterval   = 60 * time.Second
@@ -282,7 +285,7 @@ func heartbeatLoop(ctx context.Context, client *hub.Client) {
 	var consecutiveFailures int
 
 	// Send first heartbeat immediately.
-	if sendHeartbeat(ctx, client) {
+	if sendHeartbeat(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr) {
 		consecutiveFailures = 0
 	} else {
 		consecutiveFailures++
@@ -293,7 +296,7 @@ func heartbeatLoop(ctx context.Context, client *hub.Client) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if sendHeartbeat(ctx, client) {
+			if sendHeartbeat(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr) {
 				if consecutiveFailures >= circuitBreakerMax {
 					slog.Info("hub heartbeat recovered after circuit breaker", "prev_failures", consecutiveFailures)
 					ticker.Reset(normalInterval)
@@ -311,7 +314,7 @@ func heartbeatLoop(ctx context.Context, client *hub.Client) {
 	}
 }
 
-func sendHeartbeat(ctx context.Context, client *hub.Client) bool {
+func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) bool {
 	metrics := hw.SampleMetrics()
 
 	// Cache GPU utilization for the work loop's throttle check.
@@ -320,14 +323,25 @@ func sendHeartbeat(ctx context.Context, client *hub.Client) bool {
 	// Report whether the node is self-throttling due to operator GPU usage.
 	throttled := flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 && metrics.GPUUtil > flagMaxGPUUtil
 
-	heartbeat, err := client.Heartbeat(ctx, hub.Metrics{
+	heartbeatMetrics := hub.Metrics{
 		TimestampMs:  time.Now().UnixMilli(),
 		CPUUtil:      metrics.CPUUtil,
 		MemUtil:      metrics.MemUtil,
 		GPUUtil:      metrics.GPUUtil,
 		PowerWatts:   metrics.PowerWatts,
 		GPUThrottled: throttled,
-	})
+		V7Heartbeat:  buildOptionalV7HeartbeatPayload(client.PublicKeyHex(), caps, deviceType, declaredCountry, infMgr, runtimeMgr),
+	}
+
+	heartbeat, err := client.Heartbeat(ctx, heartbeatMetrics)
+	if err != nil && heartbeatMetrics.V7Heartbeat != nil {
+		heartbeatMetrics.V7Heartbeat = nil
+		if retryHeartbeat, retryErr := client.Heartbeat(ctx, heartbeatMetrics); retryErr == nil {
+			slog.Warn("heartbeat with V7 payload failed; retried without V7 payload", "error", err)
+			heartbeat = retryHeartbeat
+			err = nil
+		}
+	}
 	if err != nil {
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.recordHeartbeat(metrics, hub.HeartbeatResponse{}, err)
@@ -343,6 +357,101 @@ func sendHeartbeat(ctx context.Context, client *hub.Client) bool {
 		latestHubVersion.Store(heartbeat.LatestVersion)
 	}
 	return true
+}
+
+func buildOptionalV7HeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) *v7heartbeat.V7HeartbeatPayload {
+	if !v7heartbeat.V7HeartbeatEnabledFromEnv() {
+		return nil
+	}
+	payload, err := buildV7HeartbeatPayloadForNode(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
+	if err != nil {
+		slog.Warn("failed to build V7 heartbeat payload; sending legacy heartbeat", "error", err)
+		return nil
+	}
+	return payload
+}
+
+func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) (*v7heartbeat.V7HeartbeatPayload, error) {
+	gpuDetected := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
+	runtimeSnap := runtimeSnapshot{}
+	if runtimeMgr != nil {
+		runtimeSnap = runtimeMgr.Snapshot(gpuDetected)
+	}
+
+	nativeSupported := inference.NativeRuntimeAvailable()
+	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
+	publicAIReady := publicAIOptInEnabled()
+	diskGB := detectAvailableDiskGB()
+	localFluxReady := publicAIReady && localFlux2KleinReady(caps, diskGB, gpuDetected)
+	localFluxPreparing := publicAIReady && localFlux2KleinHardwareEligible(caps, gpuDetected) && localFlux2KleinPreparing(caps, diskGB, gpuDetected)
+	localFluxPrepareEligible := publicAIReady && localFlux2KleinPrepareEligible(caps, diskGB, gpuDetected)
+
+	runtimeProfile := v7capability.RuntimeProfile{
+		NativeInferenceSupported: nativeSupported,
+		OCIAvailable:             runtimeSnap.Ready,
+		LlamaServerAvailable:     nativeSupported,
+		ImageRuntimeAvailable:    publicAIReady && (runtimeSnap.GPUReady || localFluxReady),
+		SupportedRunnerKinds:     v7SupportedRunnerKinds(nativeSupported, runtimeSnap, publicAIReady && (localFluxReady || localFluxPreparing || localFluxPrepareEligible)),
+	}
+
+	residentModelIDs := []string{}
+	if nativeReady {
+		residentModelIDs = append(residentModelIDs, infMgr.ModelName())
+	}
+	if localFluxReady {
+		residentModelIDs = append(residentModelIDs, flux2Klein4BLocalModel)
+	}
+
+	evidenceSummary := v7capability.EvidenceCapabilitySummary{
+		SupportsArtifactManifest:    true,
+		SupportsRYV3EvidencePayload: true,
+		SupportsRuntimeHash:         strings.TrimSpace(runtimeSnap.ManifestHash) != "",
+	}
+	sandboxSummary := v7capability.SandboxCapabilitySummary{
+		RejectsUnsafePickle:        true,
+		RunnerAllowlistEnabled:     true,
+		FilesystemIsolationPlanned: true,
+		NetworkIsolationSupported:  runtimeSnap.Ready,
+	}
+	sandboxPolicy := v7sandbox.DefaultSandboxPolicy()
+
+	payload, err := v7heartbeat.BuildV7HeartbeatPayload(v7heartbeat.BuildV7HeartbeatPayloadInput{
+		AgentVersion:         version,
+		NodePublicKey:        nodePublicKey,
+		DeviceType:           deviceType,
+		DeclaredCountry:      declaredCountry,
+		HardwareCapabilities: caps,
+		RuntimeProfile:       runtimeProfile,
+		ModelCapabilitySummary: v7capability.ModelCapabilitySummary{
+			ResidentModelIDs:      residentModelIDs,
+			MaxResidentModelBytes: caps.VRAMBytes,
+			SupportsModelLease:    gpuDetected && caps.VRAMBytes > 0 && nativeSupported,
+		},
+		SandboxCapabilitySummary:  sandboxSummary,
+		SandboxPolicy:             &sandboxPolicy,
+		EvidenceCapabilitySummary: evidenceSummary,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &payload, nil
+}
+
+func v7SupportedRunnerKinds(nativeSupported bool, runtimeSnap runtimeSnapshot, ryvionRuntimeAvailable bool) []string {
+	kinds := []string{executorKindNativeReport}
+	if nativeSupported {
+		kinds = append(kinds, executorKindNativeStreaming)
+	}
+	if runtimeSnap.Ready {
+		kinds = append(kinds, executorKindManagedOCI, executorKindAgentHosting)
+		if commandExists("git") {
+			kinds = append(kinds, executorKindWorkCapsule)
+		}
+	}
+	if ryvionRuntimeAvailable {
+		kinds = append(kinds, executorKindRyvionRuntime)
+	}
+	return kinds
 }
 
 func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
