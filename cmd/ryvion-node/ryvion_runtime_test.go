@@ -210,7 +210,7 @@ echo "prepared $model"
 	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	logs, err := runFlux2LocalPrepareHelper(context.Background(), helper, flux2Klein4BLocalModel)
+	logs, err := runFlux2LocalPrepareHelper(context.Background(), helper, flux2Klein4BLocalModel, nil)
 	if err != nil {
 		t.Fatalf("prepare helper failed: %v logs=%s", err, logs)
 	}

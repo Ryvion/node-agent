@@ -427,6 +427,13 @@ func (c *Client) NodeAuthToken(tsMs int64) string {
 	return c.pubHex() + ":" + tsStr + ":" + base64.StdEncoding.EncodeToString(sig)
 }
 
+func (c *Client) NodeModelSnapshotURL(modelID string) string {
+	if c == nil || strings.TrimSpace(modelID) == "" {
+		return ""
+	}
+	return c.absoluteURL("/api/v1/node/models/" + url.PathEscape(strings.TrimSpace(modelID)) + "/snapshot.tar.gz")
+}
+
 func (c *Client) PublicKeyHex() string {
 	return c.pubHex()
 }

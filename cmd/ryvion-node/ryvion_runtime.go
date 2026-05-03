@@ -101,7 +101,7 @@ func runRyvionRuntimePrepare(ctx context.Context, work *hub.WorkAssignment, exec
 	if !ok {
 		return submitRyvionRuntimeFailure(ctx, work, execCtx, "runtime_helper_missing", fmt.Errorf("local FLUX.2 helper is not installed"))
 	}
-	logs, err := runFlux2LocalPrepareHelper(ctx, helper, spec.Model)
+	logs, err := runFlux2LocalPrepareHelper(ctx, helper, spec.Model, execCtx.client)
 	if err != nil {
 		return submitRyvionRuntimeFailureWithLogs(ctx, work, execCtx, "runtime_prepare_failed", err, logs, runtimeTaskPrepare)
 	}
@@ -163,7 +163,7 @@ func runRyvionRuntimeImageGeneration(ctx context.Context, work *hub.WorkAssignme
 
 	var logs string
 	if helper, ok := resolveFlux2LocalHelper(); ok {
-		logs, err = runFlux2LocalHelper(ctx, helper, spec, outputPath)
+		logs, err = runFlux2LocalHelper(ctx, helper, spec, outputPath, execCtx.client)
 	} else if runtimeFixturesEnabled() {
 		logs, err = writeFixturePNG(outputPath, spec)
 	} else {
@@ -326,7 +326,7 @@ func defaultImageRuntimeHelperPaths() []string {
 	return paths
 }
 
-func runFlux2LocalHelper(ctx context.Context, helper string, spec ryvionRuntimeSpec, outputPath string) (string, error) {
+func runFlux2LocalHelper(ctx context.Context, helper string, spec ryvionRuntimeSpec, outputPath string, client *hub.Client) (string, error) {
 	args := []string{
 		"--model", flux2Klein4BLocalModel,
 		"--prompt", spec.Prompt,
@@ -346,6 +346,7 @@ func runFlux2LocalHelper(ctx context.Context, helper string, spec ryvionRuntimeS
 		commandArgs = append([]string{helper}, args...)
 	}
 	cmd := exec.CommandContext(ctx, command, commandArgs...)
+	cmd.Env = flux2RuntimeHelperEnv(client)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -353,7 +354,7 @@ func runFlux2LocalHelper(ctx context.Context, helper string, spec ryvionRuntimeS
 	return buf.String(), err
 }
 
-func runFlux2LocalPrepareHelper(ctx context.Context, helper string, model string) (string, error) {
+func runFlux2LocalPrepareHelper(ctx context.Context, helper string, model string, client *hub.Client) (string, error) {
 	args := []string{"--prepare", "--model", model}
 	command := helper
 	commandArgs := args
@@ -367,11 +368,29 @@ func runFlux2LocalPrepareHelper(ctx context.Context, helper string, model string
 		commandArgs = append([]string{helper}, args...)
 	}
 	cmd := exec.CommandContext(ctx, command, commandArgs...)
+	cmd.Env = flux2RuntimeHelperEnv(client)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
+	root := imageRuntimeRoot()
+	_ = os.MkdirAll(root, 0o700)
+	warming := filepath.Join(root, flux2Klein4BWarmingMarker)
+	_ = os.WriteFile(warming, []byte(time.Now().UTC().Format(time.RFC3339)), 0o600)
+	defer os.Remove(warming)
 	err := cmd.Run()
 	return buf.String(), err
+}
+
+func flux2RuntimeHelperEnv(client *hub.Client) []string {
+	env := os.Environ()
+	if client == nil {
+		return env
+	}
+	if snapshotURL := strings.TrimSpace(client.NodeModelSnapshotURL(flux2Klein4BLocalModel)); snapshotURL != "" {
+		env = append(env, "RYVION_FLUX2_SNAPSHOT_URL="+snapshotURL)
+		env = append(env, "RYVION_NODE_TOKEN="+client.NodeAuthToken(0))
+	}
+	return env
 }
 
 func hashRuntimePrepareResult(model string, logs string) string {
@@ -560,6 +579,12 @@ func startUserImageRuntimePrewarm(ctx context.Context, caps hw.CapSet, diskGB ui
 	if !publicAIOptInEnabled() {
 		return
 	}
+	// Operator-side speculative prewarm cannot use the hub's platform artifact
+	// stream because it has no work assignment token. The hub enqueues an
+	// authenticated runtime_prepare job for public nodes instead.
+	if strings.TrimSpace(os.Getenv("HF_TOKEN")) == "" && strings.TrimSpace(os.Getenv("HUGGINGFACE_TOKEN")) == "" {
+		return
+	}
 	if diskGB < flux2Klein4BMinDiskGB || !localFlux2KleinFastGPUEligible(caps, gpuReady) || localFlux2KleinModelCacheReady() {
 		return
 	}
@@ -724,13 +749,73 @@ fi
 
 RUN_SCRIPT="$ROOT/run_flux2_klein.py"
 cat > "$RUN_SCRIPT" <<'PY'
-import os
-import sys
-import torch
-from diffusers import Flux2KleinPipeline
-from huggingface_hub import snapshot_download
-
-model, prompt, output, width, height, cache_dir = sys.argv[1:7]
+	import os
+	import shutil
+	import sys
+	import tarfile
+	import torch
+	import urllib.request
+	from pathlib import Path
+	from diffusers import Flux2KleinPipeline
+	from huggingface_hub import snapshot_download
+	
+	def safe_extract_snapshot(url, token, cache_dir):
+	    if not url or not token:
+	        return None
+	    local_dir = Path(cache_dir).parent / "flux2-klein-platform-snapshot"
+	    complete = local_dir / ".complete"
+	    if complete.exists() and (local_dir / "model_index.json").exists():
+	        return str(local_dir)
+	    tmp = Path(str(local_dir) + ".tmp")
+	    if tmp.exists():
+	        shutil.rmtree(tmp)
+	    tmp.mkdir(parents=True, exist_ok=True)
+	    req = urllib.request.Request(url, headers={
+	        "X-Node-Token": token,
+	        "User-Agent": "ryvion-node-image-runtime/1.0",
+	    })
+	    with urllib.request.urlopen(req, timeout=10800) as resp:
+	        with tarfile.open(fileobj=resp, mode="r|gz") as archive:
+	            root = tmp.resolve()
+	            for member in archive:
+	                target = (tmp / member.name).resolve()
+	                if target != root and not str(target).startswith(str(root) + os.sep):
+	                    raise SystemExit("runtime.image: unsafe model snapshot path")
+	                archive.extract(member, tmp)
+	    if local_dir.exists():
+	        shutil.rmtree(local_dir)
+	    tmp.rename(local_dir)
+	    complete.write_text("ok\n", encoding="utf-8")
+	    return str(local_dir)
+	
+	def ready_marker_dir(cache_dir):
+	    marker = Path(cache_dir).parent / ".model-flux2-klein-ready-v2"
+	    if not marker.exists():
+	        return None
+	    first = marker.read_text(encoding="utf-8").splitlines()[0].strip()
+	    if first and (Path(first) / "model_index.json").exists():
+	        return first
+	    return None
+	
+	def resolve_model_dir(cache_dir):
+	    cached = ready_marker_dir(cache_dir)
+	    if cached:
+	        return cached
+	    platform_dir = safe_extract_snapshot(
+	        os.environ.get("RYVION_FLUX2_SNAPSHOT_URL"),
+	        os.environ.get("RYVION_NODE_TOKEN"),
+	        cache_dir,
+	    )
+	    if platform_dir:
+	        return platform_dir
+	    return snapshot_download(
+	        "black-forest-labs/FLUX.2-klein-4B",
+	        cache_dir=cache_dir,
+	        token=os.environ.get("HF_TOKEN") or None,
+	        resume_download=True,
+	    )
+	
+	model, prompt, output, width, height, cache_dir = sys.argv[1:7]
 width = int(width)
 height = int(height)
 if model != "flux-2-klein-4b-local":
@@ -744,13 +829,7 @@ elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
 else:
     device = "cpu"
     dtype = torch.float32
-repo_id = "black-forest-labs/FLUX.2-klein-4B"
-local_dir = snapshot_download(
-    repo_id,
-    cache_dir=cache_dir,
-    token=os.environ.get("HF_TOKEN") or None,
-    resume_download=True,
-)
+	local_dir = resolve_model_dir(cache_dir)
 pipe = Flux2KleinPipeline.from_pretrained(
     local_dir,
     torch_dtype=dtype,
@@ -772,20 +851,58 @@ PY
 
 PREPARE_SCRIPT="$ROOT/prepare_flux2_klein.py"
 cat > "$PREPARE_SCRIPT" <<'PY'
-import os
-import sys
-from pathlib import Path
-from huggingface_hub import snapshot_download
-
-model, cache_dir, ready_marker = sys.argv[1:4]
+	import os
+	import shutil
+	import sys
+	import tarfile
+	import urllib.request
+	from pathlib import Path
+	from huggingface_hub import snapshot_download
+	
+	def safe_extract_snapshot(url, token, cache_dir):
+	    if not url or not token:
+	        return None
+	    local_dir = Path(cache_dir).parent / "flux2-klein-platform-snapshot"
+	    complete = local_dir / ".complete"
+	    if complete.exists() and (local_dir / "model_index.json").exists():
+	        return str(local_dir)
+	    tmp = Path(str(local_dir) + ".tmp")
+	    if tmp.exists():
+	        shutil.rmtree(tmp)
+	    tmp.mkdir(parents=True, exist_ok=True)
+	    req = urllib.request.Request(url, headers={
+	        "X-Node-Token": token,
+	        "User-Agent": "ryvion-node-image-runtime/1.0",
+	    })
+	    with urllib.request.urlopen(req, timeout=10800) as resp:
+	        with tarfile.open(fileobj=resp, mode="r|gz") as archive:
+	            root = tmp.resolve()
+	            for member in archive:
+	                target = (tmp / member.name).resolve()
+	                if target != root and not str(target).startswith(str(root) + os.sep):
+	                    raise SystemExit("runtime.image: unsafe model snapshot path")
+	                archive.extract(member, tmp)
+	    if local_dir.exists():
+	        shutil.rmtree(local_dir)
+	    tmp.rename(local_dir)
+	    complete.write_text("ok\n", encoding="utf-8")
+	    return str(local_dir)
+	
+	model, cache_dir, ready_marker = sys.argv[1:4]
 if model != "flux-2-klein-4b-local":
     raise SystemExit(f"unsupported model {model}")
-local_dir = snapshot_download(
-    "black-forest-labs/FLUX.2-klein-4B",
-    cache_dir=cache_dir,
-    token=os.environ.get("HF_TOKEN") or None,
-    resume_download=True,
-)
+	local_dir = safe_extract_snapshot(
+	    os.environ.get("RYVION_FLUX2_SNAPSHOT_URL"),
+	    os.environ.get("RYVION_NODE_TOKEN"),
+	    cache_dir,
+	)
+	if not local_dir:
+	    local_dir = snapshot_download(
+	        "black-forest-labs/FLUX.2-klein-4B",
+	        cache_dir=cache_dir,
+	        token=os.environ.get("HF_TOKEN") or None,
+	        resume_download=True,
+	    )
 required = [
     Path(local_dir) / "model_index.json",
     Path(local_dir) / "flux-2-klein-4b.safetensors",
