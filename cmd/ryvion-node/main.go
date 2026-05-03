@@ -25,9 +25,11 @@ import (
 	"github.com/Ryvion/node-agent/internal/nodekey"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	"github.com/Ryvion/node-agent/internal/update"
+	v7artifact "github.com/Ryvion/node-agent/internal/v7/artifact"
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
+	v7proofrunner "github.com/Ryvion/node-agent/internal/v7/proofrunner"
 	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
 )
 
@@ -56,6 +58,13 @@ var jobActive atomic.Int32
 // latestHubVersion stores the most recent agent version advertised by the hub.
 // Written by heartbeat goroutine, read by work loop for auto-update checks.
 var latestHubVersion atomic.Value // string
+
+const (
+	v7ProofFlagEnv                  = "RYV_NODE_V7_PROOF"
+	v7ProofMetadataKey              = "v7_proof"
+	v7ProofOutputBytesMetadataKey   = "_v7_proof_output_bytes"
+	v7ProofArtifactBytesMetadataKey = "_v7_proof_artifact_bytes"
+)
 
 func main() {
 	// Subcommand: ryvion-node claim <CODE>
@@ -707,6 +716,7 @@ func relayStreamingFailure(ctx context.Context, client *hub.Client, jobID string
 // submitReceiptWithRetry attempts receipt submission with exponential backoff.
 // Receipts represent completed work — losing one means the operator doesn't get paid.
 func submitReceiptWithRetry(ctx context.Context, client *hub.Client, receipt hub.Receipt) error {
+	receipt = prepareReceiptForSubmission(receipt)
 	const maxAttempts = 5
 	delay := 2 * time.Second
 	var lastErr error
@@ -728,6 +738,299 @@ func submitReceiptWithRetry(ctx context.Context, client *hub.Client, receipt hub
 		return nil
 	}
 	return fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+func prepareReceiptForSubmission(receipt hub.Receipt) hub.Receipt {
+	if strings.TrimSpace(os.Getenv(v7ProofFlagEnv)) != "1" {
+		return receipt
+	}
+
+	metadata, outputBytes, hasOutputBytes := cloneReceiptMetadataWithoutV7ProofSources(receipt.Metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+
+	runnerKind := firstNonEmptyString(
+		metadataString(metadata, "runner_kind"),
+		metadataString(metadata, "executor"),
+		metadataString(metadata, "executor_kind"),
+		"node_agent",
+	)
+
+	if hasOutputBytes {
+		now := time.Now().UnixMilli()
+		startedAt := metadataInt64OrDefault(metadata, now, "started_at_unix_ms", "execution_started_at_unix_ms")
+		finishedAt := metadataInt64OrDefault(metadata, now, "finished_at_unix_ms", "execution_finished_at_unix_ms")
+		if finishedAt < startedAt {
+			finishedAt = startedAt
+		}
+
+		proof, err := v7proofrunner.BuildProofCarryingOutput(v7proofrunner.RunnerResultInput{
+			JobID: firstNonEmptyString(
+				strings.TrimSpace(receipt.JobID),
+				metadataString(metadata, "job_id"),
+			),
+			AssignmentID: firstNonEmptyString(
+				metadataString(metadata, "assignment_id"),
+				strings.TrimSpace(receipt.JobID),
+			),
+			NodeID: firstNonEmptyString(
+				metadataString(metadata, "node_id"),
+				metadataString(metadata, "node_public_key"),
+				strings.TrimSpace(os.Getenv("RYV_NODE_ID")),
+				"node-agent",
+			),
+			RunnerKind: runnerKind,
+			AgentVersion: firstNonEmptyString(
+				metadataString(metadata, "agent_version"),
+				version,
+				"dev",
+			),
+			ModelID: firstNonEmptyString(
+				metadataString(metadata, "model_id"),
+				metadataString(metadata, "model"),
+				metadataString(metadata, "runtime_model_id"),
+				"unknown-model.gguf",
+			),
+			ModelRevision: firstNonEmptyString(
+				metadataString(metadata, "model_revision"),
+				metadataString(metadata, "revision"),
+				"unknown",
+			),
+			QuantizationID: firstNonEmptyString(
+				metadataString(metadata, "quantization_id"),
+				metadataString(metadata, "quantization"),
+				"unknown",
+			),
+			OutputBytes:      outputBytes,
+			MeteringUnits:    int64FromUint64(receipt.MeteringUnits),
+			ArtifactKind:     v7ProofArtifactKind(metadata),
+			StartedAtUnixMs:  startedAt,
+			FinishedAtUnixMs: finishedAt,
+		})
+		if err == nil {
+			metadata[v7ProofMetadataKey] = fullV7ProofMetadata(proof)
+			receipt.Metadata = metadata
+			return receipt
+		}
+		slog.Warn("failed to build V7 proof metadata; submitting legacy receipt metadata", "job_id", receipt.JobID, "error", err)
+		metadata[v7ProofMetadataKey] = partialV7ProofMetadata(receipt, runnerKind, "build_failed")
+		receipt.Metadata = metadata
+		return receipt
+	}
+
+	metadata[v7ProofMetadataKey] = partialV7ProofMetadata(receipt, runnerKind, "unavailable_no_output_bytes")
+	receipt.Metadata = metadata
+	return receipt
+}
+
+func cloneReceiptMetadataWithoutV7ProofSources(metadata map[string]any) (map[string]any, []byte, bool) {
+	if metadata == nil {
+		return nil, nil, false
+	}
+	out := make(map[string]any, len(metadata))
+	var outputBytes []byte
+	hasOutputBytes := false
+	for key, value := range metadata {
+		switch key {
+		case v7ProofOutputBytesMetadataKey, v7ProofArtifactBytesMetadataKey:
+			if !hasOutputBytes {
+				if b, ok := metadataBytes(value); ok {
+					outputBytes = b
+					hasOutputBytes = true
+				}
+			}
+			continue
+		default:
+			out[key] = value
+		}
+	}
+	return out, outputBytes, hasOutputBytes
+}
+
+func metadataBytes(value any) ([]byte, bool) {
+	switch v := value.(type) {
+	case []byte:
+		return append([]byte(nil), v...), true
+	case json.RawMessage:
+		return append([]byte(nil), v...), true
+	case string:
+		return []byte(v), true
+	default:
+		return nil, false
+	}
+}
+
+func fullV7ProofMetadata(proof v7proofrunner.ProofCarryingRunnerOutput) map[string]any {
+	return map[string]any{
+		"output_hash":           proof.OutputHash,
+		"output_bytes":          proof.OutputBytes,
+		"artifact_object_id":    proof.ArtifactObjectID,
+		"artifact_manifest":     proof.ArtifactManifest,
+		"evidence_payload":      proof.EvidencePayload,
+		"cas_object_references": proof.CASObjectReferences,
+		"proof_status":          "complete",
+	}
+}
+
+func partialV7ProofMetadata(receipt hub.Receipt, runnerKind string, proofStatus string) map[string]any {
+	objectID := v7ProofObjectIDFromResultHash(receipt.ResultHashHex)
+	casReferences := []string{}
+	if objectID != "" {
+		casReferences = append(casReferences, objectID)
+	}
+	return map[string]any{
+		"output_hash":           objectID,
+		"output_bytes":          int64(0),
+		"artifact_object_id":    objectID,
+		"artifact_manifest":     nil,
+		"evidence_payload":      nil,
+		"cas_object_references": casReferences,
+		"proof_status":          proofStatus,
+		"result_hash":           strings.TrimSpace(receipt.ResultHashHex),
+		"metering_units":        receipt.MeteringUnits,
+		"runner_kind":           strings.TrimSpace(runnerKind),
+		"job_id":                strings.TrimSpace(receipt.JobID),
+	}
+}
+
+func v7ProofObjectIDFromResultHash(resultHash string) string {
+	hash := strings.TrimSpace(resultHash)
+	if strings.HasPrefix(hash, "sha256:") {
+		if validLowerSHA256Hex(strings.TrimPrefix(hash, "sha256:")) {
+			return hash
+		}
+		return ""
+	}
+	if validLowerSHA256Hex(hash) {
+		return "sha256:" + hash
+	}
+	return ""
+}
+
+func validLowerSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	switch v := metadata[key].(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return ""
+	}
+}
+
+func metadataInt64OrDefault(metadata map[string]any, fallback int64, keys ...string) int64 {
+	for _, key := range keys {
+		value, ok := metadataInt64(metadata, key)
+		if ok {
+			return value
+		}
+	}
+	return fallback
+}
+
+func metadataInt64(metadata map[string]any, key string) (int64, bool) {
+	if metadata == nil {
+		return 0, false
+	}
+	switch v := metadata[key].(type) {
+	case int:
+		return int64(v), true
+	case int8:
+		return int64(v), true
+	case int16:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint:
+		if uint64(v) > uint64(maxInt64) {
+			return maxInt64, true
+		}
+		return int64(v), true
+	case uint8:
+		return int64(v), true
+	case uint16:
+		return int64(v), true
+	case uint32:
+		return int64(v), true
+	case uint64:
+		return int64FromUint64(v), true
+	case float64:
+		if v >= 0 && math.Trunc(v) == v && v <= float64(maxInt64) {
+			return int64(v), true
+		}
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return n, true
+		}
+	case string:
+		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+const maxInt64 = int64(1<<63 - 1)
+
+func int64FromUint64(value uint64) int64 {
+	if value > uint64(maxInt64) {
+		return maxInt64
+	}
+	return int64(value)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if s := strings.TrimSpace(value); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func v7ProofArtifactKind(metadata map[string]any) v7artifact.ArtifactKind {
+	kind := strings.ToLower(firstNonEmptyString(
+		metadataString(metadata, "artifact_kind"),
+		metadataString(metadata, "artifact_mime"),
+		metadataString(metadata, "mime_type"),
+	))
+	switch kind {
+	case "result_json", "json", "application/json":
+		return v7artifact.ArtifactKindResultJSON
+	case "image", "image/png", "image/jpeg", "image/webp":
+		return v7artifact.ArtifactKindImage
+	case "text", "text/plain":
+		return v7artifact.ArtifactKindText
+	case "model_delta":
+		return v7artifact.ArtifactKindModelDelta
+	case "evidence_bundle":
+		return v7artifact.ArtifactKindEvidenceBundle
+	case "runner_log":
+		return v7artifact.ArtifactKindRunnerLog
+	case "", "generic_blob", "application/octet-stream":
+		return v7artifact.ArtifactKindGenericBlob
+	default:
+		return v7artifact.ArtifactKind(kind)
+	}
 }
 
 func isAgentHostingTask(specJSON string) bool {

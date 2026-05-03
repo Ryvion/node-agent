@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,11 +20,13 @@ import (
 
 // fakeClient implements a minimal receipt submitter that fails N times then succeeds.
 type fakeClient struct {
-	failCount int
-	calls     atomic.Int32
+	failCount   int
+	calls       atomic.Int32
+	lastReceipt hub.Receipt
 }
 
-func (f *fakeClient) SubmitReceipt(_ context.Context, _ hub.Receipt) error {
+func (f *fakeClient) SubmitReceipt(_ context.Context, receipt hub.Receipt) error {
+	f.lastReceipt = receipt
 	n := int(f.calls.Add(1))
 	if n <= f.failCount {
 		return fmt.Errorf("simulated failure %d", n)
@@ -41,6 +44,156 @@ func TestSubmitReceiptWithRetry_SucceedsAfterFailures(t *testing.T) {
 	}
 	if got := int(fc.calls.Load()); got != 4 {
 		t.Fatalf("expected 4 calls (3 fail + 1 success), got %d", got)
+	}
+}
+
+func TestPrepareReceiptForSubmissionFlagOffDoesNotAttachV7Proof(t *testing.T) {
+	t.Setenv(v7ProofFlagEnv, "")
+	receipt := hub.Receipt{
+		JobID:         "job-no-proof",
+		ResultHashHex: strings.Repeat("a", 64),
+		MeteringUnits: 2,
+		Metadata: map[string]any{
+			"executor": "oci",
+		},
+	}
+
+	got := prepareReceiptForSubmission(receipt)
+	if _, ok := got.Metadata[v7ProofMetadataKey]; ok {
+		t.Fatalf("metadata contains %q with flag off: %+v", v7ProofMetadataKey, got.Metadata[v7ProofMetadataKey])
+	}
+	if got.Metadata["executor"] != "oci" {
+		t.Fatalf("metadata changed with flag off: %+v", got.Metadata)
+	}
+}
+
+func TestPrepareReceiptForSubmissionFlagOnWithOutputBytesAttachesV7Proof(t *testing.T) {
+	t.Setenv(v7ProofFlagEnv, "1")
+	rawOutput := []byte("raw runner output should not be serialized")
+	receipt := hub.Receipt{
+		JobID:         "job-proof-full",
+		ResultHashHex: strings.Repeat("b", 64),
+		MeteringUnits: 7,
+		Metadata: map[string]any{
+			v7ProofOutputBytesMetadataKey: rawOutput,
+			"executor":                    "oci",
+			"assignment_id":               "assignment-proof-full",
+			"node_id":                     "node-proof-full",
+			"model_id":                    "llama-3.1-8b.gguf",
+			"model_revision":              "rev-1",
+			"quantization_id":             "q4_k_m",
+			"artifact_kind":               "result_json",
+			"started_at_unix_ms":          int64(1_800_000_000_000),
+			"finished_at_unix_ms":         int64(1_800_000_001_000),
+		},
+	}
+
+	got := prepareReceiptForSubmission(receipt)
+	if _, ok := got.Metadata[v7ProofOutputBytesMetadataKey]; ok {
+		t.Fatalf("metadata still contains raw output source key %q", v7ProofOutputBytesMetadataKey)
+	}
+	proof, ok := got.Metadata[v7ProofMetadataKey].(map[string]any)
+	if !ok {
+		t.Fatalf("%q metadata type = %T, want map[string]any", v7ProofMetadataKey, got.Metadata[v7ProofMetadataKey])
+	}
+	if proof["proof_status"] != "complete" {
+		t.Fatalf("proof_status = %v, want complete", proof["proof_status"])
+	}
+	if gotHash, ok := proof["output_hash"].(string); !ok || !strings.HasPrefix(gotHash, "sha256:") {
+		t.Fatalf("output_hash = %v, want sha256 object id", proof["output_hash"])
+	}
+	if gotBytes, ok := proof["output_bytes"].(int64); !ok || gotBytes != int64(len(rawOutput)) {
+		t.Fatalf("output_bytes = %v, want %d", proof["output_bytes"], len(rawOutput))
+	}
+	if proof["artifact_manifest"] == nil {
+		t.Fatal("artifact_manifest is nil")
+	}
+	if proof["evidence_payload"] == nil {
+		t.Fatal("evidence_payload is nil")
+	}
+
+	encoded, err := json.Marshal(got.Metadata)
+	if err != nil {
+		t.Fatalf("json.Marshal(metadata) error = %v", err)
+	}
+	if strings.Contains(string(encoded), string(rawOutput)) {
+		t.Fatalf("V7 proof metadata contains raw output bytes: %s", encoded)
+	}
+}
+
+func TestPrepareReceiptForSubmissionFlagOnNoOutputBytesAttachesPartialProof(t *testing.T) {
+	t.Setenv(v7ProofFlagEnv, "1")
+	resultHash := strings.Repeat("c", 64)
+	receipt := hub.Receipt{
+		JobID:         "job-proof-partial",
+		ResultHashHex: resultHash,
+		MeteringUnits: 3,
+		Metadata: map[string]any{
+			"executor": "oci",
+		},
+	}
+
+	got := prepareReceiptForSubmission(receipt)
+	proof, ok := got.Metadata[v7ProofMetadataKey].(map[string]any)
+	if !ok {
+		t.Fatalf("%q metadata type = %T, want map[string]any", v7ProofMetadataKey, got.Metadata[v7ProofMetadataKey])
+	}
+	if proof["proof_status"] != "unavailable_no_output_bytes" {
+		t.Fatalf("proof_status = %v, want unavailable_no_output_bytes", proof["proof_status"])
+	}
+	if proof["result_hash"] != resultHash {
+		t.Fatalf("result_hash = %v, want %s", proof["result_hash"], resultHash)
+	}
+	if proof["output_hash"] != "sha256:"+resultHash {
+		t.Fatalf("output_hash = %v, want sha256 result hash", proof["output_hash"])
+	}
+	if proof["artifact_manifest"] != nil {
+		t.Fatalf("artifact_manifest = %v, want nil for partial proof", proof["artifact_manifest"])
+	}
+	if proof["evidence_payload"] != nil {
+		t.Fatalf("evidence_payload = %v, want nil for partial proof", proof["evidence_payload"])
+	}
+}
+
+func TestSubmitReceiptWithRetryTestableV7ProofBuildFailureStillSubmits(t *testing.T) {
+	t.Setenv(v7ProofFlagEnv, "1")
+	rawOutput := []byte("raw output from failed proof build")
+	fc := &fakeClient{}
+	receipt := hub.Receipt{
+		JobID:         "job-proof-build-failure",
+		ResultHashHex: strings.Repeat("d", 64),
+		MeteringUnits: 1,
+		Metadata: map[string]any{
+			v7ProofOutputBytesMetadataKey: rawOutput,
+			"executor":                    "oci",
+			"artifact_kind":               "invalid_kind",
+		},
+	}
+
+	err := submitReceiptWithRetryTestable(context.Background(), fc, receipt)
+	if err != nil {
+		t.Fatalf("submitReceiptWithRetryTestable() error = %v", err)
+	}
+	if got := int(fc.calls.Load()); got != 1 {
+		t.Fatalf("receipt submissions = %d, want 1", got)
+	}
+	proof, ok := fc.lastReceipt.Metadata[v7ProofMetadataKey].(map[string]any)
+	if !ok {
+		t.Fatalf("%q metadata type = %T, want map[string]any", v7ProofMetadataKey, fc.lastReceipt.Metadata[v7ProofMetadataKey])
+	}
+	if proof["proof_status"] != "build_failed" {
+		t.Fatalf("proof_status = %v, want build_failed", proof["proof_status"])
+	}
+	if _, ok := fc.lastReceipt.Metadata[v7ProofOutputBytesMetadataKey]; ok {
+		t.Fatalf("submitted metadata still contains raw output source key %q", v7ProofOutputBytesMetadataKey)
+	}
+
+	encoded, err := json.Marshal(fc.lastReceipt.Metadata)
+	if err != nil {
+		t.Fatalf("json.Marshal(metadata) error = %v", err)
+	}
+	if strings.Contains(string(encoded), string(rawOutput)) {
+		t.Fatalf("submitted metadata contains raw output bytes: %s", encoded)
 	}
 }
 
@@ -700,6 +853,7 @@ type receiptSubmitter interface {
 }
 
 func submitReceiptWithRetryTestable(ctx context.Context, client receiptSubmitter, receipt hub.Receipt) error {
+	receipt = prepareReceiptForSubmission(receipt)
 	const maxAttempts = 5
 	delay := 2 * time.Millisecond // fast for tests
 	var lastErr error
