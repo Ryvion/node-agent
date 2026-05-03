@@ -27,6 +27,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/update"
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
+	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
 	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
 )
 
@@ -66,6 +67,10 @@ func main() {
 		runIdentity()
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		runDoctor(os.Args[2:])
+		return
+	}
 
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.StringVar(&flagHub, "hub", "https://api.ryvion.ai", "Hub orchestrator base URL")
@@ -103,6 +108,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	runNode(ctx)
+}
+
+func runDoctor(args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	hubURL := fs.String("hub", firstNonEmpty(strings.TrimSpace(os.Getenv("RYV_HUB_URL")), "https://api.ryvion.ai"), "Hub orchestrator base URL")
+	dataDir := fs.String("data-dir", strings.TrimSpace(os.Getenv("RYV_DATA_DIR")), "Node data directory to check")
+	deviceType := fs.String("type", "", "Node device type (gpu|cpu|mobile|iot)")
+	_ = fs.Parse(args)
+
+	report := v7onboarding.RunBasicOnboardingChecksWithOptions(v7onboarding.CheckOptions{
+		AgentVersion: version,
+		HubURL:       *hubURL,
+		DataDir:      *dataDir,
+		DeviceType:   *deviceType,
+	})
+	fmt.Println(v7onboarding.FormatOnboardingReport(report))
+	if report.HasHardErrors() {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 // runNode contains all node logic. Called from console mode directly
