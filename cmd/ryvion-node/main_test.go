@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -63,6 +67,86 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	}
 }
 
+func TestBuildOptionalV7HeartbeatPayloadDoesNotProbeRuntime(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	caps := hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	runtimeMgr := newRuntimeManager("test", runtimeContractMetadata{
+		Binary:       "/opt/ryvion/runtime/ryvion-runtime",
+		Backend:      "/opt/ryvion/runtime/backend/ryvion-oci",
+		ManifestHash: "manifest-hash",
+	})
+
+	called := false
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		called = true
+		return runtimeexec.Status{CLIInstalled: true, Ready: true, GPUReady: true, Health: "ready"}, true
+	}
+	defer func() { probeManagedRuntimeStatus = prevProbe }()
+
+	payload := buildOptionalV7HeartbeatPayload("pubkey", caps, "cpu", "ca", nil, runtimeMgr)
+	if payload == nil {
+		t.Fatal("payload = nil, want V7 payload")
+	}
+	if called {
+		t.Fatal("V7 heartbeat payload construction should not probe managed runtime status")
+	}
+	if !payload.EvidenceCapabilitySummary.SupportsRuntimeHash {
+		t.Fatal("expected runtime hash support when runtime manifest hash is already available")
+	}
+}
+
+func TestSendHeartbeatOmitsV7WhenFlagOff(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "")
+	client, gotV7, calls := heartbeatTestClient(t)
+
+	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want true")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("heartbeat calls = %d, want 1", calls.Load())
+	}
+	if gotV7.Load() {
+		t.Fatal("heartbeat sent V7 payload with RYV_NODE_V7_CAPS off")
+	}
+}
+
+func TestSendHeartbeatIncludesV7WhenFlagOn(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	client, gotV7, calls := heartbeatTestClient(t)
+
+	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want true")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("heartbeat calls = %d, want 1", calls.Load())
+	}
+	if !gotV7.Load() {
+		t.Fatal("heartbeat did not send V7 payload with RYV_NODE_V7_CAPS=1")
+	}
+}
+
+func TestSendHeartbeatFallsBackToLegacyWhenV7BuildFails(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	client, gotV7, calls := heartbeatTestClient(t)
+
+	ok := sendHeartbeat(context.Background(), client, hw.CapSet{}, "cpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want true")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("heartbeat calls = %d, want 1", calls.Load())
+	}
+	if gotV7.Load() {
+		t.Fatal("heartbeat should fall back to legacy metrics when V7 payload build fails")
+	}
+}
+
 func TestSubmitReceiptWithRetry_ExhaustsRetries(t *testing.T) {
 	fc := &fakeClient{failCount: 10} // always fails
 	receipt := hub.Receipt{JobID: "test-job-2", ResultHashHex: "def456", MeteringUnits: 1}
@@ -73,6 +157,43 @@ func TestSubmitReceiptWithRetry_ExhaustsRetries(t *testing.T) {
 	}
 	if got := int(fc.calls.Load()); got != 5 {
 		t.Fatalf("expected exactly 5 attempts, got %d", got)
+	}
+}
+
+func heartbeatTestClient(t *testing.T) (*hub.Client, *atomic.Bool, *atomic.Int32) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	gotV7 := &atomic.Bool{}
+	calls := &atomic.Int32{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		calls.Add(1)
+		var req struct {
+			V7 json.RawMessage `json:"v7"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotV7.Store(len(req.V7) > 0)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	return hub.New(ts.URL, pub, priv), gotV7, calls
+}
+
+func validHeartbeatCaps() hw.CapSet {
+	return hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
 	}
 }
 

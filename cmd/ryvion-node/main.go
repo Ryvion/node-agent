@@ -398,51 +398,40 @@ func buildOptionalV7HeartbeatPayload(nodePublicKey string, caps hw.CapSet, devic
 
 func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) (*v7heartbeat.V7HeartbeatPayload, error) {
 	gpuDetected := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
-	runtimeSnap := runtimeSnapshot{}
-	if runtimeMgr != nil {
-		runtimeSnap = runtimeMgr.Snapshot(gpuDetected)
-	}
-
 	nativeSupported := inference.NativeRuntimeAvailable()
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
-	publicAIReady := publicAIOptInEnabled()
-	diskGB := detectAvailableDiskGB()
-	localFluxReady := publicAIReady && localFlux2KleinReady(caps, diskGB, gpuDetected)
-	localFluxPreparing := publicAIReady && localFlux2KleinHardwareEligible(caps, gpuDetected) && localFlux2KleinPreparing(caps, diskGB, gpuDetected)
-	localFluxPrepareEligible := publicAIReady && localFlux2KleinPrepareEligible(caps, diskGB, gpuDetected)
 
 	runtimeProfile := v7capability.RuntimeProfile{
 		NativeInferenceSupported: nativeSupported,
-		OCIAvailable:             runtimeSnap.Ready,
+		OCIAvailable:             false,
 		LlamaServerAvailable:     nativeSupported,
-		ImageRuntimeAvailable:    publicAIReady && (runtimeSnap.GPUReady || localFluxReady),
-		SupportedRunnerKinds:     v7SupportedRunnerKinds(nativeSupported, runtimeSnap, publicAIReady && (localFluxReady || localFluxPreparing || localFluxPrepareEligible)),
+		ImageRuntimeAvailable:    false,
+		SupportedRunnerKinds:     v7SupportedRunnerKinds(nativeSupported, false, false),
 	}
 
 	residentModelIDs := []string{}
 	if nativeReady {
 		residentModelIDs = append(residentModelIDs, infMgr.ModelName())
 	}
-	if localFluxReady {
-		residentModelIDs = append(residentModelIDs, flux2Klein4BLocalModel)
-	}
 
 	evidenceSummary := v7capability.EvidenceCapabilitySummary{
 		SupportsArtifactManifest:    true,
 		SupportsRYV3EvidencePayload: true,
-		SupportsRuntimeHash:         strings.TrimSpace(runtimeSnap.ManifestHash) != "",
+		SupportsRuntimeHash:         v7RuntimeManifestHash(runtimeMgr) != "",
 	}
 	sandboxSummary := v7capability.SandboxCapabilitySummary{
 		RejectsUnsafePickle:        true,
 		RunnerAllowlistEnabled:     true,
 		FilesystemIsolationPlanned: true,
-		NetworkIsolationSupported:  runtimeSnap.Ready,
+		NetworkIsolationSupported:  false,
 	}
 	sandboxPolicy := v7sandbox.DefaultSandboxPolicy()
 
 	payload, err := v7heartbeat.BuildV7HeartbeatPayload(v7heartbeat.BuildV7HeartbeatPayloadInput{
 		AgentVersion:         version,
 		NodePublicKey:        nodePublicKey,
+		OS:                   runtime.GOOS,
+		Arch:                 runtime.GOARCH,
 		DeviceType:           deviceType,
 		DeclaredCountry:      declaredCountry,
 		HardwareCapabilities: caps,
@@ -462,12 +451,34 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 	return &payload, nil
 }
 
-func v7SupportedRunnerKinds(nativeSupported bool, runtimeSnap runtimeSnapshot, ryvionRuntimeAvailable bool) []string {
+func v7RuntimeManifestHash(runtimeMgr *runtimeManager) string {
+	if runtimeMgr == nil {
+		return ""
+	}
+	hash := strings.TrimSpace(runtimeMgr.contract.ManifestHash)
+	if hash != "" {
+		return hash
+	}
+	meta := runtimeMgr.contract
+	if strings.TrimSpace(meta.Channel) == "" &&
+		strings.TrimSpace(meta.Version) == "" &&
+		strings.TrimSpace(meta.Provider) == "" &&
+		strings.TrimSpace(meta.Mode) == "" &&
+		strings.TrimSpace(meta.Source) == "" &&
+		strings.TrimSpace(meta.Artifact) == "" &&
+		strings.TrimSpace(meta.Binary) == "" &&
+		strings.TrimSpace(meta.Backend) == "" {
+		return ""
+	}
+	return computeRuntimeManifestHash(meta)
+}
+
+func v7SupportedRunnerKinds(nativeSupported bool, ociAvailable bool, ryvionRuntimeAvailable bool) []string {
 	kinds := []string{executorKindNativeReport}
 	if nativeSupported {
 		kinds = append(kinds, executorKindNativeStreaming)
 	}
-	if runtimeSnap.Ready {
+	if ociAvailable {
 		kinds = append(kinds, executorKindManagedOCI, executorKindAgentHosting)
 		if commandExists("git") {
 			kinds = append(kinds, executorKindWorkCapsule)

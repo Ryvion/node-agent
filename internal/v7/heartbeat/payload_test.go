@@ -63,6 +63,7 @@ func TestBuildV7HeartbeatPayloadContainsNoKnownSecrets(t *testing.T) {
 	t.Setenv("RYV_DEMO_KEY", "demo-key-secret")
 	t.Setenv("RYV_ADMIN_KEY", "admin-key-secret")
 	t.Setenv("RYV_BIND_TOKEN", "bind-token-secret")
+	t.Setenv("RYV_WALLET", "wallet-secret")
 
 	payload, err := BuildV7HeartbeatPayload(validInput())
 	if err != nil {
@@ -73,7 +74,7 @@ func TestBuildV7HeartbeatPayloadContainsNoKnownSecrets(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 	body := string(raw)
-	for _, secret := range []string{"demo-key-secret", "admin-key-secret", "bind-token-secret"} {
+	for _, secret := range []string{"demo-key-secret", "admin-key-secret", "bind-token-secret", "wallet-secret"} {
 		if strings.Contains(body, secret) {
 			t.Fatalf("payload JSON leaked secret %q: %s", secret, body)
 		}
@@ -99,6 +100,26 @@ func TestBuildV7HeartbeatPayloadRejectsInvalidNetworkProfile(t *testing.T) {
 	input.NetworkProfile.UploadMbpsP50 = -1
 	if _, err := BuildV7HeartbeatPayload(input); err == nil {
 		t.Fatal("BuildV7HeartbeatPayload() error = nil, want invalid network profile error")
+	}
+}
+
+func TestBuildV7HeartbeatPayloadOmitsUnavailableLeaseAndCASSummaries(t *testing.T) {
+	input := validInput()
+	input.ModelLeases = nil
+	input.CASCapabilitySummary = capability.CASCapabilitySummary{}
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	if payload.ModelLeaseSummary != nil {
+		t.Fatalf("model lease summary = %+v, want nil when no lease state is available", payload.ModelLeaseSummary)
+	}
+	if payload.CASSummary != nil {
+		t.Fatalf("CAS summary = %+v, want nil when no CAS state is available", payload.CASSummary)
+	}
+	if !payload.CapabilityPassport.ModelCapabilitySummary.SupportsModelLease {
+		t.Fatal("model lease support capability should remain advertised")
 	}
 }
 

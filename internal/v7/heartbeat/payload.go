@@ -124,7 +124,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 
 	modelSummary := input.ModelCapabilitySummary
 	modelLeaseSummary := cloneModelLeaseSummary(input.ModelLeaseSummary)
-	if modelLeaseSummary == nil && (len(input.ModelLeases) > 0 || modelSummary.SupportsModelLease) {
+	if modelLeaseSummary == nil && len(input.ModelLeases) > 0 {
 		summary := summarizeModelLeases(input.ModelLeases, modelSummary.SupportsModelLease)
 		modelLeaseSummary = &summary
 	}
