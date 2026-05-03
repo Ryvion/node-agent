@@ -4,6 +4,11 @@
 
 Run `mempalace search "node agent runner"` for codebase context.
 
+For V7 tasks, always read:
+- `V7_REPO_CONTEXT.md`
+- `tasks/v7/TASK_INDEX.md`
+- current task file
+
 ## Architecture
 
 Go 1.24 cross-platform agent. Runs natively on operator machines, polls hub for work.
