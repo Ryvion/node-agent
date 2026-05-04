@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,6 +31,7 @@ import (
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
+	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
 	v7proofrunner "github.com/Ryvion/node-agent/internal/v7/proofrunner"
 	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -83,6 +86,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "memorybench-selftest" {
 		runMemoryBenchSelfTest(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "modelbench-selftest" {
+		runModelBenchSelfTest(os.Args[2:])
 		return
 	}
 
@@ -164,6 +171,108 @@ func runMemoryBenchSelfTest(args []string) {
 	}
 	fmt.Println(v7memorybench.FormatMemoryBenchSelfTestResult(result, *jsonOutput))
 	os.Exit(0)
+}
+
+func runModelBenchSelfTest(args []string) {
+	config, jsonOutput, err := parseModelBenchSelfTestFlags(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.TimeoutMs)*time.Millisecond)
+	defer cancel()
+
+	result, err := runModelBenchSelfTestViaOperatorAPI(ctx, config, operatorAPIPort(defaultOperatorAPIPort))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(v7modelbench.FormatModelBenchmarkSelfTestResult(result, jsonOutput))
+	os.Exit(0)
+}
+
+func parseModelBenchSelfTestFlags(args []string) (v7modelbench.ModelBenchmarkSelfTestConfig, bool, error) {
+	defaults := v7modelbench.DefaultModelBenchmarkSelfTestConfig()
+	fs := flag.NewFlagSet("modelbench-selftest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	modelID := fs.String("model", defaults.ModelID, "Native model ID")
+	maxTokens := fs.Int("tokens", defaults.MaxTokens, "Maximum generated tokens")
+	timeoutRaw := fs.String("timeout", fmt.Sprintf("%dms", defaults.TimeoutMs), "Benchmark timeout as duration or milliseconds")
+	jsonOutput := fs.Bool("json", false, "Print JSON output")
+	if err := fs.Parse(args); err != nil {
+		return v7modelbench.ModelBenchmarkSelfTestConfig{}, false, err
+	}
+	timeoutMs, err := parseModelBenchTimeoutMs(*timeoutRaw)
+	if err != nil {
+		return v7modelbench.ModelBenchmarkSelfTestConfig{}, false, err
+	}
+	return v7modelbench.ModelBenchmarkSelfTestConfig{
+		ModelID:   *modelID,
+		MaxTokens: *maxTokens,
+		TimeoutMs: timeoutMs,
+	}, *jsonOutput, nil
+}
+
+func parseModelBenchTimeoutMs(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return v7modelbench.DefaultModelBenchmarkSelfTestConfig().TimeoutMs, nil
+	}
+	if ms, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if ms <= 0 {
+			return 0, fmt.Errorf("timeout must be greater than zero")
+		}
+		return ms, nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid timeout %q", raw)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("timeout must be greater than zero")
+	}
+	return duration.Milliseconds(), nil
+}
+
+func runModelBenchSelfTestViaOperatorAPI(ctx context.Context, config v7modelbench.ModelBenchmarkSelfTestConfig, port string) (v7modelbench.ModelBenchmarkResult, error) {
+	body, err := json.Marshal(struct {
+		ModelID   string `json:"model_id"`
+		MaxTokens int    `json:"max_tokens"`
+		TimeoutMs int64  `json:"timeout_ms"`
+	}{
+		ModelID:   config.ModelID,
+		MaxTokens: config.MaxTokens,
+		TimeoutMs: config.TimeoutMs,
+	})
+	if err != nil {
+		return v7modelbench.ModelBenchmarkResult{}, err
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%s/api/v1/operator/v7/model-benchmark/run", strings.TrimSpace(port))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err == nil {
+		req.Header.Set("Content-Type", "application/json")
+		if resp, doErr := http.DefaultClient.Do(req); doErr == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				var result v7modelbench.ModelBenchmarkResult
+				if decodeErr := json.NewDecoder(resp.Body).Decode(&result); decodeErr != nil {
+					return v7modelbench.ModelBenchmarkResult{}, decodeErr
+				}
+				if validationErr := v7modelbench.ValidateModelBenchmarkResult(result); validationErr != nil {
+					return result, validationErr
+				}
+				return result, nil
+			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		}
+	}
+
+	runner := v7modelbench.NativeInferenceModelBenchmarkRunner{
+		AgentVersion:     version,
+		RuntimeAvailable: inference.NativeRuntimeAvailable,
+	}
+	return v7modelbench.RunModelBenchmarkSelfTest(ctx, runner, config)
 }
 
 // runNode contains all node logic. Called from console mode directly

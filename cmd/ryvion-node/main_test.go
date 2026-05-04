@@ -387,6 +387,40 @@ func TestJobActiveFlag_PreventsUpdate(t *testing.T) {
 	}
 }
 
+func TestParseModelBenchSelfTestFlags(t *testing.T) {
+	config, jsonOutput, err := parseModelBenchSelfTestFlags([]string{
+		"--model", "tinyllama",
+		"--tokens", "8",
+		"--timeout", "1500ms",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("parseModelBenchSelfTestFlags() error = %v", err)
+	}
+	if !jsonOutput {
+		t.Fatal("json output = false, want true")
+	}
+	if config.ModelID != "tinyllama" {
+		t.Fatalf("model_id = %q, want tinyllama", config.ModelID)
+	}
+	if config.MaxTokens != 8 {
+		t.Fatalf("max_tokens = %d, want 8", config.MaxTokens)
+	}
+	if config.TimeoutMs != 1500 {
+		t.Fatalf("timeout_ms = %d, want 1500", config.TimeoutMs)
+	}
+}
+
+func TestParseModelBenchTimeoutAcceptsRawMilliseconds(t *testing.T) {
+	got, err := parseModelBenchTimeoutMs("60000")
+	if err != nil {
+		t.Fatalf("parseModelBenchTimeoutMs() error = %v", err)
+	}
+	if got != 60_000 {
+		t.Fatalf("timeout_ms = %d, want 60000", got)
+	}
+}
+
 func TestDetectManagedOCIBackendWithProbesWithoutDaemonRejectsCPUContainerWork(t *testing.T) {
 	cli, ready, gpu := detectManagedOCIBackendWithProbes(false,
 		func() string { return "/usr/bin/docker" },

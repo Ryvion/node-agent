@@ -1,17 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
+	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 )
 
 func TestAllowLocalOrigin(t *testing.T) {
@@ -91,6 +98,47 @@ func TestLogRingWriteTail(t *testing.T) {
 	}
 }
 
+func TestOperatorAPIModelBenchmarkEndpointReturnsUnavailableJSON(t *testing.T) {
+	t.Parallel()
+
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		caps: hw.CapSet{
+			CPUCores:  8,
+			RAMBytes:  16 << 30,
+			GPUModel:  "test-gpu",
+			VRAMBytes: 8 << 30,
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	payload := []byte(`{"model_id":"ryvion-llama-3.2-3b","max_tokens":16,"timeout_ms":60000}`)
+	respBody := postOperatorAPITestJSON(t, port, "/api/v1/operator/v7/model-benchmark/run", payload)
+	if strings.Contains(string(respBody), "Generate one short readiness") {
+		t.Fatalf("operator benchmark response leaked raw prompt: %s", respBody)
+	}
+
+	var result v7modelbench.ModelBenchmarkResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		t.Fatalf("decode response: %v\nbody: %s", err, respBody)
+	}
+	if result.ProofStatus != v7modelbench.ModelBenchmarkProofStatusUnavailable {
+		t.Fatalf("proof_status = %q, want unavailable; body=%s", result.ProofStatus, respBody)
+	}
+	if result.Metrics.ErrorCode == "" {
+		t.Fatalf("error_code empty; body=%s", respBody)
+	}
+	if err := v7modelbench.ValidateModelBenchmarkResult(result); err != nil {
+		t.Fatalf("ValidateModelBenchmarkResult() error = %v", err)
+	}
+}
+
 func TestStatusTokenParsing(t *testing.T) {
 	t.Parallel()
 
@@ -104,6 +152,51 @@ func TestStatusTokenParsing(t *testing.T) {
 	if got := statusTokenUint(msg, "disk_gb:"); got != 512 {
 		t.Fatalf("expected disk_gb 512, got %d", got)
 	}
+}
+
+func freeOperatorAPITestPort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on free port: %v", err)
+	}
+	defer ln.Close()
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("addr type = %T, want *net.TCPAddr", ln.Addr())
+	}
+	return strconv.Itoa(addr.Port)
+}
+
+func postOperatorAPITestJSON(t *testing.T, port, path string, payload []byte) []byte {
+	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
+	url := "http://127.0.0.1:" + port + path
+	var lastErr error
+	for i := 0; i < 50; i++ {
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+		}
+		return body
+	}
+	t.Fatalf("operator API did not become ready: %v", lastErr)
+	return nil
 }
 
 func TestSplitStatusTokens(t *testing.T) {

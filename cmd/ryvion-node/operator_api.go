@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
+	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 )
 
 const defaultOperatorAPIPort = "45890"
@@ -799,6 +801,37 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	}
 }
 
+func (s *operatorRuntime) runV7ModelBenchmark(ctx context.Context, modelID string, maxTokens int, timeoutMs int64) (v7modelbench.ModelBenchmarkResult, error) {
+	if maxTokens < 0 {
+		return v7modelbench.ModelBenchmarkResult{}, fmt.Errorf("max_tokens must be non-negative")
+	}
+	if timeoutMs < 0 {
+		return v7modelbench.ModelBenchmarkResult{}, fmt.Errorf("timeout_ms must be non-negative")
+	}
+
+	s.mu.RLock()
+	agentVersion := s.version
+	caps := s.caps
+	infMgr := s.infMgr
+	s.mu.RUnlock()
+
+	gpuDetected := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
+	runner := v7modelbench.NativeInferenceModelBenchmarkRunner{
+		Native:           infMgr,
+		AgentVersion:     agentVersion,
+		OS:               runtime.GOOS,
+		Arch:             runtime.GOARCH,
+		GPUDetected:      gpuDetected,
+		GPUModel:         caps.GPUModel,
+		RuntimeAvailable: inference.NativeRuntimeAvailable,
+	}
+	return v7modelbench.RunModelBenchmarkSelfTest(ctx, runner, v7modelbench.ModelBenchmarkSelfTestConfig{
+		ModelID:   modelID,
+		MaxTokens: maxTokens,
+		TimeoutMs: timeoutMs,
+	})
+}
+
 func freshOperatorHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *runtimeManager, fallback hub.HealthReport) hub.HealthReport {
 	if runtimeMgr == nil {
 		return fallback
@@ -949,6 +982,34 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 	mux.HandleFunc("GET /api/v1/operator/diagnostics", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, state.diagnosticsSnapshot(port))
 	})
+	mux.HandleFunc("POST /api/v1/operator/v7/model-benchmark/run", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var body struct {
+			ModelID   string `json:"model_id"`
+			MaxTokens int    `json:"max_tokens"`
+			TimeoutMs int64  `json:"timeout_ms"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
+			return
+		}
+		runCtx := r.Context()
+		if body.TimeoutMs > 0 {
+			var cancel context.CancelFunc
+			runCtx, cancel = context.WithTimeout(r.Context(), time.Duration(body.TimeoutMs)*time.Millisecond)
+			defer cancel()
+		}
+		result, err := state.runV7ModelBenchmark(runCtx, body.ModelID, body.MaxTokens, body.TimeoutMs)
+		if err != nil {
+			if result.ProofStatus != "" && v7modelbench.ValidateModelBenchmarkResult(result) == nil {
+				writeJSON(w, http.StatusOK, result)
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "model_benchmark_request_failed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	})
 	mux.HandleFunc("POST /api/v1/operator/claim", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Code string `json:"code"`
@@ -1054,7 +1115,7 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      time.Duration(v7modelbench.MaxModelBenchmarkTimeoutMs+5_000) * time.Millisecond,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
