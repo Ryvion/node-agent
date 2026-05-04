@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,8 +17,10 @@ import (
 
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
+	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 )
 
 // fakeClient implements a minimal receipt submitter that fails N times then succeeds.
@@ -991,6 +995,336 @@ func TestProcessOptionalV7MemoryBenchmarkNormalJobDoesNotRecordStatus(t *testing
 	if snapshot := status.Snapshot(); snapshot.Counters != (v7memorybench.LocalStatusCounters{}) {
 		t.Fatalf("status counters changed for normal job: %+v", snapshot.Counters)
 	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := v7modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{result: testMeasuredModelBenchmarkResult()}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) v7modelbench.ModelBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-modelbench-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSpecJSON(t),
+	}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false when flag is off")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if fakeRunner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (v7modelbench.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := v7modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{result: testMeasuredModelBenchmarkResult()}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
+		if !gpuDetected {
+			t.Fatal("gpuDetected = false, want true")
+		}
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-modelbench-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[v7modelbench.ModelBenchmarkTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7modelbench.ModelBenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != string(v7modelbench.ModelBenchmarkProofStatusMeasured) {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := metadata["output_hash"]; !ok {
+			t.Errorf("measured metadata missing output_hash: %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		if strings.Contains(string(encoded), "secret completion text") {
+			t.Errorf("metadata leaked raw output: %s", encoded)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-modelbench-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSpecJSON(t),
+	}, nil, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want hash", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+
+	snapshot := status.Snapshot()
+	if snapshot.LastSeenBenchmarkJobID != "job-modelbench-local" || snapshot.LastSeenRequestID != "request-modelbench-local" {
+		t.Fatalf("seen status = %+v", snapshot)
+	}
+	if snapshot.LastExecutedJobID != "job-modelbench-local" {
+		t.Fatalf("last executed job id = %q", snapshot.LastExecutedJobID)
+	}
+	if snapshot.LastReceiptSubmittedJobID != "job-modelbench-local" {
+		t.Fatalf("last receipt submitted job id = %q", snapshot.LastReceiptSubmittedJobID)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableReceipt(t *testing.T) {
+	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := v7modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{result: testUnavailableModelBenchmarkResult()}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) v7modelbench.ModelBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata := req.Metadata[v7modelbench.ModelBenchmarkTask].(map[string]any)
+		if metadata["proof_status"] != string(v7modelbench.ModelBenchmarkProofStatusUnavailable) {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := metadata["output_hash"]; ok {
+			t.Errorf("unavailable metadata contains output_hash: %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		runtimeMeta := metadata["runtime"].(map[string]any)
+		if runtimeMeta["native_inference_ready"] != false || runtimeMeta["model_loaded"] != false {
+			t.Errorf("runtime metadata = %+v, want native/model not ready", runtimeMeta)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-modelbench-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSpecJSON(t),
+	}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful unavailable receipt", result)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkNormalJobDoesNotRecordStatus(t *testing.T) {
+	oldStatus := v7ModelBenchmarkStatus
+	status := v7modelbench.NewLocalStatus()
+	v7ModelBenchmarkStatus = status
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+	})
+	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-normal",
+		Kind:     "native_report",
+		SpecJSON: `{"task":"native_report","job_id":"job-normal"}`,
+	}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (v7modelbench.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed for normal job: %+v", snapshot.Counters)
+	}
+}
+
+type fakeModelBenchmarkRunner struct {
+	result v7modelbench.ModelBenchmarkResult
+	err    error
+	calls  int
+}
+
+func (f *fakeModelBenchmarkRunner) RunModelBenchmark(_ context.Context, _ v7modelbench.ModelBenchmarkSpec) (v7modelbench.ModelBenchmarkResult, error) {
+	f.calls++
+	return f.result, f.err
+}
+
+func testModelBenchmarkSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := v7modelbench.ModelBenchmarkSpec{
+		Task:            v7modelbench.ModelBenchmarkTask,
+		RequestID:       "request-modelbench-local",
+		JobID:           "job-modelbench-local",
+		ModelID:         "ryvion-llama-3.2-3b",
+		PromptLabel:     "fixed-readiness-smoke",
+		PromptHash:      testSHA256ObjectID("prompt"),
+		MaxTokens:       16,
+		Temperature:     0.1,
+		TimeoutMs:       30_000,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testMeasuredModelBenchmarkResult() v7modelbench.ModelBenchmarkResult {
+	return v7modelbench.ModelBenchmarkResult{
+		RequestID:  "request-modelbench-local",
+		JobID:      "job-modelbench-local",
+		ModelID:    "ryvion-llama-3.2-3b",
+		PromptHash: testSHA256ObjectID("prompt"),
+		RuntimeInfo: v7modelbench.ModelBenchmarkRuntimeInfo{
+			AgentVersion:             "test",
+			OS:                       "darwin",
+			Arch:                     "arm64",
+			NativeInferenceSupported: true,
+			NativeInferenceReady:     true,
+			RuntimeKind:              v7modelbench.ModelBenchmarkRuntimeKindNativeLocal,
+			ModelID:                  "ryvion-llama-3.2-3b",
+			ModelLoaded:              true,
+			GPUDetected:              true,
+			GPUModel:                 "test-gpu",
+		},
+		Metrics: v7modelbench.ModelBenchmarkMetrics{
+			StartedAtUnixMs:    1_800_000_000_123,
+			FinishedAtUnixMs:   1_800_000_001_357,
+			WallTimeMs:         1234,
+			TimeToFirstTokenMs: 200,
+			TokensGenerated:    16,
+			TokensPerSecond:    12.3,
+			ModelLoadState:     v7modelbench.ModelBenchmarkModelLoadStateLoaded,
+		},
+		OutputHash:  testSHA256ObjectID("secret completion text"),
+		OutputBytes: int64(len("secret completion text")),
+		ProofStatus: v7modelbench.ModelBenchmarkProofStatusMeasured,
+	}
+}
+
+func testUnavailableModelBenchmarkResult() v7modelbench.ModelBenchmarkResult {
+	result := testMeasuredModelBenchmarkResult()
+	result.RuntimeInfo.NativeInferenceReady = false
+	result.RuntimeInfo.ModelLoaded = false
+	result.Metrics.TimeToFirstTokenMs = 0
+	result.Metrics.TokensGenerated = 0
+	result.Metrics.TokensPerSecond = 0
+	result.Metrics.ModelLoadState = v7modelbench.ModelBenchmarkModelLoadStateUnavailable
+	result.Metrics.ErrorCode = "native_model_unavailable"
+	result.OutputHash = ""
+	result.OutputBytes = 0
+	result.ProofStatus = v7modelbench.ModelBenchmarkProofStatusUnavailable
+	return result
+}
+
+func testSHA256ObjectID(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func containsToken(tokens []string, want string) bool {

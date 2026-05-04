@@ -70,6 +70,20 @@ const (
 	v7ProofArtifactBytesMetadataKey = "_v7_proof_artifact_bytes"
 )
 
+var (
+	v7ModelBenchmarkStatus    = v7modelbench.NewLocalStatus()
+	newV7ModelBenchmarkRunner = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
+		return v7modelbench.NativeInferenceModelBenchmarkRunner{
+			Native:           infMgr,
+			AgentVersion:     version,
+			OS:               runtime.GOOS,
+			Arch:             runtime.GOARCH,
+			GPUDetected:      gpuDetected,
+			RuntimeAvailable: inference.NativeRuntimeAvailable,
+		}
+	}
+)
+
 func main() {
 	// Subcommand: ryvion-node claim <CODE>
 	if len(os.Args) > 1 && os.Args[1] == "claim" {
@@ -780,6 +794,18 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	if handled, result, runErr := processOptionalV7ModelBenchmark(runCtx, client, work, infMgr, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("V7 model benchmark execution failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("V7 model benchmark completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	// Pre-job VRAM check — reject if GPU is too busy
 	if isStreaming {
 		freeVRAM := hw.GetFreeVRAM()
@@ -881,6 +907,83 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	}
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.recordV7MemoryBenchmarkReceiptSubmitted(hubReceipt.JobID)
+	}
+	return true, snapshot, err
+}
+
+func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	identity, isBenchmark := v7modelbench.ModelBenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
+	if isBenchmark && v7modelbench.ModelBenchmarkEnabledFromEnv(os.Getenv) && v7ModelBenchmarkStatus != nil {
+		v7ModelBenchmarkStatus.RecordSeen(statusJobID, identity.RequestID)
+	}
+
+	runner := newV7ModelBenchmarkRunner(infMgr, gpuDetected)
+	receipt, handled, err := v7modelbench.ExecuteModelBenchmarkAssignment(ctx, work.SpecJSON, runner, os.Getenv)
+	if !handled {
+		return false, nil, nil
+	}
+	if err != nil && v7ModelBenchmarkStatus != nil {
+		v7ModelBenchmarkStatus.RecordError(err)
+	}
+
+	runtimeMeta := map[string]any{}
+	if runtimeMgr != nil {
+		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
+	}
+	extra := map[string]any{
+		"executor":      v7modelbench.ModelBenchmarkTask,
+		"executor_kind": v7modelbench.ModelBenchmarkTask,
+		"task":          v7modelbench.ModelBenchmarkTask,
+	}
+	if strings.TrimSpace(receipt.ResultHashHex) == "" {
+		receipt = v7modelbench.BuildModelBenchmarkRejectionReceipt(work.JobID, err)
+	}
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		extra["exit_code"] = 1
+		extra["error"] = "v7 model benchmark failed"
+	} else {
+		extra["exit_code"] = 0
+	}
+	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
+	hubReceipt := hub.Receipt{
+		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
+		ResultHashHex: receipt.ResultHashHex,
+		MeteringUnits: receipt.MeteringUnits,
+		Metadata:      metadata,
+	}
+	snapshot := &runnerResultSnapshot{
+		ResultHashHex: hubReceipt.ResultHashHex,
+		MeteringUnits: hubReceipt.MeteringUnits,
+		ExitCode:      exitCode,
+		Metadata:      metadata,
+	}
+	if err == nil && v7ModelBenchmarkStatus != nil {
+		v7ModelBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
+	}
+	if client == nil {
+		submitErr := fmt.Errorf("hub client unavailable")
+		if v7ModelBenchmarkStatus != nil {
+			v7ModelBenchmarkStatus.RecordReceiptFailed(hubReceipt.JobID, submitErr)
+		}
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	if submitErr := client.SubmitReceipt(ctx, hubReceipt); submitErr != nil {
+		if v7ModelBenchmarkStatus != nil {
+			v7ModelBenchmarkStatus.RecordReceiptFailed(hubReceipt.JobID, submitErr)
+		}
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	if v7ModelBenchmarkStatus != nil {
+		v7ModelBenchmarkStatus.RecordReceiptSubmitted(hubReceipt.JobID)
 	}
 	return true, snapshot, err
 }
