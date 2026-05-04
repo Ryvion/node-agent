@@ -28,6 +28,7 @@ import (
 	v7artifact "github.com/Ryvion/node-agent/internal/v7/artifact"
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
+	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
 	v7proofrunner "github.com/Ryvion/node-agent/internal/v7/proofrunner"
 	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -632,6 +633,18 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 	defer cancel()
 
+	if handled, result, runErr := processOptionalV7MemoryBenchmark(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("V7 memory benchmark execution failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("V7 memory benchmark completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	// Pre-job VRAM check — reject if GPU is too busy
 	if isStreaming {
 		freeVRAM := hw.GetFreeVRAM()
@@ -670,6 +683,53 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.finishJob(work, result, nil)
 	}
+}
+
+func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	receipt, handled, err := v7memorybench.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
+		Getenv: os.Getenv,
+	})
+	if !handled {
+		return false, nil, nil
+	}
+
+	runtimeMeta := map[string]any{}
+	if runtimeMgr != nil {
+		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
+	}
+	extra := map[string]any{
+		"executor":      v7memorybench.BenchmarkTask,
+		"executor_kind": v7memorybench.BenchmarkTask,
+		"task":          v7memorybench.BenchmarkTask,
+	}
+	if err != nil {
+		receipt = v7memorybench.BuildBenchmarkRejectionReceipt(work.JobID, err)
+		extra["exit_code"] = 1
+		extra["error"] = "v7 memory benchmark rejected"
+	} else {
+		extra["exit_code"] = 0
+	}
+	exitCode, _ := extra["exit_code"].(int)
+	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
+	hubReceipt := hub.Receipt{
+		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
+		ResultHashHex: receipt.ResultHashHex,
+		MeteringUnits: receipt.MeteringUnits,
+		Metadata:      metadata,
+	}
+	snapshot := &runnerResultSnapshot{
+		ResultHashHex: hubReceipt.ResultHashHex,
+		MeteringUnits: hubReceipt.MeteringUnits,
+		ExitCode:      exitCode,
+		Metadata:      metadata,
+	}
+	if submitErr := submitReceiptWithRetry(ctx, client, hubReceipt); submitErr != nil {
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	return true, snapshot, err
 }
 
 // relayStreamingFailure sends a terminal SSE error chunk to hub-orch so the
