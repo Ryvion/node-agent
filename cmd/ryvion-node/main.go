@@ -81,6 +81,10 @@ func main() {
 		runDoctor(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "memorybench-selftest" {
+		runMemoryBenchSelfTest(os.Args[2:])
+		return
+	}
 
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	flag.StringVar(&flagHub, "hub", "https://api.ryvion.ai", "Hub orchestrator base URL")
@@ -137,6 +141,28 @@ func runDoctor(args []string) {
 	if report.HasHardErrors() {
 		os.Exit(1)
 	}
+	os.Exit(0)
+}
+
+func runMemoryBenchSelfTest(args []string) {
+	defaults := v7memorybench.DefaultMemoryBenchSelfTestConfig()
+	fs := flag.NewFlagSet("memorybench-selftest", flag.ExitOnError)
+	tokenCount := fs.Int("tokens", defaults.TokenCount, "Synthetic token count")
+	valueDim := fs.Int("dim", defaults.ValueDim, "Synthetic attention value dimension")
+	seed := fs.Int64("seed", defaults.Seed, "Synthetic request seed")
+	jsonOutput := fs.Bool("json", false, "Print JSON output")
+	_ = fs.Parse(args)
+
+	result, err := v7memorybench.RunMemoryBenchSelfTest(v7memorybench.MemoryBenchSelfTestConfig{
+		Seed:       *seed,
+		TokenCount: *tokenCount,
+		ValueDim:   *valueDim,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(v7memorybench.FormatMemoryBenchSelfTestResult(result, *jsonOutput))
 	os.Exit(0)
 }
 
