@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 )
 
 func TestAllowLocalOrigin(t *testing.T) {
@@ -355,6 +357,55 @@ func TestOperatorStatusSnapshotRefreshesRuntimeReport(t *testing.T) {
 	}
 	if status.Runtime.RuntimeArtifact != "ryvion-runtime-kit-windows-amd64-2026.04.15.21.zip" {
 		t.Fatalf("runtime_artifact = %q", status.Runtime.RuntimeArtifact)
+	}
+}
+
+func TestOperatorStatusSnapshotIncludesV7MemoryBenchmarkStatus(t *testing.T) {
+	t.Parallel()
+
+	benchStatus := v7memorybench.NewLocalStatus()
+	benchStatus.RecordSeen("job-bench-1", "request-bench-1")
+	benchStatus.RecordExecuted("job-bench-1")
+	benchStatus.RecordReceiptSubmitted("job-bench-1")
+
+	state := &operatorRuntime{
+		version:           "dev",
+		hubURL:            "https://api.ryvion.ai",
+		deviceType:        "gpu",
+		publicKeyHex:      "abc123",
+		v7MemoryBenchmark: benchStatus,
+	}
+	work := &hub.WorkAssignment{JobID: "job-bench-1", Kind: "benchmark", SpecJSON: `{"task":"v7_memory_benchmark"}`}
+	state.startJob(work)
+	state.finishJob(work, &runnerResultSnapshot{
+		ResultHashHex: "hash",
+		MeteringUnits: 1,
+		Metadata: map[string]any{
+			v7memorybench.BenchmarkTask: map[string]any{
+				"request_id":     "request-bench-1",
+				"weighted_value": []float64{1, 2, 3},
+				"proof_status":   "synthetic_measured",
+			},
+		},
+	}, nil)
+
+	status := state.statusSnapshot("45890")
+	if status.V7MemoryBenchmark.LastSeenBenchmarkJobID != "job-bench-1" {
+		t.Fatalf("v7 benchmark status = %+v", status.V7MemoryBenchmark)
+	}
+	if status.V7MemoryBenchmark.Counters.Seen != 1 || status.V7MemoryBenchmark.Counters.Executed != 1 || status.V7MemoryBenchmark.Counters.ReceiptSubmitted != 1 {
+		t.Fatalf("unexpected v7 benchmark counters: %+v", status.V7MemoryBenchmark.Counters)
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal(status) error = %v", err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, `"v7_memory_benchmark"`) {
+		t.Fatalf("status JSON missing v7_memory_benchmark: %s", text)
+	}
+	if strings.Contains(text, "weighted_value") {
+		t.Fatalf("operator status JSON includes weighted_value: %s", text)
 	}
 }
 

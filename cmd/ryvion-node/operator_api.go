@@ -17,6 +17,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
+	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 )
 
 const defaultOperatorAPIPort = "45890"
@@ -58,6 +59,7 @@ type operatorRuntime struct {
 	recentJobs        []operatorJob
 	infMgr            *inference.Manager
 	runtimeMgr        *runtimeManager
+	v7MemoryBenchmark *v7memorybench.LocalStatus
 }
 
 type operatorJob struct {
@@ -80,26 +82,27 @@ type operatorJob struct {
 }
 
 type operatorStatusResponse struct {
-	Version          string              `json:"version"`
-	HubURL           string              `json:"hub_url"`
-	PublicKeyHex     string              `json:"public_key_hex"`
-	DeviceType       string              `json:"device_type"`
-	DeclaredCountry  string              `json:"declared_country,omitempty"`
-	VerifiedCountry  string              `json:"verified_country,omitempty"`
-	Registered       bool                `json:"registered"`
-	RegisterError    string              `json:"register_error,omitempty"`
-	LatestVersion    string              `json:"latest_version,omitempty"`
-	LastHeartbeatAt  time.Time           `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatErr string              `json:"last_heartbeat_error,omitempty"`
-	Machine          operatorMachine     `json:"machine"`
-	Runtime          operatorRuntimeInfo `json:"runtime"`
-	Metrics          operatorMetrics     `json:"metrics"`
-	CurrentJob       *operatorJob        `json:"current_job,omitempty"`
-	RecentJobs       []operatorJob       `json:"recent_jobs"`
-	LastClaimAt      time.Time           `json:"last_claim_at,omitempty"`
-	LastClaimError   string              `json:"last_claim_error,omitempty"`
-	LastPayoutAt     time.Time           `json:"last_payout_at,omitempty"`
-	LastPayoutError  string              `json:"last_payout_error,omitempty"`
+	Version           string                            `json:"version"`
+	HubURL            string                            `json:"hub_url"`
+	PublicKeyHex      string                            `json:"public_key_hex"`
+	DeviceType        string                            `json:"device_type"`
+	DeclaredCountry   string                            `json:"declared_country,omitempty"`
+	VerifiedCountry   string                            `json:"verified_country,omitempty"`
+	Registered        bool                              `json:"registered"`
+	RegisterError     string                            `json:"register_error,omitempty"`
+	LatestVersion     string                            `json:"latest_version,omitempty"`
+	LastHeartbeatAt   time.Time                         `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatErr  string                            `json:"last_heartbeat_error,omitempty"`
+	Machine           operatorMachine                   `json:"machine"`
+	Runtime           operatorRuntimeInfo               `json:"runtime"`
+	Metrics           operatorMetrics                   `json:"metrics"`
+	CurrentJob        *operatorJob                      `json:"current_job,omitempty"`
+	RecentJobs        []operatorJob                     `json:"recent_jobs"`
+	LastClaimAt       time.Time                         `json:"last_claim_at,omitempty"`
+	LastClaimError    string                            `json:"last_claim_error,omitempty"`
+	LastPayoutAt      time.Time                         `json:"last_payout_at,omitempty"`
+	LastPayoutError   string                            `json:"last_payout_error,omitempty"`
+	V7MemoryBenchmark v7memorybench.LocalStatusSnapshot `json:"v7_memory_benchmark"`
 }
 
 type operatorMachine struct {
@@ -198,15 +201,16 @@ type logRing struct {
 
 func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, publicAIOptIn bool, caps hw.CapSet, client *hub.Client) *operatorRuntime {
 	return &operatorRuntime{
-		version:         strings.TrimSpace(version),
-		hubURL:          strings.TrimSpace(hubURL),
-		deviceType:      strings.TrimSpace(deviceType),
-		declaredCountry: strings.ToUpper(strings.TrimSpace(declaredCountry)),
-		publicKeyHex:    client.PublicKeyHex(),
-		publicAIOptIn:   publicAIOptIn,
-		caps:            caps,
-		client:          client,
-		recentJobs:      make([]operatorJob, 0, 20),
+		version:           strings.TrimSpace(version),
+		hubURL:            strings.TrimSpace(hubURL),
+		deviceType:        strings.TrimSpace(deviceType),
+		declaredCountry:   strings.ToUpper(strings.TrimSpace(declaredCountry)),
+		publicKeyHex:      client.PublicKeyHex(),
+		publicAIOptIn:     publicAIOptIn,
+		caps:              caps,
+		client:            client,
+		recentJobs:        make([]operatorJob, 0, 20),
+		v7MemoryBenchmark: v7memorybench.NewLocalStatus(),
 	}
 }
 
@@ -269,6 +273,55 @@ func (s *operatorRuntime) setRuntimeManager(runtimeMgr *runtimeManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.runtimeMgr = runtimeMgr
+}
+
+func (s *operatorRuntime) memoryBenchmarkStatus() *v7memorybench.LocalStatus {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	status := s.v7MemoryBenchmark
+	s.mu.RUnlock()
+	if status != nil {
+		return status
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.v7MemoryBenchmark == nil {
+		s.v7MemoryBenchmark = v7memorybench.NewLocalStatus()
+	}
+	return s.v7MemoryBenchmark
+}
+
+func (s *operatorRuntime) recordV7MemoryBenchmarkSeen(jobID, requestID string) {
+	if status := s.memoryBenchmarkStatus(); status != nil {
+		status.RecordSeen(jobID, requestID)
+	}
+}
+
+func (s *operatorRuntime) recordV7MemoryBenchmarkExecuted(jobID string) {
+	if status := s.memoryBenchmarkStatus(); status != nil {
+		status.RecordExecuted(jobID)
+	}
+}
+
+func (s *operatorRuntime) recordV7MemoryBenchmarkReceiptSubmitted(jobID string) {
+	if status := s.memoryBenchmarkStatus(); status != nil {
+		status.RecordReceiptSubmitted(jobID)
+	}
+}
+
+func (s *operatorRuntime) recordV7MemoryBenchmarkReceiptFailed(jobID string, err error) {
+	if status := s.memoryBenchmarkStatus(); status != nil {
+		status.RecordReceiptFailed(jobID, err)
+	}
+}
+
+func (s *operatorRuntime) recordV7MemoryBenchmarkRejected(jobID string, err error) {
+	if status := s.memoryBenchmarkStatus(); status != nil {
+		status.RecordRejected(jobID, err)
+	}
 }
 
 func (s *operatorRuntime) publicAIOptInEnabled() bool {
@@ -417,7 +470,7 @@ func (s *operatorRuntime) finishJob(work *hub.WorkAssignment, result *runnerResu
 		job.MeteringUnits = result.MeteringUnits
 		job.BlobURL = result.BlobURL
 		job.DeliveryObject = result.ObjectKey
-		job.ReceiptMeta = result.Metadata
+		job.ReceiptMeta = v7memorybench.SanitizeLocalReceiptMetadata(result.Metadata)
 		if result.ExitCode != 0 && job.Status == "completed" {
 			job.Status = "failed"
 		}
@@ -490,9 +543,14 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	infMgr := s.infMgr
 	runtimeMgr := s.runtimeMgr
 	publicAIOptIn := s.publicAIOptIn
+	memoryBenchmarkStatus := s.v7MemoryBenchmark
 	s.mu.RUnlock()
 
 	report = freshOperatorHealthReport(caps, infMgr, runtimeMgr, report)
+	var memoryBenchmarkSnapshot v7memorybench.LocalStatusSnapshot
+	if memoryBenchmarkStatus != nil {
+		memoryBenchmarkSnapshot = memoryBenchmarkStatus.Snapshot()
+	}
 
 	var currentJob *operatorJob
 	if current != nil {
@@ -576,12 +634,13 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUUtil:    metrics.GPUUtil,
 			PowerWatts: metrics.PowerWatts,
 		},
-		CurrentJob:      currentJob,
-		RecentJobs:      recent,
-		LastClaimAt:     lastClaimAt,
-		LastClaimError:  lastClaimErr,
-		LastPayoutAt:    lastPayoutAt,
-		LastPayoutError: lastPayoutErr,
+		CurrentJob:        currentJob,
+		RecentJobs:        recent,
+		LastClaimAt:       lastClaimAt,
+		LastClaimError:    lastClaimErr,
+		LastPayoutAt:      lastPayoutAt,
+		LastPayoutError:   lastPayoutErr,
+		V7MemoryBenchmark: memoryBenchmarkSnapshot,
 	}
 }
 

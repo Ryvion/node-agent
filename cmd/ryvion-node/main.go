@@ -712,11 +712,23 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 }
 
 func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	identity, isBenchmark := v7memorybench.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
+	if isBenchmark && operatorRuntimeState != nil {
+		operatorRuntimeState.recordV7MemoryBenchmarkSeen(statusJobID, identity.RequestID)
+	}
+
 	receipt, handled, err := v7memorybench.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
 		Getenv: os.Getenv,
 	})
 	if !handled {
 		return false, nil, nil
+	}
+	if err != nil && operatorRuntimeState != nil {
+		operatorRuntimeState.recordV7MemoryBenchmarkRejected(statusJobID, err)
+	}
+	if err == nil && operatorRuntimeState != nil {
+		operatorRuntimeState.recordV7MemoryBenchmarkExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
 	}
 
 	runtimeMeta := map[string]any{}
@@ -750,10 +762,16 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		Metadata:      metadata,
 	}
 	if submitErr := submitReceiptWithRetry(ctx, client, hubReceipt); submitErr != nil {
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.recordV7MemoryBenchmarkReceiptFailed(hubReceipt.JobID, submitErr)
+		}
 		if err != nil {
 			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
 		}
 		return true, snapshot, submitErr
+	}
+	if operatorRuntimeState != nil {
+		operatorRuntimeState.recordV7MemoryBenchmarkReceiptSubmitted(hubReceipt.JobID)
 	}
 	return true, snapshot, err
 }

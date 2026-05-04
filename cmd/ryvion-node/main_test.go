@@ -16,6 +16,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 )
 
 // fakeClient implements a minimal receipt submitter that fails N times then succeeds.
@@ -834,6 +835,127 @@ func TestRuntimeWarmingHeuristicWindowsPodman(t *testing.T) {
 	}
 	if runtimeWarmingHeuristic("linux", true, false, "degraded", "/opt/ryvion/runtime/backend/ryvion-oci", "podman") {
 		t.Fatal("did not expect non-Windows runtime to be treated as warming")
+	}
+}
+
+func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
+	oldState := operatorRuntimeState
+	status := v7memorybench.NewLocalStatus()
+	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	t.Cleanup(func() {
+		operatorRuntimeState = oldState
+	})
+	t.Setenv(v7memorybench.BenchmarkFlagEnv, "1")
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID    string         `json:"job_id"`
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-bench-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := req.Metadata[v7memorybench.BenchmarkTask]; !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7memorybench.BenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	spec := map[string]any{
+		"task":               v7memorybench.BenchmarkTask,
+		"request_id":         "request-bench-local",
+		"job_id":             "job-bench-local",
+		"shard_id":           "shard-a",
+		"seed":               int64(7),
+		"token_count":        4,
+		"value_dim":          2,
+		"created_at_unix_ms": int64(1_800_000_000_123),
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	handled, result, err := processOptionalV7MemoryBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-bench-local",
+		Kind:     "benchmark",
+		SpecJSON: string(specJSON),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7MemoryBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want hash", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+
+	snapshot := status.Snapshot()
+	if snapshot.LastSeenBenchmarkJobID != "job-bench-local" || snapshot.LastSeenRequestID != "request-bench-local" {
+		t.Fatalf("seen status = %+v", snapshot)
+	}
+	if snapshot.LastExecutedJobID != "job-bench-local" {
+		t.Fatalf("last executed job id = %q", snapshot.LastExecutedJobID)
+	}
+	if snapshot.LastReceiptSubmittedJobID != "job-bench-local" {
+		t.Fatalf("last receipt submitted job id = %q", snapshot.LastReceiptSubmittedJobID)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+	if snapshot.Counters.ReceiptFailed != 0 || snapshot.Counters.Rejected != 0 {
+		t.Fatalf("unexpected failure counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7MemoryBenchmarkNormalJobDoesNotRecordStatus(t *testing.T) {
+	oldState := operatorRuntimeState
+	status := v7memorybench.NewLocalStatus()
+	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	t.Cleanup(func() {
+		operatorRuntimeState = oldState
+	})
+
+	handled, result, err := processOptionalV7MemoryBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-normal",
+		Kind:     "native_report",
+		SpecJSON: `{"task":"native_report","job_id":"job-normal"}`,
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7MemoryBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (v7memorybench.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed for normal job: %+v", snapshot.Counters)
 	}
 }
 
