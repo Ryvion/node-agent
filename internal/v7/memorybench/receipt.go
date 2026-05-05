@@ -17,16 +17,25 @@ type BenchmarkReceipt struct {
 }
 
 type BenchmarkReceiptMetadata struct {
-	RequestID           string    `json:"request_id"`
-	ShardID             string    `json:"shard_id"`
-	LocalMax            float64   `json:"local_max"`
-	ExpSum              float64   `json:"exp_sum"`
-	WeightedValue       []float64 `json:"weighted_value"`
-	TokenCount          int       `json:"token_count"`
-	ValueDim            int       `json:"value_dim"`
-	ComputeTimeMs       int64     `json:"compute_time_ms"`
-	OutputBytesEstimate int64     `json:"output_bytes_estimate"`
-	ProofStatus         string    `json:"proof_status"`
+	RequestID                   string    `json:"request_id"`
+	ShardID                     string    `json:"shard_id"`
+	LocalMax                    float64   `json:"local_max"`
+	ExpSum                      float64   `json:"exp_sum"`
+	WeightedValue               []float64 `json:"weighted_value"`
+	TokenCount                  int       `json:"token_count"`
+	ValueDim                    int       `json:"value_dim"`
+	NodeStartedAtUnixMs         int64     `json:"node_started_at_unix_ms"`
+	NodeCompletedAtUnixMs       int64     `json:"node_completed_at_unix_ms"`
+	ComputeTimeMs               int64     `json:"compute_time_ms"`
+	ComputeTimeUs               int64     `json:"compute_time_us"`
+	SimulatedDelayMs            int64     `json:"simulated_delay_ms"`
+	TotalNodeWallTimeMs         int64     `json:"total_node_wall_time_ms"`
+	TotalNodeWallTimeUs         int64     `json:"total_node_wall_time_us"`
+	SummaryPayloadBytesEstimate int64     `json:"summary_payload_bytes_estimate"`
+	OutputBytesEstimate         int64     `json:"output_bytes_estimate"`
+	ReceiptMetadataJSONBytes    int64     `json:"receipt_metadata_json_bytes"`
+	ReceiptEnvelopeJSONBytes    int64     `json:"receipt_envelope_json_bytes"`
+	ProofStatus                 string    `json:"proof_status"`
 }
 
 func BuildBenchmarkReceipt(spec BenchmarkSpec, response SyntheticAttentionResponse) (BenchmarkReceipt, error) {
@@ -36,19 +45,29 @@ func BuildBenchmarkReceipt(spec BenchmarkSpec, response SyntheticAttentionRespon
 	}
 
 	metadata := BenchmarkReceiptMetadata{
-		RequestID:           response.RequestID,
-		ShardID:             response.ShardID,
-		LocalMax:            response.Summary.LocalMax,
-		ExpSum:              response.Summary.ExpSum,
-		WeightedValue:       append([]float64(nil), response.Summary.WeightedValue...),
-		TokenCount:          response.Summary.TokenCount,
-		ValueDim:            response.Summary.ValueDim,
-		ComputeTimeMs:       response.ComputeTimeMs,
-		OutputBytesEstimate: response.OutputBytesEstimate,
-		ProofStatus:         "synthetic_measured",
+		RequestID:                   response.RequestID,
+		ShardID:                     response.ShardID,
+		LocalMax:                    response.Summary.LocalMax,
+		ExpSum:                      response.Summary.ExpSum,
+		WeightedValue:               append([]float64(nil), response.Summary.WeightedValue...),
+		TokenCount:                  response.Summary.TokenCount,
+		ValueDim:                    response.Summary.ValueDim,
+		NodeStartedAtUnixMs:         response.NodeStartedAtUnixMs,
+		NodeCompletedAtUnixMs:       response.NodeCompletedAtUnixMs,
+		ComputeTimeMs:               response.ComputeTimeMs,
+		ComputeTimeUs:               response.ComputeTimeUs,
+		SimulatedDelayMs:            response.SimulatedDelayMs,
+		TotalNodeWallTimeMs:         response.TotalNodeWallTimeMs,
+		TotalNodeWallTimeUs:         response.TotalNodeWallTimeUs,
+		SummaryPayloadBytesEstimate: response.SummaryPayloadBytesEstimate,
+		OutputBytesEstimate:         response.OutputBytesEstimate,
+		ProofStatus:                 "synthetic_measured",
+	}
+	if metadata.SummaryPayloadBytesEstimate <= 0 {
+		metadata.SummaryPayloadBytesEstimate = estimatePartialAttentionSummaryBytes(response.Summary)
 	}
 	if metadata.OutputBytesEstimate <= 0 {
-		metadata.OutputBytesEstimate = estimatePartialAttentionSummaryBytes(response.Summary)
+		metadata.OutputBytesEstimate = metadata.SummaryPayloadBytesEstimate
 	}
 	if metadata.RequestID == "" {
 		metadata.RequestID = spec.RequestID
@@ -62,6 +81,9 @@ func BuildBenchmarkReceipt(spec BenchmarkSpec, response SyntheticAttentionRespon
 
 	hashHex, err := HashBenchmarkReceiptMetadata(spec.JobID, metadata)
 	if err != nil {
+		return BenchmarkReceipt{}, err
+	}
+	if err := populateBenchmarkReceiptJSONByteEstimates(&metadata, spec.JobID, hashHex, 1); err != nil {
 		return BenchmarkReceipt{}, err
 	}
 	return BenchmarkReceipt{
@@ -117,14 +139,18 @@ func HashBenchmarkReceiptMetadata(jobID string, metadata BenchmarkReceiptMetadat
 	if jobID == "" {
 		return "", fmt.Errorf("%w: job_id required for result hash", ErrInvalidBenchmarkSpec)
 	}
+	metadata = metadata.clone()
+	if metadata.SummaryPayloadBytesEstimate <= 0 {
+		metadata.SummaryPayloadBytesEstimate = metadata.OutputBytesEstimate
+	}
 	envelope := struct {
-		Task     string                   `json:"task"`
-		JobID    string                   `json:"job_id"`
-		Metadata BenchmarkReceiptMetadata `json:"v7_memory_benchmark"`
+		Task     string                       `json:"task"`
+		JobID    string                       `json:"job_id"`
+		Metadata benchmarkReceiptHashMetadata `json:"v7_memory_benchmark"`
 	}{
 		Task:     BenchmarkTask,
 		JobID:    jobID,
-		Metadata: metadata.clone(),
+		Metadata: benchmarkReceiptHashMetadataFromMetadata(metadata),
 	}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
@@ -136,16 +162,25 @@ func HashBenchmarkReceiptMetadata(jobID string, metadata BenchmarkReceiptMetadat
 
 func (m BenchmarkReceiptMetadata) Map() map[string]any {
 	return map[string]any{
-		"request_id":            m.RequestID,
-		"shard_id":              m.ShardID,
-		"local_max":             m.LocalMax,
-		"exp_sum":               m.ExpSum,
-		"weighted_value":        append([]float64(nil), m.WeightedValue...),
-		"token_count":           m.TokenCount,
-		"value_dim":             m.ValueDim,
-		"compute_time_ms":       m.ComputeTimeMs,
-		"output_bytes_estimate": m.OutputBytesEstimate,
-		"proof_status":          m.ProofStatus,
+		"request_id":                     m.RequestID,
+		"shard_id":                       m.ShardID,
+		"local_max":                      m.LocalMax,
+		"exp_sum":                        m.ExpSum,
+		"weighted_value":                 append([]float64(nil), m.WeightedValue...),
+		"token_count":                    m.TokenCount,
+		"value_dim":                      m.ValueDim,
+		"node_started_at_unix_ms":        m.NodeStartedAtUnixMs,
+		"node_completed_at_unix_ms":      m.NodeCompletedAtUnixMs,
+		"compute_time_ms":                m.ComputeTimeMs,
+		"compute_time_us":                m.ComputeTimeUs,
+		"simulated_delay_ms":             m.SimulatedDelayMs,
+		"total_node_wall_time_ms":        m.TotalNodeWallTimeMs,
+		"total_node_wall_time_us":        m.TotalNodeWallTimeUs,
+		"summary_payload_bytes_estimate": m.SummaryPayloadBytesEstimate,
+		"output_bytes_estimate":          m.OutputBytesEstimate,
+		"receipt_metadata_json_bytes":    m.ReceiptMetadataJSONBytes,
+		"receipt_envelope_json_bytes":    m.ReceiptEnvelopeJSONBytes,
+		"proof_status":                   m.ProofStatus,
 	}
 }
 
@@ -174,11 +209,100 @@ func validateBenchmarkReceiptMetadata(spec BenchmarkSpec, metadata BenchmarkRece
 	if metadata.ComputeTimeMs < 0 {
 		errs = append(errs, fmt.Errorf("%w: receipt compute_time_ms must be non-negative", ErrInvalidBenchmarkSpec))
 	}
+	if metadata.ComputeTimeUs < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt compute_time_us must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.SimulatedDelayMs < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt simulated_delay_ms must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.TotalNodeWallTimeMs < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt total_node_wall_time_ms must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.TotalNodeWallTimeUs < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt total_node_wall_time_us must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.NodeStartedAtUnixMs > 0 && metadata.NodeCompletedAtUnixMs > 0 && metadata.NodeCompletedAtUnixMs < metadata.NodeStartedAtUnixMs {
+		errs = append(errs, fmt.Errorf("%w: receipt node_completed_at_unix_ms must be at or after node_started_at_unix_ms", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.SummaryPayloadBytesEstimate <= 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt summary_payload_bytes_estimate must be positive", ErrInvalidBenchmarkSpec))
+	}
 	if metadata.OutputBytesEstimate <= 0 {
 		errs = append(errs, fmt.Errorf("%w: receipt output_bytes_estimate must be positive", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.ReceiptMetadataJSONBytes < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt receipt_metadata_json_bytes must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.ReceiptEnvelopeJSONBytes < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt receipt_envelope_json_bytes must be non-negative", ErrInvalidBenchmarkSpec))
 	}
 	if strings.TrimSpace(metadata.ProofStatus) != "synthetic_measured" {
 		errs = append(errs, fmt.Errorf("%w: receipt proof_status must be synthetic_measured", ErrInvalidBenchmarkSpec))
 	}
 	return errors.Join(errs...)
+}
+
+type benchmarkReceiptHashMetadata struct {
+	RequestID                   string    `json:"request_id"`
+	ShardID                     string    `json:"shard_id"`
+	LocalMax                    float64   `json:"local_max"`
+	ExpSum                      float64   `json:"exp_sum"`
+	WeightedValue               []float64 `json:"weighted_value"`
+	TokenCount                  int       `json:"token_count"`
+	ValueDim                    int       `json:"value_dim"`
+	SummaryPayloadBytesEstimate int64     `json:"summary_payload_bytes_estimate"`
+	OutputBytesEstimate         int64     `json:"output_bytes_estimate"`
+	ProofStatus                 string    `json:"proof_status"`
+}
+
+func benchmarkReceiptHashMetadataFromMetadata(metadata BenchmarkReceiptMetadata) benchmarkReceiptHashMetadata {
+	return benchmarkReceiptHashMetadata{
+		RequestID:                   metadata.RequestID,
+		ShardID:                     metadata.ShardID,
+		LocalMax:                    metadata.LocalMax,
+		ExpSum:                      metadata.ExpSum,
+		WeightedValue:               append([]float64(nil), metadata.WeightedValue...),
+		TokenCount:                  metadata.TokenCount,
+		ValueDim:                    metadata.ValueDim,
+		SummaryPayloadBytesEstimate: metadata.SummaryPayloadBytesEstimate,
+		OutputBytesEstimate:         metadata.OutputBytesEstimate,
+		ProofStatus:                 metadata.ProofStatus,
+	}
+}
+
+type benchmarkReceiptJSONEnvelope struct {
+	JobID         string         `json:"job_id"`
+	ResultHashHex string         `json:"result_hash_hex"`
+	MeteringUnits uint64         `json:"metering_units"`
+	Metadata      map[string]any `json:"metadata"`
+}
+
+func populateBenchmarkReceiptJSONByteEstimates(metadata *BenchmarkReceiptMetadata, jobID string, resultHashHex string, meteringUnits uint64) error {
+	for i := 0; i < 8; i++ {
+		metadataMap := metadata.Map()
+		metadataEncoded, err := json.Marshal(metadataMap)
+		if err != nil {
+			return err
+		}
+		envelopeEncoded, err := json.Marshal(benchmarkReceiptJSONEnvelope{
+			JobID:         jobID,
+			ResultHashHex: resultHashHex,
+			MeteringUnits: meteringUnits,
+			Metadata: map[string]any{
+				BenchmarkTask: metadataMap,
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		nextMetadataBytes := int64(len(metadataEncoded))
+		nextEnvelopeBytes := int64(len(envelopeEncoded))
+		if metadata.ReceiptMetadataJSONBytes == nextMetadataBytes && metadata.ReceiptEnvelopeJSONBytes == nextEnvelopeBytes {
+			return nil
+		}
+		metadata.ReceiptMetadataJSONBytes = nextMetadataBytes
+		metadata.ReceiptEnvelopeJSONBytes = nextEnvelopeBytes
+	}
+	return nil
 }

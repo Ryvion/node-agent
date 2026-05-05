@@ -18,13 +18,20 @@ type SyntheticAttentionRequest struct {
 }
 
 type SyntheticAttentionResponse struct {
-	RequestID           string                  `json:"request_id"`
-	JobID               string                  `json:"job_id"`
-	ShardID             string                  `json:"shard_id"`
-	Summary             PartialAttentionSummary `json:"summary"`
-	ComputeTimeMs       int64                   `json:"compute_time_ms"`
-	OutputBytesEstimate int64                   `json:"output_bytes_estimate"`
-	CreatedAtUnixMs     int64                   `json:"created_at_unix_ms"`
+	RequestID                   string                  `json:"request_id"`
+	JobID                       string                  `json:"job_id"`
+	ShardID                     string                  `json:"shard_id"`
+	Summary                     PartialAttentionSummary `json:"summary"`
+	NodeStartedAtUnixMs         int64                   `json:"node_started_at_unix_ms"`
+	NodeCompletedAtUnixMs       int64                   `json:"node_completed_at_unix_ms"`
+	ComputeTimeMs               int64                   `json:"compute_time_ms"`
+	ComputeTimeUs               int64                   `json:"compute_time_us"`
+	SimulatedDelayMs            int64                   `json:"simulated_delay_ms"`
+	TotalNodeWallTimeMs         int64                   `json:"total_node_wall_time_ms"`
+	TotalNodeWallTimeUs         int64                   `json:"total_node_wall_time_us"`
+	SummaryPayloadBytesEstimate int64                   `json:"summary_payload_bytes_estimate"`
+	OutputBytesEstimate         int64                   `json:"output_bytes_estimate"`
+	CreatedAtUnixMs             int64                   `json:"created_at_unix_ms"`
 }
 
 type PartialAttentionSummary struct {

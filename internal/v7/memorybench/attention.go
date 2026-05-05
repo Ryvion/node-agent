@@ -20,23 +20,30 @@ func ComputePartialAttentionSummary(request SyntheticAttentionRequest) (Syntheti
 		return SyntheticAttentionResponse{}, err
 	}
 
-	computeTimeMs := time.Since(startedAt).Milliseconds()
-	if computeTimeMs < 0 {
-		computeTimeMs = 0
-	}
+	completedAt := time.Now()
+	computeDuration := completedAt.Sub(startedAt)
+	computeTimeMs := nonNegativeDurationMilliseconds(computeDuration)
+	computeTimeUs := nonNegativeDurationMicroseconds(computeDuration)
 	createdAtUnixMs := request.CreatedAtUnixMs
 	if createdAtUnixMs <= 0 {
 		createdAtUnixMs = startedAt.UnixMilli()
 	}
+	summaryPayloadBytes := estimatePartialAttentionSummaryBytes(summary)
 
 	return SyntheticAttentionResponse{
-		RequestID:           request.RequestID,
-		JobID:               request.JobID,
-		ShardID:             request.ShardID,
-		Summary:             summary,
-		ComputeTimeMs:       computeTimeMs,
-		OutputBytesEstimate: estimatePartialAttentionSummaryBytes(summary),
-		CreatedAtUnixMs:     createdAtUnixMs,
+		RequestID:                   request.RequestID,
+		JobID:                       request.JobID,
+		ShardID:                     request.ShardID,
+		Summary:                     summary,
+		NodeStartedAtUnixMs:         startedAt.UnixMilli(),
+		NodeCompletedAtUnixMs:       completedAt.UnixMilli(),
+		ComputeTimeMs:               computeTimeMs,
+		ComputeTimeUs:               computeTimeUs,
+		TotalNodeWallTimeMs:         computeTimeMs,
+		TotalNodeWallTimeUs:         computeTimeUs,
+		SummaryPayloadBytesEstimate: summaryPayloadBytes,
+		OutputBytesEstimate:         summaryPayloadBytes,
+		CreatedAtUnixMs:             createdAtUnixMs,
 	}, nil
 }
 
@@ -166,4 +173,18 @@ func computePartialAttentionSummary(logits []float64, values [][]float64, valueD
 
 func finiteFloat64(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func nonNegativeDurationMicroseconds(duration time.Duration) int64 {
+	if duration < 0 {
+		return 0
+	}
+	return duration.Microseconds()
+}
+
+func nonNegativeDurationMilliseconds(duration time.Duration) int64 {
+	if duration < 0 {
+		return 0
+	}
+	return duration.Milliseconds()
 }

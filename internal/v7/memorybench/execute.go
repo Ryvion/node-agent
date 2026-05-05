@@ -34,6 +34,7 @@ func ExecuteBenchmarkSpec(ctx context.Context, spec BenchmarkSpec, opts ExecuteO
 	if err := ValidateBenchmarkSpec(spec); err != nil {
 		return BenchmarkReceipt{}, err
 	}
+	nodeStartedAt := time.Now()
 	if spec.SimulatedDelayMs > 0 {
 		sleep := opts.Sleep
 		if sleep == nil {
@@ -50,13 +51,26 @@ func ExecuteBenchmarkSpec(ctx context.Context, spec BenchmarkSpec, opts ExecuteO
 	request.ShardID = spec.ShardID
 	request.CreatedAtUnixMs = spec.CreatedAtUnixMs
 
+	computeStartedAt := time.Now()
 	response, err := ComputePartialAttentionSummary(request)
 	if err != nil {
 		return BenchmarkReceipt{}, err
 	}
-	response.ComputeTimeMs = spec.SimulatedDelayMs
+	computeCompletedAt := time.Now()
+	computeDuration := computeCompletedAt.Sub(computeStartedAt)
+	nodeWallDuration := computeCompletedAt.Sub(nodeStartedAt)
+	summaryPayloadBytes := estimatePartialAttentionSummaryBytes(response.Summary)
+
+	response.NodeStartedAtUnixMs = nodeStartedAt.UnixMilli()
+	response.NodeCompletedAtUnixMs = computeCompletedAt.UnixMilli()
+	response.ComputeTimeMs = nonNegativeDurationMilliseconds(computeDuration)
+	response.ComputeTimeUs = nonNegativeDurationMicroseconds(computeDuration)
+	response.SimulatedDelayMs = spec.SimulatedDelayMs
+	response.TotalNodeWallTimeMs = nonNegativeDurationMilliseconds(nodeWallDuration)
+	response.TotalNodeWallTimeUs = nonNegativeDurationMicroseconds(nodeWallDuration)
+	response.SummaryPayloadBytesEstimate = summaryPayloadBytes
 	response.CreatedAtUnixMs = spec.CreatedAtUnixMs
-	response.OutputBytesEstimate = estimatePartialAttentionSummaryBytes(response.Summary)
+	response.OutputBytesEstimate = summaryPayloadBytes
 
 	return BuildBenchmarkReceipt(spec, response)
 }
