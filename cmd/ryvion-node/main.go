@@ -941,20 +941,31 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 
 func workLoopReceiptTimingsFromMemorybench(receiptTimings v7memorybench.ReceiptBuildTimings, metadataBuild, envelopeBuild time.Duration) diagnostics.ReceiptBuildTimings {
 	metadataBuildExtraUs := durationMicrosecondsForWorkLoop(metadataBuild)
-	metadataBuildUs := receiptTimings.MetadataBuildUs + metadataBuildExtraUs
+	metadataTotalUs := receiptTimings.MetadataTotalUs
+	if metadataTotalUs == 0 {
+		metadataTotalUs = receiptTimings.MetadataBuildUs
+	}
+	metadataTotalUs += metadataBuildExtraUs
+	metadataGapUs := receiptTimings.MetadataGapUs + metadataBuildExtraUs
 	envelopeBuildUs := durationMicrosecondsForWorkLoop(envelopeBuild)
 	totalBuildUs := receiptTimings.TotalBuildUs + metadataBuildExtraUs + envelopeBuildUs
-	minTotalUs := metadataBuildUs + receiptTimings.HashUs + receiptTimings.JSONMeasureUs + envelopeBuildUs
+	minTotalUs := metadataTotalUs + receiptTimings.HashUs + receiptTimings.JSONMeasureUs + envelopeBuildUs
 	if totalBuildUs < minTotalUs {
 		totalBuildUs = minTotalUs
 	}
-	return diagnostics.ReceiptBuildTimingsFromMicroseconds(
-		metadataBuildUs,
-		receiptTimings.HashUs,
-		receiptTimings.JSONMeasureUs,
-		envelopeBuildUs,
-		totalBuildUs,
-	)
+	return diagnostics.ReceiptBuildTimings{
+		MetadataBuildUs:     metadataTotalUs,
+		MetadataStructUs:    receiptTimings.MetadataStructUs,
+		WeightedValueCopyUs: receiptTimings.WeightedValueCopyUs,
+		MetadataDefaultsUs:  receiptTimings.MetadataDefaultsUs,
+		MetadataValidateUs:  receiptTimings.MetadataValidateUs,
+		MetadataGapUs:       metadataGapUs,
+		MetadataTotalUs:     metadataTotalUs,
+		HashUs:              receiptTimings.HashUs,
+		JSONMeasureUs:       receiptTimings.JSONMeasureUs,
+		EnvelopeBuildUs:     envelopeBuildUs,
+		TotalBuildUs:        totalBuildUs,
+	}
 }
 
 func durationMicrosecondsForWorkLoop(duration time.Duration) int64 {

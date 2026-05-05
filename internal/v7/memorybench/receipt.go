@@ -45,16 +45,22 @@ type BenchmarkReceiptMetadata struct {
 }
 
 type ReceiptBuildTimings struct {
-	MetadataBuildMs int64
-	HashMs          int64
-	JSONMeasureMs   int64
-	EnvelopeBuildMs int64
-	TotalBuildMs    int64
-	MetadataBuildUs int64
-	HashUs          int64
-	JSONMeasureUs   int64
-	EnvelopeBuildUs int64
-	TotalBuildUs    int64
+	MetadataBuildMs     int64
+	HashMs              int64
+	JSONMeasureMs       int64
+	EnvelopeBuildMs     int64
+	TotalBuildMs        int64
+	MetadataBuildUs     int64
+	MetadataStructUs    int64
+	WeightedValueCopyUs int64
+	MetadataDefaultsUs  int64
+	MetadataValidateUs  int64
+	MetadataGapUs       int64
+	MetadataTotalUs     int64
+	HashUs              int64
+	JSONMeasureUs       int64
+	EnvelopeBuildUs     int64
+	TotalBuildUs        int64
 }
 
 func BuildBenchmarkReceipt(spec BenchmarkSpec, response SyntheticAttentionResponse) (BenchmarkReceipt, error) {
@@ -74,12 +80,12 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 	}
 
 	metadataStarted := time.Now()
+	metadataStructStarted := time.Now()
 	metadata := BenchmarkReceiptMetadata{
 		RequestID:                   response.RequestID,
 		ShardID:                     response.ShardID,
 		LocalMax:                    response.Summary.LocalMax,
 		ExpSum:                      response.Summary.ExpSum,
-		WeightedValue:               append([]float64(nil), response.Summary.WeightedValue...),
 		TokenCount:                  response.Summary.TokenCount,
 		ValueDim:                    response.Summary.ValueDim,
 		NodeStartedAtUnixMs:         response.NodeStartedAtUnixMs,
@@ -98,6 +104,13 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 		ComputeNumGCDelta:           response.ComputeNumGCDelta,
 		ComputeGCPauseTotalUsDelta:  response.ComputeGCPauseTotalUsDelta,
 	}
+	timings.MetadataStructUs = receiptBuildDurationMicroseconds(time.Since(metadataStructStarted))
+
+	weightedValueCopyStarted := time.Now()
+	metadata.WeightedValue = append([]float64(nil), response.Summary.WeightedValue...)
+	timings.WeightedValueCopyUs = receiptBuildDurationMicroseconds(time.Since(weightedValueCopyStarted))
+
+	metadataDefaultsStarted := time.Now()
 	if metadata.SummaryPayloadBytesEstimate <= 0 {
 		metadata.SummaryPayloadBytesEstimate = estimatePartialAttentionSummaryBytes(response.Summary)
 	}
@@ -110,11 +123,15 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 	if metadata.ShardID == "" {
 		metadata.ShardID = spec.ShardID
 	}
-	if err := validateBenchmarkReceiptMetadata(spec, metadata); err != nil {
-		timings.MetadataBuildMs, timings.MetadataBuildUs = receiptBuildDurationFields(time.Since(metadataStarted))
-		return BenchmarkReceipt{}, timings, err
+	timings.MetadataDefaultsUs = receiptBuildDurationMicroseconds(time.Since(metadataDefaultsStarted))
+
+	metadataValidateStarted := time.Now()
+	validateErr := validateBenchmarkReceiptMetadata(spec, metadata)
+	timings.MetadataValidateUs = receiptBuildDurationMicroseconds(time.Since(metadataValidateStarted))
+	finalizeMetadataReceiptBuildTimings(metadataStarted, &timings)
+	if validateErr != nil {
+		return BenchmarkReceipt{}, timings, validateErr
 	}
-	timings.MetadataBuildMs, timings.MetadataBuildUs = receiptBuildDurationFields(time.Since(metadataStarted))
 
 	hashStarted := time.Now()
 	hashHex, err := HashBenchmarkReceiptMetadata(spec.JobID, metadata)
@@ -377,4 +394,23 @@ func receiptBuildDurationFields(duration time.Duration) (int64, int64) {
 		return 0, 0
 	}
 	return duration.Milliseconds(), duration.Microseconds()
+}
+
+func receiptBuildDurationMicroseconds(duration time.Duration) int64 {
+	_, us := receiptBuildDurationFields(duration)
+	return us
+}
+
+func finalizeMetadataReceiptBuildTimings(started time.Time, timings *ReceiptBuildTimings) {
+	if timings == nil {
+		return
+	}
+	timings.MetadataBuildMs, timings.MetadataBuildUs = receiptBuildDurationFields(time.Since(started))
+	timings.MetadataTotalUs = timings.MetadataBuildUs
+	knownUs := timings.MetadataStructUs + timings.WeightedValueCopyUs + timings.MetadataDefaultsUs + timings.MetadataValidateUs
+	if timings.MetadataTotalUs > knownUs {
+		timings.MetadataGapUs = timings.MetadataTotalUs - knownUs
+	} else {
+		timings.MetadataGapUs = 0
+	}
 }

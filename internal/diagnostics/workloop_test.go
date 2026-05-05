@@ -53,6 +53,14 @@ func TestWorkLoopDiagnosticsJSONShape(t *testing.T) {
 	recorder := NewWorkLoopDiagnostics()
 	recorder.RecordPollStart()
 	recorder.RecordPollEnd(nil)
+	recorder.RecordReceiptBuildTimings(ReceiptBuildTimings{
+		MetadataStructUs:    1,
+		WeightedValueCopyUs: 1,
+		MetadataDefaultsUs:  1,
+		MetadataValidateUs:  1,
+		MetadataTotalUs:     4,
+		TotalBuildUs:        4,
+	})
 
 	encoded, err := json.Marshal(recorder.Snapshot())
 	if err != nil {
@@ -64,6 +72,12 @@ func TestWorkLoopDiagnosticsJSONShape(t *testing.T) {
 		"last_poll_cycle_duration_ms",
 		"last_work_spec_task",
 		"last_receipt_total_build_ms",
+		"last_receipt_metadata_struct_us",
+		"last_receipt_weighted_value_copy_us",
+		"last_receipt_metadata_defaults_us",
+		"last_receipt_metadata_validate_us",
+		"last_receipt_metadata_gap_us",
+		"last_receipt_metadata_total_us",
 		"last_receipt_hash_us",
 		"last_receipt_submit_duration_ms",
 		"last_receipt_submit_duration_us",
@@ -128,7 +142,18 @@ func TestWorkLoopDiagnosticsPollTimestampOrdering(t *testing.T) {
 func TestWorkLoopDiagnosticsRecordsReceiptBuildTimings(t *testing.T) {
 	recorder := NewWorkLoopDiagnostics()
 
-	recorder.RecordReceiptBuildTimings(ReceiptBuildTimingsFromMicroseconds(1_250, 2_500, 3_750, 4_000, 11_500))
+	recorder.RecordReceiptBuildTimings(ReceiptBuildTimings{
+		MetadataStructUs:    100,
+		WeightedValueCopyUs: 200,
+		MetadataDefaultsUs:  300,
+		MetadataValidateUs:  400,
+		MetadataGapUs:       250,
+		MetadataTotalUs:     1_250,
+		HashUs:              2_500,
+		JSONMeasureUs:       3_750,
+		EnvelopeBuildUs:     4_000,
+		TotalBuildUs:        11_500,
+	})
 
 	snapshot := recorder.Snapshot()
 	if snapshot.LastReceiptBuildMs != 11 || snapshot.LastReceiptTotalBuildMs != 11 {
@@ -140,6 +165,12 @@ func TestWorkLoopDiagnosticsRecordsReceiptBuildTimings(t *testing.T) {
 	if snapshot.LastReceiptMetadataBuildUs != 1_250 || snapshot.LastReceiptHashUs != 2_500 || snapshot.LastReceiptJSONMeasureUs != 3_750 || snapshot.LastReceiptEnvelopeBuildUs != 4_000 || snapshot.LastReceiptTotalBuildUs != 11_500 {
 		t.Fatalf("unexpected receipt split us timings: %+v", snapshot)
 	}
+	if snapshot.LastReceiptMetadataStructUs != 100 || snapshot.LastReceiptWeightedValueCopyUs != 200 || snapshot.LastReceiptMetadataDefaultsUs != 300 || snapshot.LastReceiptMetadataValidateUs != 400 || snapshot.LastReceiptMetadataGapUs != 250 || snapshot.LastReceiptMetadataTotalUs != 1_250 {
+		t.Fatalf("unexpected receipt metadata substep timings: %+v", snapshot)
+	}
+	if snapshot.LastReceiptMetadataBuildUs != snapshot.LastReceiptMetadataTotalUs {
+		t.Fatalf("metadata build/total aliases = %d/%d, want equal", snapshot.LastReceiptMetadataBuildUs, snapshot.LastReceiptMetadataTotalUs)
+	}
 
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
@@ -148,6 +179,12 @@ func TestWorkLoopDiagnosticsRecordsReceiptBuildTimings(t *testing.T) {
 	text := string(encoded)
 	for _, key := range []string{
 		"last_receipt_metadata_build_ms",
+		"last_receipt_metadata_struct_us",
+		"last_receipt_weighted_value_copy_us",
+		"last_receipt_metadata_defaults_us",
+		"last_receipt_metadata_validate_us",
+		"last_receipt_metadata_gap_us",
+		"last_receipt_metadata_total_us",
 		"last_receipt_hash_ms",
 		"last_receipt_json_measure_ms",
 		"last_receipt_envelope_build_ms",
@@ -157,10 +194,30 @@ func TestWorkLoopDiagnosticsRecordsReceiptBuildTimings(t *testing.T) {
 			t.Fatalf("snapshot JSON missing %q: %s", key, text)
 		}
 	}
-	for _, forbidden := range []string{"raw prompt", "raw output", "weighted_value"} {
+	for _, forbidden := range []string{"raw prompt", "raw output", `"weighted_value":[`} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("receipt timing diagnostics leaked forbidden material %q: %s", forbidden, text)
 		}
+	}
+}
+
+func TestWorkLoopDiagnosticsMetadataGapClampsWhenSubstepsExceedTotal(t *testing.T) {
+	recorder := NewWorkLoopDiagnostics()
+
+	recorder.RecordReceiptBuildTimings(ReceiptBuildTimings{
+		MetadataStructUs:    7,
+		WeightedValueCopyUs: 7,
+		MetadataDefaultsUs:  7,
+		MetadataValidateUs:  7,
+		MetadataTotalUs:     10,
+	})
+
+	snapshot := recorder.Snapshot()
+	if snapshot.LastReceiptMetadataGapUs != 0 {
+		t.Fatalf("metadata gap = %d us, want clamp to 0: %+v", snapshot.LastReceiptMetadataGapUs, snapshot)
+	}
+	if snapshot.LastReceiptMetadataBuildUs != 10 || snapshot.LastReceiptMetadataTotalUs != 10 {
+		t.Fatalf("metadata build/total = %d/%d us, want 10/10", snapshot.LastReceiptMetadataBuildUs, snapshot.LastReceiptMetadataTotalUs)
 	}
 }
 
@@ -173,7 +230,7 @@ func TestWorkLoopDiagnosticsDoesNotExposeRawPayloadFields(t *testing.T) {
 		t.Fatalf("json.Marshal(snapshot) error = %v", err)
 	}
 	text := string(encoded)
-	for _, forbidden := range []string{"raw prompt", "raw output", "weighted_value"} {
+	for _, forbidden := range []string{"raw prompt", "raw output", `"weighted_value":[`} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("work loop diagnostics leaked forbidden payload material %q: %s", forbidden, text)
 		}
