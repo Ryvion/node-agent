@@ -998,6 +998,7 @@ func TestProcessOptionalV7MemoryBenchmarkNormalJobDoesNotRecordStatus(t *testing
 }
 
 func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "")
 	oldStatus := v7ModelBenchmarkStatus
 	oldFactory := newV7ModelBenchmarkRunner
 	status := v7modelbench.NewLocalStatus()

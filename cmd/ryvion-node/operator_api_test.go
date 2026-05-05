@@ -139,6 +139,32 @@ func TestOperatorAPIModelBenchmarkEndpointReturnsUnavailableJSON(t *testing.T) {
 	}
 }
 
+func TestOperatorAPIStatusEndpointIncludesWorkLoop(t *testing.T) {
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	if !strings.Contains(string(respBody), `"work_loop"`) {
+		t.Fatalf("operator status response missing work_loop: %s", respBody)
+	}
+
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
+	}
+	if _, err := json.Marshal(status.WorkLoop); err != nil {
+		t.Fatalf("json.Marshal(status.WorkLoop) error = %v", err)
+	}
+}
+
 func TestStatusTokenParsing(t *testing.T) {
 	t.Parallel()
 
@@ -180,6 +206,32 @@ func postOperatorAPITestJSON(t *testing.T, port, path string, payload []byte) []
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+		}
+		return body
+	}
+	t.Fatalf("operator API did not become ready: %v", lastErr)
+	return nil
+}
+
+func getOperatorAPITestJSON(t *testing.T, port, path string) []byte {
+	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
+	url := "http://127.0.0.1:" + port + path
+	var lastErr error
+	for i := 0; i < 50; i++ {
+		resp, err := client.Get(url)
 		if err != nil {
 			lastErr = err
 			time.Sleep(20 * time.Millisecond)

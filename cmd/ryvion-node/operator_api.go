@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Ryvion/node-agent/internal/diagnostics"
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
@@ -105,6 +106,7 @@ type operatorStatusResponse struct {
 	LastPayoutAt      time.Time                         `json:"last_payout_at,omitempty"`
 	LastPayoutError   string                            `json:"last_payout_error,omitempty"`
 	V7MemoryBenchmark v7memorybench.LocalStatusSnapshot `json:"v7_memory_benchmark"`
+	WorkLoop          diagnostics.WorkLoopSnapshot      `json:"work_loop"`
 }
 
 type operatorMachine struct {
@@ -553,6 +555,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	if memoryBenchmarkStatus != nil {
 		memoryBenchmarkSnapshot = memoryBenchmarkStatus.Snapshot()
 	}
+	workLoopSnapshot := workLoopDiagnostics.Snapshot()
 
 	var currentJob *operatorJob
 	if current != nil {
@@ -643,6 +646,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		LastPayoutAt:      lastPayoutAt,
 		LastPayoutError:   lastPayoutErr,
 		V7MemoryBenchmark: memoryBenchmarkSnapshot,
+		WorkLoop:          workLoopSnapshot,
 	}
 }
 

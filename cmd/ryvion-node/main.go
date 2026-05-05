@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Ryvion/node-agent/internal/diagnostics"
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
@@ -71,6 +72,7 @@ const (
 )
 
 var (
+	workLoopDiagnostics       = diagnostics.NewWorkLoopDiagnostics()
 	v7ModelBenchmarkStatus    = v7modelbench.NewLocalStatus()
 	newV7ModelBenchmarkRunner = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
 		return v7modelbench.NativeInferenceModelBenchmarkRunner{
@@ -717,7 +719,9 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 			}
 		}
 
+		workLoopDiagnostics.RecordPollStart()
 		work, err := client.FetchWork(ctx)
+		workLoopDiagnostics.RecordPollEnd(err)
 		if err != nil {
 			slog.Warn("fetch work failed", "error", err)
 			select {
@@ -738,6 +742,11 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		if work == nil {
 			continue
 		}
+
+		decodeStarted := time.Now()
+		specTask := diagnostics.WorkSpecTaskFromJSON(work.SpecJSON)
+		workLoopDiagnostics.RecordWorkDecode(time.Since(decodeStarted))
+		workLoopDiagnostics.RecordWorkSeen(work.JobID, work.Kind, specTask)
 
 		jobActive.Store(1)
 		processWork(ctx, client, work, gpus, infMgr, runtimeMgr, gpuDetected)
@@ -821,6 +830,8 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 
 	engine := selectExecutionEngine(work)
 	slog.Info("dispatching work", "job_id", work.JobID, "executor_kind", engine.Kind(), "assurance_class", assuranceClassForAssignment(work))
+	executionStarted := time.Now()
+	workLoopDiagnostics.RecordExecutionStart(work.JobID)
 	result, runErr := engine.Execute(runCtx, work, executionContext{
 		client:         client,
 		gpus:           gpus,
@@ -828,6 +839,7 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		runtimeManager: runtimeMgr,
 		gpuDetected:    gpuDetected,
 	})
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), runErr)
 	if runErr != nil {
 		if engine.Kind() == executorKindManagedOCI && result != nil && managedOCIRuntimeUnavailableError(runErr, stringValue(result.Metadata["stderr_tail"])) {
 			reportManagedOCIRuntimeDegraded(client, infMgr, runtimeMgr)
@@ -853,12 +865,17 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		operatorRuntimeState.recordV7MemoryBenchmarkSeen(statusJobID, identity.RequestID)
 	}
 
+	executionStarted := time.Now()
+	if isBenchmark && v7memorybench.BenchmarkEnabledFromEnv(os.Getenv) {
+		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+	}
 	receipt, handled, err := v7memorybench.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
 		Getenv: os.Getenv,
 	})
 	if !handled {
 		return false, nil, nil
 	}
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
 	if err != nil && operatorRuntimeState != nil {
 		operatorRuntimeState.recordV7MemoryBenchmarkRejected(statusJobID, err)
 	}
@@ -866,6 +883,7 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		operatorRuntimeState.recordV7MemoryBenchmarkExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
 	}
 
+	receiptBuildStarted := time.Now()
 	runtimeMeta := map[string]any{}
 	if runtimeMgr != nil {
 		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
@@ -896,6 +914,7 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		ExitCode:      exitCode,
 		Metadata:      metadata,
 	}
+	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
 	if submitErr := submitReceiptWithRetry(ctx, client, hubReceipt); submitErr != nil {
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.recordV7MemoryBenchmarkReceiptFailed(hubReceipt.JobID, submitErr)
@@ -927,6 +946,10 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 	}
 
 	runner := newV7ModelBenchmarkRunner(infMgr, gpuDetected)
+	executionStarted := time.Now()
+	if isBenchmark && v7modelbench.ModelBenchmarkEnabledFromEnv(os.Getenv) {
+		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+	}
 	receipt, handled, err := v7modelbench.ExecuteModelBenchmarkAssignment(ctx, work.SpecJSON, runner, os.Getenv)
 	if !handled {
 		receipt, handled, err = v7modelbench.ExecuteModelBenchmarkSeriesAssignment(ctx, work.SpecJSON, runner, os.Getenv)
@@ -934,10 +957,12 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 	if !handled {
 		return false, nil, nil
 	}
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
 	if err != nil && v7ModelBenchmarkStatus != nil {
 		v7ModelBenchmarkStatus.RecordError(err)
 	}
 
+	receiptBuildStarted := time.Now()
 	runtimeMeta := map[string]any{}
 	if runtimeMgr != nil {
 		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
@@ -979,11 +1004,14 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 		ExitCode:      exitCode,
 		Metadata:      metadata,
 	}
+	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
 	if err == nil && v7ModelBenchmarkStatus != nil {
 		v7ModelBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
 	}
 	if client == nil {
 		submitErr := fmt.Errorf("hub client unavailable")
+		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
 		if v7ModelBenchmarkStatus != nil {
 			v7ModelBenchmarkStatus.RecordReceiptFailed(hubReceipt.JobID, submitErr)
 		}
@@ -992,7 +1020,11 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 		}
 		return true, snapshot, submitErr
 	}
-	if submitErr := client.SubmitReceipt(ctx, hubReceipt); submitErr != nil {
+	submitStarted := time.Now()
+	workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+	submitErr := client.SubmitReceipt(ctx, hubReceipt)
+	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), submitErr)
+	if submitErr != nil {
 		if v7ModelBenchmarkStatus != nil {
 			v7ModelBenchmarkStatus.RecordReceiptFailed(hubReceipt.JobID, submitErr)
 		}
@@ -1055,13 +1087,17 @@ func submitReceiptWithRetry(ctx context.Context, client *hub.Client, receipt hub
 	const maxAttempts = 5
 	delay := 2 * time.Second
 	var lastErr error
+	submitStarted := time.Now()
 	for i := 0; i < maxAttempts; i++ {
+		workLoopDiagnostics.RecordReceiptSubmitStart(receipt.JobID, i+1)
 		if err := client.SubmitReceipt(ctx, receipt); err != nil {
 			lastErr = err
 			slog.Warn("receipt submission attempt failed", "job_id", receipt.JobID, "attempt", i+1, "error", err)
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("context cancelled during receipt retry: %w", lastErr)
+				finalErr := fmt.Errorf("context cancelled during receipt retry: %w", lastErr)
+				workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), finalErr)
+				return finalErr
 			case <-time.After(delay):
 			}
 			delay = time.Duration(float64(delay) * 2)
@@ -1070,9 +1106,12 @@ func submitReceiptWithRetry(ctx context.Context, client *hub.Client, receipt hub
 			}
 			continue
 		}
+		workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), nil)
 		return nil
 	}
-	return fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
+	finalErr := fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
+	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), finalErr)
+	return finalErr
 }
 
 func prepareReceiptForSubmission(receipt hub.Receipt) hub.Receipt {
