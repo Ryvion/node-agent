@@ -37,6 +37,11 @@ type BenchmarkReceiptMetadata struct {
 	ReceiptMetadataJSONBytes    int64     `json:"receipt_metadata_json_bytes"`
 	ReceiptEnvelopeJSONBytes    int64     `json:"receipt_envelope_json_bytes"`
 	ProofStatus                 string    `json:"proof_status"`
+	ComputeAllocBytesDelta      int64     `json:"compute_alloc_bytes_delta"`
+	ComputeTotalAllocBytesDelta int64     `json:"compute_total_alloc_bytes_delta"`
+	ComputeMallocsDelta         int64     `json:"compute_mallocs_delta"`
+	ComputeNumGCDelta           int64     `json:"compute_num_gc_delta"`
+	ComputeGCPauseTotalUsDelta  int64     `json:"compute_gc_pause_total_us_delta"`
 }
 
 type ReceiptBuildTimings struct {
@@ -87,6 +92,11 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 		SummaryPayloadBytesEstimate: response.SummaryPayloadBytesEstimate,
 		OutputBytesEstimate:         response.OutputBytesEstimate,
 		ProofStatus:                 "synthetic_measured",
+		ComputeAllocBytesDelta:      response.ComputeAllocBytesDelta,
+		ComputeTotalAllocBytesDelta: response.ComputeTotalAllocBytesDelta,
+		ComputeMallocsDelta:         response.ComputeMallocsDelta,
+		ComputeNumGCDelta:           response.ComputeNumGCDelta,
+		ComputeGCPauseTotalUsDelta:  response.ComputeGCPauseTotalUsDelta,
 	}
 	if metadata.SummaryPayloadBytesEstimate <= 0 {
 		metadata.SummaryPayloadBytesEstimate = estimatePartialAttentionSummaryBytes(response.Summary)
@@ -200,25 +210,30 @@ func HashBenchmarkReceiptMetadata(jobID string, metadata BenchmarkReceiptMetadat
 
 func (m BenchmarkReceiptMetadata) Map() map[string]any {
 	return map[string]any{
-		"request_id":                     m.RequestID,
-		"shard_id":                       m.ShardID,
-		"local_max":                      m.LocalMax,
-		"exp_sum":                        m.ExpSum,
-		"weighted_value":                 append([]float64(nil), m.WeightedValue...),
-		"token_count":                    m.TokenCount,
-		"value_dim":                      m.ValueDim,
-		"node_started_at_unix_ms":        m.NodeStartedAtUnixMs,
-		"node_completed_at_unix_ms":      m.NodeCompletedAtUnixMs,
-		"compute_time_ms":                m.ComputeTimeMs,
-		"compute_time_us":                m.ComputeTimeUs,
-		"simulated_delay_ms":             m.SimulatedDelayMs,
-		"total_node_wall_time_ms":        m.TotalNodeWallTimeMs,
-		"total_node_wall_time_us":        m.TotalNodeWallTimeUs,
-		"summary_payload_bytes_estimate": m.SummaryPayloadBytesEstimate,
-		"output_bytes_estimate":          m.OutputBytesEstimate,
-		"receipt_metadata_json_bytes":    m.ReceiptMetadataJSONBytes,
-		"receipt_envelope_json_bytes":    m.ReceiptEnvelopeJSONBytes,
-		"proof_status":                   m.ProofStatus,
+		"request_id":                      m.RequestID,
+		"shard_id":                        m.ShardID,
+		"local_max":                       m.LocalMax,
+		"exp_sum":                         m.ExpSum,
+		"weighted_value":                  append([]float64(nil), m.WeightedValue...),
+		"token_count":                     m.TokenCount,
+		"value_dim":                       m.ValueDim,
+		"node_started_at_unix_ms":         m.NodeStartedAtUnixMs,
+		"node_completed_at_unix_ms":       m.NodeCompletedAtUnixMs,
+		"compute_time_ms":                 m.ComputeTimeMs,
+		"compute_time_us":                 m.ComputeTimeUs,
+		"simulated_delay_ms":              m.SimulatedDelayMs,
+		"total_node_wall_time_ms":         m.TotalNodeWallTimeMs,
+		"total_node_wall_time_us":         m.TotalNodeWallTimeUs,
+		"summary_payload_bytes_estimate":  m.SummaryPayloadBytesEstimate,
+		"output_bytes_estimate":           m.OutputBytesEstimate,
+		"receipt_metadata_json_bytes":     m.ReceiptMetadataJSONBytes,
+		"receipt_envelope_json_bytes":     m.ReceiptEnvelopeJSONBytes,
+		"proof_status":                    m.ProofStatus,
+		"compute_alloc_bytes_delta":       m.ComputeAllocBytesDelta,
+		"compute_total_alloc_bytes_delta": m.ComputeTotalAllocBytesDelta,
+		"compute_mallocs_delta":           m.ComputeMallocsDelta,
+		"compute_num_gc_delta":            m.ComputeNumGCDelta,
+		"compute_gc_pause_total_us_delta": m.ComputeGCPauseTotalUsDelta,
 	}
 }
 
@@ -273,6 +288,18 @@ func validateBenchmarkReceiptMetadata(spec BenchmarkSpec, metadata BenchmarkRece
 	}
 	if metadata.ReceiptEnvelopeJSONBytes < 0 {
 		errs = append(errs, fmt.Errorf("%w: receipt receipt_envelope_json_bytes must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.ComputeTotalAllocBytesDelta < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt compute_total_alloc_bytes_delta must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.ComputeMallocsDelta < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt compute_mallocs_delta must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.ComputeNumGCDelta < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt compute_num_gc_delta must be non-negative", ErrInvalidBenchmarkSpec))
+	}
+	if metadata.ComputeGCPauseTotalUsDelta < 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt compute_gc_pause_total_us_delta must be non-negative", ErrInvalidBenchmarkSpec))
 	}
 	if strings.TrimSpace(metadata.ProofStatus) != "synthetic_measured" {
 		errs = append(errs, fmt.Errorf("%w: receipt proof_status must be synthetic_measured", ErrInvalidBenchmarkSpec))

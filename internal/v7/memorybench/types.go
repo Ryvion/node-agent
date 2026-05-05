@@ -32,6 +32,11 @@ type SyntheticAttentionResponse struct {
 	SummaryPayloadBytesEstimate int64                   `json:"summary_payload_bytes_estimate"`
 	OutputBytesEstimate         int64                   `json:"output_bytes_estimate"`
 	CreatedAtUnixMs             int64                   `json:"created_at_unix_ms"`
+	ComputeAllocBytesDelta      int64                   `json:"compute_alloc_bytes_delta"`
+	ComputeTotalAllocBytesDelta int64                   `json:"compute_total_alloc_bytes_delta"`
+	ComputeMallocsDelta         int64                   `json:"compute_mallocs_delta"`
+	ComputeNumGCDelta           int64                   `json:"compute_num_gc_delta"`
+	ComputeGCPauseTotalUsDelta  int64                   `json:"compute_gc_pause_total_us_delta"`
 }
 
 type PartialAttentionSummary struct {

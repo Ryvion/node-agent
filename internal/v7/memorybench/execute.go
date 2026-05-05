@@ -55,14 +55,8 @@ func ExecuteBenchmarkSpecWithReceiptTimings(ctx context.Context, spec BenchmarkS
 		}
 	}
 
-	request := GenerateSyntheticAttentionRequest(spec.Seed, spec.ShardID, spec.TokenCount, spec.ValueDim)
-	request.RequestID = spec.RequestID
-	request.JobID = spec.JobID
-	request.ShardID = spec.ShardID
-	request.CreatedAtUnixMs = spec.CreatedAtUnixMs
-
 	computeStartedAt := time.Now()
-	response, err := ComputePartialAttentionSummary(request)
+	response, err := ComputeSyntheticPartialAttentionStreaming(spec)
 	if err != nil {
 		return BenchmarkReceipt{}, ReceiptBuildTimings{}, err
 	}
