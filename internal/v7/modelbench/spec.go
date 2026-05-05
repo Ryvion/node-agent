@@ -11,6 +11,7 @@ type ModelBenchmarkSpec struct {
 	RequestID       string  `json:"request_id"`
 	JobID           string  `json:"job_id"`
 	ModelID         string  `json:"model_id"`
+	PromptProfileID string  `json:"prompt_profile_id,omitempty"`
 	PromptLabel     string  `json:"prompt_label,omitempty"`
 	PromptHash      string  `json:"prompt_hash"`
 	MaxTokens       int     `json:"max_tokens"`
@@ -34,7 +35,11 @@ func normalizeModelBenchmarkSpec(spec ModelBenchmarkSpec) ModelBenchmarkSpec {
 	spec.RequestID = strings.TrimSpace(spec.RequestID)
 	spec.JobID = strings.TrimSpace(spec.JobID)
 	spec.ModelID = strings.TrimSpace(spec.ModelID)
+	spec.PromptProfileID = strings.TrimSpace(spec.PromptProfileID)
 	spec.PromptLabel = strings.TrimSpace(spec.PromptLabel)
 	spec.PromptHash = strings.TrimSpace(spec.PromptHash)
+	if !benchmarkPromptBindingValid(spec) {
+		spec.PromptHash = ""
+	}
 	return spec
 }

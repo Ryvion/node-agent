@@ -1,6 +1,7 @@
 package modelbench
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
@@ -64,6 +65,111 @@ func TestValidateModelBenchmarkSpecMaxTokensCapEnforced(t *testing.T) {
 	}
 }
 
+func TestValidateModelBenchmarkSpecLongDecodeProfilePasses(t *testing.T) {
+	profile, err := GetBenchmarkPromptProfile(string(BenchmarkPromptProfileLongDecodeProbe))
+	if err != nil {
+		t.Fatalf("GetBenchmarkPromptProfile() error = %v", err)
+	}
+	spec := validModelBenchmarkSpec()
+	spec.PromptProfileID = string(profile.ID)
+	spec.PromptLabel = profile.Label
+	spec.PromptHash = BenchmarkPromptHash(profile)
+	spec.MaxTokens = 128
+
+	if err := ValidateModelBenchmarkSpec(spec); err != nil {
+		t.Fatalf("ValidateModelBenchmarkSpec() error = %v", err)
+	}
+}
+
+func TestValidateModelBenchmarkSpecRejectsUnknownPromptProfile(t *testing.T) {
+	spec := validModelBenchmarkSpec()
+	spec.PromptProfileID = "missing_probe"
+
+	err := ValidateModelBenchmarkSpec(spec)
+	if !errors.Is(err, ErrInvalidModelBenchmarkSpec) || !strings.Contains(err.Error(), "prompt_hash") {
+		t.Fatalf("ValidateModelBenchmarkSpec() error = %v, want prompt profile rejection", err)
+	}
+	if _, resolveErr := ResolveBenchmarkPromptForSpec(spec); !errors.Is(resolveErr, ErrUnknownBenchmarkPromptProfile) {
+		t.Fatalf("ResolveBenchmarkPromptForSpec() error = %v, want unknown profile", resolveErr)
+	}
+}
+
+func TestValidateModelBenchmarkSpecRejectsPromptHashMismatch(t *testing.T) {
+	longProfile, err := GetBenchmarkPromptProfile(string(BenchmarkPromptProfileLongDecodeProbe))
+	if err != nil {
+		t.Fatalf("GetBenchmarkPromptProfile(long) error = %v", err)
+	}
+	shortProfile, err := GetBenchmarkPromptProfile(string(BenchmarkPromptProfileShortTTFTProbe))
+	if err != nil {
+		t.Fatalf("GetBenchmarkPromptProfile(short) error = %v", err)
+	}
+	spec := validModelBenchmarkSpec()
+	spec.PromptProfileID = string(longProfile.ID)
+	spec.PromptLabel = longProfile.Label
+	spec.PromptHash = BenchmarkPromptHash(shortProfile)
+
+	err = ValidateModelBenchmarkSpec(spec)
+	if !errors.Is(err, ErrInvalidModelBenchmarkSpec) || !strings.Contains(err.Error(), "prompt_hash") {
+		t.Fatalf("ValidateModelBenchmarkSpec() error = %v, want prompt_hash mismatch", err)
+	}
+}
+
+func TestModelBenchmarkSpecJSONDoesNotExposeRawPromptText(t *testing.T) {
+	profile, err := GetBenchmarkPromptProfile(string(BenchmarkPromptProfileLongDecodeProbe))
+	if err != nil {
+		t.Fatalf("GetBenchmarkPromptProfile() error = %v", err)
+	}
+	spec := validModelBenchmarkSpec()
+	spec.PromptProfileID = string(profile.ID)
+	spec.PromptLabel = profile.Label
+	spec.PromptHash = BenchmarkPromptHash(profile)
+
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	text := string(encoded)
+	for _, forbidden := range []string{
+		"Continue the numbered sequence",
+		"Do not stop early",
+		"prompt_text",
+		"prompt_content",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("spec JSON leaked raw prompt text %q: %s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, `"prompt_profile_id":"long_decode_probe"`) {
+		t.Fatalf("spec JSON missing prompt_profile_id: %s", text)
+	}
+}
+
+func TestResolveBenchmarkPromptForSpecDefaultsAndLegacyPrompt(t *testing.T) {
+	defaultProfile, err := ResolveBenchmarkPromptForSpec(ModelBenchmarkSpec{})
+	if err != nil {
+		t.Fatalf("ResolveBenchmarkPromptForSpec(empty) error = %v", err)
+	}
+	if defaultProfile.ID != BenchmarkPromptProfileShortTTFTProbe {
+		t.Fatalf("default profile = %q, want %q", defaultProfile.ID, BenchmarkPromptProfileShortTTFTProbe)
+	}
+
+	legacyPrompt := DefaultModelBenchmarkPrompt()
+	spec := validModelBenchmarkSpec()
+	spec.PromptProfileID = ""
+	spec.PromptLabel = legacyPrompt.Label
+	spec.PromptHash = HashBenchmarkPrompt(legacyPrompt)
+	if err := ValidateModelBenchmarkSpec(spec); err != nil {
+		t.Fatalf("ValidateModelBenchmarkSpec(legacy default) error = %v", err)
+	}
+	resolved, err := ResolveBenchmarkPromptForSpec(spec)
+	if err != nil {
+		t.Fatalf("ResolveBenchmarkPromptForSpec(legacy default) error = %v", err)
+	}
+	if resolved.Label != legacyPrompt.Label {
+		t.Fatalf("resolved legacy label = %q, want %q", resolved.Label, legacyPrompt.Label)
+	}
+}
+
 func TestValidateModelBenchmarkSpecRejectsNonFiniteTemperature(t *testing.T) {
 	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		spec := validModelBenchmarkSpec()
@@ -98,13 +204,18 @@ func TestHashBenchmarkPromptDeterministic(t *testing.T) {
 }
 
 func validModelBenchmarkSpec() ModelBenchmarkSpec {
+	profile, err := GetBenchmarkPromptProfile(string(BenchmarkPromptProfileShortTTFTProbe))
+	if err != nil {
+		panic(err)
+	}
 	return ModelBenchmarkSpec{
 		Task:            ModelBenchmarkTask,
 		RequestID:       "request-modelbench-1",
 		JobID:           "job-modelbench-1",
 		ModelID:         "llama-local-7b-q4",
-		PromptLabel:     "fixed-readiness-smoke",
-		PromptHash:      modelBenchHash("Return one short readiness token."),
+		PromptProfileID: string(profile.ID),
+		PromptLabel:     profile.Label,
+		PromptHash:      BenchmarkPromptHash(profile),
 		MaxTokens:       64,
 		Temperature:     0.2,
 		TimeoutMs:       30_000,
