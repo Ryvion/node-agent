@@ -555,7 +555,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	if memoryBenchmarkStatus != nil {
 		memoryBenchmarkSnapshot = memoryBenchmarkStatus.Snapshot()
 	}
-	workLoopSnapshot := workLoopDiagnostics.Snapshot()
+	workLoopSnapshot := sanitizeOperatorWorkLoopSnapshot(workLoopDiagnostics.Snapshot())
 
 	var currentJob *operatorJob
 	if current != nil {
@@ -648,6 +648,27 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		V7MemoryBenchmark: memoryBenchmarkSnapshot,
 		WorkLoop:          workLoopSnapshot,
 	}
+}
+
+func sanitizeOperatorWorkLoopSnapshot(snapshot diagnostics.WorkLoopSnapshot) diagnostics.WorkLoopSnapshot {
+	if len(snapshot.RecentEvents) == 0 {
+		snapshot.RecentEvents = []diagnostics.WorkLoopEvent{}
+		return snapshot
+	}
+	events := make([]diagnostics.WorkLoopEvent, len(snapshot.RecentEvents))
+	for i, event := range snapshot.RecentEvents {
+		events[i] = event
+		context := make(map[string]string, len(event.SafeContext))
+		for key, value := range event.SafeContext {
+			if key == "weighted_value_len" {
+				continue
+			}
+			context[key] = value
+		}
+		events[i].SafeContext = context
+	}
+	snapshot.RecentEvents = events
+	return snapshot
 }
 
 func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnosticsResponse {

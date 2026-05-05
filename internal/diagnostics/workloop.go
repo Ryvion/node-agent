@@ -10,55 +10,68 @@ import (
 )
 
 const (
-	maxWorkLoopIDLen    = 256
-	maxWorkLoopKindLen  = 128
-	maxWorkLoopTaskLen  = 128
-	maxWorkLoopErrorLen = 512
+	defaultWorkLoopEventLimit  = 50
+	maxWorkLoopIDLen           = 256
+	maxWorkLoopKindLen         = 128
+	maxWorkLoopTaskLen         = 128
+	maxWorkLoopErrorLen        = 512
+	maxWorkLoopEventNameLen    = 64
+	maxWorkLoopContextValueLen = 128
 )
 
 type WorkLoopSnapshot struct {
-	LastPollStartedAt              string `json:"last_poll_started_at"`
-	LastPollCompletedAt            string `json:"last_poll_completed_at"`
-	LastPollDurationMs             int64  `json:"last_poll_duration_ms"`
-	LastPollCycleDurationMs        int64  `json:"last_poll_cycle_duration_ms"`
-	LastPollError                  string `json:"last_poll_error"`
-	LastWorkSeenAt                 string `json:"last_work_seen_at"`
-	LastWorkJobID                  string `json:"last_work_job_id"`
-	LastWorkKind                   string `json:"last_work_kind"`
-	LastWorkSpecTask               string `json:"last_work_spec_task"`
-	LastWorkDecodeMs               int64  `json:"last_work_decode_ms"`
-	LastExecutionStartedAt         string `json:"last_execution_started_at"`
-	LastExecutionCompletedAt       string `json:"last_execution_completed_at"`
-	LastExecutionDurationMs        int64  `json:"last_execution_duration_ms"`
-	LastExecutionDurationUs        int64  `json:"last_execution_duration_us"`
-	LastReceiptBuildMs             int64  `json:"last_receipt_build_ms"`
-	LastReceiptMetadataBuildMs     int64  `json:"last_receipt_metadata_build_ms"`
-	LastReceiptHashMs              int64  `json:"last_receipt_hash_ms"`
-	LastReceiptJSONMeasureMs       int64  `json:"last_receipt_json_measure_ms"`
-	LastReceiptEnvelopeBuildMs     int64  `json:"last_receipt_envelope_build_ms"`
-	LastReceiptTotalBuildMs        int64  `json:"last_receipt_total_build_ms"`
-	LastReceiptMetadataBuildUs     int64  `json:"last_receipt_metadata_build_us"`
-	LastReceiptMetadataStructUs    int64  `json:"last_receipt_metadata_struct_us"`
-	LastReceiptWeightedValueCopyUs int64  `json:"last_receipt_weighted_value_copy_us,omitempty"`
-	LastReceiptMetadataDefaultsUs  int64  `json:"last_receipt_metadata_defaults_us"`
-	LastReceiptMetadataValidateUs  int64  `json:"last_receipt_metadata_validate_us"`
-	LastReceiptMetadataGapUs       int64  `json:"last_receipt_metadata_gap_us"`
-	LastReceiptMetadataTotalUs     int64  `json:"last_receipt_metadata_total_us"`
-	LastReceiptHashUs              int64  `json:"last_receipt_hash_us"`
-	LastReceiptJSONMeasureUs       int64  `json:"last_receipt_json_measure_us"`
-	LastReceiptEnvelopeBuildUs     int64  `json:"last_receipt_envelope_build_us"`
-	LastReceiptTotalBuildUs        int64  `json:"last_receipt_total_build_us"`
-	LastReceiptSubmitStartedAt     string `json:"last_receipt_submit_started_at"`
-	LastReceiptSubmitCompletedAt   string `json:"last_receipt_submit_completed_at"`
-	LastReceiptSubmitDurationMs    int64  `json:"last_receipt_submit_duration_ms"`
-	LastReceiptSubmitDurationUs    int64  `json:"last_receipt_submit_duration_us"`
-	LastReceiptSubmitError         string `json:"last_receipt_submit_error"`
-	LastReceiptAttempts            int    `json:"last_receipt_attempts"`
-	PollCount                      uint64 `json:"poll_count"`
-	WorkSeenCount                  uint64 `json:"work_seen_count"`
-	WorkCompletedCount             uint64 `json:"work_completed_count"`
-	ReceiptSubmittedCount          uint64 `json:"receipt_submitted_count"`
-	ReceiptFailedCount             uint64 `json:"receipt_failed_count"`
+	LastPollStartedAt              string          `json:"last_poll_started_at"`
+	LastPollCompletedAt            string          `json:"last_poll_completed_at"`
+	LastPollDurationMs             int64           `json:"last_poll_duration_ms"`
+	LastPollCycleDurationMs        int64           `json:"last_poll_cycle_duration_ms"`
+	LastPollError                  string          `json:"last_poll_error"`
+	LastWorkSeenAt                 string          `json:"last_work_seen_at"`
+	LastWorkJobID                  string          `json:"last_work_job_id"`
+	LastWorkKind                   string          `json:"last_work_kind"`
+	LastWorkSpecTask               string          `json:"last_work_spec_task"`
+	LastWorkDecodeMs               int64           `json:"last_work_decode_ms"`
+	LastExecutionStartedAt         string          `json:"last_execution_started_at"`
+	LastExecutionCompletedAt       string          `json:"last_execution_completed_at"`
+	LastExecutionDurationMs        int64           `json:"last_execution_duration_ms"`
+	LastExecutionDurationUs        int64           `json:"last_execution_duration_us"`
+	LastReceiptBuildMs             int64           `json:"last_receipt_build_ms"`
+	LastReceiptMetadataBuildMs     int64           `json:"last_receipt_metadata_build_ms"`
+	LastReceiptHashMs              int64           `json:"last_receipt_hash_ms"`
+	LastReceiptJSONMeasureMs       int64           `json:"last_receipt_json_measure_ms"`
+	LastReceiptEnvelopeBuildMs     int64           `json:"last_receipt_envelope_build_ms"`
+	LastReceiptTotalBuildMs        int64           `json:"last_receipt_total_build_ms"`
+	LastReceiptMetadataBuildUs     int64           `json:"last_receipt_metadata_build_us"`
+	LastReceiptMetadataStructUs    int64           `json:"last_receipt_metadata_struct_us"`
+	LastReceiptWeightedValueCopyUs int64           `json:"last_receipt_weighted_value_copy_us,omitempty"`
+	LastReceiptMetadataDefaultsUs  int64           `json:"last_receipt_metadata_defaults_us"`
+	LastReceiptMetadataValidateUs  int64           `json:"last_receipt_metadata_validate_us"`
+	LastReceiptMetadataGapUs       int64           `json:"last_receipt_metadata_gap_us"`
+	LastReceiptMetadataTotalUs     int64           `json:"last_receipt_metadata_total_us"`
+	LastReceiptHashUs              int64           `json:"last_receipt_hash_us"`
+	LastReceiptJSONMeasureUs       int64           `json:"last_receipt_json_measure_us"`
+	LastReceiptEnvelopeBuildUs     int64           `json:"last_receipt_envelope_build_us"`
+	LastReceiptTotalBuildUs        int64           `json:"last_receipt_total_build_us"`
+	LastReceiptSubmitStartedAt     string          `json:"last_receipt_submit_started_at"`
+	LastReceiptSubmitCompletedAt   string          `json:"last_receipt_submit_completed_at"`
+	LastReceiptSubmitDurationMs    int64           `json:"last_receipt_submit_duration_ms"`
+	LastReceiptSubmitDurationUs    int64           `json:"last_receipt_submit_duration_us"`
+	LastReceiptSubmitError         string          `json:"last_receipt_submit_error"`
+	LastReceiptAttempts            int             `json:"last_receipt_attempts"`
+	PollCount                      uint64          `json:"poll_count"`
+	WorkSeenCount                  uint64          `json:"work_seen_count"`
+	WorkCompletedCount             uint64          `json:"work_completed_count"`
+	ReceiptSubmittedCount          uint64          `json:"receipt_submitted_count"`
+	ReceiptFailedCount             uint64          `json:"receipt_failed_count"`
+	RecentEvents                   []WorkLoopEvent `json:"recent_events"`
+}
+
+type WorkLoopEvent struct {
+	Name        string            `json:"name"`
+	JobID       string            `json:"job_id"`
+	Kind        string            `json:"kind"`
+	At          string            `json:"at"`
+	SincePrevUs int64             `json:"since_prev_us"`
+	SafeContext map[string]string `json:"safe_context"`
 }
 
 type WorkLoopDiagnostics struct {
@@ -70,6 +83,16 @@ type WorkLoopDiagnostics struct {
 	lastExecutionStartedAt     time.Time
 	lastReceiptSubmitStartedAt time.Time
 	lastReceiptSubmitJobID     string
+
+	eventLimit  int
+	events      []workLoopEventRecord
+	eventNext   int
+	eventCount  int
+	lastEventAt time.Time
+}
+
+type workLoopEventRecord struct {
+	event WorkLoopEvent
 }
 
 type ReceiptBuildTimings struct {
@@ -92,7 +115,17 @@ type ReceiptBuildTimings struct {
 }
 
 func NewWorkLoopDiagnostics() *WorkLoopDiagnostics {
-	return &WorkLoopDiagnostics{}
+	return newWorkLoopDiagnostics(defaultWorkLoopEventLimit)
+}
+
+func newWorkLoopDiagnostics(eventLimit int) *WorkLoopDiagnostics {
+	if eventLimit <= 0 {
+		eventLimit = defaultWorkLoopEventLimit
+	}
+	return &WorkLoopDiagnostics{
+		eventLimit: eventLimit,
+		events:     make([]workLoopEventRecord, eventLimit),
+	}
 }
 
 func (d *WorkLoopDiagnostics) RecordPollStart() {
@@ -109,6 +142,7 @@ func (d *WorkLoopDiagnostics) RecordPollStart() {
 	d.snapshot.LastPollCycleDurationMs = 0
 	d.snapshot.LastPollError = ""
 	d.snapshot.PollCount++
+	d.recordEventLocked(now, "poll_start", "", "", nil)
 }
 
 func (d *WorkLoopDiagnostics) RecordPollEnd(err error) {
@@ -126,6 +160,7 @@ func (d *WorkLoopDiagnostics) RecordPollEnd(err error) {
 	}
 	d.snapshot.LastPollCycleDurationMs = d.snapshot.LastPollDurationMs
 	d.snapshot.LastPollError = sanitizeWorkLoopError(err)
+	d.recordEventLocked(now, "poll_end", "", "", nil)
 }
 
 func (d *WorkLoopDiagnostics) RecordWorkSeen(jobID, kind, specTask string) {
@@ -136,10 +171,14 @@ func (d *WorkLoopDiagnostics) RecordWorkSeen(jobID, kind, specTask string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.snapshot.LastWorkSeenAt = formatWorkLoopTime(now)
-	d.snapshot.LastWorkJobID = cleanWorkLoopText(jobID, maxWorkLoopIDLen)
-	d.snapshot.LastWorkKind = cleanWorkLoopText(kind, maxWorkLoopKindLen)
-	d.snapshot.LastWorkSpecTask = cleanWorkLoopText(specTask, maxWorkLoopTaskLen)
+	cleanJobID := cleanWorkLoopText(jobID, maxWorkLoopIDLen)
+	cleanKind := cleanWorkLoopText(kind, maxWorkLoopKindLen)
+	cleanSpecTask := cleanWorkLoopText(specTask, maxWorkLoopTaskLen)
+	d.snapshot.LastWorkJobID = cleanJobID
+	d.snapshot.LastWorkKind = cleanKind
+	d.snapshot.LastWorkSpecTask = cleanSpecTask
 	d.snapshot.WorkSeenCount++
+	d.recordEventLocked(now, "work_seen", cleanJobID, cleanKind, workLoopSpecContext(cleanSpecTask))
 }
 
 func (d *WorkLoopDiagnostics) RecordWorkDecode(duration time.Duration) {
@@ -163,6 +202,7 @@ func (d *WorkLoopDiagnostics) RecordExecutionStart(jobID string) {
 	if cleaned := cleanWorkLoopText(jobID, maxWorkLoopIDLen); cleaned != "" {
 		d.snapshot.LastWorkJobID = cleaned
 	}
+	d.recordEventLocked(now, "execution_start", d.snapshot.LastWorkJobID, d.snapshot.LastWorkKind, workLoopSpecContext(d.snapshot.LastWorkSpecTask))
 }
 
 func (d *WorkLoopDiagnostics) RecordExecutionEnd(duration time.Duration, err error) {
@@ -180,6 +220,7 @@ func (d *WorkLoopDiagnostics) RecordExecutionEnd(duration time.Duration, err err
 	d.snapshot.LastExecutionDurationMs = durationMilliseconds(duration)
 	d.snapshot.LastExecutionDurationUs = durationMicroseconds(duration)
 	d.snapshot.WorkCompletedCount++
+	d.recordEventLocked(now, "execution_end", d.snapshot.LastWorkJobID, d.snapshot.LastWorkKind, workLoopSpecContext(d.snapshot.LastWorkSpecTask))
 }
 
 func (d *WorkLoopDiagnostics) RecordReceiptBuild(duration time.Duration) {
@@ -241,6 +282,11 @@ func (d *WorkLoopDiagnostics) RecordReceiptSubmitStart(jobID string, attempt int
 		d.snapshot.LastReceiptSubmitError = ""
 	}
 	d.snapshot.LastReceiptAttempts = attempt
+	eventJobID := cleanJobID
+	if eventJobID == "" {
+		eventJobID = d.snapshot.LastWorkJobID
+	}
+	d.recordEventLocked(now, "receipt_submit_start", eventJobID, d.snapshot.LastWorkKind, workLoopSpecContext(d.snapshot.LastWorkSpecTask))
 }
 
 func (d *WorkLoopDiagnostics) RecordReceiptSubmitEnd(duration time.Duration, err error) {
@@ -257,6 +303,11 @@ func (d *WorkLoopDiagnostics) RecordReceiptSubmitEnd(duration time.Duration, err
 	d.snapshot.LastReceiptSubmitDurationMs = durationMilliseconds(duration)
 	d.snapshot.LastReceiptSubmitDurationUs = durationMicroseconds(duration)
 	d.snapshot.LastReceiptSubmitError = sanitizeWorkLoopError(err)
+	eventJobID := d.lastReceiptSubmitJobID
+	if eventJobID == "" {
+		eventJobID = d.snapshot.LastWorkJobID
+	}
+	d.recordEventLocked(now, "receipt_submit_end", eventJobID, d.snapshot.LastWorkKind, workLoopSpecContext(d.snapshot.LastWorkSpecTask))
 	if err != nil {
 		d.snapshot.ReceiptFailedCount++
 		return
@@ -264,13 +315,38 @@ func (d *WorkLoopDiagnostics) RecordReceiptSubmitEnd(duration time.Duration, err
 	d.snapshot.ReceiptSubmittedCount++
 }
 
-func (d *WorkLoopDiagnostics) Snapshot() WorkLoopSnapshot {
+func (d *WorkLoopDiagnostics) RecordEvent(name, jobID, kind string, safeContext map[string]string) {
 	if d == nil {
-		return WorkLoopSnapshot{}
+		return
+	}
+	now := time.Now().UTC()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.recordEventLocked(now, name, jobID, kind, safeContext)
+}
+
+func (d *WorkLoopDiagnostics) RecordReceiptSubstepEvent(name, jobID, kind string, safeContext map[string]string) {
+	d.RecordEvent(name, jobID, kind, safeContext)
+}
+
+func (d *WorkLoopDiagnostics) EventTimeline() []WorkLoopEvent {
+	if d == nil {
+		return []WorkLoopEvent{}
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.snapshot
+	return d.eventTimelineLocked()
+}
+
+func (d *WorkLoopDiagnostics) Snapshot() WorkLoopSnapshot {
+	if d == nil {
+		return WorkLoopSnapshot{RecentEvents: []WorkLoopEvent{}}
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	snapshot := d.snapshot
+	snapshot.RecentEvents = d.eventTimelineLocked()
+	return snapshot
 }
 
 func WorkSpecTaskFromJSON(specJSON string) string {
@@ -386,6 +462,190 @@ func nonNegativeInt64(value int64) int64 {
 		return 0
 	}
 	return value
+}
+
+func (d *WorkLoopDiagnostics) recordEventLocked(now time.Time, name, jobID, kind string, safeContext map[string]string) {
+	name = cleanWorkLoopEventName(name)
+	if name == "" {
+		return
+	}
+	d.ensureEventBufferLocked()
+	event := WorkLoopEvent{
+		Name:        name,
+		JobID:       cleanWorkLoopText(jobID, maxWorkLoopIDLen),
+		Kind:        cleanWorkLoopText(kind, maxWorkLoopKindLen),
+		At:          formatWorkLoopTime(now),
+		SafeContext: sanitizeWorkLoopEventContext(safeContext),
+	}
+	if !d.lastEventAt.IsZero() {
+		event.SincePrevUs = nonNegativeInt64(now.Sub(d.lastEventAt).Microseconds())
+	}
+	d.lastEventAt = now
+	d.events[d.eventNext] = workLoopEventRecord{event: event}
+	d.eventNext = (d.eventNext + 1) % d.eventLimit
+	if d.eventCount < d.eventLimit {
+		d.eventCount++
+	}
+}
+
+func (d *WorkLoopDiagnostics) ensureEventBufferLocked() {
+	if d.eventLimit <= 0 {
+		d.eventLimit = defaultWorkLoopEventLimit
+	}
+	if len(d.events) == d.eventLimit {
+		return
+	}
+	d.events = make([]workLoopEventRecord, d.eventLimit)
+	d.eventNext = 0
+	d.eventCount = 0
+	d.lastEventAt = time.Time{}
+}
+
+func (d *WorkLoopDiagnostics) eventTimelineLocked() []WorkLoopEvent {
+	if d.eventCount == 0 {
+		return []WorkLoopEvent{}
+	}
+	out := make([]WorkLoopEvent, 0, d.eventCount)
+	start := d.eventNext - d.eventCount
+	if start < 0 {
+		start += d.eventLimit
+	}
+	for i := 0; i < d.eventCount; i++ {
+		idx := (start + i) % d.eventLimit
+		out = append(out, cloneWorkLoopEvent(d.events[idx].event))
+	}
+	out[0].SincePrevUs = 0
+	return out
+}
+
+func cloneWorkLoopEvent(event WorkLoopEvent) WorkLoopEvent {
+	event.SafeContext = cloneWorkLoopEventContext(event.SafeContext)
+	return event
+}
+
+func cloneWorkLoopEventContext(input map[string]string) map[string]string {
+	out := make(map[string]string, len(input))
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+func workLoopSpecContext(specTask string) map[string]string {
+	if strings.TrimSpace(specTask) == "" {
+		return nil
+	}
+	return map[string]string{"spec_task": specTask}
+}
+
+func cleanWorkLoopEventName(name string) string {
+	name = cleanWorkLoopText(name, maxWorkLoopEventNameLen)
+	if !isAllowedWorkLoopEventName(name) {
+		return ""
+	}
+	return name
+}
+
+func isAllowedWorkLoopEventName(name string) bool {
+	switch name {
+	case "work_seen",
+		"execution_start",
+		"execution_end",
+		"receipt_build_start",
+		"receipt_metadata_start",
+		"receipt_metadata_struct_end",
+		"receipt_weighted_copy_end",
+		"receipt_defaults_end",
+		"receipt_validate_end",
+		"receipt_metadata_end",
+		"receipt_hash_end",
+		"receipt_json_measure_end",
+		"receipt_envelope_end",
+		"receipt_build_end",
+		"receipt_submit_start",
+		"receipt_submit_end",
+		"poll_start",
+		"poll_end":
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeWorkLoopEventContext(input map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range input {
+		key = strings.TrimSpace(key)
+		if !isAllowedWorkLoopContextKey(key) {
+			continue
+		}
+		cleanValue := cleanWorkLoopContextValue(key, value)
+		if cleanValue == "" {
+			continue
+		}
+		out[key] = cleanValue
+	}
+	return out
+}
+
+func isAllowedWorkLoopContextKey(key string) bool {
+	switch key {
+	case "spec_task",
+		"token_count",
+		"value_dim",
+		"metadata_total_us",
+		"metadata_gap_us",
+		"weighted_value_len",
+		"receipt_body_bytes":
+		return true
+	default:
+		return false
+	}
+}
+
+func cleanWorkLoopContextValue(key, value string) string {
+	value = cleanWorkLoopText(value, maxWorkLoopContextValueLen)
+	if value == "" {
+		return ""
+	}
+	if key == "spec_task" {
+		if !isSafeWorkLoopLabel(value) {
+			return ""
+		}
+		return value
+	}
+	if !isWorkLoopUnsignedInteger(value) {
+		return ""
+	}
+	return value
+}
+
+func isSafeWorkLoopLabel(value string) bool {
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r == '_' || r == '-' || r == '.' || r == ':' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isWorkLoopUnsignedInteger(value string) bool {
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return value != ""
 }
 
 func cleanWorkLoopText(value string, maxLen int) string {

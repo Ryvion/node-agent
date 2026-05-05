@@ -870,13 +870,19 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		operatorRuntimeState.recordV7MemoryBenchmarkSeen(statusJobID, identity.RequestID)
 	}
 
+	benchmarkEnabled := isBenchmark && v7memorybench.BenchmarkEnabledFromEnv(os.Getenv)
 	executionStarted := time.Now()
-	if isBenchmark && v7memorybench.BenchmarkEnabledFromEnv(os.Getenv) {
+	if benchmarkEnabled {
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+	}
+	restoreReceiptRecorder := func() {}
+	if benchmarkEnabled {
+		restoreReceiptRecorder = v7memorybench.SetReceiptSubstepEventRecorder(workLoopDiagnostics)
 	}
 	receipt, receiptBuildTimings, handled, err := v7memorybench.ExecuteBenchmarkAssignmentWithReceiptTimings(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
 		Getenv: os.Getenv,
 	})
+	restoreReceiptRecorder()
 	if !handled {
 		return false, nil, nil
 	}
@@ -888,7 +894,10 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		operatorRuntimeState.recordV7MemoryBenchmarkExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
 	}
 
+	receiptContext := v7MemoryBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON)
+	workLoopDiagnostics.RecordEvent("receipt_build_start", statusJobID, work.Kind, receiptContext)
 	metadataBuildStarted := time.Now()
+	workLoopDiagnostics.RecordEvent("receipt_metadata_start", statusJobID, work.Kind, receiptContext)
 	runtimeMeta := map[string]any{}
 	if runtimeMgr != nil {
 		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
@@ -908,6 +917,8 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	exitCode, _ := extra["exit_code"].(int)
 	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
 	metadataBuildDuration := time.Since(metadataBuildStarted)
+	metadataEndTimings := workLoopReceiptTimingsFromMemorybench(receiptBuildTimings, metadataBuildDuration, 0)
+	workLoopDiagnostics.RecordEvent("receipt_metadata_end", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, metadataEndTimings))
 
 	envelopeBuildStarted := time.Now()
 	hubReceipt := hub.Receipt{
@@ -923,7 +934,11 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		Metadata:      metadata,
 	}
 	envelopeBuildDuration := time.Since(envelopeBuildStarted)
-	workLoopDiagnostics.RecordReceiptBuildTimings(workLoopReceiptTimingsFromMemorybench(receiptBuildTimings, metadataBuildDuration, envelopeBuildDuration))
+	receiptTimings := workLoopReceiptTimingsFromMemorybench(receiptBuildTimings, metadataBuildDuration, envelopeBuildDuration)
+	receiptEndContext := v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings)
+	workLoopDiagnostics.RecordEvent("receipt_envelope_end", hubReceipt.JobID, work.Kind, receiptEndContext)
+	workLoopDiagnostics.RecordReceiptBuildTimings(receiptTimings)
+	workLoopDiagnostics.RecordEvent("receipt_build_end", hubReceipt.JobID, work.Kind, receiptEndContext)
 	if submitErr := submitReceiptWithRetry(ctx, client, hubReceipt); submitErr != nil {
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.recordV7MemoryBenchmarkReceiptFailed(hubReceipt.JobID, submitErr)
@@ -973,6 +988,91 @@ func durationMicrosecondsForWorkLoop(duration time.Duration) int64 {
 		return 0
 	}
 	return duration.Microseconds()
+}
+
+func v7MemoryBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {
+	context := map[string]string{
+		"spec_task": v7memorybench.BenchmarkTask,
+	}
+	var spec struct {
+		Task       string `json:"task"`
+		TokenCount int    `json:"token_count"`
+		ValueDim   int    `json:"value_dim"`
+	}
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return context
+	}
+	if strings.TrimSpace(spec.Task) == v7memorybench.BenchmarkTask {
+		context["spec_task"] = v7memorybench.BenchmarkTask
+	}
+	if spec.TokenCount > 0 {
+		context["token_count"] = strconv.Itoa(spec.TokenCount)
+	}
+	if spec.ValueDim > 0 {
+		context["value_dim"] = strconv.Itoa(spec.ValueDim)
+	}
+	return context
+}
+
+func v7MemoryBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v7memorybench.BenchmarkReceipt, timings diagnostics.ReceiptBuildTimings) map[string]string {
+	context := v7MemoryBenchmarkWorkLoopEventContextFromSpec(specJSON)
+	putWorkLoopInt64Context(context, "metadata_total_us", timings.MetadataTotalUs)
+	putWorkLoopInt64Context(context, "metadata_gap_us", timings.MetadataGapUs)
+	if bodyBytes := v7MemoryBenchmarkReceiptBodyBytes(receipt.Metadata); bodyBytes > 0 {
+		putWorkLoopInt64Context(context, "receipt_body_bytes", bodyBytes)
+	}
+	if taskMetadata, ok := receipt.Metadata[v7memorybench.BenchmarkTask].(map[string]any); ok {
+		putWorkLoopAnyIntContext(context, "token_count", taskMetadata["token_count"])
+		putWorkLoopAnyIntContext(context, "value_dim", taskMetadata["value_dim"])
+		if weightedValue, ok := taskMetadata["weighted_value"].([]float64); ok {
+			context["weighted_value_len"] = strconv.Itoa(len(weightedValue))
+		}
+	}
+	return context
+}
+
+func v7MemoryBenchmarkReceiptBodyBytes(metadata map[string]any) int64 {
+	taskMetadata, ok := metadata[v7memorybench.BenchmarkTask].(map[string]any)
+	if !ok {
+		return 0
+	}
+	return workLoopAnyInt64(taskMetadata["receipt_envelope_json_bytes"])
+}
+
+func putWorkLoopAnyIntContext(context map[string]string, key string, value any) {
+	if n := workLoopAnyInt64(value); n > 0 {
+		context[key] = strconv.FormatInt(n, 10)
+	}
+}
+
+func putWorkLoopInt64Context(context map[string]string, key string, value int64) {
+	if value > 0 {
+		context[key] = strconv.FormatInt(value, 10)
+	}
+}
+
+func workLoopAnyInt64(value any) int64 {
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case int32:
+		return int64(v)
+	case uint64:
+		const maxInt64Uint64 = uint64(1<<63 - 1)
+		if v <= maxInt64Uint64 {
+			return int64(v)
+		}
+	case uint32:
+		return int64(v)
+	case float64:
+		const maxInt64Float64 = float64(1<<63 - 1)
+		if v > 0 && v <= maxInt64Float64 {
+			return int64(v)
+		}
+	}
+	return 0
 }
 
 func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {

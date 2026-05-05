@@ -3,10 +3,13 @@ package diagnostics
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 )
 
 func TestWorkLoopDiagnosticsRecordsCounters(t *testing.T) {
@@ -82,6 +85,7 @@ func TestWorkLoopDiagnosticsJSONShape(t *testing.T) {
 		"last_receipt_submit_duration_ms",
 		"last_receipt_submit_duration_us",
 		"receipt_submitted_count",
+		"recent_events",
 	} {
 		if !strings.Contains(text, `"`+key+`"`) {
 			t.Fatalf("snapshot JSON missing %q: %s", key, text)
@@ -272,6 +276,9 @@ func TestWorkLoopDiagnosticsConcurrentUse(t *testing.T) {
 	if snapshot.LastReceiptBuildMs != snapshot.LastReceiptTotalBuildMs || snapshot.LastReceiptTotalBuildUs < 0 {
 		t.Fatalf("unexpected concurrent receipt timings: %+v", snapshot)
 	}
+	if got := len(recorder.EventTimeline()); got != defaultWorkLoopEventLimit {
+		t.Fatalf("event timeline length = %d, want capped at %d", got, defaultWorkLoopEventLimit)
+	}
 }
 
 func TestWorkSpecTaskFromJSON(t *testing.T) {
@@ -281,6 +288,202 @@ func TestWorkSpecTaskFromJSON(t *testing.T) {
 	if got := WorkSpecTaskFromJSON(`not json`); got != "" {
 		t.Fatalf("WorkSpecTaskFromJSON(invalid) = %q, want empty", got)
 	}
+}
+
+func TestWorkLoopDiagnosticsEventRingCapsAndOrdersOldestFirst(t *testing.T) {
+	recorder := newWorkLoopDiagnostics(3)
+
+	for i := 0; i < 5; i++ {
+		recorder.RecordEvent("work_seen", fmt.Sprintf("job-%d", i), "benchmark", map[string]string{
+			"spec_task":   "v7_memory_benchmark",
+			"token_count": fmt.Sprintf("%d", i+1),
+		})
+		time.Sleep(time.Millisecond)
+	}
+
+	events := recorder.EventTimeline()
+	if len(events) != 3 {
+		t.Fatalf("event count = %d, want 3: %+v", len(events), events)
+	}
+	for i, wantJobID := range []string{"job-2", "job-3", "job-4"} {
+		if events[i].JobID != wantJobID {
+			t.Fatalf("event[%d].job_id = %q, want %q; events=%+v", i, events[i].JobID, wantJobID, events)
+		}
+		if i > 0 {
+			prev := mustParseWorkLoopTestTime(t, events[i-1].At)
+			next := mustParseWorkLoopTestTime(t, events[i].At)
+			if next.Before(prev) {
+				t.Fatalf("events not sorted oldest to newest: %+v", events)
+			}
+			if events[i].SincePrevUs <= 0 {
+				t.Fatalf("event[%d].since_prev_us = %d, want positive", i, events[i].SincePrevUs)
+			}
+		}
+	}
+	if events[0].SincePrevUs != 0 {
+		t.Fatalf("oldest retained event since_prev_us = %d, want 0", events[0].SincePrevUs)
+	}
+}
+
+func TestWorkLoopDiagnosticsEventContextSanitized(t *testing.T) {
+	recorder := NewWorkLoopDiagnostics()
+
+	recorder.RecordEvent("work_seen", "job-unsafe", "benchmark", map[string]string{
+		"spec_task":          "v7_memory_benchmark",
+		"token_count":        "64",
+		"value_dim":          "not-a-number",
+		"metadata_gap_us":    "123",
+		"receipt_body_bytes": "456",
+		"prompt":             "raw prompt",
+		"output":             "raw output",
+		"weighted_value":     "[1,2,3]",
+	})
+	recorder.RecordEvent("prompt_dump", "job-unsafe", "benchmark", map[string]string{
+		"spec_task": "v7_memory_benchmark",
+	})
+
+	events := recorder.EventTimeline()
+	if len(events) != 1 {
+		t.Fatalf("event count = %d, want 1 allowed event: %+v", len(events), events)
+	}
+	context := events[0].SafeContext
+	if context["spec_task"] != "v7_memory_benchmark" || context["token_count"] != "64" || context["metadata_gap_us"] != "123" || context["receipt_body_bytes"] != "456" {
+		t.Fatalf("safe context missing expected allowed values: %+v", context)
+	}
+	if _, ok := context["value_dim"]; ok {
+		t.Fatalf("non-numeric value_dim was retained: %+v", context)
+	}
+
+	encoded, err := json.Marshal(recorder.Snapshot())
+	if err != nil {
+		t.Fatalf("json.Marshal(snapshot) error = %v", err)
+	}
+	text := string(encoded)
+	for _, forbidden := range []string{"raw prompt", "raw output", "weighted_value", "prompt_dump"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("event diagnostics leaked forbidden material %q: %s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, `"recent_events"`) {
+		t.Fatalf("snapshot JSON missing recent_events: %s", text)
+	}
+}
+
+func TestWorkLoopDiagnosticsConcurrentEventWrites(t *testing.T) {
+	recorder := newWorkLoopDiagnostics(10)
+
+	const goroutines = 6
+	const iterations = 25
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(worker int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				recorder.RecordEvent("poll_start", fmt.Sprintf("worker-%d-job-%d", worker, j), "benchmark", map[string]string{
+					"spec_task": "v7_memory_benchmark",
+				})
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	events := recorder.EventTimeline()
+	if len(events) != 10 {
+		t.Fatalf("event count = %d, want 10", len(events))
+	}
+	for i, event := range events {
+		if event.Name != "poll_start" || event.At == "" || event.SafeContext == nil {
+			t.Fatalf("event[%d] malformed after concurrent writes: %+v", i, event)
+		}
+		if i > 0 && event.SincePrevUs < 0 {
+			t.Fatalf("event[%d].since_prev_us = %d, want non-negative", i, event.SincePrevUs)
+		}
+	}
+}
+
+func TestMemoryBenchReceiptEmitsSubstepEvents(t *testing.T) {
+	spec := v7memorybench.BenchmarkSpec{
+		Task:            v7memorybench.BenchmarkTask,
+		RequestID:       "request-substeps",
+		JobID:           "job-substeps",
+		ShardID:         "shard-a",
+		Seed:            7,
+		TokenCount:      4,
+		ValueDim:        2,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	request := v7memorybench.GenerateSyntheticAttentionRequest(spec.Seed, spec.ShardID, spec.TokenCount, spec.ValueDim)
+	request.RequestID = spec.RequestID
+	request.JobID = spec.JobID
+	request.ShardID = spec.ShardID
+	request.CreatedAtUnixMs = spec.CreatedAtUnixMs
+	response, err := v7memorybench.ComputePartialAttentionSummary(request)
+	if err != nil {
+		t.Fatalf("ComputePartialAttentionSummary() error = %v", err)
+	}
+
+	recorder := &receiptSubstepCapture{}
+	restore := v7memorybench.SetReceiptSubstepEventRecorder(recorder)
+	defer restore()
+
+	if _, _, err := v7memorybench.BuildBenchmarkReceiptWithTimings(spec, response); err != nil {
+		t.Fatalf("BuildBenchmarkReceiptWithTimings() error = %v", err)
+	}
+
+	wantNames := []string{
+		"receipt_build_start",
+		"receipt_metadata_start",
+		"receipt_metadata_struct_end",
+		"receipt_weighted_copy_end",
+		"receipt_defaults_end",
+		"receipt_validate_end",
+		"receipt_metadata_end",
+		"receipt_hash_end",
+		"receipt_json_measure_end",
+		"receipt_envelope_end",
+		"receipt_build_end",
+	}
+	if len(recorder.events) != len(wantNames) {
+		t.Fatalf("receipt substep event count = %d, want %d: %+v", len(recorder.events), len(wantNames), recorder.events)
+	}
+	for i, wantName := range wantNames {
+		event := recorder.events[i]
+		if event.Name != wantName {
+			t.Fatalf("event[%d].name = %q, want %q; events=%+v", i, event.Name, wantName, recorder.events)
+		}
+		if event.JobID != spec.JobID || event.Kind != v7memorybench.BenchmarkTask {
+			t.Fatalf("event[%d] identity = %q/%q, want %q/%q", i, event.JobID, event.Kind, spec.JobID, v7memorybench.BenchmarkTask)
+		}
+	}
+	lastContext := recorder.events[len(recorder.events)-1].SafeContext
+	if lastContext["metadata_total_us"] == "" || lastContext["metadata_gap_us"] == "" || lastContext["receipt_body_bytes"] == "" {
+		t.Fatalf("receipt_build_end context missing timing/body fields: %+v", lastContext)
+	}
+	encoded, err := json.Marshal(recorder.events)
+	if err != nil {
+		t.Fatalf("json.Marshal(events) error = %v", err)
+	}
+	if strings.Contains(string(encoded), `"weighted_value":[`) || strings.Contains(string(encoded), "raw prompt") || strings.Contains(string(encoded), "raw output") {
+		t.Fatalf("receipt substep events leaked unsafe fields: %s", encoded)
+	}
+}
+
+type receiptSubstepCapture struct {
+	events []WorkLoopEvent
+}
+
+func (c *receiptSubstepCapture) RecordReceiptSubstepEvent(name, jobID, kind string, safeContext map[string]string) {
+	context := make(map[string]string, len(safeContext))
+	for key, value := range safeContext {
+		context[key] = value
+	}
+	c.events = append(c.events, WorkLoopEvent{
+		Name:        name,
+		JobID:       jobID,
+		Kind:        kind,
+		SafeContext: context,
+	})
 }
 
 func assertPollSnapshotOrdered(t *testing.T, snapshot WorkLoopSnapshot) {

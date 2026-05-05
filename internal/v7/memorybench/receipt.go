@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -63,6 +65,28 @@ type ReceiptBuildTimings struct {
 	TotalBuildUs        int64
 }
 
+type ReceiptSubstepEventRecorder interface {
+	RecordReceiptSubstepEvent(name, jobID, kind string, safeContext map[string]string)
+}
+
+var receiptSubstepRecorderState struct {
+	mu       sync.RWMutex
+	recorder ReceiptSubstepEventRecorder
+}
+
+func SetReceiptSubstepEventRecorder(recorder ReceiptSubstepEventRecorder) func() {
+	receiptSubstepRecorderState.mu.Lock()
+	previous := receiptSubstepRecorderState.recorder
+	receiptSubstepRecorderState.recorder = recorder
+	receiptSubstepRecorderState.mu.Unlock()
+
+	return func() {
+		receiptSubstepRecorderState.mu.Lock()
+		receiptSubstepRecorderState.recorder = previous
+		receiptSubstepRecorderState.mu.Unlock()
+	}
+}
+
 func BuildBenchmarkReceipt(spec BenchmarkSpec, response SyntheticAttentionResponse) (BenchmarkReceipt, error) {
 	receipt, _, err := BuildBenchmarkReceiptWithTimings(spec, response)
 	return receipt, err
@@ -72,14 +96,19 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 	totalStarted := time.Now()
 	defer func() {
 		timings.TotalBuildMs, timings.TotalBuildUs = receiptBuildDurationFields(time.Since(totalStarted))
+		if err == nil {
+			recordReceiptSubstepEvent("receipt_build_end", spec, response, receiptBuildEventContextFromTimings(timings, receiptBodyBytesFromMetadata(receipt.Metadata)))
+		}
 	}()
 
 	spec = normalizeBenchmarkSpec(spec)
+	recordReceiptSubstepEvent("receipt_build_start", spec, response, nil)
 	if err := ValidateBenchmarkSpec(spec); err != nil {
 		return BenchmarkReceipt{}, timings, err
 	}
 
 	metadataStarted := time.Now()
+	recordReceiptSubstepEvent("receipt_metadata_start", spec, response, nil)
 	metadataStructStarted := time.Now()
 	metadata := BenchmarkReceiptMetadata{
 		RequestID:                   response.RequestID,
@@ -105,10 +134,14 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 		ComputeGCPauseTotalUsDelta:  response.ComputeGCPauseTotalUsDelta,
 	}
 	timings.MetadataStructUs = receiptBuildDurationMicroseconds(time.Since(metadataStructStarted))
+	recordReceiptSubstepEvent("receipt_metadata_struct_end", spec, response, nil)
 
 	weightedValueCopyStarted := time.Now()
 	metadata.WeightedValue = append([]float64(nil), response.Summary.WeightedValue...)
 	timings.WeightedValueCopyUs = receiptBuildDurationMicroseconds(time.Since(weightedValueCopyStarted))
+	recordReceiptSubstepEvent("receipt_weighted_copy_end", spec, response, map[string]string{
+		"weighted_value_len": strconv.Itoa(len(metadata.WeightedValue)),
+	})
 
 	metadataDefaultsStarted := time.Now()
 	if metadata.SummaryPayloadBytesEstimate <= 0 {
@@ -124,11 +157,14 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 		metadata.ShardID = spec.ShardID
 	}
 	timings.MetadataDefaultsUs = receiptBuildDurationMicroseconds(time.Since(metadataDefaultsStarted))
+	recordReceiptSubstepEvent("receipt_defaults_end", spec, response, nil)
 
 	metadataValidateStarted := time.Now()
 	validateErr := validateBenchmarkReceiptMetadata(spec, metadata)
 	timings.MetadataValidateUs = receiptBuildDurationMicroseconds(time.Since(metadataValidateStarted))
+	recordReceiptSubstepEvent("receipt_validate_end", spec, response, nil)
 	finalizeMetadataReceiptBuildTimings(metadataStarted, &timings)
+	recordReceiptSubstepEvent("receipt_metadata_end", spec, response, receiptBuildEventContextFromTimings(timings, 0))
 	if validateErr != nil {
 		return BenchmarkReceipt{}, timings, validateErr
 	}
@@ -140,6 +176,7 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 		return BenchmarkReceipt{}, timings, err
 	}
 	timings.HashMs, timings.HashUs = receiptBuildDurationFields(time.Since(hashStarted))
+	recordReceiptSubstepEvent("receipt_hash_end", spec, response, nil)
 
 	jsonMeasureStarted := time.Now()
 	if err := populateBenchmarkReceiptJSONByteEstimates(&metadata, spec.JobID, hashHex, 1); err != nil {
@@ -147,6 +184,9 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 		return BenchmarkReceipt{}, timings, err
 	}
 	timings.JSONMeasureMs, timings.JSONMeasureUs = receiptBuildDurationFields(time.Since(jsonMeasureStarted))
+	recordReceiptSubstepEvent("receipt_json_measure_end", spec, response, map[string]string{
+		"receipt_body_bytes": strconv.FormatInt(metadata.ReceiptEnvelopeJSONBytes, 10),
+	})
 
 	envelopeStarted := time.Now()
 	receipt = BenchmarkReceipt{
@@ -158,6 +198,9 @@ func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAtte
 		},
 	}
 	timings.EnvelopeBuildMs, timings.EnvelopeBuildUs = receiptBuildDurationFields(time.Since(envelopeStarted))
+	recordReceiptSubstepEvent("receipt_envelope_end", spec, response, map[string]string{
+		"receipt_body_bytes": strconv.FormatInt(metadata.ReceiptEnvelopeJSONBytes, 10),
+	})
 	return receipt, timings, nil
 }
 
@@ -413,4 +456,82 @@ func finalizeMetadataReceiptBuildTimings(started time.Time, timings *ReceiptBuil
 	} else {
 		timings.MetadataGapUs = 0
 	}
+}
+
+func currentReceiptSubstepEventRecorder() ReceiptSubstepEventRecorder {
+	receiptSubstepRecorderState.mu.RLock()
+	defer receiptSubstepRecorderState.mu.RUnlock()
+	return receiptSubstepRecorderState.recorder
+}
+
+func recordReceiptSubstepEvent(name string, spec BenchmarkSpec, response SyntheticAttentionResponse, extra map[string]string) {
+	recorder := currentReceiptSubstepEventRecorder()
+	if recorder == nil {
+		return
+	}
+	context := receiptSubstepEventContext(spec, response)
+	for key, value := range extra {
+		context[key] = value
+	}
+	recorder.RecordReceiptSubstepEvent(name, spec.JobID, BenchmarkTask, context)
+}
+
+func receiptSubstepEventContext(spec BenchmarkSpec, response SyntheticAttentionResponse) map[string]string {
+	tokenCount := spec.TokenCount
+	if tokenCount <= 0 {
+		tokenCount = response.Summary.TokenCount
+	}
+	valueDim := spec.ValueDim
+	if valueDim <= 0 {
+		valueDim = response.Summary.ValueDim
+	}
+	return map[string]string{
+		"spec_task":          BenchmarkTask,
+		"token_count":        strconv.Itoa(nonNegativeInt(tokenCount)),
+		"value_dim":          strconv.Itoa(nonNegativeInt(valueDim)),
+		"weighted_value_len": strconv.Itoa(len(response.Summary.WeightedValue)),
+	}
+}
+
+func receiptBuildEventContextFromTimings(timings ReceiptBuildTimings, receiptBodyBytes int64) map[string]string {
+	context := map[string]string{
+		"metadata_total_us": strconv.FormatInt(nonNegativeInt64(timings.MetadataTotalUs), 10),
+		"metadata_gap_us":   strconv.FormatInt(nonNegativeInt64(timings.MetadataGapUs), 10),
+	}
+	if receiptBodyBytes > 0 {
+		context["receipt_body_bytes"] = strconv.FormatInt(receiptBodyBytes, 10)
+	}
+	return context
+}
+
+func receiptBodyBytesFromMetadata(metadata map[string]any) int64 {
+	taskMetadata, ok := metadata[BenchmarkTask].(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch value := taskMetadata["receipt_envelope_json_bytes"].(type) {
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case float64:
+		if value > 0 {
+			return int64(value)
+		}
+	}
+	return 0
+}
+
+func nonNegativeInt(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func nonNegativeInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
