@@ -22,7 +22,7 @@ func TestBuildModelBenchmarkSeriesReceiptMetadataShape(t *testing.T) {
 	}
 
 	metadata := receipt.Metadata[ModelBenchmarkSeriesTask].(map[string]any)
-	for _, key := range []string{"request_id", "job_id", "model_id", "prompt_profile_id", "prompt_hash", "warmup_runs", "measured_runs", "trials", "summary", "proof_status"} {
+	for _, key := range []string{"request_id", "job_id", "model_id", "prompt_profile_id", "prompt_hash", "warmup_runs", "measured_runs", "runtime", "trials", "summary", "proof_status"} {
 		if _, ok := metadata[key]; !ok {
 			t.Fatalf("metadata missing %q: %+v", key, metadata)
 		}
@@ -36,6 +36,16 @@ func TestBuildModelBenchmarkSeriesReceiptMetadataShape(t *testing.T) {
 	}
 	if _, ok := trials[0]["error_message"]; ok {
 		t.Fatalf("trial metadata should not include error_message: %+v", trials[0])
+	}
+	runtimeMeta := metadata["runtime"].(map[string]any)
+	if runtimeMeta["agent_version"] != result.Runtime.AgentVersion ||
+		runtimeMeta["os"] != result.Runtime.OS ||
+		runtimeMeta["arch"] != result.Runtime.Arch ||
+		runtimeMeta["native_inference_supported"] != result.Runtime.NativeInferenceSupported ||
+		runtimeMeta["native_inference_ready"] != result.Runtime.NativeInferenceReady ||
+		runtimeMeta["runtime_kind"] != result.Runtime.RuntimeKind ||
+		runtimeMeta["model_loaded"] != result.Runtime.ModelLoaded {
+		t.Fatalf("runtime metadata = %+v, want %+v", runtimeMeta, result.Runtime)
 	}
 }
 
@@ -80,6 +90,23 @@ func TestBuildModelBenchmarkSeriesReceiptDeterministicFromSanitizedMetadata(t *t
 	}
 	if first.ResultHashHex != second.ResultHashHex {
 		t.Fatalf("hashes differ: %s vs %s", first.ResultHashHex, second.ResultHashHex)
+	}
+}
+
+func TestModelBenchmarkSeriesReceiptRuntimeSurvivesJSONRoundTrip(t *testing.T) {
+	result := measuredModelBenchmarkSeriesResult(t)
+	metadata := modelBenchmarkSeriesReceiptMetadataFromResult(result)
+
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatalf("json.Marshal(metadata) error = %v", err)
+	}
+	var decoded ModelBenchmarkSeriesReceiptMetadata
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(metadata) error = %v", err)
+	}
+	if decoded.Runtime != result.Runtime {
+		t.Fatalf("decoded runtime = %+v, want %+v", decoded.Runtime, result.Runtime)
 	}
 }
 

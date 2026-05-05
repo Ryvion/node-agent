@@ -60,6 +60,80 @@ func TestRunModelBenchmarkSeriesRunsWarmupAndMeasuredTrials(t *testing.T) {
 	}
 }
 
+func TestRunModelBenchmarkSeriesRuntimeUsesFirstSuccessfulMeasuredTrial(t *testing.T) {
+	spec := validModelBenchmarkSeriesSpec()
+	spec.WarmupRuns = 1
+	spec.MeasuredRuns = 3
+	warmup := withSeriesRuntime(seriesRunResult(ModelBenchmarkProofStatusMeasured, 50, 1_050, 11, 10.48, ""), "warmup-runtime", "darwin", "arm64", true, true, true)
+	failed := withSeriesRuntime(seriesRunResult(ModelBenchmarkProofStatusFailed, 0, 25, 0, 0, "native_request_failed"), "failed-runtime", "linux", "amd64", true, true, false)
+	measured := withSeriesRuntime(seriesRunResult(ModelBenchmarkProofStatusMeasured, 100, 1_100, 11, 10, ""), "measured-runtime", "windows", "amd64", true, true, true)
+	laterMeasured := withSeriesRuntime(seriesRunResult(ModelBenchmarkProofStatusMeasured, 200, 1_200, 11, 9.17, ""), "later-runtime", "linux", "arm64", true, true, true)
+	runner := &fakeSeriesRunner{
+		results: []ModelBenchmarkResult{warmup, failed, measured, laterMeasured},
+	}
+
+	result, err := RunModelBenchmarkSeries(context.Background(), runner, spec)
+	if err != nil {
+		t.Fatalf("RunModelBenchmarkSeries() error = %v", err)
+	}
+	if result.Runtime.AgentVersion != "measured-runtime" || result.Runtime.OS != "windows" || result.Runtime.Arch != "amd64" {
+		t.Fatalf("runtime = %+v, want first successful measured trial runtime", result.Runtime)
+	}
+	if result.Runtime.RuntimeKind != "native" || !result.Runtime.NativeInferenceSupported || !result.Runtime.NativeInferenceReady || !result.Runtime.ModelLoaded {
+		t.Fatalf("runtime readiness = %+v, want native supported/ready/loaded from measured trial", result.Runtime)
+	}
+}
+
+func TestRunModelBenchmarkSeriesRuntimeFallsBackToFirstUnavailableTrial(t *testing.T) {
+	spec := validModelBenchmarkSeriesSpec()
+	spec.WarmupRuns = 1
+	spec.MeasuredRuns = 2
+	firstUnavailable := withSeriesRuntime(seriesRunResult(ModelBenchmarkProofStatusUnavailable, 0, 25, 0, 0, "native_runtime_unavailable"), "first-unavailable-runtime", "linux", "amd64", true, false, false)
+	secondUnavailable := withSeriesRuntime(seriesRunResult(ModelBenchmarkProofStatusUnavailable, 0, 30, 0, 0, "native_runtime_unavailable"), "second-unavailable-runtime", "windows", "arm64", true, false, false)
+	thirdUnavailable := withSeriesRuntime(seriesRunResult(ModelBenchmarkProofStatusUnavailable, 0, 20, 0, 0, "native_runtime_unavailable"), "third-unavailable-runtime", "darwin", "arm64", true, false, false)
+	runner := &fakeSeriesRunner{
+		results: []ModelBenchmarkResult{firstUnavailable, secondUnavailable, thirdUnavailable},
+	}
+
+	result, err := RunModelBenchmarkSeries(context.Background(), runner, spec)
+	if err != nil {
+		t.Fatalf("RunModelBenchmarkSeries() error = %v", err)
+	}
+	if result.Runtime.AgentVersion != "first-unavailable-runtime" || result.Runtime.OS != "linux" || result.Runtime.Arch != "amd64" {
+		t.Fatalf("runtime = %+v, want first unavailable trial runtime", result.Runtime)
+	}
+	if result.Runtime.RuntimeKind != "native" || !result.Runtime.NativeInferenceSupported || result.Runtime.NativeInferenceReady || result.Runtime.ModelLoaded {
+		t.Fatalf("runtime readiness = %+v, want supported but not ready/loaded from unavailable trial", result.Runtime)
+	}
+}
+
+func TestModelBenchmarkSeriesRuntimeSurvivesJSONRoundTrip(t *testing.T) {
+	spec := validModelBenchmarkSeriesSpec()
+	spec.WarmupRuns = 0
+	spec.MeasuredRuns = 1
+	runner := &fakeSeriesRunner{
+		results: []ModelBenchmarkResult{
+			withSeriesRuntime(seriesRunResult(ModelBenchmarkProofStatusMeasured, 100, 1_100, 11, 10, ""), "json-runtime", "windows", "amd64", true, true, true),
+		},
+	}
+
+	result, err := RunModelBenchmarkSeries(context.Background(), runner, spec)
+	if err != nil {
+		t.Fatalf("RunModelBenchmarkSeries() error = %v", err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal(result) error = %v", err)
+	}
+	var decoded ModelBenchmarkSeriesResult
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(result) error = %v", err)
+	}
+	if decoded.Runtime != result.Runtime {
+		t.Fatalf("decoded runtime = %+v, want %+v", decoded.Runtime, result.Runtime)
+	}
+}
+
 func TestRunModelBenchmarkSeriesUnavailableRunnerProducesUnavailableSummary(t *testing.T) {
 	spec := validModelBenchmarkSeriesSpec()
 	spec.WarmupRuns = 1
@@ -239,6 +313,17 @@ func seriesRunResult(status ModelBenchmarkProofStatus, ttftMs int64, wallMs int6
 		result.OutputHash = ""
 		result.OutputBytes = 0
 	}
+	return result
+}
+
+func withSeriesRuntime(result ModelBenchmarkResult, agentVersion string, osName string, arch string, nativeSupported bool, nativeReady bool, modelLoaded bool) ModelBenchmarkResult {
+	result.RuntimeInfo.AgentVersion = agentVersion
+	result.RuntimeInfo.OS = osName
+	result.RuntimeInfo.Arch = arch
+	result.RuntimeInfo.NativeInferenceSupported = nativeSupported
+	result.RuntimeInfo.NativeInferenceReady = nativeReady
+	result.RuntimeInfo.RuntimeKind = ModelBenchmarkRuntimeKindNativeLocal
+	result.RuntimeInfo.ModelLoaded = modelLoaded
 	return result
 }
 

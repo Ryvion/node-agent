@@ -28,18 +28,21 @@ type ModelBenchmarkSeriesSpec struct {
 }
 
 type ModelBenchmarkTrialResult struct {
-	TrialIndex              int                       `json:"trial_index"`
-	Warmup                  bool                      `json:"warmup"`
-	ProofStatus             ModelBenchmarkProofStatus `json:"proof_status"`
-	WallTimeMs              int64                     `json:"wall_time_ms"`
-	TimeToFirstTokenMs      int64                     `json:"time_to_first_token_ms"`
-	TokensGenerated         int64                     `json:"tokens_generated"`
-	EndToEndTokensPerSecond float64                   `json:"end_to_end_tokens_per_second"`
-	DecodeTokensPerSecond   float64                   `json:"decode_tokens_per_second"`
-	OutputHash              string                    `json:"output_hash,omitempty"`
-	OutputBytes             int64                     `json:"output_bytes"`
-	ErrorMessage            string                    `json:"error_message,omitempty"`
+	TrialIndex              int                         `json:"trial_index"`
+	Warmup                  bool                        `json:"warmup"`
+	ProofStatus             ModelBenchmarkProofStatus   `json:"proof_status"`
+	WallTimeMs              int64                       `json:"wall_time_ms"`
+	TimeToFirstTokenMs      int64                       `json:"time_to_first_token_ms"`
+	TokensGenerated         int64                       `json:"tokens_generated"`
+	EndToEndTokensPerSecond float64                     `json:"end_to_end_tokens_per_second"`
+	DecodeTokensPerSecond   float64                     `json:"decode_tokens_per_second"`
+	OutputHash              string                      `json:"output_hash,omitempty"`
+	OutputBytes             int64                       `json:"output_bytes"`
+	ErrorMessage            string                      `json:"error_message,omitempty"`
+	Runtime                 ModelBenchmarkResultRuntime `json:"-"`
 }
+
+type ModelBenchmarkResultRuntime = ModelBenchmarkReceiptRuntime
 
 type ModelBenchmarkSeriesResult struct {
 	Spec            ModelBenchmarkSeriesSpec    `json:"spec"`
@@ -55,6 +58,7 @@ type ModelBenchmarkSeriesResult struct {
 	CreatedAtUnixMs int64                       `json:"created_at_unix_ms"`
 	Trials          []ModelBenchmarkTrialResult `json:"trials"`
 	Summary         ModelBenchmarkSeriesSummary `json:"summary"`
+	Runtime         ModelBenchmarkResultRuntime `json:"runtime"`
 }
 
 func RunModelBenchmarkSeries(ctx context.Context, runner ModelBenchmarkRunner, spec ModelBenchmarkSeriesSpec) (ModelBenchmarkSeriesResult, error) {
@@ -79,6 +83,7 @@ func RunModelBenchmarkSeries(ctx context.Context, runner ModelBenchmarkRunner, s
 		trial := modelBenchmarkTrialResultFromRun(i, i < spec.WarmupRuns, runResult, runErr)
 		result.Trials = append(result.Trials, trial)
 	}
+	result.Runtime = SelectSeriesRuntimeInfo(result.Trials)
 
 	summary, err := ComputeBenchmarkSeriesSummary(result.Trials)
 	result.Summary = summary
@@ -168,12 +173,61 @@ func modelBenchmarkTrialResultFromRun(index int, warmup bool, result ModelBenchm
 		OutputHash:              safeSeriesOutputHash(result.OutputHash),
 		OutputBytes:             result.OutputBytes,
 		ErrorMessage:            seriesTrialErrorMessage(status, result.Metrics.ErrorCode, runErr),
+		Runtime:                 modelBenchmarkResultRuntimeFromInfo(result.RuntimeInfo),
 	}
 	if trial.ProofStatus != ModelBenchmarkProofStatusMeasured {
 		trial.OutputHash = ""
 		trial.OutputBytes = 0
 	}
 	return trial
+}
+
+func SelectSeriesRuntimeInfo(trials []ModelBenchmarkTrialResult) ModelBenchmarkResultRuntime {
+	for _, trial := range trials {
+		if trial.Warmup || trial.ProofStatus != ModelBenchmarkProofStatusMeasured || strings.TrimSpace(trial.ErrorMessage) != "" {
+			continue
+		}
+		if hasSeriesRuntimeInfo(trial.Runtime) {
+			return trial.Runtime
+		}
+	}
+	for _, trial := range trials {
+		if hasSeriesRuntimeInfo(trial.Runtime) {
+			return trial.Runtime
+		}
+	}
+	return ModelBenchmarkResultRuntime{}
+}
+
+func modelBenchmarkResultRuntimeFromInfo(info ModelBenchmarkRuntimeInfo) ModelBenchmarkResultRuntime {
+	info = normalizeModelBenchmarkRuntimeInfo(info)
+	return ModelBenchmarkResultRuntime{
+		AgentVersion:             info.AgentVersion,
+		OS:                       info.OS,
+		Arch:                     info.Arch,
+		NativeInferenceSupported: info.NativeInferenceSupported,
+		NativeInferenceReady:     info.NativeInferenceReady,
+		RuntimeKind:              seriesRuntimeKind(info.RuntimeKind),
+		ModelLoaded:              info.ModelLoaded,
+	}
+}
+
+func hasSeriesRuntimeInfo(runtimeInfo ModelBenchmarkResultRuntime) bool {
+	return strings.TrimSpace(runtimeInfo.AgentVersion) != "" ||
+		strings.TrimSpace(runtimeInfo.OS) != "" ||
+		strings.TrimSpace(runtimeInfo.Arch) != "" ||
+		strings.TrimSpace(runtimeInfo.RuntimeKind) != "" ||
+		runtimeInfo.NativeInferenceSupported ||
+		runtimeInfo.NativeInferenceReady ||
+		runtimeInfo.ModelLoaded
+}
+
+func seriesRuntimeKind(kind string) string {
+	kind = strings.TrimSpace(kind)
+	if kind == "" || disallowedRuntimeKind(kind) {
+		return ""
+	}
+	return "native"
 }
 
 func computeDecodeTokensPerSecond(tokensGenerated int64, wallTimeMs int64, timeToFirstTokenMs int64) float64 {

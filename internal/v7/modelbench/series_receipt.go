@@ -25,6 +25,7 @@ type ModelBenchmarkSeriesReceiptMetadata struct {
 	PromptHash      string                             `json:"prompt_hash"`
 	WarmupRuns      int                                `json:"warmup_runs"`
 	MeasuredRuns    int                                `json:"measured_runs"`
+	Runtime         ModelBenchmarkResultRuntime        `json:"runtime"`
 	Trials          []ModelBenchmarkSeriesReceiptTrial `json:"trials"`
 	Summary         ModelBenchmarkSeriesReceiptSummary `json:"summary"`
 	ProofStatus     string                             `json:"proof_status"`
@@ -146,6 +147,7 @@ func (m ModelBenchmarkSeriesReceiptMetadata) Map() map[string]any {
 		"prompt_hash":       m.PromptHash,
 		"warmup_runs":       m.WarmupRuns,
 		"measured_runs":     m.MeasuredRuns,
+		"runtime":           m.Runtime.Map(),
 		"trials":            trials,
 		"summary":           m.Summary.Map(),
 		"proof_status":      m.ProofStatus,
@@ -208,6 +210,7 @@ func modelBenchmarkSeriesReceiptMetadataFromResult(result ModelBenchmarkSeriesRe
 		PromptHash:      result.PromptHash,
 		WarmupRuns:      result.WarmupRuns,
 		MeasuredRuns:    result.MeasuredRuns,
+		Runtime:         result.Runtime,
 		Trials:          trials,
 		Summary: ModelBenchmarkSeriesReceiptSummary{
 			P50TTFTMs:              result.Summary.P50TTFTMs,
