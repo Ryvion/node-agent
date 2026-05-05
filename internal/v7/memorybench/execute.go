@@ -12,27 +12,37 @@ type ExecuteOptions struct {
 }
 
 func ExecuteBenchmarkAssignment(ctx context.Context, specJSON string, opts ExecuteOptions) (BenchmarkReceipt, bool, error) {
+	receipt, _, handled, err := ExecuteBenchmarkAssignmentWithReceiptTimings(ctx, specJSON, opts)
+	return receipt, handled, err
+}
+
+func ExecuteBenchmarkAssignmentWithReceiptTimings(ctx context.Context, specJSON string, opts ExecuteOptions) (BenchmarkReceipt, ReceiptBuildTimings, bool, error) {
 	if !IsBenchmarkSpecJSON(specJSON) {
-		return BenchmarkReceipt{}, false, nil
+		return BenchmarkReceipt{}, ReceiptBuildTimings{}, false, nil
 	}
 	if !BenchmarkEnabledFromEnv(opts.Getenv) {
-		return BenchmarkReceipt{}, false, nil
+		return BenchmarkReceipt{}, ReceiptBuildTimings{}, false, nil
 	}
 	spec, err := DecodeBenchmarkSpec(specJSON)
 	if err != nil {
-		return BenchmarkReceipt{}, true, err
+		return BenchmarkReceipt{}, ReceiptBuildTimings{}, true, err
 	}
-	receipt, err := ExecuteBenchmarkSpec(ctx, spec, opts)
+	receipt, timings, err := ExecuteBenchmarkSpecWithReceiptTimings(ctx, spec, opts)
 	if err != nil {
-		return BenchmarkReceipt{}, true, err
+		return BenchmarkReceipt{}, timings, true, err
 	}
-	return receipt, true, nil
+	return receipt, timings, true, nil
 }
 
 func ExecuteBenchmarkSpec(ctx context.Context, spec BenchmarkSpec, opts ExecuteOptions) (BenchmarkReceipt, error) {
+	receipt, _, err := ExecuteBenchmarkSpecWithReceiptTimings(ctx, spec, opts)
+	return receipt, err
+}
+
+func ExecuteBenchmarkSpecWithReceiptTimings(ctx context.Context, spec BenchmarkSpec, opts ExecuteOptions) (BenchmarkReceipt, ReceiptBuildTimings, error) {
 	spec = normalizeBenchmarkSpec(spec)
 	if err := ValidateBenchmarkSpec(spec); err != nil {
-		return BenchmarkReceipt{}, err
+		return BenchmarkReceipt{}, ReceiptBuildTimings{}, err
 	}
 	nodeStartedAt := time.Now()
 	if spec.SimulatedDelayMs > 0 {
@@ -41,7 +51,7 @@ func ExecuteBenchmarkSpec(ctx context.Context, spec BenchmarkSpec, opts ExecuteO
 			sleep = sleepWithContext
 		}
 		if err := sleep(ctx, time.Duration(spec.SimulatedDelayMs)*time.Millisecond); err != nil {
-			return BenchmarkReceipt{}, fmt.Errorf("%w: simulated delay: %v", ErrInvalidBenchmarkSpec, err)
+			return BenchmarkReceipt{}, ReceiptBuildTimings{}, fmt.Errorf("%w: simulated delay: %v", ErrInvalidBenchmarkSpec, err)
 		}
 	}
 
@@ -54,7 +64,7 @@ func ExecuteBenchmarkSpec(ctx context.Context, spec BenchmarkSpec, opts ExecuteO
 	computeStartedAt := time.Now()
 	response, err := ComputePartialAttentionSummary(request)
 	if err != nil {
-		return BenchmarkReceipt{}, err
+		return BenchmarkReceipt{}, ReceiptBuildTimings{}, err
 	}
 	computeCompletedAt := time.Now()
 	computeDuration := computeCompletedAt.Sub(computeStartedAt)
@@ -72,7 +82,7 @@ func ExecuteBenchmarkSpec(ctx context.Context, spec BenchmarkSpec, opts ExecuteO
 	response.CreatedAtUnixMs = spec.CreatedAtUnixMs
 	response.OutputBytesEstimate = summaryPayloadBytes
 
-	return BuildBenchmarkReceipt(spec, response)
+	return BuildBenchmarkReceiptWithTimings(spec, response)
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {

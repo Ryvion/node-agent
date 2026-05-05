@@ -20,6 +20,7 @@ type WorkLoopSnapshot struct {
 	LastPollStartedAt            string `json:"last_poll_started_at"`
 	LastPollCompletedAt          string `json:"last_poll_completed_at"`
 	LastPollDurationMs           int64  `json:"last_poll_duration_ms"`
+	LastPollCycleDurationMs      int64  `json:"last_poll_cycle_duration_ms"`
 	LastPollError                string `json:"last_poll_error"`
 	LastWorkSeenAt               string `json:"last_work_seen_at"`
 	LastWorkJobID                string `json:"last_work_job_id"`
@@ -29,10 +30,22 @@ type WorkLoopSnapshot struct {
 	LastExecutionStartedAt       string `json:"last_execution_started_at"`
 	LastExecutionCompletedAt     string `json:"last_execution_completed_at"`
 	LastExecutionDurationMs      int64  `json:"last_execution_duration_ms"`
+	LastExecutionDurationUs      int64  `json:"last_execution_duration_us"`
 	LastReceiptBuildMs           int64  `json:"last_receipt_build_ms"`
+	LastReceiptMetadataBuildMs   int64  `json:"last_receipt_metadata_build_ms"`
+	LastReceiptHashMs            int64  `json:"last_receipt_hash_ms"`
+	LastReceiptJSONMeasureMs     int64  `json:"last_receipt_json_measure_ms"`
+	LastReceiptEnvelopeBuildMs   int64  `json:"last_receipt_envelope_build_ms"`
+	LastReceiptTotalBuildMs      int64  `json:"last_receipt_total_build_ms"`
+	LastReceiptMetadataBuildUs   int64  `json:"last_receipt_metadata_build_us"`
+	LastReceiptHashUs            int64  `json:"last_receipt_hash_us"`
+	LastReceiptJSONMeasureUs     int64  `json:"last_receipt_json_measure_us"`
+	LastReceiptEnvelopeBuildUs   int64  `json:"last_receipt_envelope_build_us"`
+	LastReceiptTotalBuildUs      int64  `json:"last_receipt_total_build_us"`
 	LastReceiptSubmitStartedAt   string `json:"last_receipt_submit_started_at"`
 	LastReceiptSubmitCompletedAt string `json:"last_receipt_submit_completed_at"`
 	LastReceiptSubmitDurationMs  int64  `json:"last_receipt_submit_duration_ms"`
+	LastReceiptSubmitDurationUs  int64  `json:"last_receipt_submit_duration_us"`
 	LastReceiptSubmitError       string `json:"last_receipt_submit_error"`
 	LastReceiptAttempts          int    `json:"last_receipt_attempts"`
 	PollCount                    uint64 `json:"poll_count"`
@@ -53,6 +66,19 @@ type WorkLoopDiagnostics struct {
 	lastReceiptSubmitJobID     string
 }
 
+type ReceiptBuildTimings struct {
+	MetadataBuildMs int64
+	HashMs          int64
+	JSONMeasureMs   int64
+	EnvelopeBuildMs int64
+	TotalBuildMs    int64
+	MetadataBuildUs int64
+	HashUs          int64
+	JSONMeasureUs   int64
+	EnvelopeBuildUs int64
+	TotalBuildUs    int64
+}
+
 func NewWorkLoopDiagnostics() *WorkLoopDiagnostics {
 	return &WorkLoopDiagnostics{}
 }
@@ -66,6 +92,9 @@ func (d *WorkLoopDiagnostics) RecordPollStart() {
 	defer d.mu.Unlock()
 	d.lastPollStartedAt = now
 	d.snapshot.LastPollStartedAt = formatWorkLoopTime(now)
+	d.snapshot.LastPollCompletedAt = formatWorkLoopTime(now)
+	d.snapshot.LastPollDurationMs = 0
+	d.snapshot.LastPollCycleDurationMs = 0
 	d.snapshot.LastPollError = ""
 	d.snapshot.PollCount++
 }
@@ -83,6 +112,7 @@ func (d *WorkLoopDiagnostics) RecordPollEnd(err error) {
 	} else {
 		d.snapshot.LastPollDurationMs = durationMilliseconds(now.Sub(d.lastPollStartedAt))
 	}
+	d.snapshot.LastPollCycleDurationMs = d.snapshot.LastPollDurationMs
 	d.snapshot.LastPollError = sanitizeWorkLoopError(err)
 }
 
@@ -136,6 +166,7 @@ func (d *WorkLoopDiagnostics) RecordExecutionEnd(duration time.Duration, err err
 	}
 	d.snapshot.LastExecutionCompletedAt = formatWorkLoopTime(now)
 	d.snapshot.LastExecutionDurationMs = durationMilliseconds(duration)
+	d.snapshot.LastExecutionDurationUs = durationMicroseconds(duration)
 	d.snapshot.WorkCompletedCount++
 }
 
@@ -145,7 +176,32 @@ func (d *WorkLoopDiagnostics) RecordReceiptBuild(duration time.Duration) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.snapshot.LastReceiptBuildMs = durationMilliseconds(duration)
+	timings := ReceiptBuildTimingsFromDurations(0, 0, 0, duration, duration)
+	d.applyReceiptBuildTimingsLocked(timings)
+}
+
+func (d *WorkLoopDiagnostics) RecordReceiptBuildTimings(timings ReceiptBuildTimings) {
+	if d == nil {
+		return
+	}
+	timings = normalizeReceiptBuildTimings(timings)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.applyReceiptBuildTimingsLocked(timings)
+}
+
+func (d *WorkLoopDiagnostics) applyReceiptBuildTimingsLocked(timings ReceiptBuildTimings) {
+	d.snapshot.LastReceiptMetadataBuildMs = timings.MetadataBuildMs
+	d.snapshot.LastReceiptHashMs = timings.HashMs
+	d.snapshot.LastReceiptJSONMeasureMs = timings.JSONMeasureMs
+	d.snapshot.LastReceiptEnvelopeBuildMs = timings.EnvelopeBuildMs
+	d.snapshot.LastReceiptTotalBuildMs = timings.TotalBuildMs
+	d.snapshot.LastReceiptBuildMs = timings.TotalBuildMs
+	d.snapshot.LastReceiptMetadataBuildUs = timings.MetadataBuildUs
+	d.snapshot.LastReceiptHashUs = timings.HashUs
+	d.snapshot.LastReceiptJSONMeasureUs = timings.JSONMeasureUs
+	d.snapshot.LastReceiptEnvelopeBuildUs = timings.EnvelopeBuildUs
+	d.snapshot.LastReceiptTotalBuildUs = timings.TotalBuildUs
 }
 
 func (d *WorkLoopDiagnostics) RecordReceiptSubmitStart(jobID string, attempt int) {
@@ -181,6 +237,7 @@ func (d *WorkLoopDiagnostics) RecordReceiptSubmitEnd(duration time.Duration, err
 	}
 	d.snapshot.LastReceiptSubmitCompletedAt = formatWorkLoopTime(now)
 	d.snapshot.LastReceiptSubmitDurationMs = durationMilliseconds(duration)
+	d.snapshot.LastReceiptSubmitDurationUs = durationMicroseconds(duration)
 	d.snapshot.LastReceiptSubmitError = sanitizeWorkLoopError(err)
 	if err != nil {
 		d.snapshot.ReceiptFailedCount++
@@ -231,6 +288,66 @@ func durationMilliseconds(duration time.Duration) int64 {
 		return 0
 	}
 	return duration.Milliseconds()
+}
+
+func durationMicroseconds(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	return duration.Microseconds()
+}
+
+func ReceiptBuildTimingsFromDurations(metadataBuild, hash, jsonMeasure, envelopeBuild, totalBuild time.Duration) ReceiptBuildTimings {
+	return ReceiptBuildTimings{
+		MetadataBuildMs: durationMilliseconds(metadataBuild),
+		HashMs:          durationMilliseconds(hash),
+		JSONMeasureMs:   durationMilliseconds(jsonMeasure),
+		EnvelopeBuildMs: durationMilliseconds(envelopeBuild),
+		TotalBuildMs:    durationMilliseconds(totalBuild),
+		MetadataBuildUs: durationMicroseconds(metadataBuild),
+		HashUs:          durationMicroseconds(hash),
+		JSONMeasureUs:   durationMicroseconds(jsonMeasure),
+		EnvelopeBuildUs: durationMicroseconds(envelopeBuild),
+		TotalBuildUs:    durationMicroseconds(totalBuild),
+	}
+}
+
+func ReceiptBuildTimingsFromMicroseconds(metadataBuildUs, hashUs, jsonMeasureUs, envelopeBuildUs, totalBuildUs int64) ReceiptBuildTimings {
+	return normalizeReceiptBuildTimings(ReceiptBuildTimings{
+		MetadataBuildUs: metadataBuildUs,
+		HashUs:          hashUs,
+		JSONMeasureUs:   jsonMeasureUs,
+		EnvelopeBuildUs: envelopeBuildUs,
+		TotalBuildUs:    totalBuildUs,
+	})
+}
+
+func normalizeReceiptBuildTimings(timings ReceiptBuildTimings) ReceiptBuildTimings {
+	timings.MetadataBuildUs = nonNegativeInt64(timings.MetadataBuildUs)
+	timings.HashUs = nonNegativeInt64(timings.HashUs)
+	timings.JSONMeasureUs = nonNegativeInt64(timings.JSONMeasureUs)
+	timings.EnvelopeBuildUs = nonNegativeInt64(timings.EnvelopeBuildUs)
+	timings.TotalBuildUs = nonNegativeInt64(timings.TotalBuildUs)
+	timings.MetadataBuildMs = nonNegativeInt64(firstNonZeroInt64(timings.MetadataBuildMs, timings.MetadataBuildUs/1000))
+	timings.HashMs = nonNegativeInt64(firstNonZeroInt64(timings.HashMs, timings.HashUs/1000))
+	timings.JSONMeasureMs = nonNegativeInt64(firstNonZeroInt64(timings.JSONMeasureMs, timings.JSONMeasureUs/1000))
+	timings.EnvelopeBuildMs = nonNegativeInt64(firstNonZeroInt64(timings.EnvelopeBuildMs, timings.EnvelopeBuildUs/1000))
+	timings.TotalBuildMs = nonNegativeInt64(firstNonZeroInt64(timings.TotalBuildMs, timings.TotalBuildUs/1000))
+	return timings
+}
+
+func firstNonZeroInt64(first, fallback int64) int64 {
+	if first != 0 {
+		return first
+	}
+	return fallback
+}
+
+func nonNegativeInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func cleanWorkLoopText(value string, maxLen int) string {

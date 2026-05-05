@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type BenchmarkReceipt struct {
@@ -38,12 +39,36 @@ type BenchmarkReceiptMetadata struct {
 	ProofStatus                 string    `json:"proof_status"`
 }
 
+type ReceiptBuildTimings struct {
+	MetadataBuildMs int64
+	HashMs          int64
+	JSONMeasureMs   int64
+	EnvelopeBuildMs int64
+	TotalBuildMs    int64
+	MetadataBuildUs int64
+	HashUs          int64
+	JSONMeasureUs   int64
+	EnvelopeBuildUs int64
+	TotalBuildUs    int64
+}
+
 func BuildBenchmarkReceipt(spec BenchmarkSpec, response SyntheticAttentionResponse) (BenchmarkReceipt, error) {
+	receipt, _, err := BuildBenchmarkReceiptWithTimings(spec, response)
+	return receipt, err
+}
+
+func BuildBenchmarkReceiptWithTimings(spec BenchmarkSpec, response SyntheticAttentionResponse) (receipt BenchmarkReceipt, timings ReceiptBuildTimings, err error) {
+	totalStarted := time.Now()
+	defer func() {
+		timings.TotalBuildMs, timings.TotalBuildUs = receiptBuildDurationFields(time.Since(totalStarted))
+	}()
+
 	spec = normalizeBenchmarkSpec(spec)
 	if err := ValidateBenchmarkSpec(spec); err != nil {
-		return BenchmarkReceipt{}, err
+		return BenchmarkReceipt{}, timings, err
 	}
 
+	metadataStarted := time.Now()
 	metadata := BenchmarkReceiptMetadata{
 		RequestID:                   response.RequestID,
 		ShardID:                     response.ShardID,
@@ -76,24 +101,37 @@ func BuildBenchmarkReceipt(spec BenchmarkSpec, response SyntheticAttentionRespon
 		metadata.ShardID = spec.ShardID
 	}
 	if err := validateBenchmarkReceiptMetadata(spec, metadata); err != nil {
-		return BenchmarkReceipt{}, err
+		timings.MetadataBuildMs, timings.MetadataBuildUs = receiptBuildDurationFields(time.Since(metadataStarted))
+		return BenchmarkReceipt{}, timings, err
 	}
+	timings.MetadataBuildMs, timings.MetadataBuildUs = receiptBuildDurationFields(time.Since(metadataStarted))
 
+	hashStarted := time.Now()
 	hashHex, err := HashBenchmarkReceiptMetadata(spec.JobID, metadata)
 	if err != nil {
-		return BenchmarkReceipt{}, err
+		timings.HashMs, timings.HashUs = receiptBuildDurationFields(time.Since(hashStarted))
+		return BenchmarkReceipt{}, timings, err
 	}
+	timings.HashMs, timings.HashUs = receiptBuildDurationFields(time.Since(hashStarted))
+
+	jsonMeasureStarted := time.Now()
 	if err := populateBenchmarkReceiptJSONByteEstimates(&metadata, spec.JobID, hashHex, 1); err != nil {
-		return BenchmarkReceipt{}, err
+		timings.JSONMeasureMs, timings.JSONMeasureUs = receiptBuildDurationFields(time.Since(jsonMeasureStarted))
+		return BenchmarkReceipt{}, timings, err
 	}
-	return BenchmarkReceipt{
+	timings.JSONMeasureMs, timings.JSONMeasureUs = receiptBuildDurationFields(time.Since(jsonMeasureStarted))
+
+	envelopeStarted := time.Now()
+	receipt = BenchmarkReceipt{
 		JobID:         spec.JobID,
 		ResultHashHex: hashHex,
 		MeteringUnits: 1,
 		Metadata: map[string]any{
 			BenchmarkTask: metadata.Map(),
 		},
-	}, nil
+	}
+	timings.EnvelopeBuildMs, timings.EnvelopeBuildUs = receiptBuildDurationFields(time.Since(envelopeStarted))
+	return receipt, timings, nil
 }
 
 func BuildBenchmarkRejectionReceipt(jobID string, runErr error) BenchmarkReceipt {
@@ -305,4 +343,11 @@ func populateBenchmarkReceiptJSONByteEstimates(metadata *BenchmarkReceiptMetadat
 		metadata.ReceiptEnvelopeJSONBytes = nextEnvelopeBytes
 	}
 	return nil
+}
+
+func receiptBuildDurationFields(duration time.Duration) (int64, int64) {
+	if duration <= 0 {
+		return 0, 0
+	}
+	return duration.Milliseconds(), duration.Microseconds()
 }

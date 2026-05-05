@@ -710,31 +710,36 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 			gpuUtil := math.Float64frombits(cachedGPUUtil.Load())
 			if gpuUtil > flagMaxGPUUtil {
 				slog.Debug("GPU busy, skipping work fetch", "gpu_util", gpuUtil, "max_gpu_util", flagMaxGPUUtil)
+				workLoopDiagnostics.RecordPollStart()
 				select {
 				case <-ctx.Done():
+					workLoopDiagnostics.RecordPollEnd(ctx.Err())
 					return
 				case <-time.After(5 * time.Second):
 				}
+				workLoopDiagnostics.RecordPollEnd(nil)
 				continue
 			}
 		}
 
 		workLoopDiagnostics.RecordPollStart()
 		work, err := client.FetchWork(ctx)
-		workLoopDiagnostics.RecordPollEnd(err)
 		if err != nil {
 			slog.Warn("fetch work failed", "error", err)
 			select {
 			case <-ctx.Done():
+				workLoopDiagnostics.RecordPollEnd(err)
 				return
 			case <-time.After(backoff):
 			}
+			workLoopDiagnostics.RecordPollEnd(err)
 			backoff = time.Duration(float64(backoff) * 1.5)
 			if backoff > maxBackoff {
 				backoff = maxBackoff
 			}
 			continue
 		}
+		workLoopDiagnostics.RecordPollEnd(nil)
 
 		// Successful fetch — reset backoff.
 		backoff = 5 * time.Second
@@ -869,7 +874,7 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	if isBenchmark && v7memorybench.BenchmarkEnabledFromEnv(os.Getenv) {
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
 	}
-	receipt, handled, err := v7memorybench.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
+	receipt, receiptBuildTimings, handled, err := v7memorybench.ExecuteBenchmarkAssignmentWithReceiptTimings(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
 		Getenv: os.Getenv,
 	})
 	if !handled {
@@ -883,7 +888,7 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		operatorRuntimeState.recordV7MemoryBenchmarkExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
 	}
 
-	receiptBuildStarted := time.Now()
+	metadataBuildStarted := time.Now()
 	runtimeMeta := map[string]any{}
 	if runtimeMgr != nil {
 		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
@@ -902,6 +907,9 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	}
 	exitCode, _ := extra["exit_code"].(int)
 	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
+	metadataBuildDuration := time.Since(metadataBuildStarted)
+
+	envelopeBuildStarted := time.Now()
 	hubReceipt := hub.Receipt{
 		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
 		ResultHashHex: receipt.ResultHashHex,
@@ -914,7 +922,8 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		ExitCode:      exitCode,
 		Metadata:      metadata,
 	}
-	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
+	envelopeBuildDuration := time.Since(envelopeBuildStarted)
+	workLoopDiagnostics.RecordReceiptBuildTimings(workLoopReceiptTimingsFromMemorybench(receiptBuildTimings, metadataBuildDuration, envelopeBuildDuration))
 	if submitErr := submitReceiptWithRetry(ctx, client, hubReceipt); submitErr != nil {
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.recordV7MemoryBenchmarkReceiptFailed(hubReceipt.JobID, submitErr)
@@ -928,6 +937,31 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		operatorRuntimeState.recordV7MemoryBenchmarkReceiptSubmitted(hubReceipt.JobID)
 	}
 	return true, snapshot, err
+}
+
+func workLoopReceiptTimingsFromMemorybench(receiptTimings v7memorybench.ReceiptBuildTimings, metadataBuild, envelopeBuild time.Duration) diagnostics.ReceiptBuildTimings {
+	metadataBuildExtraUs := durationMicrosecondsForWorkLoop(metadataBuild)
+	metadataBuildUs := receiptTimings.MetadataBuildUs + metadataBuildExtraUs
+	envelopeBuildUs := durationMicrosecondsForWorkLoop(envelopeBuild)
+	totalBuildUs := receiptTimings.TotalBuildUs + metadataBuildExtraUs + envelopeBuildUs
+	minTotalUs := metadataBuildUs + receiptTimings.HashUs + receiptTimings.JSONMeasureUs + envelopeBuildUs
+	if totalBuildUs < minTotalUs {
+		totalBuildUs = minTotalUs
+	}
+	return diagnostics.ReceiptBuildTimingsFromMicroseconds(
+		metadataBuildUs,
+		receiptTimings.HashUs,
+		receiptTimings.JSONMeasureUs,
+		envelopeBuildUs,
+		totalBuildUs,
+	)
+}
+
+func durationMicrosecondsForWorkLoop(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	return duration.Microseconds()
 }
 
 func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
