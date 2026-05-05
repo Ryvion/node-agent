@@ -913,6 +913,14 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 
 func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
 	identity, isBenchmark := v7modelbench.ModelBenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	taskName := v7modelbench.ModelBenchmarkTask
+	if !isBenchmark {
+		if seriesIdentity, isSeriesBenchmark := v7modelbench.ModelBenchmarkSeriesAssignmentIdentityFromJSON(work.SpecJSON); isSeriesBenchmark {
+			identity = seriesIdentity
+			isBenchmark = true
+			taskName = v7modelbench.ModelBenchmarkSeriesTask
+		}
+	}
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
 	if isBenchmark && v7modelbench.ModelBenchmarkEnabledFromEnv(os.Getenv) && v7ModelBenchmarkStatus != nil {
 		v7ModelBenchmarkStatus.RecordSeen(statusJobID, identity.RequestID)
@@ -920,6 +928,9 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 
 	runner := newV7ModelBenchmarkRunner(infMgr, gpuDetected)
 	receipt, handled, err := v7modelbench.ExecuteModelBenchmarkAssignment(ctx, work.SpecJSON, runner, os.Getenv)
+	if !handled {
+		receipt, handled, err = v7modelbench.ExecuteModelBenchmarkSeriesAssignment(ctx, work.SpecJSON, runner, os.Getenv)
+	}
 	if !handled {
 		return false, nil, nil
 	}
@@ -932,18 +943,26 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
 	}
 	extra := map[string]any{
-		"executor":      v7modelbench.ModelBenchmarkTask,
-		"executor_kind": v7modelbench.ModelBenchmarkTask,
-		"task":          v7modelbench.ModelBenchmarkTask,
+		"executor":      taskName,
+		"executor_kind": taskName,
+		"task":          taskName,
 	}
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		receipt = v7modelbench.BuildModelBenchmarkRejectionReceipt(work.JobID, err)
+		if taskName == v7modelbench.ModelBenchmarkSeriesTask {
+			receipt = v7modelbench.BuildModelBenchmarkSeriesRejectionReceipt(work.JobID, err)
+		} else {
+			receipt = v7modelbench.BuildModelBenchmarkRejectionReceipt(work.JobID, err)
+		}
 	}
 	exitCode := 0
 	if err != nil {
 		exitCode = 1
 		extra["exit_code"] = 1
-		extra["error"] = "v7 model benchmark failed"
+		if taskName == v7modelbench.ModelBenchmarkSeriesTask {
+			extra["error"] = "v7 model benchmark series failed"
+		} else {
+			extra["error"] = "v7 model benchmark failed"
+		}
 	} else {
 		extra["exit_code"] = 0
 	}

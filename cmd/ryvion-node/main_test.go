@@ -1214,6 +1214,198 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableReceipt(t *testing.T) 
 	}
 }
 
+func TestProcessOptionalV7ModelBenchmarkSubmitsSeriesReceipt(t *testing.T) {
+	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := v7modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{
+		results: []v7modelbench.ModelBenchmarkResult{
+			testMeasuredModelBenchmarkSeriesResult(9_999, 10_999, 99, 99),
+			testMeasuredModelBenchmarkSeriesResult(100, 1_100, 11, 10),
+			testMeasuredModelBenchmarkSeriesResult(200, 1_200, 11, 9.17),
+		},
+	}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) v7modelbench.ModelBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-modelbench-series-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[v7modelbench.ModelBenchmarkSeriesTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7modelbench.ModelBenchmarkSeriesTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != v7modelbench.ModelBenchmarkSeriesProofStatusMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		summary := metadata["summary"].(map[string]any)
+		if summary["successful_measured_runs"] != float64(2) || summary["p50_ttft_ms"] != float64(100) || summary["p95_ttft_ms"] != float64(200) {
+			t.Errorf("summary = %+v, want measured-only p50/p95 and 2 successes", summary)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		trials := metadata["trials"].([]any)
+		if len(trials) != 3 {
+			t.Errorf("trials len = %d, want 3", len(trials))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"secret series completion text", "Continue the numbered sequence", "prompt_text", "output_text", "error_message"} {
+			if strings.Contains(string(encoded), forbidden) {
+				t.Errorf("metadata leaked raw series content %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-modelbench-series-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSeriesSpecJSON(t, 1, 2),
+	}, nil, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful series hash", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 3 {
+		t.Fatalf("runner calls = %d, want 3", fakeRunner.calls)
+	}
+
+	snapshot := status.Snapshot()
+	if snapshot.LastSeenBenchmarkJobID != "job-modelbench-series-local" || snapshot.LastSeenRequestID != "request-modelbench-series-local" {
+		t.Fatalf("seen status = %+v", snapshot)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableSeriesReceipt(t *testing.T) {
+	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := v7modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{
+		results: []v7modelbench.ModelBenchmarkResult{
+			testUnavailableModelBenchmarkSeriesResult(),
+			testUnavailableModelBenchmarkSeriesResult(),
+		},
+	}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) v7modelbench.ModelBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata := req.Metadata[v7modelbench.ModelBenchmarkSeriesTask].(map[string]any)
+		if metadata["proof_status"] != v7modelbench.ModelBenchmarkSeriesProofStatusUnavailable {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		summary := metadata["summary"].(map[string]any)
+		if summary["successful_measured_runs"] != float64(0) {
+			t.Errorf("summary = %+v, want 0 successful measured runs", summary)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		trials := metadata["trials"].([]any)
+		measured := trials[1].(map[string]any)
+		if measured["output_hash"] != "" || measured["output_bytes"] != float64(0) {
+			t.Errorf("unavailable measured trial exposed output fields: %+v", measured)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-modelbench-series-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSeriesSpecJSON(t, 1, 1),
+	}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful unavailable series receipt", result)
+	}
+	if fakeRunner.calls != 2 {
+		t.Fatalf("runner calls = %d, want 2", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
 func TestProcessOptionalV7ModelBenchmarkNormalJobDoesNotRecordStatus(t *testing.T) {
 	oldStatus := v7ModelBenchmarkStatus
 	status := v7modelbench.NewLocalStatus()
@@ -1243,14 +1435,25 @@ func TestProcessOptionalV7ModelBenchmarkNormalJobDoesNotRecordStatus(t *testing.
 }
 
 type fakeModelBenchmarkRunner struct {
-	result v7modelbench.ModelBenchmarkResult
-	err    error
-	calls  int
+	result  v7modelbench.ModelBenchmarkResult
+	results []v7modelbench.ModelBenchmarkResult
+	err     error
+	errs    []error
+	calls   int
 }
 
 func (f *fakeModelBenchmarkRunner) RunModelBenchmark(_ context.Context, _ v7modelbench.ModelBenchmarkSpec) (v7modelbench.ModelBenchmarkResult, error) {
+	index := f.calls
 	f.calls++
-	return f.result, f.err
+	result := f.result
+	if index < len(f.results) {
+		result = f.results[index]
+	}
+	err := f.err
+	if index < len(f.errs) {
+		err = f.errs[index]
+	}
+	return result, err
 }
 
 func testModelBenchmarkSpecJSON(t *testing.T) string {
@@ -1316,6 +1519,62 @@ func testUnavailableModelBenchmarkResult() v7modelbench.ModelBenchmarkResult {
 	result.Metrics.TokensPerSecond = 0
 	result.Metrics.ModelLoadState = v7modelbench.ModelBenchmarkModelLoadStateUnavailable
 	result.Metrics.ErrorCode = "native_model_unavailable"
+	result.OutputHash = ""
+	result.OutputBytes = 0
+	result.ProofStatus = v7modelbench.ModelBenchmarkProofStatusUnavailable
+	return result
+}
+
+func testModelBenchmarkSeriesSpecJSON(t *testing.T, warmupRuns int, measuredRuns int) string {
+	t.Helper()
+	profile, err := v7modelbench.GetBenchmarkPromptProfile(string(v7modelbench.BenchmarkPromptProfileLongDecodeProbe))
+	if err != nil {
+		t.Fatalf("GetBenchmarkPromptProfile() error = %v", err)
+	}
+	spec := map[string]any{
+		"task":               v7modelbench.ModelBenchmarkSeriesTask,
+		"request_id":         "request-modelbench-series-local",
+		"job_id":             "job-modelbench-series-local",
+		"model_id":           "ryvion-llama-3.2-3b",
+		"prompt_profile_id":  string(profile.ID),
+		"prompt_hash":        v7modelbench.BenchmarkPromptHash(profile),
+		"max_tokens":         32,
+		"timeout_ms":         30_000,
+		"warmup_runs":        warmupRuns,
+		"measured_runs":      measuredRuns,
+		"created_at_unix_ms": int64(1_800_000_000_123),
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testMeasuredModelBenchmarkSeriesResult(ttftMs int64, wallMs int64, tokens int64, tps float64) v7modelbench.ModelBenchmarkResult {
+	profile, _ := v7modelbench.GetBenchmarkPromptProfile(string(v7modelbench.BenchmarkPromptProfileLongDecodeProbe))
+	result := testMeasuredModelBenchmarkResult()
+	result.RequestID = "request-modelbench-series-local"
+	result.JobID = "job-modelbench-series-local"
+	result.PromptHash = v7modelbench.BenchmarkPromptHash(profile)
+	result.Metrics.TimeToFirstTokenMs = ttftMs
+	result.Metrics.WallTimeMs = wallMs
+	result.Metrics.TokensGenerated = tokens
+	result.Metrics.TokensPerSecond = tps
+	result.OutputHash = testSHA256ObjectID(fmt.Sprintf("secret series completion text %d", ttftMs))
+	result.OutputBytes = int64(len("secret series completion text"))
+	return result
+}
+
+func testUnavailableModelBenchmarkSeriesResult() v7modelbench.ModelBenchmarkResult {
+	result := testMeasuredModelBenchmarkSeriesResult(0, 25, 0, 0)
+	result.RuntimeInfo.NativeInferenceReady = false
+	result.RuntimeInfo.ModelLoaded = false
+	result.Metrics.TimeToFirstTokenMs = 0
+	result.Metrics.TokensGenerated = 0
+	result.Metrics.TokensPerSecond = 0
+	result.Metrics.ModelLoadState = v7modelbench.ModelBenchmarkModelLoadStateUnavailable
+	result.Metrics.ErrorCode = "native_runtime_unavailable"
 	result.OutputHash = ""
 	result.OutputBytes = 0
 	result.ProofStatus = v7modelbench.ModelBenchmarkProofStatusUnavailable
