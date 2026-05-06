@@ -73,9 +73,10 @@ const (
 )
 
 var (
-	workLoopDiagnostics       = diagnostics.NewWorkLoopDiagnostics()
-	v7ModelBenchmarkStatus    = v7modelbench.NewLocalStatus()
-	newV7ModelBenchmarkRunner = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
+	workLoopDiagnostics          = diagnostics.NewWorkLoopDiagnostics()
+	v7ModelBenchmarkStatus       = v7modelbench.NewLocalStatus()
+	v7TensorPlaneBenchmarkStatus = v7tensorplane.NewLocalStatus()
+	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
 		return v7modelbench.NativeInferenceModelBenchmarkRunner{
 			Native:           infMgr,
 			AgentVersion:     version,
@@ -856,6 +857,18 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	if handled, result, runErr := processOptionalV7TensorPlaneBenchmark(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("V7 TensorPlane benchmark execution failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("V7 TensorPlane benchmark completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	if handled, result, runErr := processOptionalV7ModelBenchmark(runCtx, client, work, infMgr, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
 			slog.Warn("V7 model benchmark execution failed", "job_id", work.JobID, "error", runErr)
@@ -1154,6 +1167,155 @@ func workLoopAnyInt64(value any) int64 {
 		}
 	}
 	return 0
+}
+
+func processOptionalV7TensorPlaneBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	identity, isBenchmark := v7tensorplane.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
+	benchmarkEnabled := isBenchmark && v7tensorplane.BenchmarkEnabledFromEnv(os.Getenv)
+	if benchmarkEnabled && v7TensorPlaneBenchmarkStatus != nil {
+		v7TensorPlaneBenchmarkStatus.RecordSeen(statusJobID)
+	}
+
+	executionStarted := time.Now()
+	if benchmarkEnabled {
+		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
+	}
+	receipt, handled, err := v7tensorplane.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, v7tensorplane.ExecuteOptions{
+		Getenv: os.Getenv,
+	})
+	if !handled {
+		return false, nil, nil
+	}
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
+	if err != nil && v7TensorPlaneBenchmarkStatus != nil {
+		v7TensorPlaneBenchmarkStatus.RecordError(statusJobID, err)
+	}
+
+	receiptBuildStarted := time.Now()
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
+	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
+	extra := map[string]any{
+		"executor":      v7tensorplane.BenchmarkTask,
+		"executor_kind": v7tensorplane.BenchmarkTask,
+		"task":          v7tensorplane.BenchmarkTask,
+	}
+	if strings.TrimSpace(receipt.ResultHashHex) == "" {
+		receipt = v7tensorplane.BuildBenchmarkRejectionReceipt(work.JobID, err)
+	}
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		extra["exit_code"] = 1
+		extra["error"] = "v7 tensorplane benchmark failed"
+	} else {
+		extra["exit_code"] = 0
+	}
+	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
+	hubReceipt := hub.Receipt{
+		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
+		ResultHashHex: receipt.ResultHashHex,
+		MeteringUnits: receipt.MeteringUnits,
+		Metadata:      metadata,
+	}
+	snapshot := &runnerResultSnapshot{
+		ResultHashHex: hubReceipt.ResultHashHex,
+		MeteringUnits: hubReceipt.MeteringUnits,
+		ExitCode:      exitCode,
+		Metadata:      metadata,
+	}
+	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
+	receiptContext := v7TensorPlaneBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt)
+	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_start", hubReceipt.JobID, work.Kind, receiptContext)
+	if client == nil {
+		submitErr := fmt.Errorf("hub client unavailable")
+		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+		if v7TensorPlaneBenchmarkStatus != nil {
+			if err == nil {
+				v7TensorPlaneBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
+			}
+			v7TensorPlaneBenchmarkStatus.RecordReceiptFailed(hubReceipt.JobID, submitErr)
+		}
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	submitStarted := time.Now()
+	workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+	submitErr := client.SubmitReceipt(ctx, hubReceipt)
+	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), submitErr)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+	if submitErr != nil {
+		if v7TensorPlaneBenchmarkStatus != nil {
+			if err == nil {
+				v7TensorPlaneBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
+			}
+			v7TensorPlaneBenchmarkStatus.RecordReceiptFailed(hubReceipt.JobID, submitErr)
+		}
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	if v7TensorPlaneBenchmarkStatus != nil {
+		if err == nil {
+			v7TensorPlaneBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
+		}
+		v7TensorPlaneBenchmarkStatus.RecordReceiptSubmitted(hubReceipt.JobID)
+	}
+	return true, snapshot, err
+}
+
+func v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {
+	context := map[string]string{
+		"spec_task": v7tensorplane.BenchmarkTask,
+	}
+	var spec struct {
+		Task     string `json:"task"`
+		Tokens   int    `json:"tokens"`
+		HeadDim  int    `json:"head_dim"`
+		ValueDim int    `json:"value_dim"`
+	}
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return context
+	}
+	if strings.TrimSpace(spec.Task) == v7tensorplane.BenchmarkTask {
+		context["spec_task"] = v7tensorplane.BenchmarkTask
+	}
+	if spec.Tokens > 0 {
+		context["tokens"] = strconv.Itoa(spec.Tokens)
+	}
+	if spec.HeadDim > 0 {
+		context["head_dim"] = strconv.Itoa(spec.HeadDim)
+	}
+	if spec.ValueDim > 0 {
+		context["value_dim"] = strconv.Itoa(spec.ValueDim)
+	}
+	return context
+}
+
+func v7TensorPlaneBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v7tensorplane.BenchmarkReceipt) map[string]string {
+	context := v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(specJSON)
+	if taskMetadata, ok := receipt.Metadata[v7tensorplane.BenchmarkTask].(map[string]any); ok {
+		putWorkLoopAnyIntContext(context, "tokens", taskMetadata["tokens"])
+		putWorkLoopAnyIntContext(context, "head_dim", taskMetadata["head_dim"])
+		putWorkLoopAnyIntContext(context, "value_dim", taskMetadata["value_dim"])
+		putWorkLoopAnyIntContext(context, "payload_bytes_estimate", taskMetadata["payload_bytes_estimate"])
+		if weightedValue, ok := taskMetadata["weighted_value"].([]float64); ok {
+			context["weighted_value_len"] = strconv.Itoa(len(weightedValue))
+		}
+		if status, ok := taskMetadata["correctness_status"].(string); ok && strings.TrimSpace(status) != "" {
+			context["correctness_status"] = strings.TrimSpace(status)
+		}
+	}
+	return context
 }
 
 func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {

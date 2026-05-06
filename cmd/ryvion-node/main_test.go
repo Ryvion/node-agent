@@ -22,6 +22,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
+	v7tensorplane "github.com/Ryvion/node-agent/internal/v7/tensorplane"
 )
 
 // fakeClient implements a minimal receipt submitter that fails N times then succeeds.
@@ -1228,6 +1229,198 @@ func TestProcessOptionalV7MemoryBenchmarkNormalJobDoesNotRecordStatus(t *testing
 	}
 }
 
+func TestProcessOptionalV7TensorPlaneBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	t.Setenv(v7tensorplane.BenchmarkFlagEnv, "")
+	oldStatus := v7TensorPlaneBenchmarkStatus
+	status := v7tensorplane.NewLocalStatus()
+	v7TensorPlaneBenchmarkStatus = status
+	t.Cleanup(func() {
+		v7TensorPlaneBenchmarkStatus = oldStatus
+	})
+
+	handled, result, err := processOptionalV7TensorPlaneBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-tensorplane-local",
+		Kind:     "benchmark",
+		SpecJSON: testV7TensorPlaneBenchmarkSpecJSON(t, "job-tensorplane-local", "request-tensorplane-local"),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7TensorPlaneBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false when flag is off")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (v7tensorplane.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7TensorPlaneBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(v7tensorplane.BenchmarkFlagEnv, "1")
+	oldStatus := v7TensorPlaneBenchmarkStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := v7tensorplane.NewLocalStatus()
+	v7TensorPlaneBenchmarkStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	t.Cleanup(func() {
+		v7TensorPlaneBenchmarkStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-tensorplane-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[v7tensorplane.BenchmarkTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7tensorplane.BenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != v7tensorplane.ProofStatusTensorPlaneMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["correctness_status"] != v7tensorplane.CorrectnessStatusMatched {
+			t.Errorf("correctness_status = %v", metadata["correctness_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, key := range []string{"page_hash", "query_hash", "summary_hash"} {
+			value, ok := metadata[key].(string)
+			if !ok || !strings.HasPrefix(value, "sha256:") {
+				t.Errorf("%s = %#v, want sha256 hash", key, metadata[key])
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"key_data", "value_data", "query_vector", "prompt text", "generated output"} {
+			if strings.Contains(string(encoded), forbidden) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7TensorPlaneBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-tensorplane-local",
+		Kind:     "benchmark",
+		SpecJSON: testV7TensorPlaneBenchmarkSpecJSON(t, "job-tensorplane-local", "request-tensorplane-local"),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7TensorPlaneBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful tensorplane receipt", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+
+	snapshot := status.Snapshot()
+	if snapshot.LastJobID != "job-tensorplane-local" {
+		t.Fatalf("last_job_id = %q", snapshot.LastJobID)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.LastWorkSpecTask != v7tensorplane.BenchmarkTask {
+		t.Fatalf("last work spec task = %q", workSnapshot.LastWorkSpecTask)
+	}
+	for _, name := range []string{"v7_fast_path_start", "v7_fast_path_receipt_ready", "v7_fast_path_submit_start", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end"} {
+		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
+		}
+	}
+}
+
+func TestProcessOptionalV7TensorPlaneBenchmarkSubmitFailureRecordsDiagnostics(t *testing.T) {
+	t.Setenv(v7tensorplane.BenchmarkFlagEnv, "1")
+	oldStatus := v7TensorPlaneBenchmarkStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := v7tensorplane.NewLocalStatus()
+	v7TensorPlaneBenchmarkStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	t.Cleanup(func() {
+		v7TensorPlaneBenchmarkStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7TensorPlaneBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-tensorplane-fail",
+		Kind:     "benchmark",
+		SpecJSON: testV7TensorPlaneBenchmarkSpecJSON(t, "job-tensorplane-fail", "request-tensorplane-fail"),
+	}, nil, false)
+	if err == nil {
+		t.Fatal("processOptionalV7TensorPlaneBenchmark() error = nil, want submit error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want built receipt snapshot despite submit error", result)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 0 || snapshot.Counters.ReceiptFailed != 1 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+	if snapshot.LastError == "" {
+		t.Fatalf("last_error not recorded: %+v", snapshot)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.ReceiptSubmittedCount != 0 || workSnapshot.ReceiptFailedCount != 1 {
+		t.Fatalf("unexpected work-loop receipt counters: %+v", workSnapshot)
+	}
+}
+
 func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
 	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "")
 	oldStatus := v7ModelBenchmarkStatus
@@ -1869,6 +2062,31 @@ func assertMainWorkLoopEventsChronological(t *testing.T, events []diagnostics.Wo
 		}
 		previous = parsed
 	}
+}
+
+func testV7TensorPlaneBenchmarkSpecJSON(t *testing.T, jobID, requestID string) string {
+	t.Helper()
+	spec := map[string]any{
+		"task":               v7tensorplane.BenchmarkTask,
+		"request_id":         requestID,
+		"job_id":             jobID,
+		"model_id":           "model-fixture",
+		"layer_index":        2,
+		"dtype":              string(v7tensorplane.TensorDTypeFloat32),
+		"tokens":             8,
+		"head_dim":           4,
+		"value_dim":          3,
+		"seed":               int64(99),
+		"timeout_ms":         int64(5_000),
+		"created_at_unix_ms": int64(1_800_000_000_123),
+		"prompt_text":        "prompt text must not leak",
+		"generated_output":   "generated output must not leak",
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(specJSON)
 }
 
 func testV7MemoryBenchmarkSpecJSON(t *testing.T, jobID, requestID string) string {
