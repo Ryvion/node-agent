@@ -183,6 +183,18 @@ func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
 	if err := json.Unmarshal(respBody, &status); err != nil {
 		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
 	}
+	if status.TensorAccess.RuntimeKind != v7kvprobe.RuntimeKindNative {
+		t.Fatalf("top-level tensor_access = %+v, want native runtime kind", status.TensorAccess)
+	}
+	if status.TensorAccess.Reason == "" {
+		t.Fatalf("top-level tensor_access reason is empty: %+v", status.TensorAccess)
+	}
+	if !status.TensorAccess.TensorPlaneDemoSupported {
+		t.Fatalf("top-level tensor_access tensorplane_demo_supported = false: %+v", status.TensorAccess)
+	}
+	if status.TensorAccess.KVAccessSupported {
+		t.Fatalf("top-level tensor_access kv_access_supported = true by default: %+v", status.TensorAccess)
+	}
 	if status.Runtime.TensorAccess.RuntimeKind != v7kvprobe.RuntimeKindNative {
 		t.Fatalf("runtime tensor_access = %+v, want native runtime kind", status.Runtime.TensorAccess)
 	}
@@ -201,6 +213,7 @@ func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
 		`"hidden_state_access_supported"`,
 		`"logits_access_supported"`,
 		`"attention_hook_supported"`,
+		`"tensorplane_demo_supported"`,
 		`"runtime_kind"`,
 		`"reason"`,
 	} {
@@ -208,7 +221,7 @@ func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
 			t.Fatalf("status JSON missing %s: %s", want, text)
 		}
 	}
-	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output"} {
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes"} {
 		if strings.Contains(strings.ToLower(text), forbidden) {
 			t.Fatalf("status JSON contains forbidden text marker %q: %s", forbidden, text)
 		}

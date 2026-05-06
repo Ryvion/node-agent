@@ -87,28 +87,29 @@ type operatorJob struct {
 }
 
 type operatorStatusResponse struct {
-	Version           string                            `json:"version"`
-	HubURL            string                            `json:"hub_url"`
-	PublicKeyHex      string                            `json:"public_key_hex"`
-	DeviceType        string                            `json:"device_type"`
-	DeclaredCountry   string                            `json:"declared_country,omitempty"`
-	VerifiedCountry   string                            `json:"verified_country,omitempty"`
-	Registered        bool                              `json:"registered"`
-	RegisterError     string                            `json:"register_error,omitempty"`
-	LatestVersion     string                            `json:"latest_version,omitempty"`
-	LastHeartbeatAt   time.Time                         `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatErr  string                            `json:"last_heartbeat_error,omitempty"`
-	Machine           operatorMachine                   `json:"machine"`
-	Runtime           operatorRuntimeInfo               `json:"runtime"`
-	Metrics           operatorMetrics                   `json:"metrics"`
-	CurrentJob        *operatorJob                      `json:"current_job,omitempty"`
-	RecentJobs        []operatorJob                     `json:"recent_jobs"`
-	LastClaimAt       time.Time                         `json:"last_claim_at,omitempty"`
-	LastClaimError    string                            `json:"last_claim_error,omitempty"`
-	LastPayoutAt      time.Time                         `json:"last_payout_at,omitempty"`
-	LastPayoutError   string                            `json:"last_payout_error,omitempty"`
-	V7MemoryBenchmark v7memorybench.LocalStatusSnapshot `json:"v7_memory_benchmark"`
-	WorkLoop          diagnostics.WorkLoopSnapshot      `json:"work_loop"`
+	Version           string                                `json:"version"`
+	HubURL            string                                `json:"hub_url"`
+	PublicKeyHex      string                                `json:"public_key_hex"`
+	DeviceType        string                                `json:"device_type"`
+	DeclaredCountry   string                                `json:"declared_country,omitempty"`
+	VerifiedCountry   string                                `json:"verified_country,omitempty"`
+	Registered        bool                                  `json:"registered"`
+	RegisterError     string                                `json:"register_error,omitempty"`
+	LatestVersion     string                                `json:"latest_version,omitempty"`
+	LastHeartbeatAt   time.Time                             `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatErr  string                                `json:"last_heartbeat_error,omitempty"`
+	Machine           operatorMachine                       `json:"machine"`
+	Runtime           operatorRuntimeInfo                   `json:"runtime"`
+	TensorAccess      v7tensoraccess.TensorAccessCapability `json:"tensor_access"`
+	Metrics           operatorMetrics                       `json:"metrics"`
+	CurrentJob        *operatorJob                          `json:"current_job,omitempty"`
+	RecentJobs        []operatorJob                         `json:"recent_jobs"`
+	LastClaimAt       time.Time                             `json:"last_claim_at,omitempty"`
+	LastClaimError    string                                `json:"last_claim_error,omitempty"`
+	LastPayoutAt      time.Time                             `json:"last_payout_at,omitempty"`
+	LastPayoutError   string                                `json:"last_payout_error,omitempty"`
+	V7MemoryBenchmark v7memorybench.LocalStatusSnapshot     `json:"v7_memory_benchmark"`
+	WorkLoop          diagnostics.WorkLoopSnapshot          `json:"work_loop"`
 }
 
 type operatorMachine struct {
@@ -636,7 +637,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUModel:  caps.GPUModel,
 			VRAMBytes: caps.VRAMBytes,
 		},
-		Runtime: runtimeInfo,
+		Runtime:      runtimeInfo,
+		TensorAccess: runtimeInfo.TensorAccess,
 		Metrics: operatorMetrics{
 			CPUUtil:    metrics.CPUUtil,
 			MemUtil:    metrics.MemUtil,
@@ -683,7 +685,9 @@ func buildRuntimeTensorAccessStatus(infMgr *inference.Manager) v7tensoraccess.Te
 		modelID = infMgr.ModelName()
 		modelLoaded = nativeSupported && infMgr.Healthy()
 	}
-	return v7tensoraccess.NewNativeNoopProvider(modelID, modelLoaded, nativeSupported).Capability(context.Background())
+	capability := v7tensoraccess.NewNativeNoopProvider(modelID, modelLoaded, nativeSupported).Capability(context.Background())
+	capability.TensorPlaneDemoSupported = true
+	return capability
 }
 
 func sanitizeOperatorWorkLoopSnapshot(snapshot diagnostics.WorkLoopSnapshot) diagnostics.WorkLoopSnapshot {
