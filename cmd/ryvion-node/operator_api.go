@@ -22,6 +22,7 @@ import (
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
+	v7tensoraccess "github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
 
 const defaultOperatorAPIPort = "45890"
@@ -118,45 +119,45 @@ type operatorMachine struct {
 }
 
 type operatorRuntimeInfo struct {
-	LocalAPIURL              string               `json:"local_api_url"`
-	StatusMessage            string               `json:"status_message,omitempty"`
-	RuntimeReady             bool                 `json:"runtime_ready"`
-	RuntimeGPUReady          bool                 `json:"runtime_gpu_ready"`
-	RuntimeWarming           bool                 `json:"runtime_warming"`
-	RuntimeHealth            string               `json:"runtime_health,omitempty"`
-	RuntimePosture           string               `json:"runtime_posture,omitempty"`
-	RuntimeDetail            string               `json:"runtime_detail,omitempty"`
-	RuntimeVersion           string               `json:"runtime_version,omitempty"`
-	RuntimeChannel           string               `json:"runtime_channel,omitempty"`
-	RuntimeProvider          string               `json:"runtime_provider,omitempty"`
-	RuntimeMode              string               `json:"runtime_mode,omitempty"`
-	RuntimeSource            string               `json:"runtime_source,omitempty"`
-	RuntimeArtifact          string               `json:"runtime_artifact,omitempty"`
-	RuntimeBinary            string               `json:"runtime_binary,omitempty"`
-	RuntimeBackend           string               `json:"runtime_backend,omitempty"`
-	RuntimeEngine            string               `json:"runtime_engine,omitempty"`
-	RuntimeEngineKind        string               `json:"runtime_engine_kind,omitempty"`
-	RuntimeBackendPresent    bool                 `json:"runtime_backend_present"`
-	RuntimeManifestHash      string               `json:"runtime_manifest_hash,omitempty"`
-	TensorAccess             v7kvprobe.Capability `json:"tensor_access"`
-	ManagedOCIGPUReady       bool                 `json:"managed_oci_gpu_ready"`
-	GPUReady                 bool                 `json:"gpu_ready"`
-	SpatialReady             bool                 `json:"spatial_ready"`
-	PublicAIOptIn            bool                 `json:"public_ai_opt_in"`
-	PublicAIReady            bool                 `json:"public_ai_ready"`
-	NativeInferenceSupported bool                 `json:"native_inference_supported"`
-	NativeInferenceReady     bool                 `json:"native_inference_ready"`
-	PublicInferenceReady     bool                 `json:"public_inference_ready"`
-	SovereignReviewReady     bool                 `json:"sovereign_review_ready"`
-	SovereignStatus          string               `json:"sovereign_status,omitempty"`
-	SovereignDetail          string               `json:"sovereign_detail,omitempty"`
-	VerifiedCountry          string               `json:"verified_country,omitempty"`
-	LocationApproved         bool                 `json:"location_approved"`
-	SovereignVerified        bool                 `json:"sovereign_verified"`
-	VerificationSource       string               `json:"verification_source,omitempty"`
-	TrustReason              string               `json:"trust_reason,omitempty"`
-	NativeModel              string               `json:"native_model,omitempty"`
-	DiskGB                   uint64               `json:"disk_gb,omitempty"`
+	LocalAPIURL              string                                `json:"local_api_url"`
+	StatusMessage            string                                `json:"status_message,omitempty"`
+	RuntimeReady             bool                                  `json:"runtime_ready"`
+	RuntimeGPUReady          bool                                  `json:"runtime_gpu_ready"`
+	RuntimeWarming           bool                                  `json:"runtime_warming"`
+	RuntimeHealth            string                                `json:"runtime_health,omitempty"`
+	RuntimePosture           string                                `json:"runtime_posture,omitempty"`
+	RuntimeDetail            string                                `json:"runtime_detail,omitempty"`
+	RuntimeVersion           string                                `json:"runtime_version,omitempty"`
+	RuntimeChannel           string                                `json:"runtime_channel,omitempty"`
+	RuntimeProvider          string                                `json:"runtime_provider,omitempty"`
+	RuntimeMode              string                                `json:"runtime_mode,omitempty"`
+	RuntimeSource            string                                `json:"runtime_source,omitempty"`
+	RuntimeArtifact          string                                `json:"runtime_artifact,omitempty"`
+	RuntimeBinary            string                                `json:"runtime_binary,omitempty"`
+	RuntimeBackend           string                                `json:"runtime_backend,omitempty"`
+	RuntimeEngine            string                                `json:"runtime_engine,omitempty"`
+	RuntimeEngineKind        string                                `json:"runtime_engine_kind,omitempty"`
+	RuntimeBackendPresent    bool                                  `json:"runtime_backend_present"`
+	RuntimeManifestHash      string                                `json:"runtime_manifest_hash,omitempty"`
+	TensorAccess             v7tensoraccess.TensorAccessCapability `json:"tensor_access"`
+	ManagedOCIGPUReady       bool                                  `json:"managed_oci_gpu_ready"`
+	GPUReady                 bool                                  `json:"gpu_ready"`
+	SpatialReady             bool                                  `json:"spatial_ready"`
+	PublicAIOptIn            bool                                  `json:"public_ai_opt_in"`
+	PublicAIReady            bool                                  `json:"public_ai_ready"`
+	NativeInferenceSupported bool                                  `json:"native_inference_supported"`
+	NativeInferenceReady     bool                                  `json:"native_inference_ready"`
+	PublicInferenceReady     bool                                  `json:"public_inference_ready"`
+	SovereignReviewReady     bool                                  `json:"sovereign_review_ready"`
+	SovereignStatus          string                                `json:"sovereign_status,omitempty"`
+	SovereignDetail          string                                `json:"sovereign_detail,omitempty"`
+	VerifiedCountry          string                                `json:"verified_country,omitempty"`
+	LocationApproved         bool                                  `json:"location_approved"`
+	SovereignVerified        bool                                  `json:"sovereign_verified"`
+	VerificationSource       string                                `json:"verification_source,omitempty"`
+	TrustReason              string                                `json:"trust_reason,omitempty"`
+	NativeModel              string                                `json:"native_model,omitempty"`
+	DiskGB                   uint64                                `json:"disk_gb,omitempty"`
 }
 
 type operatorMetrics struct {
@@ -613,7 +614,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	if infMgr != nil {
 		runtimeInfo.NativeModel = infMgr.ModelName()
 	}
-	runtimeInfo.TensorAccess = buildNativeTensorAccessCapability(infMgr)
+	runtimeInfo.TensorAccess = buildRuntimeTensorAccessStatus(infMgr)
 	runtimeInfo.RuntimeBackendPresent = runtimeInfo.RuntimeBackend != ""
 	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
 
@@ -672,6 +673,17 @@ func buildNativeTensorAccessCapability(infMgr *inference.Manager) v7kvprobe.Capa
 		ModelID:          modelID,
 		ModelLoaded:      modelLoaded,
 	})
+}
+
+func buildRuntimeTensorAccessStatus(infMgr *inference.Manager) v7tensoraccess.TensorAccessCapability {
+	nativeSupported := inference.NativeRuntimeAvailable()
+	modelID := ""
+	modelLoaded := false
+	if infMgr != nil {
+		modelID = infMgr.ModelName()
+		modelLoaded = nativeSupported && infMgr.Healthy()
+	}
+	return v7tensoraccess.NewNativeNoopProvider(modelID, modelLoaded, nativeSupported).Capability(context.Background())
 }
 
 func sanitizeOperatorWorkLoopSnapshot(snapshot diagnostics.WorkLoopSnapshot) diagnostics.WorkLoopSnapshot {
