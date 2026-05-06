@@ -36,6 +36,7 @@ import (
 	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
 	v7proofrunner "github.com/Ryvion/node-agent/internal/v7/proofrunner"
 	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
+	v7tensorplane "github.com/Ryvion/node-agent/internal/v7/tensorplane"
 )
 
 // Set via -ldflags at build time.
@@ -106,6 +107,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "modelbench-selftest" {
 		runModelBenchSelfTest(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "tensorplane-selftest" {
+		runTensorPlaneSelfTest(os.Args[2:])
 		return
 	}
 
@@ -207,6 +212,24 @@ func runModelBenchSelfTest(args []string) {
 	os.Exit(0)
 }
 
+func runTensorPlaneSelfTest(args []string) {
+	config, jsonOutput, err := parseTensorPlaneSelfTestFlags(args)
+	if err != nil {
+		if err == flag.ErrHelp {
+			os.Exit(0)
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	result, err := v7tensorplane.RunTensorPlaneProbe(config)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(v7tensorplane.FormatTensorPlaneProbeResult(result, jsonOutput))
+	os.Exit(0)
+}
+
 func parseModelBenchSelfTestFlags(args []string) (v7modelbench.ModelBenchmarkSelfTestConfig, bool, error) {
 	defaults := v7modelbench.DefaultModelBenchmarkSelfTestConfig()
 	fs := flag.NewFlagSet("modelbench-selftest", flag.ContinueOnError)
@@ -226,6 +249,31 @@ func parseModelBenchSelfTestFlags(args []string) (v7modelbench.ModelBenchmarkSel
 		ModelID:   *modelID,
 		MaxTokens: *maxTokens,
 		TimeoutMs: timeoutMs,
+	}, *jsonOutput, nil
+}
+
+func parseTensorPlaneSelfTestFlags(args []string) (v7tensorplane.TensorPlaneProbeConfig, bool, error) {
+	defaults := v7tensorplane.DefaultTensorPlaneProbeConfig()
+	fs := flag.NewFlagSet("tensorplane-selftest", flag.ContinueOnError)
+	tokens := fs.Int("tokens", defaults.Tokens, "Tensor page token count")
+	headDim := fs.Int("head-dim", defaults.HeadDim, "Tensor page key/query head dimension")
+	valueDim := fs.Int("value-dim", defaults.ValueDim, "Tensor page value dimension")
+	dtype := fs.String("dtype", string(defaults.DType), "Tensor dtype (float32|float16)")
+	seed := fs.Int64("seed", defaults.Seed, "Deterministic fixture seed")
+	jsonOutput := fs.Bool("json", false, "Print JSON output")
+	writeFixture := fs.String("write-fixture", "", "Write deterministic fixture JSON to path")
+	readFixture := fs.String("read-fixture", "", "Read fixture JSON from path")
+	if err := fs.Parse(args); err != nil {
+		return v7tensorplane.TensorPlaneProbeConfig{}, false, err
+	}
+	return v7tensorplane.TensorPlaneProbeConfig{
+		Tokens:           *tokens,
+		HeadDim:          *headDim,
+		ValueDim:         *valueDim,
+		DType:            v7tensorplane.TensorDType(*dtype),
+		Seed:             *seed,
+		WriteFixturePath: *writeFixture,
+		ReadFixturePath:  *readFixture,
 	}, *jsonOutput, nil
 }
 
