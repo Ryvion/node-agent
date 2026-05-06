@@ -17,6 +17,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 )
@@ -162,6 +163,55 @@ func TestOperatorAPIStatusEndpointIncludesWorkLoop(t *testing.T) {
 	}
 	if _, err := json.Marshal(status.WorkLoop); err != nil {
 		t.Fatalf("json.Marshal(status.WorkLoop) error = %v", err)
+	}
+}
+
+func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
+	}
+	if status.Runtime.TensorAccess.RuntimeKind != v7kvprobe.RuntimeKindNative {
+		t.Fatalf("runtime tensor_access = %+v, want native runtime kind", status.Runtime.TensorAccess)
+	}
+	if status.Runtime.TensorAccess.KVAccessSupported ||
+		status.Runtime.TensorAccess.KVSnapshotSupported ||
+		status.Runtime.TensorAccess.HiddenStateAccessSupported ||
+		status.Runtime.TensorAccess.LogitsAccessSupported ||
+		status.Runtime.TensorAccess.AttentionHookSupported {
+		t.Fatalf("operator status should not advertise tensor hooks yet: %+v", status.Runtime.TensorAccess)
+	}
+	text := string(respBody)
+	for _, want := range []string{
+		`"tensor_access"`,
+		`"kv_access_supported"`,
+		`"kv_snapshot_supported"`,
+		`"hidden_state_access_supported"`,
+		`"logits_access_supported"`,
+		`"attention_hook_supported"`,
+		`"runtime_kind"`,
+		`"reason"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status JSON missing %s: %s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output"} {
+		if strings.Contains(strings.ToLower(text), forbidden) {
+			t.Fatalf("status JSON contains forbidden text marker %q: %s", forbidden, text)
+		}
 	}
 }
 

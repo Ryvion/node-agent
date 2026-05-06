@@ -9,6 +9,7 @@ import (
 
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
+	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -24,6 +25,7 @@ type V7HeartbeatPayload struct {
 	CapabilityPassport        capability.CapabilityPassport         `json:"capability_passport"`
 	NetworkProfile            *netprofile.NetworkProfile            `json:"network_profile,omitempty"`
 	ModelLeaseSummary         *ModelLeaseSummary                    `json:"model_lease_summary,omitempty"`
+	KVCapability              *kvprobe.Capability                   `json:"kv_capability,omitempty"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
@@ -49,6 +51,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	ModelCapabilitySummary capability.ModelCapabilitySummary
 	ModelLeases            []modellease.ModelLease
 	ModelLeaseSummary      *ModelLeaseSummary
+	KVCapability           *kvprobe.Capability
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -134,6 +137,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 			modelSummary.MaxResidentModelBytes = modelLeaseSummary.VRAMReservedBytes
 		}
 	}
+	kvCapability := cloneKVCapability(input.KVCapability)
 
 	casSummary := cloneCASSummary(input.CASSummary)
 	if casSummary == nil && input.CASCapabilitySummary.Enabled {
@@ -179,6 +183,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		CapabilityPassport:   passport,
 		NetworkProfile:       networkProfile,
 		ModelLeaseSummary:    modelLeaseSummary,
+		KVCapability:         kvCapability,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,
@@ -260,6 +265,14 @@ func cloneModelLeaseSummary(summary *ModelLeaseSummary) *ModelLeaseSummary {
 	}
 	cloned := *summary
 	cloned.ResidentModelIDs = cloneStrings(summary.ResidentModelIDs)
+	return &cloned
+}
+
+func cloneKVCapability(capability *kvprobe.Capability) *kvprobe.Capability {
+	if capability == nil {
+		return nil
+	}
+	cloned := kvprobe.NormalizeCapability(*capability)
 	return &cloned
 }
 

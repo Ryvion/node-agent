@@ -7,6 +7,7 @@ import (
 
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
+	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -47,6 +48,9 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	}
 	if payload.ModelLeaseSummary == nil || payload.ModelLeaseSummary.ResidentLeases != 1 {
 		t.Fatalf("model lease summary = %+v, want one resident lease", payload.ModelLeaseSummary)
+	}
+	if payload.KVCapability == nil || payload.KVCapability.Reason != kvprobe.ReasonTextGenerationOnly {
+		t.Fatalf("kv capability = %+v, want compact unsupported capability", payload.KVCapability)
 	}
 	if payload.CASSummary == nil || !payload.CASSummary.Enabled {
 		t.Fatalf("CAS summary = %+v, want enabled", payload.CASSummary)
@@ -175,6 +179,18 @@ func validInput() BuildV7HeartbeatPayloadInput {
 				LeaseExpiresAtUnixMs: 456,
 				UpdatedAtUnixMs:      123,
 			},
+		},
+		KVCapability: &kvprobe.Capability{
+			KVAccessSupported:          false,
+			KVSnapshotSupported:        false,
+			HiddenStateAccessSupported: false,
+			LogitsAccessSupported:      false,
+			AttentionHookSupported:     false,
+			Backend:                    kvprobe.BackendLlamaCPP,
+			ModelID:                    "ryvion-llama-3.2-3b",
+			ModelLoaded:                true,
+			RuntimeKind:                kvprobe.RuntimeKindNative,
+			Reason:                     kvprobe.ReasonTextGenerationOnly,
 		},
 		CASCapabilitySummary: capability.CASCapabilitySummary{
 			Enabled:  true,

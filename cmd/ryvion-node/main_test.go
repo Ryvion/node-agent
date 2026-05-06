@@ -20,6 +20,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7tensorplane "github.com/Ryvion/node-agent/internal/v7/tensorplane"
@@ -224,6 +225,9 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	}
 	if payload.CapabilityPassport.NodePublicKey != "pubkey" {
 		t.Fatalf("node public key = %q, want pubkey", payload.CapabilityPassport.NodePublicKey)
+	}
+	if payload.KVCapability == nil || payload.KVCapability.RuntimeKind != v7kvprobe.RuntimeKindNative {
+		t.Fatalf("kv capability = %+v, want native runtime capability probe", payload.KVCapability)
 	}
 }
 
