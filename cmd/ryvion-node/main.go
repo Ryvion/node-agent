@@ -882,9 +882,15 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	receipt, receiptBuildTimings, handled, err := v7memorybench.ExecuteBenchmarkAssignmentWithReceiptTimings(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
 		Getenv: os.Getenv,
 	})
+	receiptReadyAt := time.Now()
 	restoreReceiptRecorder()
 	if !handled {
 		return false, nil, nil
+	}
+	receiptTimings := workLoopReceiptTimingsFromMemorybench(receiptBuildTimings)
+	workLoopDiagnostics.RecordReceiptBuildTimings(receiptTimings)
+	if err == nil {
+		workLoopDiagnostics.RecordReceiptReady(firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, receiptReadyAt, v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings))
 	}
 	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
 	if err != nil && operatorRuntimeState != nil {
@@ -894,10 +900,6 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		operatorRuntimeState.recordV7MemoryBenchmarkExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
 	}
 
-	receiptContext := v7MemoryBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON)
-	workLoopDiagnostics.RecordEvent("receipt_build_start", statusJobID, work.Kind, receiptContext)
-	metadataBuildStarted := time.Now()
-	workLoopDiagnostics.RecordEvent("receipt_metadata_start", statusJobID, work.Kind, receiptContext)
 	runtimeMeta := map[string]any{}
 	if runtimeMgr != nil {
 		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
@@ -916,11 +918,6 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	}
 	exitCode, _ := extra["exit_code"].(int)
 	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
-	metadataBuildDuration := time.Since(metadataBuildStarted)
-	metadataEndTimings := workLoopReceiptTimingsFromMemorybench(receiptBuildTimings, metadataBuildDuration, 0)
-	workLoopDiagnostics.RecordEvent("receipt_metadata_end", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, metadataEndTimings))
-
-	envelopeBuildStarted := time.Now()
 	hubReceipt := hub.Receipt{
 		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
 		ResultHashHex: receipt.ResultHashHex,
@@ -933,12 +930,9 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		ExitCode:      exitCode,
 		Metadata:      metadata,
 	}
-	envelopeBuildDuration := time.Since(envelopeBuildStarted)
-	receiptTimings := workLoopReceiptTimingsFromMemorybench(receiptBuildTimings, metadataBuildDuration, envelopeBuildDuration)
-	receiptEndContext := v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings)
-	workLoopDiagnostics.RecordEvent("receipt_envelope_end", hubReceipt.JobID, work.Kind, receiptEndContext)
-	workLoopDiagnostics.RecordReceiptBuildTimings(receiptTimings)
-	workLoopDiagnostics.RecordEvent("receipt_build_end", hubReceipt.JobID, work.Kind, receiptEndContext)
+	if err != nil {
+		workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings))
+	}
 	if submitErr := submitReceiptWithRetry(ctx, client, hubReceipt); submitErr != nil {
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.recordV7MemoryBenchmarkReceiptFailed(hubReceipt.JobID, submitErr)
@@ -954,40 +948,20 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	return true, snapshot, err
 }
 
-func workLoopReceiptTimingsFromMemorybench(receiptTimings v7memorybench.ReceiptBuildTimings, metadataBuild, envelopeBuild time.Duration) diagnostics.ReceiptBuildTimings {
-	metadataBuildExtraUs := durationMicrosecondsForWorkLoop(metadataBuild)
-	metadataTotalUs := receiptTimings.MetadataTotalUs
-	if metadataTotalUs == 0 {
-		metadataTotalUs = receiptTimings.MetadataBuildUs
-	}
-	metadataTotalUs += metadataBuildExtraUs
-	metadataGapUs := receiptTimings.MetadataGapUs + metadataBuildExtraUs
-	envelopeBuildUs := durationMicrosecondsForWorkLoop(envelopeBuild)
-	totalBuildUs := receiptTimings.TotalBuildUs + metadataBuildExtraUs + envelopeBuildUs
-	minTotalUs := metadataTotalUs + receiptTimings.HashUs + receiptTimings.JSONMeasureUs + envelopeBuildUs
-	if totalBuildUs < minTotalUs {
-		totalBuildUs = minTotalUs
-	}
+func workLoopReceiptTimingsFromMemorybench(receiptTimings v7memorybench.ReceiptBuildTimings) diagnostics.ReceiptBuildTimings {
 	return diagnostics.ReceiptBuildTimings{
-		MetadataBuildUs:     metadataTotalUs,
+		MetadataBuildUs:     receiptTimings.MetadataBuildUs,
 		MetadataStructUs:    receiptTimings.MetadataStructUs,
 		WeightedValueCopyUs: receiptTimings.WeightedValueCopyUs,
 		MetadataDefaultsUs:  receiptTimings.MetadataDefaultsUs,
 		MetadataValidateUs:  receiptTimings.MetadataValidateUs,
-		MetadataGapUs:       metadataGapUs,
-		MetadataTotalUs:     metadataTotalUs,
+		MetadataGapUs:       receiptTimings.MetadataGapUs,
+		MetadataTotalUs:     receiptTimings.MetadataTotalUs,
 		HashUs:              receiptTimings.HashUs,
 		JSONMeasureUs:       receiptTimings.JSONMeasureUs,
-		EnvelopeBuildUs:     envelopeBuildUs,
-		TotalBuildUs:        totalBuildUs,
+		EnvelopeBuildUs:     receiptTimings.EnvelopeBuildUs,
+		TotalBuildUs:        receiptTimings.TotalBuildUs,
 	}
-}
-
-func durationMicrosecondsForWorkLoop(duration time.Duration) int64 {
-	if duration <= 0 {
-		return 0
-	}
-	return duration.Microseconds()
 }
 
 func v7MemoryBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {

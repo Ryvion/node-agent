@@ -82,6 +82,11 @@ func TestWorkLoopDiagnosticsJSONShape(t *testing.T) {
 		"last_receipt_metadata_gap_us",
 		"last_receipt_metadata_total_us",
 		"last_receipt_hash_us",
+		"last_receipt_ready_at",
+		"last_receipt_ready_to_submit_ms",
+		"last_receipt_ready_to_submit_us",
+		"last_receipt_submit_queue_gap_ms",
+		"last_receipt_submit_queue_gap_us",
 		"last_receipt_submit_duration_ms",
 		"last_receipt_submit_duration_us",
 		"receipt_submitted_count",
@@ -90,6 +95,79 @@ func TestWorkLoopDiagnosticsJSONShape(t *testing.T) {
 		if !strings.Contains(text, `"`+key+`"`) {
 			t.Fatalf("snapshot JSON missing %q: %s", key, text)
 		}
+	}
+}
+
+func TestWorkLoopDiagnosticsSeparatesReceiptReadyToSubmitGap(t *testing.T) {
+	recorder := NewWorkLoopDiagnostics()
+	recorder.RecordWorkSeen("job-gap", "benchmark", "v7_memory_benchmark")
+	recorder.RecordReceiptBuildTimings(ReceiptBuildTimings{
+		MetadataStructUs:    10,
+		WeightedValueCopyUs: 10,
+		MetadataDefaultsUs:  10,
+		MetadataValidateUs:  10,
+		MetadataTotalUs:     40,
+		HashUs:              100,
+		JSONMeasureUs:       200,
+		EnvelopeBuildUs:     300,
+		TotalBuildUs:        1_000,
+	})
+	recorder.RecordReceiptReady("job-gap", "benchmark", time.Now(), map[string]string{
+		"spec_task": "v7_memory_benchmark",
+		"prompt":    "raw prompt",
+		"output":    "raw output",
+	})
+	time.Sleep(2 * time.Millisecond)
+	recorder.RecordReceiptSubmitStart("job-gap", 1)
+
+	snapshot := recorder.Snapshot()
+	if snapshot.LastReceiptBuildMs != 1 || snapshot.LastReceiptTotalBuildMs != 1 || snapshot.LastReceiptTotalBuildUs != 1_000 {
+		t.Fatalf("receipt build timing changed by pre-submit gap: %+v", snapshot)
+	}
+	if snapshot.LastReceiptMetadataGapUs != 0 {
+		t.Fatalf("metadata gap = %d us, want only actual metadata substep gap", snapshot.LastReceiptMetadataGapUs)
+	}
+	if snapshot.LastReceiptReadyAt == "" || snapshot.LastReceiptSubmitStartedAt == "" {
+		t.Fatalf("receipt ready/submit timestamps not populated: %+v", snapshot)
+	}
+	if snapshot.LastReceiptReadyToSubmitUs <= 0 {
+		t.Fatalf("ready-to-submit gap = %d us, want positive", snapshot.LastReceiptReadyToSubmitUs)
+	}
+	if snapshot.LastReceiptSubmitQueueGapUs != snapshot.LastReceiptReadyToSubmitUs || snapshot.LastReceiptSubmitQueueGapMs != snapshot.LastReceiptReadyToSubmitMs {
+		t.Fatalf("ready gap aliases differ: %+v", snapshot)
+	}
+
+	events := snapshot.RecentEvents
+	if countWorkLoopEvents(events, "receipt_ready_to_submit_gap") != 1 || countWorkLoopEvents(events, "receipt_submit_start") != 1 {
+		t.Fatalf("unexpected ready/submit events: %+v", events)
+	}
+	gapEvent := findWorkLoopEvent(events, "receipt_ready_to_submit_gap")
+	if gapEvent.SafeContext["gap_us"] == "" || gapEvent.SafeContext["job_id"] != "job-gap" || gapEvent.SafeContext["kind"] != "benchmark" || gapEvent.SafeContext["spec_task"] != "v7_memory_benchmark" {
+		t.Fatalf("gap event safe context missing expected fields: %+v", gapEvent.SafeContext)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal(snapshot) error = %v", err)
+	}
+	if strings.Contains(string(encoded), "raw prompt") || strings.Contains(string(encoded), "raw output") {
+		t.Fatalf("ready-to-submit diagnostics leaked raw payload: %s", encoded)
+	}
+}
+
+func TestWorkLoopDiagnosticsImmediateReceiptSubmitGapIsSmall(t *testing.T) {
+	recorder := NewWorkLoopDiagnostics()
+	recorder.RecordWorkSeen("job-immediate", "benchmark", "v7_memory_benchmark")
+	recorder.RecordReceiptReady("job-immediate", "benchmark", time.Now(), map[string]string{
+		"spec_task": "v7_memory_benchmark",
+	})
+	recorder.RecordReceiptSubmitStart("job-immediate", 1)
+
+	snapshot := recorder.Snapshot()
+	if snapshot.LastReceiptReadyToSubmitUs < 0 {
+		t.Fatalf("ready-to-submit gap = %d us, want non-negative", snapshot.LastReceiptReadyToSubmitUs)
+	}
+	if snapshot.LastReceiptReadyToSubmitUs > 100_000 {
+		t.Fatalf("ready-to-submit gap = %d us, want near-zero immediate submit", snapshot.LastReceiptReadyToSubmitUs)
 	}
 }
 
@@ -484,6 +562,25 @@ func (c *receiptSubstepCapture) RecordReceiptSubstepEvent(name, jobID, kind stri
 		Kind:        kind,
 		SafeContext: context,
 	})
+}
+
+func countWorkLoopEvents(events []WorkLoopEvent, name string) int {
+	count := 0
+	for _, event := range events {
+		if event.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+func findWorkLoopEvent(events []WorkLoopEvent, name string) WorkLoopEvent {
+	for _, event := range events {
+		if event.Name == name {
+			return event
+		}
+	}
+	return WorkLoopEvent{}
 }
 
 func assertPollSnapshotOrdered(t *testing.T, snapshot WorkLoopSnapshot) {

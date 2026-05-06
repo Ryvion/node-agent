@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Ryvion/node-agent/internal/diagnostics"
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
@@ -878,10 +879,13 @@ func TestRuntimeWarmingHeuristicWindowsPodman(t *testing.T) {
 
 func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 	oldState := operatorRuntimeState
+	oldDiagnostics := workLoopDiagnostics
 	status := v7memorybench.NewLocalStatus()
 	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
 	t.Cleanup(func() {
 		operatorRuntimeState = oldState
+		workLoopDiagnostics = oldDiagnostics
 	})
 	t.Setenv(v7memorybench.BenchmarkFlagEnv, "1")
 
@@ -929,6 +933,9 @@ func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 		"token_count":        4,
 		"value_dim":          2,
 		"created_at_unix_ms": int64(1_800_000_000_123),
+		"prompt":             "raw prompt must not leak",
+		"output":             "raw output must not leak",
+		"weighted_value":     []float64{1, 2, 3},
 	}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
@@ -967,6 +974,48 @@ func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 	}
 	if snapshot.Counters.ReceiptFailed != 0 || snapshot.Counters.Rejected != 0 {
 		t.Fatalf("unexpected failure counters: %+v", snapshot.Counters)
+	}
+
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, "receipt_build_start"); got != 1 {
+		t.Fatalf("receipt_build_start events = %d, want 1: %+v", got, workSnapshot.RecentEvents)
+	}
+	if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, "receipt_build_end"); got != 1 {
+		t.Fatalf("receipt_build_end events = %d, want 1: %+v", got, workSnapshot.RecentEvents)
+	}
+	if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, "receipt_metadata_start"); got != 1 {
+		t.Fatalf("receipt_metadata_start events = %d, want 1: %+v", got, workSnapshot.RecentEvents)
+	}
+	if workSnapshot.LastReceiptBuildMs != workSnapshot.LastReceiptTotalBuildMs || workSnapshot.LastReceiptTotalBuildUs <= 0 {
+		t.Fatalf("receipt build status did not use actual build timings: %+v", workSnapshot)
+	}
+	if workSnapshot.LastReceiptMetadataGapUs < 0 {
+		t.Fatalf("metadata gap = %d us, want non-negative", workSnapshot.LastReceiptMetadataGapUs)
+	}
+	if workSnapshot.LastReceiptReadyAt == "" || workSnapshot.LastReceiptReadyToSubmitUs <= 0 || workSnapshot.LastReceiptSubmitQueueGapUs != workSnapshot.LastReceiptReadyToSubmitUs {
+		t.Fatalf("ready-to-submit gap not recorded separately: %+v", workSnapshot)
+	}
+	for _, name := range []string{"receipt_ready", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end"} {
+		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
+		}
+	}
+	if !mainWorkLoopEventOrder(workSnapshot.RecentEvents, "receipt_build_end", "receipt_ready", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end") {
+		t.Fatalf("receipt event timeline is out of order: %+v", workSnapshot.RecentEvents)
+	}
+	assertMainWorkLoopEventsChronological(t, workSnapshot.RecentEvents)
+	gapEvent := findMainWorkLoopEvent(workSnapshot.RecentEvents, "receipt_ready_to_submit_gap")
+	if gapEvent.SafeContext["gap_us"] == "" || gapEvent.SafeContext["job_id"] != "job-bench-local" || gapEvent.SafeContext["kind"] != "benchmark" || gapEvent.SafeContext["spec_task"] != v7memorybench.BenchmarkTask {
+		t.Fatalf("gap event safe context missing expected fields: %+v", gapEvent.SafeContext)
+	}
+	encodedWorkSnapshot, err := json.Marshal(workSnapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal(workSnapshot) error = %v", err)
+	}
+	for _, forbidden := range []string{"raw prompt must not leak", "raw output must not leak", `"weighted_value":[`} {
+		if strings.Contains(string(encodedWorkSnapshot), forbidden) {
+			t.Fatalf("work loop diagnostics leaked forbidden material %q: %s", forbidden, encodedWorkSnapshot)
+		}
 	}
 }
 
@@ -1594,6 +1643,50 @@ func containsToken(tokens []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func countMainWorkLoopEvents(events []diagnostics.WorkLoopEvent, name string) int {
+	count := 0
+	for _, event := range events {
+		if event.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+func findMainWorkLoopEvent(events []diagnostics.WorkLoopEvent, name string) diagnostics.WorkLoopEvent {
+	for _, event := range events {
+		if event.Name == name {
+			return event
+		}
+	}
+	return diagnostics.WorkLoopEvent{}
+}
+
+func mainWorkLoopEventOrder(events []diagnostics.WorkLoopEvent, names ...string) bool {
+	next := 0
+	for _, event := range events {
+		if next < len(names) && event.Name == names[next] {
+			next++
+		}
+	}
+	return next == len(names)
+}
+
+func assertMainWorkLoopEventsChronological(t *testing.T, events []diagnostics.WorkLoopEvent) {
+	t.Helper()
+	var previous time.Time
+	for i, event := range events {
+		parsed, err := time.Parse(time.RFC3339Nano, event.At)
+		if err != nil {
+			t.Fatalf("event[%d] time parse error: %v; event=%+v", i, err, event)
+		}
+		if !previous.IsZero() && parsed.Before(previous) {
+			t.Fatalf("event[%d] time %s before previous %s; events=%+v", i, event.At, previous.Format(time.RFC3339Nano), events)
+		}
+		previous = parsed
+	}
 }
 
 // submitReceiptWithRetryTestable is the same logic as submitReceiptWithRetry

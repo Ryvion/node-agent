@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,11 @@ type WorkLoopSnapshot struct {
 	LastReceiptJSONMeasureUs       int64           `json:"last_receipt_json_measure_us"`
 	LastReceiptEnvelopeBuildUs     int64           `json:"last_receipt_envelope_build_us"`
 	LastReceiptTotalBuildUs        int64           `json:"last_receipt_total_build_us"`
+	LastReceiptReadyAt             string          `json:"last_receipt_ready_at"`
+	LastReceiptReadyToSubmitMs     int64           `json:"last_receipt_ready_to_submit_ms"`
+	LastReceiptReadyToSubmitUs     int64           `json:"last_receipt_ready_to_submit_us"`
+	LastReceiptSubmitQueueGapMs    int64           `json:"last_receipt_submit_queue_gap_ms"`
+	LastReceiptSubmitQueueGapUs    int64           `json:"last_receipt_submit_queue_gap_us"`
 	LastReceiptSubmitStartedAt     string          `json:"last_receipt_submit_started_at"`
 	LastReceiptSubmitCompletedAt   string          `json:"last_receipt_submit_completed_at"`
 	LastReceiptSubmitDurationMs    int64           `json:"last_receipt_submit_duration_ms"`
@@ -81,6 +87,9 @@ type WorkLoopDiagnostics struct {
 
 	lastPollStartedAt          time.Time
 	lastExecutionStartedAt     time.Time
+	lastReceiptReadyAt         time.Time
+	lastReceiptReadyJobID      string
+	lastReceiptReadyKind       string
 	lastReceiptSubmitStartedAt time.Time
 	lastReceiptSubmitJobID     string
 
@@ -263,6 +272,46 @@ func (d *WorkLoopDiagnostics) applyReceiptBuildTimingsLocked(timings ReceiptBuil
 	d.snapshot.LastReceiptTotalBuildUs = timings.TotalBuildUs
 }
 
+func (d *WorkLoopDiagnostics) RecordReceiptReady(jobID, kind string, readyAt time.Time, safeContext map[string]string) {
+	if d == nil {
+		return
+	}
+	if readyAt.IsZero() {
+		readyAt = time.Now()
+	}
+	readyAt = readyAt.UTC()
+	cleanJobID := cleanWorkLoopText(jobID, maxWorkLoopIDLen)
+	cleanKind := cleanWorkLoopText(kind, maxWorkLoopKindLen)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if cleanJobID == "" {
+		cleanJobID = d.snapshot.LastWorkJobID
+	}
+	if cleanKind == "" {
+		cleanKind = d.snapshot.LastWorkKind
+	}
+	d.lastReceiptReadyAt = readyAt
+	d.lastReceiptReadyJobID = cleanJobID
+	d.lastReceiptReadyKind = cleanKind
+	d.snapshot.LastReceiptReadyAt = formatWorkLoopTime(readyAt)
+	if d.snapshot.LastWorkJobID == "" {
+		d.snapshot.LastWorkJobID = cleanJobID
+	}
+	if d.snapshot.LastWorkKind == "" {
+		d.snapshot.LastWorkKind = cleanKind
+	}
+	if d.snapshot.LastWorkSpecTask == "" {
+		if specTask, ok := safeContext["spec_task"]; ok {
+			cleanSpecTask := cleanWorkLoopText(specTask, maxWorkLoopTaskLen)
+			if isSafeWorkLoopLabel(cleanSpecTask) {
+				d.snapshot.LastWorkSpecTask = cleanSpecTask
+			}
+		}
+	}
+	d.recordEventLocked(readyAt, "receipt_ready", cleanJobID, cleanKind, safeContext)
+}
+
 func (d *WorkLoopDiagnostics) RecordReceiptSubmitStart(jobID string, attempt int) {
 	if d == nil {
 		return
@@ -275,18 +324,61 @@ func (d *WorkLoopDiagnostics) RecordReceiptSubmitStart(jobID string, attempt int
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if attempt == 1 || d.lastReceiptSubmitStartedAt.IsZero() || cleanJobID != d.lastReceiptSubmitJobID {
+	shouldRecordSubmitStart := attempt == 1 || d.lastReceiptSubmitStartedAt.IsZero() || cleanJobID != d.lastReceiptSubmitJobID
+	if shouldRecordSubmitStart {
 		d.lastReceiptSubmitStartedAt = now
 		d.lastReceiptSubmitJobID = cleanJobID
 		d.snapshot.LastReceiptSubmitStartedAt = formatWorkLoopTime(now)
 		d.snapshot.LastReceiptSubmitError = ""
+		d.recordReadyToSubmitGapLocked(now, cleanJobID)
 	}
 	d.snapshot.LastReceiptAttempts = attempt
 	eventJobID := cleanJobID
 	if eventJobID == "" {
 		eventJobID = d.snapshot.LastWorkJobID
 	}
-	d.recordEventLocked(now, "receipt_submit_start", eventJobID, d.snapshot.LastWorkKind, workLoopSpecContext(d.snapshot.LastWorkSpecTask))
+	eventKind := d.snapshot.LastWorkKind
+	if eventKind == "" {
+		eventKind = d.lastReceiptReadyKind
+	}
+	d.recordEventLocked(now, "receipt_submit_start", eventJobID, eventKind, workLoopSpecContext(d.snapshot.LastWorkSpecTask))
+}
+
+func (d *WorkLoopDiagnostics) recordReadyToSubmitGapLocked(now time.Time, cleanJobID string) {
+	if d.lastReceiptReadyAt.IsZero() {
+		return
+	}
+	if d.lastReceiptReadyJobID != "" && cleanJobID != "" && cleanJobID != d.lastReceiptReadyJobID {
+		return
+	}
+	gap := now.Sub(d.lastReceiptReadyAt)
+	gapMs := durationMilliseconds(gap)
+	gapUs := durationMicroseconds(gap)
+	d.snapshot.LastReceiptReadyToSubmitMs = gapMs
+	d.snapshot.LastReceiptReadyToSubmitUs = gapUs
+	d.snapshot.LastReceiptSubmitQueueGapMs = gapMs
+	d.snapshot.LastReceiptSubmitQueueGapUs = gapUs
+
+	eventJobID := cleanJobID
+	if eventJobID == "" {
+		eventJobID = firstNonEmptyWorkLoopString(d.lastReceiptReadyJobID, d.snapshot.LastWorkJobID)
+	}
+	eventKind := firstNonEmptyWorkLoopString(d.snapshot.LastWorkKind, d.lastReceiptReadyKind)
+	context := workLoopSpecContext(d.snapshot.LastWorkSpecTask)
+	if context == nil {
+		context = map[string]string{}
+	}
+	context["gap_us"] = strconv.FormatInt(gapUs, 10)
+	if eventJobID != "" {
+		context["job_id"] = eventJobID
+	}
+	if eventKind != "" {
+		context["kind"] = eventKind
+	}
+	d.recordEventLocked(now, "receipt_ready_to_submit_gap", eventJobID, eventKind, context)
+	d.lastReceiptReadyAt = time.Time{}
+	d.lastReceiptReadyJobID = ""
+	d.lastReceiptReadyKind = ""
 }
 
 func (d *WorkLoopDiagnostics) RecordReceiptSubmitEnd(duration time.Duration, err error) {
@@ -457,6 +549,15 @@ func firstNonZeroInt64(first, fallback int64) int64 {
 	return fallback
 }
 
+func firstNonEmptyWorkLoopString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func nonNegativeInt64(value int64) int64 {
 	if value < 0 {
 		return 0
@@ -562,6 +663,8 @@ func isAllowedWorkLoopEventName(name string) bool {
 		"receipt_json_measure_end",
 		"receipt_envelope_end",
 		"receipt_build_end",
+		"receipt_ready",
+		"receipt_ready_to_submit_gap",
 		"receipt_submit_start",
 		"receipt_submit_end",
 		"poll_start",
@@ -591,8 +694,11 @@ func sanitizeWorkLoopEventContext(input map[string]string) map[string]string {
 func isAllowedWorkLoopContextKey(key string) bool {
 	switch key {
 	case "spec_task",
+		"job_id",
+		"kind",
 		"token_count",
 		"value_dim",
+		"gap_us",
 		"metadata_total_us",
 		"metadata_gap_us",
 		"weighted_value_len",
@@ -608,7 +714,7 @@ func cleanWorkLoopContextValue(key, value string) string {
 	if value == "" {
 		return ""
 	}
-	if key == "spec_task" {
+	if key == "spec_task" || key == "job_id" || key == "kind" {
 		if !isSafeWorkLoopLabel(value) {
 			return ""
 		}
