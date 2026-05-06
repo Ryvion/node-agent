@@ -11,6 +11,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
+	"github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
 
 func TestV7HeartbeatEnabledFromEnv(t *testing.T) {
@@ -51,6 +52,12 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	}
 	if payload.KVCapability == nil || payload.KVCapability.Reason != kvprobe.ReasonTextGenerationOnly {
 		t.Fatalf("kv capability = %+v, want compact unsupported capability", payload.KVCapability)
+	}
+	if payload.TensorAccess.Provider != tensoraccess.ProviderNoop {
+		t.Fatalf("tensor_access provider = %q, want %q", payload.TensorAccess.Provider, tensoraccess.ProviderNoop)
+	}
+	if !payload.TensorAccess.TensorPlaneDemoSupported || !payload.TensorAccess.ModelLoaded {
+		t.Fatalf("tensor_access = %+v, want demo support and loaded model from input", payload.TensorAccess)
 	}
 	if payload.CASSummary == nil || !payload.CASSummary.Enabled {
 		t.Fatalf("CAS summary = %+v, want enabled", payload.CASSummary)
@@ -97,6 +104,9 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 	if !strings.Contains(string(raw), `"capability_passport"`) {
 		t.Fatalf("payload JSON missing capability_passport: %s", string(raw))
 	}
+	if !strings.Contains(string(raw), `"tensor_access"`) {
+		t.Fatalf("payload JSON missing tensor_access: %s", string(raw))
+	}
 }
 
 func TestBuildV7HeartbeatPayloadRejectsInvalidNetworkProfile(t *testing.T) {
@@ -124,6 +134,93 @@ func TestBuildV7HeartbeatPayloadOmitsUnavailableLeaseAndCASSummaries(t *testing.
 	}
 	if !payload.CapabilityPassport.ModelCapabilitySummary.SupportsModelLease {
 		t.Fatal("model lease support capability should remain advertised")
+	}
+}
+
+func TestBuildV7HeartbeatPayloadDefaultsUnsupportedNoopTensorAccess(t *testing.T) {
+	input := validInput()
+	input.TensorAccess = nil
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	if payload.TensorAccess.Provider != tensoraccess.ProviderNoop {
+		t.Fatalf("tensor_access provider = %q, want noop", payload.TensorAccess.Provider)
+	}
+	if payload.TensorAccess.KVAccessSupported ||
+		payload.TensorAccess.KVSnapshotSupported ||
+		payload.TensorAccess.HiddenStateAccessSupported ||
+		payload.TensorAccess.LogitsAccessSupported ||
+		payload.TensorAccess.AttentionHookSupported {
+		t.Fatalf("default tensor_access should not advertise hooks: %+v", payload.TensorAccess)
+	}
+	if payload.TensorAccess.ModelLoaded {
+		t.Fatalf("default tensor_access model_loaded = true: %+v", payload.TensorAccess)
+	}
+	if payload.TensorAccess.Reason == "" {
+		t.Fatalf("default tensor_access reason is empty: %+v", payload.TensorAccess)
+	}
+}
+
+func TestBuildV7HeartbeatPayloadNormalizesTensorAccess(t *testing.T) {
+	input := validInput()
+	longReason := "  " + strings.Repeat("r", 300) + "\n"
+	longModelID := "  " + strings.Repeat("m", 160) + "\t"
+	input.TensorAccess = &tensoraccess.TensorAccessCapability{
+		Provider:    "  NOOP  ",
+		Backend:     "  NATIVE ",
+		RuntimeKind: "  NATIVE ",
+		ModelID:     longModelID,
+		ModelLoaded: true,
+		Reason:      longReason,
+	}
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	if payload.TensorAccess.Provider != tensoraccess.ProviderNoop ||
+		payload.TensorAccess.Backend != tensoraccess.BackendNative ||
+		payload.TensorAccess.RuntimeKind != tensoraccess.RuntimeKindNative {
+		t.Fatalf("tensor_access was not normalized: %+v", payload.TensorAccess)
+	}
+	if len(payload.TensorAccess.ModelID) != 128 {
+		t.Fatalf("model_id length = %d, want 128", len(payload.TensorAccess.ModelID))
+	}
+	if len(payload.TensorAccess.Reason) != 256 {
+		t.Fatalf("reason length = %d, want 256", len(payload.TensorAccess.Reason))
+	}
+	if strings.ContainsAny(payload.TensorAccess.ModelID, " \t\n") || strings.ContainsAny(payload.TensorAccess.Reason, "\t\n") {
+		t.Fatalf("tensor_access text was not sanitized: %+v", payload.TensorAccess)
+	}
+}
+
+func TestBuildV7HeartbeatPayloadContainsNoRawTensorPromptOrOutputFields(t *testing.T) {
+	payload, err := BuildV7HeartbeatPayload(validInput())
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	body := strings.ToLower(string(raw))
+	for _, forbidden := range []string{
+		"raw_tensor",
+		"tensor_bytes",
+		"key_data",
+		"value_data",
+		"query_vector",
+		"raw_prompt",
+		"prompt_text",
+		"generated_text",
+		"model_output",
+		"output_text",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("payload JSON contains forbidden field marker %q: %s", forbidden, body)
+		}
 	}
 }
 
@@ -191,6 +288,20 @@ func validInput() BuildV7HeartbeatPayloadInput {
 			ModelLoaded:                true,
 			RuntimeKind:                kvprobe.RuntimeKindNative,
 			Reason:                     kvprobe.ReasonTextGenerationOnly,
+		},
+		TensorAccess: &tensoraccess.TensorAccessCapability{
+			Provider:                   tensoraccess.ProviderNoop,
+			Backend:                    tensoraccess.BackendNative,
+			KVAccessSupported:          false,
+			KVSnapshotSupported:        false,
+			HiddenStateAccessSupported: false,
+			LogitsAccessSupported:      false,
+			AttentionHookSupported:     false,
+			TensorPlaneDemoSupported:   true,
+			ModelLoaded:                true,
+			RuntimeKind:                tensoraccess.RuntimeKindNative,
+			ModelID:                    "ryvion-llama-3.2-3b",
+			Reason:                     tensoraccess.ReasonTextGenerationOnly,
 		},
 		CASCapabilitySummary: capability.CASCapabilitySummary{
 			Enabled:  true,

@@ -1,6 +1,7 @@
 package heartbeat
 
 import (
+	"context"
 	"os"
 	goruntime "runtime"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
+	"github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
 
 const (
@@ -26,6 +28,7 @@ type V7HeartbeatPayload struct {
 	NetworkProfile            *netprofile.NetworkProfile            `json:"network_profile,omitempty"`
 	ModelLeaseSummary         *ModelLeaseSummary                    `json:"model_lease_summary,omitempty"`
 	KVCapability              *kvprobe.Capability                   `json:"kv_capability,omitempty"`
+	TensorAccess              tensoraccess.TensorAccessCapability   `json:"tensor_access"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
@@ -52,6 +55,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	ModelLeases            []modellease.ModelLease
 	ModelLeaseSummary      *ModelLeaseSummary
 	KVCapability           *kvprobe.Capability
+	TensorAccess           *tensoraccess.TensorAccessCapability
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -138,6 +142,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		}
 	}
 	kvCapability := cloneKVCapability(input.KVCapability)
+	tensorAccess := cloneTensorAccessCapability(input.TensorAccess)
 
 	casSummary := cloneCASSummary(input.CASSummary)
 	if casSummary == nil && input.CASCapabilitySummary.Enabled {
@@ -184,6 +189,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		NetworkProfile:       networkProfile,
 		ModelLeaseSummary:    modelLeaseSummary,
 		KVCapability:         kvCapability,
+		TensorAccess:         tensorAccess,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,
@@ -274,6 +280,13 @@ func cloneKVCapability(capability *kvprobe.Capability) *kvprobe.Capability {
 	}
 	cloned := kvprobe.NormalizeCapability(*capability)
 	return &cloned
+}
+
+func cloneTensorAccessCapability(capability *tensoraccess.TensorAccessCapability) tensoraccess.TensorAccessCapability {
+	if capability == nil {
+		return tensoraccess.NewNoopProvider(tensoraccess.NoopProviderConfig{}).Capability(context.Background())
+	}
+	return tensoraccess.NormalizeCapability(*capability)
 }
 
 func cloneCASSummary(summary *CASSummary) *CASSummary {

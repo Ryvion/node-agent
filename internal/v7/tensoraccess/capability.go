@@ -2,19 +2,19 @@ package tensoraccess
 
 import "strings"
 
-const maxCapabilityTextLen = 256
+const (
+	maxCapabilityModelIDLen = 128
+	maxCapabilityReasonLen  = 256
+)
 
 func NormalizeCapability(capability TensorAccessCapability) TensorAccessCapability {
 	capability.Provider = normalizeProvider(capability.Provider)
 	capability.Backend = normalizeBackend(capability.Backend)
 	capability.RuntimeKind = normalizeRuntimeKind(capability.RuntimeKind)
-	capability.ModelID = cleanCapabilityText(capability.ModelID)
-	capability.Reason = cleanCapabilityText(capability.Reason)
+	capability.ModelID = cleanCapabilityText(capability.ModelID, maxCapabilityModelIDLen)
+	capability.Reason = cleanCapabilityText(capability.Reason, maxCapabilityReasonLen)
 	if capability.Reason == "" {
 		capability.Reason = defaultReason(capability)
-	}
-	if capability.Provider == ProviderNoop {
-		capability.TensorPlaneDemoSupported = false
 	}
 	if capability.Provider == ProviderTensorPlaneDemo {
 		capability.TensorPlaneDemoSupported = true
@@ -78,21 +78,27 @@ func defaultReason(capability TensorAccessCapability) string {
 	return ReasonTextGenerationOnly
 }
 
-func cleanCapabilityText(value string) string {
+func cleanCapabilityText(value string, limit ...int) string {
 	value = strings.TrimSpace(value)
-	if value == "" {
+	maxRunes := maxCapabilityReasonLen
+	if len(limit) > 0 {
+		maxRunes = limit[0]
+	}
+	if value == "" || maxRunes <= 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.Grow(len(value))
+	written := 0
 	for _, r := range value {
 		if r < 0x20 || r == 0x7f {
 			continue
 		}
-		b.WriteRune(r)
-		if b.Len() >= maxCapabilityTextLen {
+		if written >= maxRunes {
 			break
 		}
+		b.WriteRune(r)
+		written++
 	}
 	return strings.TrimSpace(b.String())
 }

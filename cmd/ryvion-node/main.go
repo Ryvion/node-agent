@@ -624,6 +624,7 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 		residentModelIDs = append(residentModelIDs, infMgr.ModelName())
 	}
 	kvCapability := buildNativeTensorAccessCapability(infMgr)
+	tensorAccess := buildRuntimeTensorAccessStatus(infMgr)
 
 	evidenceSummary := v7capability.EvidenceCapabilitySummary{
 		SupportsArtifactManifest:    true,
@@ -653,6 +654,7 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 			SupportsModelLease:    gpuDetected && caps.VRAMBytes > 0 && nativeSupported,
 		},
 		KVCapability:              &kvCapability,
+		TensorAccess:              &tensorAccess,
 		SandboxCapabilitySummary:  sandboxSummary,
 		SandboxPolicy:             &sandboxPolicy,
 		EvidenceCapabilitySummary: evidenceSummary,

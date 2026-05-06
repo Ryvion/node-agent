@@ -229,6 +229,30 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if payload.KVCapability == nil || payload.KVCapability.RuntimeKind != v7kvprobe.RuntimeKindNative {
 		t.Fatalf("kv capability = %+v, want native runtime capability probe", payload.KVCapability)
 	}
+	expectedTensorAccess := buildRuntimeTensorAccessStatus(nil)
+	if payload.TensorAccess != expectedTensorAccess {
+		t.Fatalf("tensor_access = %+v, want local status builder value %+v", payload.TensorAccess, expectedTensorAccess)
+	}
+	if payload.TensorAccess.KVAccessSupported ||
+		payload.TensorAccess.KVSnapshotSupported ||
+		payload.TensorAccess.HiddenStateAccessSupported ||
+		payload.TensorAccess.LogitsAccessSupported ||
+		payload.TensorAccess.AttentionHookSupported {
+		t.Fatalf("tensor_access should be reporting-only unsupported capability: %+v", payload.TensorAccess)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"tensor_access"`) {
+		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "generated_text", "model_output", "output_text", "key_data", "value_data", "query_vector", "tensor_bytes"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("V7 heartbeat payload contains forbidden marker %q: %s", forbidden, raw)
+		}
+	}
 }
 
 func TestBuildOptionalV7HeartbeatPayloadDoesNotProbeRuntime(t *testing.T) {
