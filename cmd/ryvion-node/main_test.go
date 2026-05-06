@@ -992,16 +992,27 @@ func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 	if workSnapshot.LastReceiptMetadataGapUs < 0 {
 		t.Fatalf("metadata gap = %d us, want non-negative", workSnapshot.LastReceiptMetadataGapUs)
 	}
-	if workSnapshot.LastReceiptReadyAt == "" || workSnapshot.LastReceiptReadyToSubmitUs <= 0 || workSnapshot.LastReceiptSubmitQueueGapUs != workSnapshot.LastReceiptReadyToSubmitUs {
+	if workSnapshot.LastReceiptReadyAt == "" || workSnapshot.LastReceiptReadyToSubmitUs < 0 || workSnapshot.LastReceiptSubmitQueueGapUs != workSnapshot.LastReceiptReadyToSubmitUs {
 		t.Fatalf("ready-to-submit gap not recorded separately: %+v", workSnapshot)
+	}
+	if workSnapshot.LastReceiptReadyToSubmitUs > 100_000 {
+		t.Fatalf("ready-to-submit gap = %d us, want near-zero fast-path submit", workSnapshot.LastReceiptReadyToSubmitUs)
 	}
 	for _, name := range []string{"receipt_ready", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end"} {
 		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
 			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
 		}
 	}
+	for _, name := range []string{"v7_fast_path_start", "v7_fast_path_receipt_ready", "v7_fast_path_submit_start", "v7_fast_path_submit_end", "pre_submit_block_start", "pre_submit_block_end"} {
+		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
+		}
+	}
 	if !mainWorkLoopEventOrder(workSnapshot.RecentEvents, "receipt_build_end", "receipt_ready", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end") {
 		t.Fatalf("receipt event timeline is out of order: %+v", workSnapshot.RecentEvents)
+	}
+	if !mainWorkLoopEventOrder(workSnapshot.RecentEvents, "v7_fast_path_receipt_ready", "receipt_ready", "v7_fast_path_submit_start", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end") {
+		t.Fatalf("fast-path receipt event timeline is out of order: %+v", workSnapshot.RecentEvents)
 	}
 	assertMainWorkLoopEventsChronological(t, workSnapshot.RecentEvents)
 	gapEvent := findMainWorkLoopEvent(workSnapshot.RecentEvents, "receipt_ready_to_submit_gap")
@@ -1016,6 +1027,177 @@ func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 		if strings.Contains(string(encodedWorkSnapshot), forbidden) {
 			t.Fatalf("work loop diagnostics leaked forbidden material %q: %s", forbidden, encodedWorkSnapshot)
 		}
+	}
+}
+
+func TestProcessOptionalV7MemoryBenchmarkFastPathSkipsRuntimeProbe(t *testing.T) {
+	oldState := operatorRuntimeState
+	oldDiagnostics := workLoopDiagnostics
+	oldProbe := probeManagedRuntimeStatus
+	status := v7memorybench.NewLocalStatus()
+	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	var probeCalls atomic.Int32
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		probeCalls.Add(1)
+		time.Sleep(200 * time.Millisecond)
+		return runtimeexec.Status{
+			BinaryPath:   "slow-wrapper",
+			BackendPath:  "slow-backend",
+			EnginePath:   "slow-engine",
+			EngineKind:   "podman",
+			CLIInstalled: true,
+			Ready:        true,
+			GPUReady:     true,
+			Health:       "ready",
+		}, true
+	}
+	t.Cleanup(func() {
+		operatorRuntimeState = oldState
+		workLoopDiagnostics = oldDiagnostics
+		probeManagedRuntimeStatus = oldProbe
+	})
+	t.Setenv(v7memorybench.BenchmarkFlagEnv, "1")
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		var req struct {
+			JobID    string         `json:"job_id"`
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-bench-fast" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := req.Metadata[v7memorybench.BenchmarkTask]; !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7memorybench.BenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.Metadata["runtime_version"] != "2026.05.test" || req.Metadata["runtime_binary"] != "slow-wrapper" || req.Metadata["runtime_engine_kind"] != "podman" {
+			t.Errorf("runtime metadata = %+v", req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Version:      "2026.05.test",
+		Binary:       "slow-wrapper",
+		Backend:      "slow-backend",
+		Engine:       "slow-engine",
+		EngineKind:   "podman",
+		ManifestHash: "manifest-fast",
+	})
+	handled, result, err := processOptionalV7MemoryBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-bench-fast",
+		Kind:     "benchmark",
+		SpecJSON: testV7MemoryBenchmarkSpecJSON(t, "job-bench-fast", "request-bench-fast"),
+	}, runtimeMgr, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7MemoryBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want hash", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if got := probeCalls.Load(); got != 0 {
+		t.Fatalf("managed runtime probe calls = %d, want 0 on V7 benchmark fast path", got)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.LastReceiptReadyToSubmitUs < 0 || workSnapshot.LastReceiptReadyToSubmitUs > 100_000 {
+		t.Fatalf("ready-to-submit gap = %d us, want near-zero fast-path submit", workSnapshot.LastReceiptReadyToSubmitUs)
+	}
+	if workSnapshot.ReceiptSubmittedCount != 1 || workSnapshot.ReceiptFailedCount != 0 {
+		t.Fatalf("unexpected receipt counters: %+v", workSnapshot)
+	}
+	for _, name := range []string{"v7_fast_path_start", "v7_fast_path_receipt_ready", "v7_fast_path_submit_start", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end"} {
+		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
+		}
+	}
+	if !mainWorkLoopEventOrder(workSnapshot.RecentEvents, "v7_fast_path_receipt_ready", "receipt_ready", "v7_fast_path_submit_start", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end") {
+		t.Fatalf("fast-path receipt event timeline is out of order: %+v", workSnapshot.RecentEvents)
+	}
+}
+
+func TestProcessOptionalV7MemoryBenchmarkSubmitFailureRecordsDiagnostics(t *testing.T) {
+	oldState := operatorRuntimeState
+	oldDiagnostics := workLoopDiagnostics
+	status := v7memorybench.NewLocalStatus()
+	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	t.Cleanup(func() {
+		operatorRuntimeState = oldState
+		workLoopDiagnostics = oldDiagnostics
+	})
+	t.Setenv(v7memorybench.BenchmarkFlagEnv, "1")
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	handled, result, err := processOptionalV7MemoryBenchmark(ctx, hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-bench-submit-fails",
+		Kind:     "benchmark",
+		SpecJSON: testV7MemoryBenchmarkSpecJSON(t, "job-bench-submit-fails", "request-bench-submit-fails"),
+	}, nil, false)
+	if err == nil {
+		t.Fatal("processOptionalV7MemoryBenchmark() error = nil, want submit error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want built receipt snapshot despite submit error", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1 before context stops retry backoff", got)
+	}
+
+	statusSnapshot := status.Snapshot()
+	if statusSnapshot.Counters.Seen != 1 || statusSnapshot.Counters.Executed != 1 || statusSnapshot.Counters.ReceiptSubmitted != 0 || statusSnapshot.Counters.ReceiptFailed != 1 {
+		t.Fatalf("unexpected local status counters: %+v", statusSnapshot.Counters)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.ReceiptSubmittedCount != 0 || workSnapshot.ReceiptFailedCount != 1 {
+		t.Fatalf("unexpected work-loop receipt counters: %+v", workSnapshot)
+	}
+	if workSnapshot.LastReceiptSubmitError == "" {
+		t.Fatalf("last receipt submit error not recorded: %+v", workSnapshot)
+	}
+	if workSnapshot.LastReceiptReadyToSubmitUs < 0 || workSnapshot.LastReceiptReadyToSubmitUs > 100_000 {
+		t.Fatalf("ready-to-submit gap = %d us, want near-zero first submit attempt", workSnapshot.LastReceiptReadyToSubmitUs)
+	}
+	if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, "receipt_submit_start"); got != 1 {
+		t.Fatalf("receipt_submit_start events = %d, want 1 before retry cancellation: %+v", got, workSnapshot.RecentEvents)
 	}
 }
 
@@ -1687,6 +1869,26 @@ func assertMainWorkLoopEventsChronological(t *testing.T, events []diagnostics.Wo
 		}
 		previous = parsed
 	}
+}
+
+func testV7MemoryBenchmarkSpecJSON(t *testing.T, jobID, requestID string) string {
+	t.Helper()
+	spec := map[string]any{
+		"task":               v7memorybench.BenchmarkTask,
+		"request_id":         requestID,
+		"job_id":             jobID,
+		"shard_id":           "shard-a",
+		"seed":               int64(7),
+		"token_count":        4,
+		"value_dim":          2,
+		"created_at_unix_ms": int64(1_800_000_000_123),
+		"weighted_value":     []float64{1, 2, 3},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(specJSON)
 }
 
 // submitReceiptWithRetryTestable is the same logic as submitReceiptWithRetry

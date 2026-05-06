@@ -820,6 +820,8 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	workLoopDiagnostics.RecordEvent("generic_path_entered", work.JobID, work.Kind, mainWorkLoopSpecContext(diagnostics.WorkSpecTaskFromJSON(work.SpecJSON)))
+
 	// Pre-job VRAM check — reject if GPU is too busy
 	if isStreaming {
 		freeVRAM := hw.GetFreeVRAM()
@@ -874,6 +876,7 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	executionStarted := time.Now()
 	if benchmarkEnabled {
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7MemoryBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
 	}
 	restoreReceiptRecorder := func() {}
 	if benchmarkEnabled {
@@ -882,28 +885,16 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	receipt, receiptBuildTimings, handled, err := v7memorybench.ExecuteBenchmarkAssignmentWithReceiptTimings(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
 		Getenv: os.Getenv,
 	})
-	receiptReadyAt := time.Now()
 	restoreReceiptRecorder()
 	if !handled {
 		return false, nil, nil
 	}
 	receiptTimings := workLoopReceiptTimingsFromMemorybench(receiptBuildTimings)
 	workLoopDiagnostics.RecordReceiptBuildTimings(receiptTimings)
-	if err == nil {
-		workLoopDiagnostics.RecordReceiptReady(firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, receiptReadyAt, v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings))
-	}
 	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
-	if err != nil && operatorRuntimeState != nil {
-		operatorRuntimeState.recordV7MemoryBenchmarkRejected(statusJobID, err)
-	}
-	if err == nil && operatorRuntimeState != nil {
-		operatorRuntimeState.recordV7MemoryBenchmarkExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
-	}
 
-	runtimeMeta := map[string]any{}
-	if runtimeMgr != nil {
-		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
-	}
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings))
+	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
 	extra := map[string]any{
 		"executor":      v7memorybench.BenchmarkTask,
 		"executor_kind": v7memorybench.BenchmarkTask,
@@ -930,11 +921,21 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		ExitCode:      exitCode,
 		Metadata:      metadata,
 	}
-	if err != nil {
-		workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings))
-	}
+	receiptContext := v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings)
+	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
+	receiptReadyAt := time.Now()
+	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, receiptReadyAt, receiptContext)
+
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_start", hubReceipt.JobID, work.Kind, receiptContext)
 	if submitErr := submitReceiptWithRetry(ctx, client, hubReceipt); submitErr != nil {
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
 		if operatorRuntimeState != nil {
+			if err != nil {
+				operatorRuntimeState.recordV7MemoryBenchmarkRejected(statusJobID, err)
+			} else {
+				operatorRuntimeState.recordV7MemoryBenchmarkExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
+			}
 			operatorRuntimeState.recordV7MemoryBenchmarkReceiptFailed(hubReceipt.JobID, submitErr)
 		}
 		if err != nil {
@@ -942,10 +943,68 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 		}
 		return true, snapshot, submitErr
 	}
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
 	if operatorRuntimeState != nil {
+		if err != nil {
+			operatorRuntimeState.recordV7MemoryBenchmarkRejected(statusJobID, err)
+		} else {
+			operatorRuntimeState.recordV7MemoryBenchmarkExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
+		}
 		operatorRuntimeState.recordV7MemoryBenchmarkReceiptSubmitted(hubReceipt.JobID)
 	}
 	return true, snapshot, err
+}
+
+func v7BenchmarkFastPathRuntimeMetadata(runtimeMgr *runtimeManager, gpuDetected bool) map[string]any {
+	_ = gpuDetected
+	if runtimeMgr == nil {
+		return map[string]any{}
+	}
+	// Internal benchmark latency measurement requires no artificial pre-submit delay.
+	// Keep the receipt metadata key shape, but do not probe the managed runtime before SubmitReceipt.
+	return nonProbingRuntimeReceiptMetadata(runtimeMgr)
+}
+
+func nonProbingRuntimeReceiptMetadata(runtimeMgr *runtimeManager) map[string]any {
+	if runtimeMgr == nil {
+		return map[string]any{}
+	}
+	version := sanitizeStatusValue(runtimeMgr.contract.Version)
+	if version == "" {
+		version = sanitizeStatusValue(runtimeMgr.version)
+	}
+	if version == "" {
+		version = "dev"
+	}
+	manifestHash := sanitizeStatusValue(runtimeMgr.contract.ManifestHash)
+	if manifestHash == "" {
+		manifestHash = computeRuntimeManifestHash(runtimeMgr.contract)
+	}
+	mode := sanitizeStatusValue(runtimeMgr.contract.Mode)
+	source := sanitizeStatusValue(runtimeMgr.contract.Source)
+	health := ""
+	if ociLaneDisabled() {
+		health = "disabled"
+		mode = "native_only"
+		source = "operator_opt_out"
+	}
+	engine := sanitizeStatusValue(runtimeMgr.contract.Engine)
+	engineKind := sanitizeStatusValue(firstNonEmpty(runtimeMgr.contract.EngineKind, runtimeexec.EngineKind(engine)))
+	return map[string]any{
+		"runtime_version":       version,
+		"runtime_manifest_hash": manifestHash,
+		"runtime_health":        health,
+		"runtime_warming":       false,
+		"runtime_channel":       sanitizeStatusValue(runtimeMgr.contract.Channel),
+		"runtime_provider":      sanitizeStatusValue(runtimeMgr.contract.Provider),
+		"runtime_mode":          mode,
+		"runtime_source":        source,
+		"runtime_artifact":      sanitizeStatusValue(runtimeMgr.contract.Artifact),
+		"runtime_binary":        sanitizeStatusValue(runtimeMgr.contract.Binary),
+		"runtime_backend":       sanitizeStatusValue(runtimeMgr.contract.Backend),
+		"runtime_engine":        engine,
+		"runtime_engine_kind":   engineKind,
+	}
 }
 
 func workLoopReceiptTimingsFromMemorybench(receiptTimings v7memorybench.ReceiptBuildTimings) diagnostics.ReceiptBuildTimings {
@@ -1068,6 +1127,7 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 	executionStarted := time.Now()
 	if isBenchmark && v7modelbench.ModelBenchmarkEnabledFromEnv(os.Getenv) {
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, mainWorkLoopSpecContext(taskName))
 	}
 	receipt, handled, err := v7modelbench.ExecuteModelBenchmarkAssignment(ctx, work.SpecJSON, runner, os.Getenv)
 	if !handled {
@@ -1082,10 +1142,8 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 	}
 
 	receiptBuildStarted := time.Now()
-	runtimeMeta := map[string]any{}
-	if runtimeMgr != nil {
-		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
-	}
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, mainWorkLoopSpecContext(taskName))
+	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
 	extra := map[string]any{
 		"executor":      taskName,
 		"executor_kind": taskName,
@@ -1124,14 +1182,20 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 		Metadata:      metadata,
 	}
 	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
-	if err == nil && v7ModelBenchmarkStatus != nil {
-		v7ModelBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
-	}
+	receiptContext := mainWorkLoopSpecContext(taskName)
+	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_start", hubReceipt.JobID, work.Kind, receiptContext)
 	if client == nil {
 		submitErr := fmt.Errorf("hub client unavailable")
 		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
 		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
 		if v7ModelBenchmarkStatus != nil {
+			if err == nil {
+				v7ModelBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
+			}
 			v7ModelBenchmarkStatus.RecordReceiptFailed(hubReceipt.JobID, submitErr)
 		}
 		if err != nil {
@@ -1143,8 +1207,12 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 	workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
 	submitErr := client.SubmitReceipt(ctx, hubReceipt)
 	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), submitErr)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
 	if submitErr != nil {
 		if v7ModelBenchmarkStatus != nil {
+			if err == nil {
+				v7ModelBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
+			}
 			v7ModelBenchmarkStatus.RecordReceiptFailed(hubReceipt.JobID, submitErr)
 		}
 		if err != nil {
@@ -1153,6 +1221,9 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 		return true, snapshot, submitErr
 	}
 	if v7ModelBenchmarkStatus != nil {
+		if err == nil {
+			v7ModelBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
+		}
 		v7ModelBenchmarkStatus.RecordReceiptSubmitted(hubReceipt.JobID)
 	}
 	return true, snapshot, err
@@ -1498,6 +1569,14 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func mainWorkLoopSpecContext(specTask string) map[string]string {
+	specTask = strings.TrimSpace(specTask)
+	if specTask == "" {
+		return nil
+	}
+	return map[string]string{"spec_task": specTask}
 }
 
 func v7ProofArtifactKind(metadata map[string]any) v7artifact.ArtifactKind {
