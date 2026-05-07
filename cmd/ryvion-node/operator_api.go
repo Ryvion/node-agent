@@ -22,6 +22,7 @@ import (
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
+	v7runtimeinventory "github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	v7tensoraccess "github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
 
@@ -101,6 +102,7 @@ type operatorStatusResponse struct {
 	Machine           operatorMachine                       `json:"machine"`
 	Runtime           operatorRuntimeInfo                   `json:"runtime"`
 	TensorAccess      v7tensoraccess.TensorAccessCapability `json:"tensor_access"`
+	RuntimeInventory  v7runtimeinventory.Inventory          `json:"runtime_inventory"`
 	Metrics           operatorMetrics                       `json:"metrics"`
 	CurrentJob        *operatorJob                          `json:"current_job,omitempty"`
 	RecentJobs        []operatorJob                         `json:"recent_jobs"`
@@ -618,6 +620,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInfo.TensorAccess = buildRuntimeTensorAccessStatus(infMgr)
 	runtimeInfo.RuntimeBackendPresent = runtimeInfo.RuntimeBackend != ""
 	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
+	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
 
 	return operatorStatusResponse{
 		Version:          s.version,
@@ -637,8 +640,9 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUModel:  caps.GPUModel,
 			VRAMBytes: caps.VRAMBytes,
 		},
-		Runtime:      runtimeInfo,
-		TensorAccess: runtimeInfo.TensorAccess,
+		Runtime:          runtimeInfo,
+		TensorAccess:     runtimeInfo.TensorAccess,
+		RuntimeInventory: runtimeInventory,
 		Metrics: operatorMetrics{
 			CPUUtil:    metrics.CPUUtil,
 			MemUtil:    metrics.MemUtil,
@@ -688,6 +692,26 @@ func buildRuntimeTensorAccessStatus(infMgr *inference.Manager) v7tensoraccess.Te
 	capability := v7tensoraccess.NewNativeNoopProvider(modelID, modelLoaded, nativeSupported).Capability(context.Background())
 	capability.TensorPlaneDemoSupported = true
 	return capability
+}
+
+func buildRuntimeInventoryStatus(runtimeInfo operatorRuntimeInfo, capability v7tensoraccess.TensorAccessCapability, infMgr *inference.Manager) v7runtimeinventory.Inventory {
+	processMode := v7runtimeinventory.ProcessModeUnknown
+	if infMgr != nil {
+		processMode = v7runtimeinventory.ProcessModeSidecar
+	}
+	return v7runtimeinventory.BuildInventory(v7runtimeinventory.RuntimeStatus{
+		RuntimeKind:             capability.RuntimeKind,
+		Backend:                 capability.Backend,
+		Provider:                capability.Provider,
+		ProcessMode:             processMode,
+		NativeInferenceReady:    runtimeInfo.NativeInferenceReady,
+		NativeModel:             firstNonEmptyString(runtimeInfo.NativeModel, capability.ModelID),
+		ModelLoaded:             capability.ModelLoaded,
+		SupportsTextGeneration:  runtimeInfo.NativeInferenceReady,
+		SupportsStreaming:       runtimeInfo.NativeInferenceReady,
+		SupportsTensorPlaneDemo: capability.TensorPlaneDemoSupported,
+		Reason:                  capability.Reason,
+	}, v7runtimeinventory.DefaultCandidateBackendDetector())
 }
 
 func sanitizeOperatorWorkLoopSnapshot(snapshot diagnostics.WorkLoopSnapshot) diagnostics.WorkLoopSnapshot {
