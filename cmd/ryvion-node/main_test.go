@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -240,6 +241,13 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 		payload.TensorAccess.AttentionHookSupported {
 		t.Fatalf("tensor_access should be reporting-only unsupported capability: %+v", payload.TensorAccess)
 	}
+	expectedRuntimeInventory := buildRuntimeInventoryStatus(operatorRuntimeInfo{}, expectedTensorAccess, nil)
+	if !reflect.DeepEqual(payload.RuntimeInventory, expectedRuntimeInventory) {
+		t.Fatalf("runtime_inventory = %+v, want local status builder value %+v", payload.RuntimeInventory, expectedRuntimeInventory)
+	}
+	if payload.RuntimeInventory.Provider != "noop" {
+		t.Fatalf("runtime_inventory provider = %q, want noop", payload.RuntimeInventory.Provider)
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("json.Marshal(payload) error = %v", err)
@@ -247,11 +255,52 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
 	}
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
+		}
+	}
 	lower := strings.ToLower(string(raw))
-	for _, forbidden := range []string{"raw_prompt", "prompt_text", "generated_text", "model_output", "output_text", "key_data", "value_data", "query_vector", "tensor_bytes"} {
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "generated_text", "model_output", "output_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "weighted_value"} {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("V7 heartbeat payload contains forbidden marker %q: %s", forbidden, raw)
 		}
+	}
+}
+
+func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	caps := hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	infMgr := inference.New(t.TempDir())
+	runtimeMgr := newRuntimeManager("test", runtimeContractMetadata{})
+
+	payload, err := buildV7HeartbeatPayloadForNode("pubkey", caps, "cpu", "ca", infMgr, runtimeMgr)
+	if err != nil {
+		t.Fatalf("buildV7HeartbeatPayloadForNode() error = %v", err)
+	}
+	expectedTensorAccess := buildRuntimeTensorAccessStatus(infMgr)
+	expectedRuntimeInventory := buildRuntimeInventoryStatus(operatorRuntimeInfo{
+		NativeInferenceReady: inference.NativeRuntimeAvailable() && infMgr.Healthy(),
+		NativeModel:          infMgr.ModelName(),
+	}, expectedTensorAccess, infMgr)
+	if !reflect.DeepEqual(payload.RuntimeInventory, expectedRuntimeInventory) {
+		t.Fatalf("runtime_inventory = %+v, want local status builder value %+v", payload.RuntimeInventory, expectedRuntimeInventory)
+	}
+	if len(payload.RuntimeInventory.LoadedModels) != 1 {
+		t.Fatalf("runtime_inventory loaded_models = %+v, want one local native model entry", payload.RuntimeInventory.LoadedModels)
+	}
+	if payload.RuntimeInventory.LoadedModels[0].ModelID != infMgr.ModelName() {
+		t.Fatalf("loaded model id = %q, want %q", payload.RuntimeInventory.LoadedModels[0].ModelID, infMgr.ModelName())
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"runtime_inventory"`) || !strings.Contains(string(raw), `"candidate_backends"`) {
+		t.Fatalf("V7 heartbeat payload missing runtime inventory fields: %s", raw)
 	}
 }
 

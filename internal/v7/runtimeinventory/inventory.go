@@ -12,13 +12,15 @@ import (
 )
 
 const (
-	maxInventoryModelIDLen = 128
-	maxInventoryReasonLen  = 256
+	maxInventoryCompactFieldLen = 64
+	maxInventoryModelIDLen      = 128
+	maxInventoryReasonLen       = 256
+	maxInventoryLoadedModels    = 32
 )
 
 func BuildInventory(status RuntimeStatus, detector CandidateBackendDetector) Inventory {
 	normalized := normalizeRuntimeStatus(status)
-	return Inventory{
+	return NormalizeInventory(Inventory{
 		RuntimeKind:          normalized.RuntimeKind,
 		Backend:              normalized.Backend,
 		Provider:             normalized.Provider,
@@ -27,7 +29,17 @@ func BuildInventory(status RuntimeStatus, detector CandidateBackendDetector) Inv
 		NativeModel:          normalized.NativeModel,
 		LoadedModels:         BuildModelResidencySnapshot(normalized),
 		CandidateBackends:    DetectCandidateBackends(detector),
-	}
+	})
+}
+
+func NormalizeInventory(inventory Inventory) Inventory {
+	inventory.RuntimeKind = normalizeRuntimeKind(cleanInventoryText(inventory.RuntimeKind, maxInventoryCompactFieldLen))
+	inventory.Backend = normalizeBackend(cleanInventoryText(inventory.Backend, maxInventoryCompactFieldLen))
+	inventory.Provider = normalizeProvider(cleanInventoryText(inventory.Provider, maxInventoryCompactFieldLen))
+	inventory.ProcessMode = normalizeProcessMode(cleanInventoryText(inventory.ProcessMode, maxInventoryCompactFieldLen))
+	inventory.NativeModel = cleanInventoryText(inventory.NativeModel, maxInventoryModelIDLen)
+	inventory.LoadedModels = normalizeLoadedModels(inventory.LoadedModels)
+	return inventory
 }
 
 func DetectCandidateBackends(detector CandidateBackendDetector) CandidateBackends {
@@ -53,13 +65,43 @@ func normalizeRuntimeStatus(status RuntimeStatus) RuntimeStatus {
 	status.NativeModel = cleanInventoryText(status.NativeModel, maxInventoryModelIDLen)
 	status.Reason = cleanInventoryText(status.Reason, maxInventoryReasonLen)
 	if status.Reason == "" {
-		if status.Backend == BackendNative {
-			status.Reason = tensoraccess.ReasonTextGenerationOnly
-		} else {
-			status.Reason = tensoraccess.ReasonNativeRuntimeUnavailable
-		}
+		status.Reason = defaultInventoryReason(status.Backend)
 	}
 	return status
+}
+
+func normalizeLoadedModels(models []ModelResidencySnapshot) []ModelResidencySnapshot {
+	if len(models) == 0 {
+		return []ModelResidencySnapshot{}
+	}
+	out := make([]ModelResidencySnapshot, 0, min(len(models), maxInventoryLoadedModels))
+	for _, model := range models {
+		if len(out) >= maxInventoryLoadedModels {
+			break
+		}
+		model.ModelID = cleanInventoryText(model.ModelID, maxInventoryModelIDLen)
+		if model.ModelID == "" {
+			continue
+		}
+		model.RuntimeKind = normalizeRuntimeKind(cleanInventoryText(model.RuntimeKind, maxInventoryCompactFieldLen))
+		model.Backend = normalizeBackend(cleanInventoryText(model.Backend, maxInventoryCompactFieldLen))
+		model.Reason = cleanInventoryText(model.Reason, maxInventoryReasonLen)
+		if model.Reason == "" {
+			model.Reason = defaultInventoryReason(model.Backend)
+		}
+		out = append(out, model)
+	}
+	if len(out) == 0 {
+		return []ModelResidencySnapshot{}
+	}
+	return out
+}
+
+func defaultInventoryReason(backend string) string {
+	if backend == BackendNative {
+		return tensoraccess.ReasonTextGenerationOnly
+	}
+	return tensoraccess.ReasonNativeRuntimeUnavailable
 }
 
 func normalizeRuntimeKind(value string) string {

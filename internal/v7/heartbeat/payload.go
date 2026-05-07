@@ -13,6 +13,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
+	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
 	"github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
@@ -29,6 +30,7 @@ type V7HeartbeatPayload struct {
 	ModelLeaseSummary         *ModelLeaseSummary                    `json:"model_lease_summary,omitempty"`
 	KVCapability              *kvprobe.Capability                   `json:"kv_capability,omitempty"`
 	TensorAccess              tensoraccess.TensorAccessCapability   `json:"tensor_access"`
+	RuntimeInventory          runtimeinventory.Inventory            `json:"runtime_inventory"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
@@ -56,6 +58,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	ModelLeaseSummary      *ModelLeaseSummary
 	KVCapability           *kvprobe.Capability
 	TensorAccess           *tensoraccess.TensorAccessCapability
+	RuntimeInventory       *runtimeinventory.Inventory
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -143,6 +146,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 	}
 	kvCapability := cloneKVCapability(input.KVCapability)
 	tensorAccess := cloneTensorAccessCapability(input.TensorAccess)
+	runtimeInventory := cloneRuntimeInventory(input.RuntimeInventory)
 
 	casSummary := cloneCASSummary(input.CASSummary)
 	if casSummary == nil && input.CASCapabilitySummary.Enabled {
@@ -190,6 +194,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		ModelLeaseSummary:    modelLeaseSummary,
 		KVCapability:         kvCapability,
 		TensorAccess:         tensorAccess,
+		RuntimeInventory:     runtimeInventory,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,
@@ -287,6 +292,13 @@ func cloneTensorAccessCapability(capability *tensoraccess.TensorAccessCapability
 		return tensoraccess.NewNoopProvider(tensoraccess.NoopProviderConfig{}).Capability(context.Background())
 	}
 	return tensoraccess.NormalizeCapability(*capability)
+}
+
+func cloneRuntimeInventory(inventory *runtimeinventory.Inventory) runtimeinventory.Inventory {
+	if inventory == nil {
+		return runtimeinventory.NormalizeInventory(runtimeinventory.Inventory{})
+	}
+	return runtimeinventory.NormalizeInventory(*inventory)
 }
 
 func cloneCASSummary(summary *CASSummary) *CASSummary {

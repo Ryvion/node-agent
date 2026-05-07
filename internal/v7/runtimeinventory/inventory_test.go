@@ -101,6 +101,61 @@ func TestBuildInventoryUnknownRuntimeUsesSafeDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeInventorySanitizesAndCapsHeartbeatFields(t *testing.T) {
+	t.Parallel()
+
+	models := make([]ModelResidencySnapshot, 0, 35)
+	for i := 0; i < 35; i++ {
+		models = append(models, ModelResidencySnapshot{
+			ModelID:     strings.Repeat("m", 150),
+			RuntimeKind: " native\n",
+			Backend:     " native\t",
+			Loaded:      true,
+			Warm:        true,
+			Reason:      strings.Repeat("r", 300),
+		})
+	}
+	inventory := NormalizeInventory(Inventory{
+		RuntimeKind:          " native\n",
+		Backend:              " native\t",
+		Provider:             " noop\n",
+		ProcessMode:          " sidecar\t",
+		NativeInferenceReady: true,
+		NativeModel:          strings.Repeat("n", 150),
+		LoadedModels:         models,
+		CandidateBackends: CandidateBackends{
+			LlamaCPPDetected: true,
+		},
+	})
+
+	if inventory.RuntimeKind != RuntimeKindNative ||
+		inventory.Backend != BackendNative ||
+		inventory.Provider != ProviderNoop ||
+		inventory.ProcessMode != ProcessModeSidecar {
+		t.Fatalf("compact fields were not normalized: %+v", inventory)
+	}
+	if len(inventory.NativeModel) != maxInventoryModelIDLen {
+		t.Fatalf("native_model length = %d, want %d", len(inventory.NativeModel), maxInventoryModelIDLen)
+	}
+	if len(inventory.LoadedModels) != maxInventoryLoadedModels {
+		t.Fatalf("loaded_models length = %d, want %d", len(inventory.LoadedModels), maxInventoryLoadedModels)
+	}
+	for _, model := range inventory.LoadedModels {
+		if len(model.ModelID) != maxInventoryModelIDLen {
+			t.Fatalf("model_id length = %d, want %d", len(model.ModelID), maxInventoryModelIDLen)
+		}
+		if len(model.Reason) != maxInventoryReasonLen {
+			t.Fatalf("reason length = %d, want %d", len(model.Reason), maxInventoryReasonLen)
+		}
+		if strings.ContainsAny(model.ModelID+model.Reason, "\n\t") {
+			t.Fatalf("loaded model text contains control whitespace: %+v", model)
+		}
+	}
+	if !inventory.CandidateBackends.LlamaCPPDetected {
+		t.Fatalf("candidate_backends were not preserved: %+v", inventory.CandidateBackends)
+	}
+}
+
 func TestDetectCandidateBackendsCanBeMocked(t *testing.T) {
 	t.Parallel()
 

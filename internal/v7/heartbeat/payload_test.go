@@ -2,6 +2,7 @@ package heartbeat
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
+	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
 	"github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
@@ -59,6 +61,19 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	if !payload.TensorAccess.TensorPlaneDemoSupported || !payload.TensorAccess.ModelLoaded {
 		t.Fatalf("tensor_access = %+v, want demo support and loaded model from input", payload.TensorAccess)
 	}
+	if payload.RuntimeInventory.RuntimeKind != runtimeinventory.RuntimeKindNative ||
+		payload.RuntimeInventory.Backend != runtimeinventory.BackendNative ||
+		payload.RuntimeInventory.Provider != runtimeinventory.ProviderNoop {
+		t.Fatalf("runtime_inventory identity = %+v, want native/noop inventory", payload.RuntimeInventory)
+	}
+	if len(payload.RuntimeInventory.LoadedModels) != 1 || payload.RuntimeInventory.LoadedModels[0].ModelID != "ryvion-llama-3.2-3b" {
+		t.Fatalf("runtime_inventory loaded_models = %+v, want local native model", payload.RuntimeInventory.LoadedModels)
+	}
+	if !payload.RuntimeInventory.CandidateBackends.LlamaCPPDetected ||
+		!payload.RuntimeInventory.CandidateBackends.PythonTransformersDetected ||
+		!payload.RuntimeInventory.CandidateBackends.GGUFModelsDetected {
+		t.Fatalf("runtime_inventory candidate_backends = %+v, want mocked candidates", payload.RuntimeInventory.CandidateBackends)
+	}
 	if payload.CASSummary == nil || !payload.CASSummary.Enabled {
 		t.Fatalf("CAS summary = %+v, want enabled", payload.CASSummary)
 	}
@@ -106,6 +121,12 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("payload JSON missing tensor_access: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"runtime_inventory"`) {
+		t.Fatalf("payload JSON missing runtime_inventory: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"loaded_models"`) || !strings.Contains(string(raw), `"candidate_backends"`) {
+		t.Fatalf("payload JSON missing runtime inventory details: %s", string(raw))
 	}
 }
 
@@ -160,6 +181,41 @@ func TestBuildV7HeartbeatPayloadDefaultsUnsupportedNoopTensorAccess(t *testing.T
 	}
 	if payload.TensorAccess.Reason == "" {
 		t.Fatalf("default tensor_access reason is empty: %+v", payload.TensorAccess)
+	}
+}
+
+func TestBuildV7HeartbeatPayloadDefaultsUnsupportedNoopRuntimeInventory(t *testing.T) {
+	input := validInput()
+	input.RuntimeInventory = nil
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	if payload.RuntimeInventory.RuntimeKind != runtimeinventory.RuntimeKindUnknown {
+		t.Fatalf("runtime_kind = %q, want unknown", payload.RuntimeInventory.RuntimeKind)
+	}
+	if payload.RuntimeInventory.Backend != runtimeinventory.BackendUnknown {
+		t.Fatalf("backend = %q, want unknown", payload.RuntimeInventory.Backend)
+	}
+	if payload.RuntimeInventory.Provider != runtimeinventory.ProviderNoop {
+		t.Fatalf("provider = %q, want noop", payload.RuntimeInventory.Provider)
+	}
+	if payload.RuntimeInventory.ProcessMode != runtimeinventory.ProcessModeUnknown {
+		t.Fatalf("process_mode = %q, want unknown", payload.RuntimeInventory.ProcessMode)
+	}
+	if payload.RuntimeInventory.NativeInferenceReady {
+		t.Fatalf("native_inference_ready = true, want false: %+v", payload.RuntimeInventory)
+	}
+	if len(payload.RuntimeInventory.LoadedModels) != 0 {
+		t.Fatalf("loaded_models = %+v, want empty unsupported state", payload.RuntimeInventory.LoadedModels)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"runtime_inventory"`) {
+		t.Fatalf("payload JSON missing runtime_inventory: %s", raw)
 	}
 }
 
@@ -303,6 +359,7 @@ func validInput() BuildV7HeartbeatPayloadInput {
 			ModelID:                    "ryvion-llama-3.2-3b",
 			Reason:                     tensoraccess.ReasonTextGenerationOnly,
 		},
+		RuntimeInventory: ptr(validRuntimeInventory()),
 		CASCapabilitySummary: capability.CASCapabilitySummary{
 			Enabled:  true,
 			MaxBytes: 100 * 1024 * 1024,
@@ -321,6 +378,38 @@ func validInput() BuildV7HeartbeatPayloadInput {
 		},
 		CreatedAtUnixMs: 123,
 	}
+}
+
+func validRuntimeInventory() runtimeinventory.Inventory {
+	return runtimeinventory.BuildInventory(runtimeinventory.RuntimeStatus{
+		RuntimeKind:             runtimeinventory.RuntimeKindNative,
+		Backend:                 runtimeinventory.BackendNative,
+		Provider:                runtimeinventory.ProviderNoop,
+		ProcessMode:             runtimeinventory.ProcessModeSidecar,
+		NativeInferenceReady:    true,
+		NativeModel:             "ryvion-llama-3.2-3b",
+		ModelLoaded:             true,
+		SupportsTextGeneration:  true,
+		SupportsStreaming:       true,
+		SupportsTensorPlaneDemo: true,
+		Reason:                  tensoraccess.ReasonTextGenerationOnly,
+	}, runtimeinventory.CandidateBackendDetector{
+		LookPath: func(name string) (string, error) {
+			switch name {
+			case "llama-server", "python3":
+				return "/usr/local/bin/" + name, nil
+			default:
+				return "", errors.New("not found")
+			}
+		},
+		ReadDirNames: func(dir string, limit int) ([]string, error) {
+			return []string{"model.Q4_K_M.gguf"}, nil
+		},
+		ConfiguredModelDirs: []string{"/tmp/ryvion-models"},
+		UserHomeDir: func() (string, error) {
+			return "", errors.New("not configured")
+		},
+	})
 }
 
 func ptr[T any](value T) *T {

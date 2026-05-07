@@ -675,6 +675,13 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 	}
 	kvCapability := buildNativeTensorAccessCapability(infMgr)
 	tensorAccess := buildRuntimeTensorAccessStatus(infMgr)
+	runtimeInfo := operatorRuntimeInfo{
+		NativeInferenceReady: nativeReady,
+	}
+	if infMgr != nil {
+		runtimeInfo.NativeModel = infMgr.ModelName()
+	}
+	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, tensorAccess, infMgr)
 
 	evidenceSummary := v7capability.EvidenceCapabilitySummary{
 		SupportsArtifactManifest:    true,
@@ -705,6 +712,7 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 		},
 		KVCapability:              &kvCapability,
 		TensorAccess:              &tensorAccess,
+		RuntimeInventory:          &runtimeInventory,
 		SandboxCapabilitySummary:  sandboxSummary,
 		SandboxPolicy:             &sandboxPolicy,
 		EvidenceCapabilitySummary: evidenceSummary,
