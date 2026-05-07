@@ -13,7 +13,9 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/capability"
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/node-agent/internal/v7/modelcache"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
+	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -33,6 +35,8 @@ type V7HeartbeatPayload struct {
 	KVCapability              *kvprobe.Capability                   `json:"kv_capability,omitempty"`
 	TensorAccess              tensoraccess.TensorAccessCapability   `json:"tensor_access"`
 	RuntimeInventory          runtimeinventory.Inventory            `json:"runtime_inventory"`
+	ModelPolicy               modelpolicy.Status                    `json:"model_policy"`
+	ModelCache                modelcache.Status                     `json:"model_cache"`
 	BackendProbes             backendprobe.Probes                   `json:"backend_probes"`
 	BackendRuntimes           llamacpp.BackendRuntimes              `json:"backend_runtimes"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
@@ -63,6 +67,8 @@ type BuildV7HeartbeatPayloadInput struct {
 	KVCapability           *kvprobe.Capability
 	TensorAccess           *tensoraccess.TensorAccessCapability
 	RuntimeInventory       *runtimeinventory.Inventory
+	ModelPolicy            *modelpolicy.Status
+	ModelCache             *modelcache.Status
 	BackendProbes          *backendprobe.Probes
 	BackendRuntimes        *llamacpp.BackendRuntimes
 
@@ -153,6 +159,8 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 	kvCapability := cloneKVCapability(input.KVCapability)
 	tensorAccess := cloneTensorAccessCapability(input.TensorAccess)
 	runtimeInventory := cloneRuntimeInventory(input.RuntimeInventory)
+	modelPolicy := cloneModelPolicy(input.ModelPolicy)
+	modelCache := cloneModelCache(input.ModelCache)
 	backendProbes := cloneBackendProbes(input.BackendProbes)
 	backendRuntimes := cloneBackendRuntimes(input.BackendRuntimes)
 
@@ -203,6 +211,8 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		KVCapability:         kvCapability,
 		TensorAccess:         tensorAccess,
 		RuntimeInventory:     runtimeInventory,
+		ModelPolicy:          modelPolicy,
+		ModelCache:           modelCache,
 		BackendProbes:        backendProbes,
 		BackendRuntimes:      backendRuntimes,
 		CASSummary:           casSummary,
@@ -309,6 +319,21 @@ func cloneRuntimeInventory(inventory *runtimeinventory.Inventory) runtimeinvento
 		return runtimeinventory.NormalizeInventory(runtimeinventory.Inventory{})
 	}
 	return runtimeinventory.NormalizeInventory(*inventory)
+}
+
+func cloneModelPolicy(policy *modelpolicy.Status) modelpolicy.Status {
+	if policy == nil {
+		return modelpolicy.StatusFromEnv()
+	}
+	return modelpolicy.BuildStatus(*policy)
+}
+
+func cloneModelCache(status *modelcache.Status) modelcache.Status {
+	if status == nil {
+		policy := modelpolicy.StatusFromEnv()
+		return modelcache.NormalizeStatus(modelcache.Status{CacheDir: policy.CacheDir})
+	}
+	return modelcache.NormalizeStatus(*status)
 }
 
 func cloneBackendProbes(probes *backendprobe.Probes) backendprobe.Probes {

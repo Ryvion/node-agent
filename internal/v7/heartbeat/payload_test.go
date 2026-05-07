@@ -12,7 +12,9 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/capability"
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/node-agent/internal/v7/modelcache"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
+	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -77,6 +79,12 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	}
 	if len(payload.RuntimeInventory.GGUFModels) != 1 {
 		t.Fatalf("runtime_inventory gguf_models = %+v, want one mocked GGUF model", payload.RuntimeInventory.GGUFModels)
+	}
+	if payload.ModelPolicy.CacheDir != "/tmp/ryvion-models" || payload.ModelPolicy.MaxSingleModelBytes != 8*1024*1024*1024 {
+		t.Fatalf("model_policy = %+v, want mocked cache policy", payload.ModelPolicy)
+	}
+	if payload.ModelCache.CacheDir != "/tmp/ryvion-models" || len(payload.ModelCache.Models) != 1 {
+		t.Fatalf("model_cache = %+v, want mocked cache status", payload.ModelCache)
 	}
 	if !payload.RuntimeInventory.CandidateBackends.LlamaCPPDetected ||
 		!payload.RuntimeInventory.CandidateBackends.PythonTransformersDetected ||
@@ -154,6 +162,9 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"runtime_inventory"`) {
 		t.Fatalf("payload JSON missing runtime_inventory: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"model_policy"`) || !strings.Contains(string(raw), `"model_cache"`) {
+		t.Fatalf("payload JSON missing model policy/cache: %s", string(raw))
 	}
 	if !strings.Contains(string(raw), `"loaded_models"`) ||
 		!strings.Contains(string(raw), `"candidate_backends"`) ||
@@ -543,8 +554,35 @@ func validInput() BuildV7HeartbeatPayloadInput {
 			Reason:                     tensoraccess.ReasonTextGenerationOnly,
 		},
 		RuntimeInventory: ptr(validRuntimeInventory()),
-		BackendProbes:    ptr(validBackendProbes()),
-		BackendRuntimes:  ptr(validBackendRuntimes()),
+		ModelPolicy: ptr(modelpolicy.Status{
+			AutoDownload:           false,
+			MaxSingleModelBytes:    8 * 1024 * 1024 * 1024,
+			MaxCacheBytes:          50 * 1024 * 1024 * 1024,
+			CacheDir:               "/tmp/ryvion-models",
+			AllowedFamilies:        []string{"llama", "phi", "qwen", "gemma"},
+			AllowedFormats:         []string{"gguf"},
+			KeepWarmModelIDs:       []string{"Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
+			EvictionPolicy:         "lru",
+			AllowLicenseRestricted: false,
+		}),
+		ModelCache: ptr(modelcache.Status{
+			CacheDir:   "/tmp/ryvion-models",
+			TotalBytes: 2048,
+			Models: []modelcache.Model{{
+				ModelID:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+				Filename:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+				Path:             "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+				SizeBytes:        2048,
+				FamilyHint:       "llama",
+				QuantizationHint: "Q4_K_M",
+				Format:           "gguf",
+				Installed:        true,
+				HashVerified:     false,
+				LastSeenAt:       time.Unix(100, 0),
+			}},
+		}),
+		BackendProbes:   ptr(validBackendProbes()),
+		BackendRuntimes: ptr(validBackendRuntimes()),
 		CASCapabilitySummary: capability.CASCapabilitySummary{
 			Enabled:  true,
 			MaxBytes: 100 * 1024 * 1024,

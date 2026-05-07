@@ -26,6 +26,8 @@ import (
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
+	v7modelcache "github.com/Ryvion/node-agent/internal/v7/modelcache"
+	v7modelpolicy "github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 	v7runtimeinventory "github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	v7tensoraccess "github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
@@ -112,6 +114,8 @@ type operatorStatusResponse struct {
 	Runtime              operatorRuntimeInfo                            `json:"runtime"`
 	TensorAccess         v7tensoraccess.TensorAccessCapability          `json:"tensor_access"`
 	RuntimeInventory     v7runtimeinventory.Inventory                   `json:"runtime_inventory"`
+	ModelPolicy          v7modelpolicy.Status                           `json:"model_policy"`
+	ModelCache           v7modelcache.Status                            `json:"model_cache"`
 	BackendProbes        v7backendprobe.Probes                          `json:"backend_probes"`
 	BackendRuntimes      v7llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
 	LlamaCPPSidecar      v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
@@ -234,6 +238,9 @@ type v7HeartbeatPreviewFieldPresence struct {
 	BackendCandidatesLen     int  `json:"backend_candidates_len"`
 	GGUFModelsPresent        bool `json:"gguf_models_present"`
 	GGUFModelsLen            int  `json:"gguf_models_len"`
+	ModelPolicyPresent       bool `json:"model_policy_present"`
+	ModelCachePresent        bool `json:"model_cache_present"`
+	ModelCacheModelsLen      int  `json:"model_cache_models_len"`
 	BackendProbesPresent     bool `json:"backend_probes_present"`
 	LlamaCPPProbePresent     bool `json:"llama_cpp_probe_present"`
 	BackendRuntimesPresent   bool `json:"backend_runtimes_present"`
@@ -828,6 +835,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInfo.RuntimeBackendPresent = runtimeInfo.RuntimeBackend != ""
 	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
+	modelPolicy := buildModelPolicyStatus()
+	modelCache := buildModelCacheStatus(modelPolicy)
 	backendProbes := buildBackendProbeStatus()
 	llamaCppSidecar := s.llamaCppSidecarStatusView(context.Background())
 	backendRuntimes := v7llamacpp.BuildBackendRuntimes(llamaCppSidecar.LlamaCppSidecarStatus)
@@ -854,6 +863,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		Runtime:           runtimeInfo,
 		TensorAccess:      runtimeInfo.TensorAccess,
 		RuntimeInventory:  runtimeInventory,
+		ModelPolicy:       modelPolicy,
+		ModelCache:        modelCache,
 		BackendProbes:     backendProbes,
 		BackendRuntimes:   backendRuntimes,
 		LlamaCPPSidecar:   llamaCppSidecar,
@@ -942,6 +953,14 @@ func buildRuntimeInventoryStatus(runtimeInfo operatorRuntimeInfo, capability v7t
 		SupportsTensorPlaneDemo: capability.TensorPlaneDemoSupported,
 		Reason:                  capability.Reason,
 	}, runtimeInventoryBackendDetector())
+}
+
+func buildModelPolicyStatus() v7modelpolicy.Status {
+	return v7modelpolicy.StatusFromEnv()
+}
+
+func buildModelCacheStatus(policy v7modelpolicy.Status) v7modelcache.Status {
+	return v7modelcache.BuildStatus(policy.CacheDir)
 }
 
 func runtimeInventoryBackendDetector() v7runtimeinventory.CandidateBackendDetector {
@@ -1162,6 +1181,9 @@ func buildV7HeartbeatPreviewResponse(nodeID string, payload v7heartbeat.V7Heartb
 			BackendCandidatesLen:     len(payload.RuntimeInventory.BackendCandidates),
 			GGUFModelsPresent:        payload.RuntimeInventory.GGUFModels != nil,
 			GGUFModelsLen:            len(payload.RuntimeInventory.GGUFModels),
+			ModelPolicyPresent:       payload.ModelPolicy.CacheDir != "",
+			ModelCachePresent:        payload.ModelCache.CacheDir != "",
+			ModelCacheModelsLen:      len(payload.ModelCache.Models),
 			BackendProbesPresent:     payload.SchemaVersion != "",
 			LlamaCPPProbePresent:     payload.SchemaVersion != "",
 			BackendRuntimesPresent:   payload.SchemaVersion != "",

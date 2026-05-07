@@ -266,7 +266,7 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
 	}
-	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"backend_probes"`, `"backend_runtimes"`, `"llama_cpp"`} {
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"model_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"llama_cpp"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
 		}
@@ -363,6 +363,8 @@ func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *
 		!strings.Contains(string(raw), `"candidate_backends"`) ||
 		!strings.Contains(string(raw), `"backend_candidates"`) ||
 		!strings.Contains(string(raw), `"gguf_models"`) ||
+		!strings.Contains(string(raw), `"model_policy"`) ||
+		!strings.Contains(string(raw), `"model_cache"`) ||
 		!strings.Contains(string(raw), `"backend_probes"`) ||
 		!strings.Contains(string(raw), `"llama_cpp"`) {
 		t.Fatalf("V7 heartbeat payload missing runtime inventory fields: %s", raw)

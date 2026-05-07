@@ -232,7 +232,76 @@ func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
 	}
 }
 
+func TestOperatorAPIStatusEndpointIncludesModelPolicyAndCache(t *testing.T) {
+	cacheDir := t.TempDir()
+	modelPath := filepath.Join(cacheDir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	if err := os.WriteFile(modelPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write model fixture: %v", err)
+	}
+	t.Setenv("RYV_MODEL_AUTO_DOWNLOAD", "1")
+	t.Setenv("RYV_MODEL_MAX_SINGLE_GB", "4")
+	t.Setenv("RYV_MODEL_MAX_CACHE_GB", "12")
+	t.Setenv("RYV_MODEL_CACHE_DIR", cacheDir)
+	t.Setenv("RYV_MODEL_ALLOWED_FAMILIES", "llama,qwen")
+	t.Setenv("RYV_MODEL_ALLOWED_FORMATS", "gguf")
+	t.Setenv("RYV_MODEL_KEEP_WARM_IDS", "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	t.Setenv("RYV_MODEL_EVICTION_POLICY", "lru")
+	t.Setenv("RYV_MODEL_ALLOW_LICENSE_RESTRICTED", "0")
+
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
+	}
+	if !status.ModelPolicy.AutoDownload ||
+		status.ModelPolicy.MaxSingleModelBytes != 4*1024*1024*1024 ||
+		status.ModelPolicy.MaxCacheBytes != 12*1024*1024*1024 ||
+		status.ModelPolicy.CacheDir != cacheDir ||
+		status.ModelPolicy.AllowLicenseRestricted {
+		t.Fatalf("model_policy = %+v", status.ModelPolicy)
+	}
+	if len(status.ModelPolicy.KeepWarmModelIDs) != 1 || status.ModelPolicy.KeepWarmModelIDs[0] != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+		t.Fatalf("keep_warm_model_ids = %+v", status.ModelPolicy.KeepWarmModelIDs)
+	}
+	if status.ModelCache.CacheDir != cacheDir || len(status.ModelCache.Models) != 1 {
+		t.Fatalf("model_cache = %+v, want one model in configured cache dir", status.ModelCache)
+	}
+	model := status.ModelCache.Models[0]
+	if model.ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" ||
+		model.FamilyHint != "llama" ||
+		model.QuantizationHint != "Q4_K_M" ||
+		model.Format != "gguf" ||
+		!model.Installed ||
+		model.HashVerified {
+		t.Fatalf("model cache row = %+v", model)
+	}
+	text := strings.ToLower(string(respBody))
+	for _, want := range []string{`"model_policy"`, `"model_cache"`, `"auto_download"`, `"max_cache_bytes"`, `"keep_warm_model_ids"`, `"hash_verified"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("operator status missing %s: %s", want, respBody)
+		}
+	}
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("operator status contains forbidden marker %q: %s", forbidden, respBody)
+		}
+	}
+}
+
 func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
+	t.Setenv(v7llamacpp.EnvKeepWarm, "0")
+
 	port := freeOperatorAPITestPort(t)
 	state := &operatorRuntime{
 		version:      "test",
@@ -471,6 +540,7 @@ func TestOperatorAPILlamaCppBenchmarkEndpointRecordsSafeStatus(t *testing.T) {
 func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	dataDir := setupHeartbeatPreviewInventoryFixture(t)
 	t.Setenv("RYV_DATA_DIR", dataDir)
+	t.Setenv("RYV_MODEL_CACHE_DIR", filepath.Join(dataDir, "models"))
 	t.Setenv("RYV_MODEL_DIR", "")
 	t.Setenv("RYVION_MODEL_DIR", "")
 	t.Setenv("RYV_LLAMA_CPP_DIR", "")
@@ -525,6 +595,9 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	if !preview.FieldPresence.GGUFModelsPresent || preview.FieldPresence.GGUFModelsLen != 2 {
 		t.Fatalf("gguf_models presence = %+v; body=%s", preview.FieldPresence, respBody)
 	}
+	if !preview.FieldPresence.ModelPolicyPresent || !preview.FieldPresence.ModelCachePresent || preview.FieldPresence.ModelCacheModelsLen != 2 {
+		t.Fatalf("model policy/cache presence = %+v; body=%s", preview.FieldPresence, respBody)
+	}
 	if !preview.FieldPresence.BackendProbesPresent || !preview.FieldPresence.LlamaCPPProbePresent {
 		t.Fatalf("backend probe presence = %+v; body=%s", preview.FieldPresence, respBody)
 	}
@@ -543,6 +616,12 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	}
 	if len(preview.HeartbeatPreview.V7.RuntimeInventory.GGUFModels) != 2 {
 		t.Fatalf("heartbeat_preview.v7.runtime_inventory.gguf_models = %+v", preview.HeartbeatPreview.V7.RuntimeInventory.GGUFModels)
+	}
+	if preview.HeartbeatPreview.V7.ModelPolicy.CacheDir != filepath.Join(dataDir, "models") {
+		t.Fatalf("heartbeat_preview.v7.model_policy = %+v", preview.HeartbeatPreview.V7.ModelPolicy)
+	}
+	if len(preview.HeartbeatPreview.V7.ModelCache.Models) != 2 {
+		t.Fatalf("heartbeat_preview.v7.model_cache = %+v", preview.HeartbeatPreview.V7.ModelCache)
 	}
 
 	text := strings.ToLower(string(respBody))
