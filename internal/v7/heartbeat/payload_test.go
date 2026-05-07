@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
@@ -69,10 +70,29 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	if len(payload.RuntimeInventory.LoadedModels) != 1 || payload.RuntimeInventory.LoadedModels[0].ModelID != "ryvion-llama-3.2-3b" {
 		t.Fatalf("runtime_inventory loaded_models = %+v, want local native model", payload.RuntimeInventory.LoadedModels)
 	}
+	if len(payload.RuntimeInventory.BackendCandidates) == 0 {
+		t.Fatalf("runtime_inventory backend_candidates = %+v, want detailed backend rows", payload.RuntimeInventory.BackendCandidates)
+	}
+	if len(payload.RuntimeInventory.GGUFModels) != 1 {
+		t.Fatalf("runtime_inventory gguf_models = %+v, want one mocked GGUF model", payload.RuntimeInventory.GGUFModels)
+	}
 	if !payload.RuntimeInventory.CandidateBackends.LlamaCPPDetected ||
 		!payload.RuntimeInventory.CandidateBackends.PythonTransformersDetected ||
 		!payload.RuntimeInventory.CandidateBackends.GGUFModelsDetected {
 		t.Fatalf("runtime_inventory candidate_backends = %+v, want mocked candidates", payload.RuntimeInventory.CandidateBackends)
+	}
+	if !payload.BackendProbes.LlamaCPP.Available ||
+		payload.BackendProbes.LlamaCPP.BinaryPath != "/opt/ryvion/bin/llama-cli" ||
+		payload.BackendProbes.LlamaCPP.ServerBinaryPath != "/opt/ryvion/bin/llama-server" ||
+		payload.BackendProbes.LlamaCPP.BenchBinaryPath != "/opt/ryvion/bin/llama-bench" ||
+		payload.BackendProbes.LlamaCPP.Version != "llama.cpp build 456" ||
+		!payload.BackendProbes.LlamaCPP.GGUFModelsDetected ||
+		!payload.BackendProbes.LlamaCPP.CandidateForFastTextRuntime ||
+		!payload.BackendProbes.LlamaCPP.CandidateForRealTensorAccess {
+		t.Fatalf("backend_probes.llama_cpp = %+v, want mocked llama.cpp probe", payload.BackendProbes.LlamaCPP)
+	}
+	if payload.BackendProbes.LlamaCPP.SupportsKVAccess || payload.BackendProbes.LlamaCPP.SupportsTensorHooks {
+		t.Fatalf("backend_probes should not claim KV/tensor hooks: %+v", payload.BackendProbes.LlamaCPP)
 	}
 	if payload.CASSummary == nil || !payload.CASSummary.Enabled {
 		t.Fatalf("CAS summary = %+v, want enabled", payload.CASSummary)
@@ -125,8 +145,14 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 	if !strings.Contains(string(raw), `"runtime_inventory"`) {
 		t.Fatalf("payload JSON missing runtime_inventory: %s", string(raw))
 	}
-	if !strings.Contains(string(raw), `"loaded_models"`) || !strings.Contains(string(raw), `"candidate_backends"`) {
+	if !strings.Contains(string(raw), `"loaded_models"`) ||
+		!strings.Contains(string(raw), `"candidate_backends"`) ||
+		!strings.Contains(string(raw), `"backend_candidates"`) ||
+		!strings.Contains(string(raw), `"gguf_models"`) {
 		t.Fatalf("payload JSON missing runtime inventory details: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"backend_probes"`) || !strings.Contains(string(raw), `"llama_cpp"`) {
+		t.Fatalf("payload JSON missing backend probe details: %s", string(raw))
 	}
 }
 
@@ -219,6 +245,37 @@ func TestBuildV7HeartbeatPayloadDefaultsUnsupportedNoopRuntimeInventory(t *testi
 	}
 }
 
+func TestBuildV7HeartbeatPayloadDefaultsSafeBackendProbes(t *testing.T) {
+	input := validInput()
+	input.BackendProbes = nil
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	if payload.BackendProbes.LlamaCPP.Available ||
+		payload.BackendProbes.LlamaCPP.SupportsTextGeneration ||
+		payload.BackendProbes.LlamaCPP.SupportsStreaming ||
+		payload.BackendProbes.LlamaCPP.SupportsOpenAICompatibleServer ||
+		payload.BackendProbes.LlamaCPP.SupportsKVAccess ||
+		payload.BackendProbes.LlamaCPP.SupportsTensorHooks ||
+		payload.BackendProbes.LlamaCPP.CandidateForFastTextRuntime ||
+		payload.BackendProbes.LlamaCPP.CandidateForRealTensorAccess {
+		t.Fatalf("default backend_probes should be safe false values: %+v", payload.BackendProbes.LlamaCPP)
+	}
+	if payload.BackendProbes.LlamaCPP.Version != "unknown" ||
+		payload.BackendProbes.LlamaCPP.Reason != "llama.cpp binary not detected" {
+		t.Fatalf("default backend_probes version/reason = %q/%q", payload.BackendProbes.LlamaCPP.Version, payload.BackendProbes.LlamaCPP.Reason)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"backend_probes"`) || !strings.Contains(string(raw), `"llama_cpp"`) {
+		t.Fatalf("payload JSON missing backend_probes: %s", raw)
+	}
+}
+
 func TestBuildV7HeartbeatPayloadNormalizesTensorAccess(t *testing.T) {
 	input := validInput()
 	longReason := "  " + strings.Repeat("r", 300) + "\n"
@@ -249,6 +306,51 @@ func TestBuildV7HeartbeatPayloadNormalizesTensorAccess(t *testing.T) {
 	}
 	if strings.ContainsAny(payload.TensorAccess.ModelID, " \t\n") || strings.ContainsAny(payload.TensorAccess.Reason, "\t\n") {
 		t.Fatalf("tensor_access text was not sanitized: %+v", payload.TensorAccess)
+	}
+}
+
+func TestBuildV7HeartbeatPayloadNormalizesBackendProbes(t *testing.T) {
+	input := validInput()
+	longPath := "/tmp/" + strings.Repeat("p", 600)
+	input.BackendProbes = &backendprobe.Probes{
+		LlamaCPP: backendprobe.LlamaCPPProbe{
+			Available:                      true,
+			BinaryPath:                     longPath + "\n",
+			ServerBinaryPath:               longPath + "\t",
+			BenchBinaryPath:                longPath + "\r",
+			Version:                        "ggml_metal_device_init: tensor API disabled\nllama.cpp build 789\n",
+			SupportsTextGeneration:         true,
+			SupportsStreaming:              true,
+			SupportsOpenAICompatibleServer: true,
+			SupportsKVAccess:               true,
+			SupportsTensorHooks:            true,
+			CandidateForFastTextRuntime:    true,
+			CandidateForRealTensorAccess:   true,
+			Reason:                         strings.Repeat("r", 300) + "\n",
+		},
+	}
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	probe := payload.BackendProbes.LlamaCPP
+	if len(probe.BinaryPath) != 512 ||
+		len(probe.ServerBinaryPath) != 512 ||
+		len(probe.BenchBinaryPath) != 512 {
+		t.Fatalf("probe paths were not capped: %+v", probe)
+	}
+	if probe.Version != "llama.cpp build 789" {
+		t.Fatalf("version = %q, want clean llama.cpp version line", probe.Version)
+	}
+	if len(probe.Reason) != 256 {
+		t.Fatalf("reason length = %d, want 256", len(probe.Reason))
+	}
+	if strings.ContainsAny(probe.BinaryPath+probe.ServerBinaryPath+probe.BenchBinaryPath+probe.Reason, "\t\n\r") {
+		t.Fatalf("probe text still contains control whitespace: %+v", probe)
+	}
+	if probe.SupportsKVAccess || probe.SupportsTensorHooks {
+		t.Fatalf("normalization must not advertise KV/tensor hooks: %+v", probe)
 	}
 }
 
@@ -360,6 +462,7 @@ func validInput() BuildV7HeartbeatPayloadInput {
 			Reason:                     tensoraccess.ReasonTextGenerationOnly,
 		},
 		RuntimeInventory: ptr(validRuntimeInventory()),
+		BackendProbes:    ptr(validBackendProbes()),
 		CASCapabilitySummary: capability.CASCapabilitySummary{
 			Enabled:  true,
 			MaxBytes: 100 * 1024 * 1024,
@@ -408,6 +511,28 @@ func validRuntimeInventory() runtimeinventory.Inventory {
 		ConfiguredModelDirs: []string{"/tmp/ryvion-models"},
 		UserHomeDir: func() (string, error) {
 			return "", errors.New("not configured")
+		},
+	})
+}
+
+func validBackendProbes() backendprobe.Probes {
+	return backendprobe.NormalizeProbes(backendprobe.Probes{
+		LlamaCPP: backendprobe.LlamaCPPProbe{
+			Available:                      true,
+			BinaryPath:                     "/opt/ryvion/bin/llama-cli",
+			ServerBinaryPath:               "/opt/ryvion/bin/llama-server",
+			BenchBinaryPath:                "/opt/ryvion/bin/llama-bench",
+			Version:                        "llama.cpp build 456",
+			GGUFModelsDetected:             true,
+			ProbeModelConfigured:           false,
+			SupportsTextGeneration:         true,
+			SupportsStreaming:              true,
+			SupportsOpenAICompatibleServer: true,
+			SupportsKVAccess:               false,
+			SupportsTensorHooks:            false,
+			CandidateForFastTextRuntime:    true,
+			CandidateForRealTensorAccess:   true,
+			Reason:                         "llama.cpp detected; real KV/tensor hooks require adapter implementation",
 		},
 	})
 }

@@ -726,6 +726,7 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 		runtimeInfo.NativeModel = infMgr.ModelName()
 	}
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, tensorAccess, infMgr)
+	backendProbes := buildBackendProbeStatus()
 
 	evidenceSummary := v7capability.EvidenceCapabilitySummary{
 		SupportsArtifactManifest:    true,
@@ -757,6 +758,7 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 		KVCapability:              &kvCapability,
 		TensorAccess:              &tensorAccess,
 		RuntimeInventory:          &runtimeInventory,
+		BackendProbes:             &backendProbes,
 		SandboxCapabilitySummary:  sandboxSummary,
 		SandboxPolicy:             &sandboxPolicy,
 		EvidenceCapabilitySummary: evidenceSummary,

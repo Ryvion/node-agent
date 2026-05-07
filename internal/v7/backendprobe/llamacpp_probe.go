@@ -18,13 +18,14 @@ const (
 	defaultModelProbeTimeout = 5 * time.Second
 	unknownVersion           = "unknown"
 	maxProbePathLen          = 512
+	maxProbeVersionLen       = 128
 	maxProbeReasonLen        = 256
 )
 
 func ProbeAll(detector Detector) Probes {
-	return Probes{
+	return NormalizeProbes(Probes{
 		LlamaCPP: ProbeLlamaCPP(detector),
-	}
+	})
 }
 
 func ProbeLlamaCPP(detector Detector) LlamaCPPProbe {
@@ -162,16 +163,101 @@ func llamaCPPProbeReason(candidate runtimeinventory.BackendCandidate, probeModel
 	return "llama.cpp detected; real KV/tensor hooks require adapter implementation"
 }
 
+func NormalizeProbes(probes Probes) Probes {
+	return Probes{
+		LlamaCPP: normalizeLlamaCPPProbe(probes.LlamaCPP),
+	}
+}
+
+func normalizeLlamaCPPProbe(probe LlamaCPPProbe) LlamaCPPProbe {
+	probe.BinaryPath = cleanProbeText(probe.BinaryPath, maxProbePathLen)
+	probe.ServerBinaryPath = cleanProbeText(probe.ServerBinaryPath, maxProbePathLen)
+	probe.BenchBinaryPath = cleanProbeText(probe.BenchBinaryPath, maxProbePathLen)
+	probe.Version = normalizeProbeVersion(probe.Version)
+	probe.Reason = cleanProbeText(probe.Reason, maxProbeReasonLen)
+	if probe.Reason == "" {
+		if probe.Available {
+			probe.Reason = "llama.cpp detected; real KV/tensor hooks require adapter implementation"
+		} else {
+			probe.Reason = "llama.cpp binary not detected"
+		}
+	}
+	probe.SupportsKVAccess = false
+	probe.SupportsTensorHooks = false
+	if !probe.Available {
+		probe.SupportsTextGeneration = false
+		probe.SupportsStreaming = false
+		probe.SupportsOpenAICompatibleServer = false
+		probe.CandidateForFastTextRuntime = false
+		probe.CandidateForRealTensorAccess = false
+	}
+	return probe
+}
+
 func normalizeProbeVersion(value string) string {
-	value = cleanProbeText(value, maxProbeReasonLen)
-	if value == "" {
+	version := firstVersionLookingLine(value)
+	if version == "" {
 		return unknownVersion
 	}
-	lower := strings.ToLower(value)
-	if strings.Contains(lower, "llama") || strings.Contains(lower, "version") || strings.Contains(lower, "build") {
-		return value
+	return version
+}
+
+func firstVersionLookingLine(value string) string {
+	for _, line := range strings.FieldsFunc(value, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		line = cleanProbeText(line, maxProbeVersionLen)
+		if line == "" {
+			continue
+		}
+		if version := trimToVersionAnchor(line); version != "" {
+			return version
+		}
 	}
-	return unknownVersion
+	line := cleanProbeText(value, maxProbeVersionLen)
+	return trimToVersionAnchor(line)
+}
+
+func trimToVersionAnchor(line string) string {
+	lower := strings.ToLower(line)
+	anchor, genericAnchor := versionAnchorIndex(lower)
+	if anchor < 0 {
+		return ""
+	}
+	if genericAnchor {
+		prefix := lower[:anchor]
+		if strings.Contains(prefix, "ggml") || strings.Contains(prefix, "metal") {
+			return ""
+		}
+	}
+	version := strings.TrimSpace(line[anchor:])
+	if version == "" {
+		return ""
+	}
+	lowerVersion := strings.ToLower(version)
+	if strings.HasPrefix(lowerVersion, "ggml_") ||
+		strings.HasPrefix(lowerVersion, "ggml-") ||
+		strings.HasPrefix(lowerVersion, "metal ") ||
+		strings.HasPrefix(lowerVersion, "ggml metal") {
+		return ""
+	}
+	return cleanProbeText(version, maxProbeVersionLen)
+}
+
+func versionAnchorIndex(lower string) (int, bool) {
+	best := -1
+	for _, anchor := range []string{"llama.cpp", "llama-cpp"} {
+		if idx := strings.Index(lower, anchor); idx >= 0 && (best < 0 || idx < best) {
+			best = idx
+		}
+	}
+	if best >= 0 {
+		return best, false
+	}
+	for _, anchor := range []string{"version", "build"} {
+		if idx := strings.Index(lower, anchor); idx >= 0 && (best < 0 || idx < best) {
+			best = idx
+		}
+	}
+	return best, true
 }
 
 func cleanProbeText(value string, maxRunes int) string {

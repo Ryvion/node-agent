@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
@@ -31,6 +32,7 @@ type V7HeartbeatPayload struct {
 	KVCapability              *kvprobe.Capability                   `json:"kv_capability,omitempty"`
 	TensorAccess              tensoraccess.TensorAccessCapability   `json:"tensor_access"`
 	RuntimeInventory          runtimeinventory.Inventory            `json:"runtime_inventory"`
+	BackendProbes             backendprobe.Probes                   `json:"backend_probes"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
@@ -59,6 +61,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	KVCapability           *kvprobe.Capability
 	TensorAccess           *tensoraccess.TensorAccessCapability
 	RuntimeInventory       *runtimeinventory.Inventory
+	BackendProbes          *backendprobe.Probes
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -147,6 +150,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 	kvCapability := cloneKVCapability(input.KVCapability)
 	tensorAccess := cloneTensorAccessCapability(input.TensorAccess)
 	runtimeInventory := cloneRuntimeInventory(input.RuntimeInventory)
+	backendProbes := cloneBackendProbes(input.BackendProbes)
 
 	casSummary := cloneCASSummary(input.CASSummary)
 	if casSummary == nil && input.CASCapabilitySummary.Enabled {
@@ -195,6 +199,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		KVCapability:         kvCapability,
 		TensorAccess:         tensorAccess,
 		RuntimeInventory:     runtimeInventory,
+		BackendProbes:        backendProbes,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,
@@ -299,6 +304,13 @@ func cloneRuntimeInventory(inventory *runtimeinventory.Inventory) runtimeinvento
 		return runtimeinventory.NormalizeInventory(runtimeinventory.Inventory{})
 	}
 	return runtimeinventory.NormalizeInventory(*inventory)
+}
+
+func cloneBackendProbes(probes *backendprobe.Probes) backendprobe.Probes {
+	if probes == nil {
+		return backendprobe.NormalizeProbes(backendprobe.Probes{})
+	}
+	return backendprobe.NormalizeProbes(*probes)
 }
 
 func cloneCASSummary(summary *CASSummary) *CASSummary {

@@ -208,6 +208,7 @@ func TestSubmitReceiptWithRetryTestableV7ProofBuildFailureStillSubmits(t *testin
 
 func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	t.Setenv("RYV_DISABLE_OCI", "1")
+	t.Setenv("RYV_LLAMA_CPP_PROBE_MODEL", "")
 	caps := hw.CapSet{
 		CPUCores: 4,
 		RAMBytes: 8 * 1024 * 1024 * 1024,
@@ -248,6 +249,10 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if payload.RuntimeInventory.Provider != "noop" {
 		t.Fatalf("runtime_inventory provider = %q, want noop", payload.RuntimeInventory.Provider)
 	}
+	expectedBackendProbes := buildBackendProbeStatus()
+	if !reflect.DeepEqual(payload.BackendProbes, expectedBackendProbes) {
+		t.Fatalf("backend_probes = %+v, want local status builder value %+v", payload.BackendProbes, expectedBackendProbes)
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("json.Marshal(payload) error = %v", err)
@@ -255,7 +260,7 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
 	}
-	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`} {
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"backend_probes"`, `"llama_cpp"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
 		}
@@ -270,6 +275,7 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 
 func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *testing.T) {
 	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	t.Setenv("RYV_LLAMA_CPP_PROBE_MODEL", "")
 	caps := hw.CapSet{
 		CPUCores: 4,
 		RAMBytes: 8 * 1024 * 1024 * 1024,
@@ -295,11 +301,20 @@ func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *
 	if payload.RuntimeInventory.LoadedModels[0].ModelID != infMgr.ModelName() {
 		t.Fatalf("loaded model id = %q, want %q", payload.RuntimeInventory.LoadedModels[0].ModelID, infMgr.ModelName())
 	}
+	expectedBackendProbes := buildBackendProbeStatus()
+	if !reflect.DeepEqual(payload.BackendProbes, expectedBackendProbes) {
+		t.Fatalf("backend_probes = %+v, want local status builder value %+v", payload.BackendProbes, expectedBackendProbes)
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("json.Marshal(payload) error = %v", err)
 	}
-	if !strings.Contains(string(raw), `"runtime_inventory"`) || !strings.Contains(string(raw), `"candidate_backends"`) {
+	if !strings.Contains(string(raw), `"runtime_inventory"`) ||
+		!strings.Contains(string(raw), `"candidate_backends"`) ||
+		!strings.Contains(string(raw), `"backend_candidates"`) ||
+		!strings.Contains(string(raw), `"gguf_models"`) ||
+		!strings.Contains(string(raw), `"backend_probes"`) ||
+		!strings.Contains(string(raw), `"llama_cpp"`) {
 		t.Fatalf("V7 heartbeat payload missing runtime inventory fields: %s", raw)
 	}
 }

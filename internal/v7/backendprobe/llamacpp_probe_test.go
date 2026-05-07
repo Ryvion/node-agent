@@ -213,6 +213,63 @@ func TestProbeLlamaCPPJSONContainsNoPromptOutputOrTensorFields(t *testing.T) {
 	}
 }
 
+func TestNormalizeProbesSanitizesCapsAndDropsNoisyVersionLogs(t *testing.T) {
+	t.Parallel()
+
+	longPath := "/tmp/" + strings.Repeat("p", 600)
+	probes := NormalizeProbes(Probes{
+		LlamaCPP: LlamaCPPProbe{
+			Available:                      true,
+			BinaryPath:                     longPath + "\n",
+			ServerBinaryPath:               longPath + "\t",
+			BenchBinaryPath:                longPath + "\r",
+			Version:                        "ggml_metal_device_init: tensor API disabled\nllama.cpp build 789\n",
+			SupportsTextGeneration:         true,
+			SupportsStreaming:              true,
+			SupportsOpenAICompatibleServer: true,
+			SupportsKVAccess:               true,
+			SupportsTensorHooks:            true,
+			CandidateForFastTextRuntime:    true,
+			CandidateForRealTensorAccess:   true,
+			Reason:                         strings.Repeat("r", 300) + "\n",
+		},
+	})
+
+	probe := probes.LlamaCPP
+	if len(probe.BinaryPath) != maxProbePathLen ||
+		len(probe.ServerBinaryPath) != maxProbePathLen ||
+		len(probe.BenchBinaryPath) != maxProbePathLen {
+		t.Fatalf("path lengths = %d/%d/%d, want cap %d", len(probe.BinaryPath), len(probe.ServerBinaryPath), len(probe.BenchBinaryPath), maxProbePathLen)
+	}
+	if probe.Version != "llama.cpp build 789" {
+		t.Fatalf("version = %q, want first clean version-looking line", probe.Version)
+	}
+	if len(probe.Reason) != maxProbeReasonLen {
+		t.Fatalf("reason length = %d, want %d", len(probe.Reason), maxProbeReasonLen)
+	}
+	if strings.ContainsAny(probe.BinaryPath+probe.ServerBinaryPath+probe.BenchBinaryPath+probe.Reason, "\t\n\r") {
+		t.Fatalf("probe text still contains control whitespace: %+v", probe)
+	}
+	if probe.SupportsKVAccess || probe.SupportsTensorHooks {
+		t.Fatalf("normalized probe should not advertise KV/tensor hooks: %+v", probe)
+	}
+}
+
+func TestNormalizeProbesSetsUnknownForOnlyInitializationLogs(t *testing.T) {
+	t.Parallel()
+
+	probes := NormalizeProbes(Probes{
+		LlamaCPP: LlamaCPPProbe{
+			Available: true,
+			Version:   "ggml_metal_device_init: tensor API disabled for this runtime\n",
+		},
+	})
+
+	if probes.LlamaCPP.Version != unknownVersion {
+		t.Fatalf("version = %q, want unknown for initialization-only logs", probes.LlamaCPP.Version)
+	}
+}
+
 type fakeFileInfo struct {
 	name string
 	size int64
