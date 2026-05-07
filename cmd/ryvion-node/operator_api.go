@@ -70,6 +70,7 @@ type operatorRuntime struct {
 	runtimeMgr        *runtimeManager
 	v7MemoryBenchmark *v7memorybench.LocalStatus
 	llamaCppSidecar   *v7llamacpp.Manager
+	llamaCppBenchmark *v7llamacpp.BenchmarkLocalStatus
 }
 
 type operatorJob struct {
@@ -109,6 +110,7 @@ type operatorStatusResponse struct {
 	RuntimeInventory  v7runtimeinventory.Inventory          `json:"runtime_inventory"`
 	BackendProbes     v7backendprobe.Probes                 `json:"backend_probes"`
 	LlamaCPPSidecar   v7llamacpp.LlamaCppSidecarStatus      `json:"llama_cpp_sidecar"`
+	LlamaCPPBenchmark v7llamacpp.BenchmarkStatusSnapshot    `json:"llama_cpp_benchmark"`
 	Metrics           operatorMetrics                       `json:"metrics"`
 	CurrentJob        *operatorJob                          `json:"current_job,omitempty"`
 	RecentJobs        []operatorJob                         `json:"recent_jobs"`
@@ -249,6 +251,7 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		recentJobs:        make([]operatorJob, 0, 20),
 		v7MemoryBenchmark: v7memorybench.NewLocalStatus(),
 		llamaCppSidecar:   v7llamacpp.NewManagerFromEnv(),
+		llamaCppBenchmark: v7llamacpp.NewBenchmarkLocalStatus(),
 	}
 }
 
@@ -351,6 +354,29 @@ func (s *operatorRuntime) llamaCppManager() *v7llamacpp.Manager {
 	return s.llamaCppSidecar
 }
 
+func (s *operatorRuntime) llamaCppBenchmarkStore() *v7llamacpp.BenchmarkLocalStatus {
+	if s == nil {
+		return v7llamacpp.NewBenchmarkLocalStatus()
+	}
+	s.mu.RLock()
+	status := s.llamaCppBenchmark
+	s.mu.RUnlock()
+	if status != nil {
+		return status
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.llamaCppBenchmark == nil {
+		s.llamaCppBenchmark = v7llamacpp.NewBenchmarkLocalStatus()
+	}
+	return s.llamaCppBenchmark
+}
+
+func (s *operatorRuntime) llamaCppBenchmarkSnapshot() v7llamacpp.BenchmarkStatusSnapshot {
+	return s.llamaCppBenchmarkStore().Snapshot()
+}
+
 func (s *operatorRuntime) llamaCppSidecarStatus(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
 	return s.llamaCppManager().Status(ctx)
 }
@@ -365,6 +391,16 @@ func (s *operatorRuntime) stopLlamaCppSidecar(ctx context.Context) v7llamacpp.Ll
 
 func (s *operatorRuntime) restartLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
 	return s.llamaCppManager().Restart(ctx)
+}
+
+func (s *operatorRuntime) runLlamaCppBenchmark(ctx context.Context, config v7llamacpp.BenchmarkConfig) v7llamacpp.BenchmarkStatusSnapshot {
+	runner := v7llamacpp.BenchmarkRunner{
+		Sidecar: s.llamaCppManager(),
+		Client:  v7llamacpp.OpenAIClient{},
+	}
+	snapshot := runner.Run(ctx, config)
+	s.llamaCppBenchmarkStore().Record(snapshot)
+	return snapshot
 }
 
 func (s *operatorRuntime) recordV7MemoryBenchmarkSeen(jobID, requestID string) {
@@ -686,6 +722,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
 	backendProbes := buildBackendProbeStatus()
 	llamaCppSidecar := s.llamaCppSidecarStatus(context.Background())
+	llamaCppBenchmark := s.llamaCppBenchmarkSnapshot()
 
 	return operatorStatusResponse{
 		Version:          s.version,
@@ -705,11 +742,12 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUModel:  caps.GPUModel,
 			VRAMBytes: caps.VRAMBytes,
 		},
-		Runtime:          runtimeInfo,
-		TensorAccess:     runtimeInfo.TensorAccess,
-		RuntimeInventory: runtimeInventory,
-		BackendProbes:    backendProbes,
-		LlamaCPPSidecar:  llamaCppSidecar,
+		Runtime:           runtimeInfo,
+		TensorAccess:      runtimeInfo.TensorAccess,
+		RuntimeInventory:  runtimeInventory,
+		BackendProbes:     backendProbes,
+		LlamaCPPSidecar:   llamaCppSidecar,
+		LlamaCPPBenchmark: llamaCppBenchmark,
 		Metrics: operatorMetrics{
 			CPUUtil:    metrics.CPUUtil,
 			MemUtil:    metrics.MemUtil,
@@ -1130,6 +1168,58 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 	})
 	mux.HandleFunc("POST /api/v1/operator/llamacpp/restart", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, state.restartLlamaCppSidecar(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/operator/llamacpp/benchmark", func(w http.ResponseWriter, r *http.Request) {
+		if !v7llamacpp.BenchmarkEnabledFromEnv(os.Getenv) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "llamacpp_benchmark_disabled"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var body struct {
+			ModelID      string   `json:"model_id"`
+			MaxTokens    int      `json:"max_tokens"`
+			Temperature  *float64 `json:"temperature"`
+			TimeoutMs    int64    `json:"timeout_ms"`
+			Streaming    *bool    `json:"streaming"`
+			MeasuredRuns int      `json:"measured_runs"`
+			WarmupRuns   int      `json:"warmup_runs"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
+			return
+		}
+		config := v7llamacpp.DefaultBenchmarkConfig()
+		config.ModelID = body.ModelID
+		if body.MaxTokens != 0 {
+			config.MaxTokens = body.MaxTokens
+		}
+		if body.Temperature != nil {
+			config.Temperature = *body.Temperature
+		}
+		if body.TimeoutMs != 0 {
+			config.TimeoutMs = body.TimeoutMs
+		}
+		if body.Streaming != nil {
+			config.Streaming = *body.Streaming
+		}
+		if body.MeasuredRuns != 0 {
+			config.MeasuredRuns = body.MeasuredRuns
+		}
+		if body.WarmupRuns != 0 {
+			config.WarmupRuns = body.WarmupRuns
+		}
+		if err := v7llamacpp.ValidateBenchmarkConfig(config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_benchmark_config"})
+			return
+		}
+		config = v7llamacpp.NormalizeBenchmarkConfig(config)
+		runCtx := r.Context()
+		if config.TimeoutMs > 0 {
+			var cancel context.CancelFunc
+			runCtx, cancel = context.WithTimeout(r.Context(), time.Duration(config.TimeoutMs)*time.Millisecond)
+			defer cancel()
+		}
+		writeJSON(w, http.StatusOK, state.runLlamaCppBenchmark(runCtx, config))
 	})
 	mux.HandleFunc("GET /api/v1/operator/jobs", func(w http.ResponseWriter, r *http.Request) {
 		jobs, current := state.recentJobsSnapshot()

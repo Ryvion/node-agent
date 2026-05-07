@@ -32,6 +32,7 @@ import (
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
+	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
@@ -110,6 +111,10 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "backend-probe" {
 		runBackendProbe(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "llamacpp-bench" {
+		runLlamaCppBench(os.Args[2:])
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "memorybench-selftest" {
@@ -252,6 +257,33 @@ func runLlamaCPPBackendProbe(args []string) {
 	os.Exit(0)
 }
 
+func runLlamaCppBench(args []string) {
+	config, jsonOutput, err := parseLlamaCppBenchFlags(args)
+	if err != nil {
+		if err == flag.ErrHelp {
+			os.Exit(0)
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if !v7llamacpp.BenchmarkEnabledFromEnv(os.Getenv) {
+		fmt.Fprintf(os.Stderr, "%s=1 required for llama.cpp benchmark\n", v7llamacpp.EnvBenchmark)
+		os.Exit(2)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.TimeoutMs)*time.Millisecond)
+	defer cancel()
+	runner := v7llamacpp.BenchmarkRunner{
+		Sidecar: v7llamacpp.NewManagerFromEnv(),
+		Client:  v7llamacpp.OpenAIClient{},
+	}
+	snapshot := runner.Run(ctx, config)
+	fmt.Println(v7llamacpp.FormatBenchmarkStatus(snapshot, jsonOutput))
+	if snapshot.Status != v7llamacpp.BenchmarkStatusCompleted {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
 func runDoctor(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	hubURL := fs.String("hub", firstNonEmpty(strings.TrimSpace(os.Getenv("RYV_HUB_URL")), "https://api.ryvion.ai"), "Hub orchestrator base URL")
@@ -368,6 +400,62 @@ func parseModelBenchSelfTestFlags(args []string) (v7modelbench.ModelBenchmarkSel
 		MaxTokens: *maxTokens,
 		TimeoutMs: timeoutMs,
 	}, *jsonOutput, nil
+}
+
+func parseLlamaCppBenchFlags(args []string) (v7llamacpp.BenchmarkConfig, bool, error) {
+	defaults := v7llamacpp.DefaultBenchmarkConfig()
+	fs := flag.NewFlagSet("llamacpp-bench", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	modelID := fs.String("model", defaults.ModelID, "llama.cpp model ID or model filename")
+	maxTokens := fs.Int("max-tokens", defaults.MaxTokens, "Maximum generated tokens")
+	runs := fs.Int("runs", defaults.MeasuredRuns, "Measured benchmark runs")
+	warmups := fs.Int("warmup-runs", defaults.WarmupRuns, "Warmup runs before measurement")
+	timeoutRaw := fs.String("timeout", fmt.Sprintf("%dms", defaults.TimeoutMs), "Benchmark timeout as duration or milliseconds")
+	jsonOutput := fs.Bool("json", false, "Print JSON output")
+	if err := fs.Parse(args); err != nil {
+		return v7llamacpp.BenchmarkConfig{}, false, err
+	}
+	if fs.NArg() != 0 {
+		return v7llamacpp.BenchmarkConfig{}, false, fmt.Errorf("usage: ryvion-node llamacpp-bench --json --max-tokens 32 --runs 3")
+	}
+	timeoutMs, err := parseLlamaCppBenchTimeoutMs(*timeoutRaw)
+	if err != nil {
+		return v7llamacpp.BenchmarkConfig{}, false, err
+	}
+	config := v7llamacpp.BenchmarkConfig{
+		ModelID:      *modelID,
+		MaxTokens:    *maxTokens,
+		Temperature:  0,
+		TimeoutMs:    timeoutMs,
+		Streaming:    true,
+		MeasuredRuns: *runs,
+		WarmupRuns:   *warmups,
+	}
+	if err := v7llamacpp.ValidateBenchmarkConfig(config); err != nil {
+		return v7llamacpp.BenchmarkConfig{}, false, err
+	}
+	return v7llamacpp.NormalizeBenchmarkConfig(config), *jsonOutput, nil
+}
+
+func parseLlamaCppBenchTimeoutMs(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return v7llamacpp.DefaultBenchmarkConfig().TimeoutMs, nil
+	}
+	if ms, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if ms <= 0 {
+			return 0, fmt.Errorf("timeout must be greater than zero")
+		}
+		return ms, nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid timeout %q", raw)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("timeout must be greater than zero")
+	}
+	return duration.Milliseconds(), nil
 }
 
 func parseTensorPlaneSelfTestFlags(args []string) (v7tensorplane.TensorPlaneProbeConfig, bool, error) {

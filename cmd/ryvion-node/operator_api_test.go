@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -312,6 +314,72 @@ func TestOperatorAPILlamaCppEndpointsDisabledSafe(t *testing.T) {
 	}
 }
 
+func TestOperatorAPILlamaCppBenchmarkEndpointRecordsSafeStatus(t *testing.T) {
+	t.Setenv(v7llamacpp.EnvBenchmark, "1")
+	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		case "/v1/chat/completions":
+			var req struct {
+				Stream bool `json:"stream"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode llama.cpp request: %v", err)
+			}
+			if !req.Stream {
+				t.Fatalf("stream = false, want true")
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"safe generated output\"}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n")
+			_, _ = io.WriteString(w, "data: [DONE]\n")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer llamaServer.Close()
+
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:           "test",
+		hubURL:            "https://api.ryvion.ai",
+		deviceType:        "gpu",
+		publicKeyHex:      "abc123",
+		llamaCppSidecar:   testLlamaCppManagerForServer(t, llamaServer.URL),
+		llamaCppBenchmark: v7llamacpp.NewBenchmarkLocalStatus(),
+		v7MemoryBenchmark: v7memorybench.NewLocalStatus(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := postOperatorAPITestJSON(t, port, "/api/v1/operator/llamacpp/benchmark", []byte(`{"max_tokens":4,"warmup_runs":0,"measured_runs":1,"timeout_ms":60000}`))
+	var snapshot v7llamacpp.BenchmarkStatusSnapshot
+	if err := json.Unmarshal(respBody, &snapshot); err != nil {
+		t.Fatalf("decode benchmark response: %v\nbody: %s", err, respBody)
+	}
+	if snapshot.Status != v7llamacpp.BenchmarkStatusCompleted {
+		t.Fatalf("benchmark status = %+v, want completed", snapshot)
+	}
+	if snapshot.Metrics.PromptHash == "" || snapshot.Metrics.OutputHash == "" || snapshot.Metrics.OutputBytes == 0 {
+		t.Fatalf("benchmark hashes/bytes missing: %+v", snapshot.Metrics)
+	}
+	statusBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	var status operatorStatusResponse
+	if err := json.Unmarshal(statusBody, &status); err != nil {
+		t.Fatalf("decode status: %v\nbody: %s", err, statusBody)
+	}
+	if status.LlamaCPPBenchmark.Status != v7llamacpp.BenchmarkStatusCompleted {
+		t.Fatalf("status llama_cpp_benchmark = %+v, want completed", status.LlamaCPPBenchmark)
+	}
+	lower := strings.ToLower(string(respBody) + string(statusBody))
+	for _, forbidden := range []string{"write one short sentence about distributed computing", "safe generated output", "raw_prompt", "prompt_text", "generated_text", "output_text", "model_output"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("benchmark operator JSON leaked forbidden text %q: response=%s status=%s", forbidden, respBody, statusBody)
+		}
+	}
+}
+
 func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	dataDir := setupHeartbeatPreviewInventoryFixture(t)
 	t.Setenv("RYV_DATA_DIR", dataDir)
@@ -402,6 +470,38 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 			t.Fatalf("heartbeat preview contains forbidden marker %q: %s", forbidden, respBody)
 		}
 	}
+}
+
+func testLlamaCppManagerForServer(t *testing.T, serverURL string) *v7llamacpp.Manager {
+	t.Helper()
+	parsed, err := url.Parse(serverURL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	host, portRaw, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("split test server host: %v", err)
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil {
+		t.Fatalf("parse test server port: %v", err)
+	}
+	dir := t.TempDir()
+	serverPath := filepath.Join(dir, "llama-server")
+	modelPath := filepath.Join(dir, "tinyllama.Q4_K_M.gguf")
+	if err := os.WriteFile(serverPath, []byte("test llama-server"), 0o755); err != nil {
+		t.Fatalf("write server fixture: %v", err)
+	}
+	if err := os.WriteFile(modelPath, []byte("test gguf"), 0o644); err != nil {
+		t.Fatalf("write model fixture: %v", err)
+	}
+	return v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
+		Enabled:    true,
+		ServerPath: serverPath,
+		ModelPath:  modelPath,
+		Host:       host,
+		Port:       port,
+	})
 }
 
 func setupHeartbeatPreviewInventoryFixture(t *testing.T) string {

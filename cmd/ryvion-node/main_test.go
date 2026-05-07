@@ -519,6 +519,42 @@ func TestParseModelBenchTimeoutAcceptsRawMilliseconds(t *testing.T) {
 	}
 }
 
+func TestParseLlamaCppBenchFlags(t *testing.T) {
+	config, jsonOutput, err := parseLlamaCppBenchFlags([]string{
+		"--json",
+		"--model", "tinyllama.Q4_K_M.gguf",
+		"--max-tokens", "16",
+		"--runs", "5",
+		"--warmup-runs", "2",
+		"--timeout", "1500ms",
+	})
+	if err != nil {
+		t.Fatalf("parseLlamaCppBenchFlags() error = %v", err)
+	}
+	if !jsonOutput {
+		t.Fatal("json output = false, want true")
+	}
+	if config.ModelID != "tinyllama.Q4_K_M.gguf" {
+		t.Fatalf("model_id = %q, want tinyllama.Q4_K_M.gguf", config.ModelID)
+	}
+	if config.MaxTokens != 16 || config.MeasuredRuns != 5 || config.WarmupRuns != 2 || config.TimeoutMs != 1500 {
+		t.Fatalf("config = %+v, want max_tokens/runs/warmups/timeout overrides", config)
+	}
+	if !config.Streaming {
+		t.Fatalf("streaming = false, want default true")
+	}
+}
+
+func TestParseLlamaCppBenchTimeoutAcceptsRawMilliseconds(t *testing.T) {
+	got, err := parseLlamaCppBenchTimeoutMs("60000")
+	if err != nil {
+		t.Fatalf("parseLlamaCppBenchTimeoutMs() error = %v", err)
+	}
+	if got != 60_000 {
+		t.Fatalf("timeout_ms = %d, want 60000", got)
+	}
+}
+
 func TestDetectManagedOCIBackendWithProbesWithoutDaemonRejectsCPUContainerWork(t *testing.T) {
 	cli, ready, gpu := detectManagedOCIBackendWithProbes(false,
 		func() string { return "/usr/bin/docker" },
