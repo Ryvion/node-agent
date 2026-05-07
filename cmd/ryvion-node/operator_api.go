@@ -28,6 +28,7 @@ import (
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7modelcache "github.com/Ryvion/node-agent/internal/v7/modelcache"
 	v7modelpolicy "github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+	v7modelprepare "github.com/Ryvion/node-agent/internal/v7/modelprepare"
 	v7runtimeinventory "github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	v7tensoraccess "github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
@@ -74,6 +75,7 @@ type operatorRuntime struct {
 	v7MemoryBenchmark    *v7memorybench.LocalStatus
 	v7BackendBenchmark   *v7llamacpp.BackendBenchmarkLocalStatus
 	v7InferenceBenchmark *v7inferencebench.LocalStatus
+	v7ModelPrepare       *v7modelprepare.LocalStatus
 	llamaCppSidecar      *v7llamacpp.Manager
 	llamaCppKeeper       *v7llamacpp.ResidencyKeeper
 	llamaCppBenchmark    *v7llamacpp.BenchmarkLocalStatus
@@ -130,6 +132,7 @@ type operatorStatusResponse struct {
 	V7MemoryBenchmark    v7memorybench.LocalStatusSnapshot              `json:"v7_memory_benchmark"`
 	V7BackendBenchmark   v7llamacpp.BackendBenchmarkLocalStatusSnapshot `json:"v7_backend_benchmark"`
 	V7InferenceBenchmark v7inferencebench.LocalStatusSnapshot           `json:"v7_inference_benchmark"`
+	V7ModelPrepare       v7modelprepare.LocalStatusSnapshot             `json:"v7_model_prepare"`
 	WorkLoop             diagnostics.WorkLoopSnapshot                   `json:"work_loop"`
 }
 
@@ -269,6 +272,7 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		v7MemoryBenchmark:    v7memorybench.NewLocalStatus(),
 		v7BackendBenchmark:   v7llamacpp.NewBackendBenchmarkLocalStatus(),
 		v7InferenceBenchmark: v7inferencebench.NewLocalStatus(),
+		v7ModelPrepare:       v7modelprepare.NewLocalStatus(),
 		llamaCppSidecar:      llamaCppSidecar,
 		llamaCppKeeper:       v7llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
 		llamaCppBenchmark:    v7llamacpp.NewBenchmarkLocalStatus(),
@@ -413,6 +417,25 @@ func (s *operatorRuntime) llamaCppResidencyKeeper() *v7llamacpp.ResidencyKeeper 
 		s.llamaCppKeeper = v7llamacpp.NewResidencyKeeperFromEnv(s.llamaCppSidecar)
 	}
 	return s.llamaCppKeeper
+}
+
+func (s *operatorRuntime) modelPrepareStatus() *v7modelprepare.LocalStatus {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	status := s.v7ModelPrepare
+	s.mu.RUnlock()
+	if status != nil {
+		return status
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.v7ModelPrepare == nil {
+		s.v7ModelPrepare = v7modelprepare.NewLocalStatus()
+	}
+	return s.v7ModelPrepare
 }
 
 func (s *operatorRuntime) backendBenchmarkStatus() *v7llamacpp.BackendBenchmarkLocalStatus {
@@ -760,6 +783,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	memoryBenchmarkStatus := s.v7MemoryBenchmark
 	backendBenchmarkStatus := s.v7BackendBenchmark
 	inferenceBenchmarkStatus := s.v7InferenceBenchmark
+	modelPrepareStatus := s.v7ModelPrepare
 	s.mu.RUnlock()
 
 	report = freshOperatorHealthReport(caps, infMgr, runtimeMgr, report)
@@ -774,6 +798,10 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	var inferenceBenchmarkSnapshot v7inferencebench.LocalStatusSnapshot
 	if inferenceBenchmarkStatus != nil {
 		inferenceBenchmarkSnapshot = inferenceBenchmarkStatus.Snapshot()
+	}
+	var modelPrepareSnapshot v7modelprepare.LocalStatusSnapshot
+	if modelPrepareStatus != nil {
+		modelPrepareSnapshot = modelPrepareStatus.Snapshot()
 	}
 	workLoopSnapshot := sanitizeOperatorWorkLoopSnapshot(workLoopDiagnostics.Snapshot())
 
@@ -884,6 +912,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		V7MemoryBenchmark:    memoryBenchmarkSnapshot,
 		V7BackendBenchmark:   backendBenchmarkSnapshot,
 		V7InferenceBenchmark: inferenceBenchmarkSnapshot,
+		V7ModelPrepare:       modelPrepareSnapshot,
 		WorkLoop:             workLoopSnapshot,
 	}
 }

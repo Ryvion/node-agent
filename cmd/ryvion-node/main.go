@@ -36,6 +36,8 @@ import (
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
+	v7modelpolicy "github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+	v7modelprepare "github.com/Ryvion/node-agent/internal/v7/modelprepare"
 	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
 	v7proofrunner "github.com/Ryvion/node-agent/internal/v7/proofrunner"
 	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -82,6 +84,7 @@ var (
 	v7TensorPlaneBenchmarkStatus = v7tensorplane.NewLocalStatus()
 	v7BackendBenchmarkStatus     = v7llamacpp.NewBackendBenchmarkLocalStatus()
 	v7InferenceBenchmarkStatus   = v7inferencebench.NewLocalStatus()
+	v7ModelPrepareStatus         = v7modelprepare.NewLocalStatus()
 	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
 		return v7modelbench.NativeInferenceModelBenchmarkRunner{
 			Native:           infMgr,
@@ -1206,6 +1209,18 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	if handled, result, runErr := processOptionalV7ModelPrepare(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("V7 model prepare execution failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("V7 model prepare completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	workLoopDiagnostics.RecordEvent("generic_path_entered", work.JobID, work.Kind, mainWorkLoopSpecContext(diagnostics.WorkSpecTaskFromJSON(work.SpecJSON)))
 
 	// Pre-job VRAM check — reject if GPU is too busy
@@ -2070,6 +2085,128 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 			v7ModelBenchmarkStatus.RecordExecuted(hubReceipt.JobID)
 		}
 		v7ModelBenchmarkStatus.RecordReceiptSubmitted(hubReceipt.JobID)
+	}
+	return true, snapshot, err
+}
+
+func currentV7ModelPrepareStatus() *v7modelprepare.LocalStatus {
+	if operatorRuntimeState != nil {
+		return operatorRuntimeState.modelPrepareStatus()
+	}
+	return v7ModelPrepareStatus
+}
+
+func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	identity, isPrepare := v7modelprepare.PrepareAssignmentIdentityFromJSON(work.SpecJSON)
+	if !isPrepare {
+		return false, nil, nil
+	}
+	status := currentV7ModelPrepareStatus()
+	if status != nil {
+		status.RecordSeen(identity.PrepareID, identity.ModelID)
+	}
+	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
+	executionStarted := time.Now()
+	workLoopDiagnostics.RecordExecutionStart(statusJobID)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, mainWorkLoopSpecContext(v7modelprepare.PrepareTask))
+
+	var manager v7modelprepare.LlamaCppManager
+	if operatorRuntimeState != nil {
+		manager = operatorRuntimeState.llamaCppManager()
+	} else {
+		manager = v7llamacpp.NewManagerFromEnv()
+	}
+	receipt, handled, err := v7modelprepare.ExecutePrepareAssignment(ctx, work.SpecJSON, v7modelprepare.ExecuteOptions{
+		Getenv:          os.Getenv,
+		Policy:          v7modelpolicy.FromEnv(),
+		LlamaCppManager: manager,
+		BenchmarkRunner: v7llamacpp.BenchmarkRunner{
+			Sidecar: manager,
+			Client:  v7llamacpp.OpenAIClient{},
+		},
+	})
+	if !handled {
+		return false, nil, nil
+	}
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
+	if strings.TrimSpace(receipt.ResultHashHex) == "" {
+		receipt = v7modelprepare.BuildPrepareRejectionReceiptFromIdentity(identity, err)
+	}
+	receiptBuildStarted := time.Now()
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, mainWorkLoopSpecContext(v7modelprepare.PrepareTask))
+	extra := map[string]any{
+		"executor":      v7modelprepare.PrepareTask,
+		"executor_kind": v7modelprepare.PrepareTask,
+		"task":          v7modelprepare.PrepareTask,
+	}
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		extra["exit_code"] = 1
+		extra["error"] = "v7 model prepare failed"
+	} else {
+		extra["exit_code"] = 0
+	}
+	metadata := receiptMetadataBase(work, v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected), receipt.Metadata, extra)
+	hubReceipt := hub.Receipt{
+		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
+		ResultHashHex: receipt.ResultHashHex,
+		MeteringUnits: receipt.MeteringUnits,
+		Metadata:      metadata,
+	}
+	snapshot := &runnerResultSnapshot{
+		ResultHashHex: hubReceipt.ResultHashHex,
+		MeteringUnits: hubReceipt.MeteringUnits,
+		ExitCode:      exitCode,
+		Metadata:      metadata,
+	}
+	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
+	receiptContext := mainWorkLoopSpecContext(v7modelprepare.PrepareTask)
+	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_start", hubReceipt.JobID, work.Kind, receiptContext)
+	if client == nil {
+		submitErr := fmt.Errorf("hub client unavailable")
+		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+		if status != nil {
+			if err == nil {
+				status.RecordExecuted(identity.PrepareID, identity.ModelID)
+			} else {
+				status.RecordRejected(identity.PrepareID, identity.ModelID, err)
+			}
+			status.RecordReceiptFailed(identity.PrepareID, identity.ModelID, submitErr)
+		}
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	if submitErr := submitReceiptWithRetry(ctx, client, hubReceipt); submitErr != nil {
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+		if status != nil {
+			if err == nil {
+				status.RecordExecuted(identity.PrepareID, identity.ModelID)
+			} else {
+				status.RecordRejected(identity.PrepareID, identity.ModelID, err)
+			}
+			status.RecordReceiptFailed(identity.PrepareID, identity.ModelID, submitErr)
+		}
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+	if status != nil {
+		if err == nil {
+			status.RecordExecuted(identity.PrepareID, identity.ModelID)
+		} else {
+			status.RecordRejected(identity.PrepareID, identity.ModelID, err)
+		}
+		status.RecordReceiptSubmitted(identity.PrepareID, identity.ModelID)
 	}
 	return true, snapshot, err
 }

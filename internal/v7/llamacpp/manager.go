@@ -113,6 +113,17 @@ func (m *Manager) Config() LlamaCppSidecarConfig {
 	return m.cfg
 }
 
+func (m *Manager) SetModelPath(modelPath string) LlamaCppSidecarConfig {
+	if m == nil {
+		return NewManager(LlamaCppSidecarConfig{}).SetModelPath(modelPath)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg.ModelPath = cleanConfigText(modelPath, maxConfigTextLen)
+	m.cfg = normalizeConfig(m.cfg)
+	return m.cfg
+}
+
 func (m *Manager) Status(ctx context.Context) LlamaCppSidecarStatus {
 	if m == nil {
 		return NewManager(LlamaCppSidecarConfig{}).Status(ctx)
@@ -236,6 +247,14 @@ func (m *Manager) Restart(ctx context.Context) LlamaCppSidecarStatus {
 	}
 	_ = m.Stop(ctx)
 	return m.Start(ctx)
+}
+
+func (m *Manager) RestartWithModel(ctx context.Context, modelPath string) LlamaCppSidecarStatus {
+	if m == nil {
+		return NewManager(LlamaCppSidecarConfig{}).RestartWithModel(ctx, modelPath)
+	}
+	_ = m.SetModelPath(modelPath)
+	return m.Restart(ctx)
 }
 
 func (m *Manager) waitForManagedProcess(process managedProcess) {
