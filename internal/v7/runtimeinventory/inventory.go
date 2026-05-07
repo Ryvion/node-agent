@@ -1,10 +1,6 @@
 package runtimeinventory
 
 import (
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"unicode"
 
@@ -20,6 +16,7 @@ const (
 
 func BuildInventory(status RuntimeStatus, detector CandidateBackendDetector) Inventory {
 	normalized := normalizeRuntimeStatus(status)
+	backendInventory := detectBackendCandidateInventory(detector)
 	return NormalizeInventory(Inventory{
 		RuntimeKind:          normalized.RuntimeKind,
 		Backend:              normalized.Backend,
@@ -28,7 +25,9 @@ func BuildInventory(status RuntimeStatus, detector CandidateBackendDetector) Inv
 		NativeInferenceReady: normalized.NativeInferenceReady,
 		NativeModel:          normalized.NativeModel,
 		LoadedModels:         BuildModelResidencySnapshot(normalized),
-		CandidateBackends:    DetectCandidateBackends(detector),
+		CandidateBackends:    backendInventory.CandidateBackends,
+		BackendCandidates:    backendInventory.BackendCandidates,
+		GGUFModels:           backendInventory.GGUFModels,
 	})
 }
 
@@ -39,22 +38,9 @@ func NormalizeInventory(inventory Inventory) Inventory {
 	inventory.ProcessMode = normalizeProcessMode(cleanInventoryText(inventory.ProcessMode, maxInventoryCompactFieldLen))
 	inventory.NativeModel = cleanInventoryText(inventory.NativeModel, maxInventoryModelIDLen)
 	inventory.LoadedModels = normalizeLoadedModels(inventory.LoadedModels)
+	inventory.BackendCandidates = normalizeBackendCandidates(inventory.BackendCandidates)
+	inventory.GGUFModels = normalizeGGUFModels(inventory.GGUFModels)
 	return inventory
-}
-
-func DetectCandidateBackends(detector CandidateBackendDetector) CandidateBackends {
-	detector = normalizeCandidateBackendDetector(detector)
-	return CandidateBackends{
-		LlamaCPPDetected:           commandDetected(detector, "llama-server") || commandDetected(detector, "llama-cli"),
-		OllamaDetected:             commandDetected(detector, "ollama"),
-		VLLMDetected:               commandDetected(detector, "vllm"),
-		PythonTransformersDetected: commandDetected(detector, "python") || commandDetected(detector, "python3"),
-		GGUFModelsDetected:         ggufModelDetected(detector),
-	}
-}
-
-func DefaultCandidateBackendDetector() CandidateBackendDetector {
-	return CandidateBackendDetector{}
 }
 
 func normalizeRuntimeStatus(status RuntimeStatus) RuntimeStatus {
@@ -154,94 +140,6 @@ func normalizeProcessMode(value string) string {
 	default:
 		return ProcessModeUnknown
 	}
-}
-
-func normalizeCandidateBackendDetector(detector CandidateBackendDetector) CandidateBackendDetector {
-	if detector.LookPath == nil {
-		detector.LookPath = exec.LookPath
-	}
-	if detector.ReadDirNames == nil {
-		detector.ReadDirNames = readDirNames
-	}
-	if detector.Getenv == nil {
-		detector.Getenv = os.Getenv
-	}
-	if detector.UserHomeDir == nil {
-		detector.UserHomeDir = os.UserHomeDir
-	}
-	return detector
-}
-
-func commandDetected(detector CandidateBackendDetector, name string) bool {
-	if strings.TrimSpace(name) == "" || detector.LookPath == nil {
-		return false
-	}
-	path, err := detector.LookPath(name)
-	return err == nil && strings.TrimSpace(path) != ""
-}
-
-func ggufModelDetected(detector CandidateBackendDetector) bool {
-	for _, dir := range configuredModelDirs(detector) {
-		names, err := detector.ReadDirNames(dir, 256)
-		if err != nil {
-			continue
-		}
-		for _, name := range names {
-			if strings.EqualFold(filepath.Ext(strings.TrimSpace(name)), ".gguf") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func configuredModelDirs(detector CandidateBackendDetector) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 4)
-	add := func(path string) {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return
-		}
-		cleaned := filepath.Clean(path)
-		if cleaned == "." || cleaned == string(filepath.Separator) {
-			return
-		}
-		if _, ok := seen[cleaned]; ok {
-			return
-		}
-		seen[cleaned] = struct{}{}
-		out = append(out, cleaned)
-	}
-
-	for _, dir := range detector.ConfiguredModelDirs {
-		add(dir)
-	}
-	for _, envName := range []string{"RYV_MODEL_DIR", "RYVION_MODEL_DIR"} {
-		add(detector.Getenv(envName))
-	}
-	if dataDir := strings.TrimSpace(detector.Getenv("RYV_DATA_DIR")); dataDir != "" {
-		add(filepath.Join(dataDir, "models"))
-	} else if home, err := detector.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		add(filepath.Join(home, ".ryvion", "models"))
-	}
-	return out
-}
-
-func readDirNames(dir string, limit int) ([]string, error) {
-	if limit <= 0 {
-		limit = 256
-	}
-	f, err := os.Open(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	names, err := f.Readdirnames(limit)
-	if err != nil && err != io.EOF {
-		return names, err
-	}
-	return names, nil
 }
 
 func cleanInventoryText(value string, maxRunes int) string {

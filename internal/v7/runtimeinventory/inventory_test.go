@@ -99,6 +99,20 @@ func TestBuildInventoryUnknownRuntimeUsesSafeDefaults(t *testing.T) {
 	if inventory.CandidateBackends != (CandidateBackends{}) {
 		t.Fatalf("candidate backends = %+v, want zero", inventory.CandidateBackends)
 	}
+	if len(inventory.BackendCandidates) == 0 {
+		t.Fatalf("backend_candidates should include safe false candidate rows")
+	}
+	for _, candidate := range inventory.BackendCandidates {
+		if candidate.Detected {
+			t.Fatalf("backend candidate detected with missing binaries: %+v", candidate)
+		}
+		if candidate.Reason == "" {
+			t.Fatalf("backend candidate reason is empty: %+v", candidate)
+		}
+	}
+	if len(inventory.GGUFModels) != 0 {
+		t.Fatalf("gguf_models = %+v, want empty", inventory.GGUFModels)
+	}
 }
 
 func TestNormalizeInventorySanitizesAndCapsHeartbeatFields(t *testing.T) {
@@ -228,7 +242,10 @@ func TestInventoryJSONHasNoRawTensorPromptOrOutputFields(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 	text := strings.ToLower(string(encoded))
-	if !strings.Contains(text, `"loaded_models"`) || !strings.Contains(text, `"candidate_backends"`) {
+	if !strings.Contains(text, `"loaded_models"`) ||
+		!strings.Contains(text, `"candidate_backends"`) ||
+		!strings.Contains(text, `"backend_candidates"`) ||
+		!strings.Contains(text, `"gguf_models"`) {
 		t.Fatalf("inventory JSON missing expected blocks: %s", encoded)
 	}
 	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "weighted_value"} {
