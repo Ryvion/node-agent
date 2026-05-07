@@ -110,6 +110,7 @@ type operatorStatusResponse struct {
 	TensorAccess       v7tensoraccess.TensorAccessCapability          `json:"tensor_access"`
 	RuntimeInventory   v7runtimeinventory.Inventory                   `json:"runtime_inventory"`
 	BackendProbes      v7backendprobe.Probes                          `json:"backend_probes"`
+	BackendRuntimes    v7llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
 	LlamaCPPSidecar    v7llamacpp.LlamaCppSidecarStatus               `json:"llama_cpp_sidecar"`
 	LlamaCPPBenchmark  v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
 	Metrics            operatorMetrics                                `json:"metrics"`
@@ -231,6 +232,8 @@ type v7HeartbeatPreviewFieldPresence struct {
 	GGUFModelsLen            int  `json:"gguf_models_len"`
 	BackendProbesPresent     bool `json:"backend_probes_present"`
 	LlamaCPPProbePresent     bool `json:"llama_cpp_probe_present"`
+	BackendRuntimesPresent   bool `json:"backend_runtimes_present"`
+	LlamaCPPRuntimePresent   bool `json:"llama_cpp_runtime_present"`
 }
 
 type logRing struct {
@@ -401,6 +404,10 @@ func (s *operatorRuntime) llamaCppBenchmarkSnapshot() v7llamacpp.BenchmarkStatus
 
 func (s *operatorRuntime) llamaCppSidecarStatus(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
 	return s.llamaCppManager().Status(ctx)
+}
+
+func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) v7llamacpp.BackendRuntimes {
+	return v7llamacpp.BuildBackendRuntimes(s.llamaCppSidecarStatus(ctx))
 }
 
 func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
@@ -749,6 +756,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
 	backendProbes := buildBackendProbeStatus()
 	llamaCppSidecar := s.llamaCppSidecarStatus(context.Background())
+	backendRuntimes := v7llamacpp.BuildBackendRuntimes(llamaCppSidecar)
 	llamaCppBenchmark := s.llamaCppBenchmarkSnapshot()
 
 	return operatorStatusResponse{
@@ -773,6 +781,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		TensorAccess:      runtimeInfo.TensorAccess,
 		RuntimeInventory:  runtimeInventory,
 		BackendProbes:     backendProbes,
+		BackendRuntimes:   backendRuntimes,
 		LlamaCPPSidecar:   llamaCppSidecar,
 		LlamaCPPBenchmark: llamaCppBenchmark,
 		Metrics: operatorMetrics{
@@ -794,7 +803,16 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 }
 
 func buildBackendProbeStatus() v7backendprobe.Probes {
-	return v7backendprobe.ProbeAll(v7backendprobe.Detector{})
+	return v7backendprobe.ProbeAll(v7backendprobe.Detector{
+		// Operator status and heartbeat should stay metadata-only and must not
+		// execute local backend binaries while preparing JSON.
+		VersionCommand: func(string, time.Duration) (string, error) {
+			return "", os.ErrNotExist
+		},
+		ModelProbeCommand: func(string, string, time.Duration) error {
+			return nil
+		},
+	})
 }
 
 func buildNativeTensorAccessCapability(infMgr *inference.Manager) v7kvprobe.Capability {
@@ -848,7 +866,15 @@ func buildRuntimeInventoryStatus(runtimeInfo operatorRuntimeInfo, capability v7t
 		SupportsStreaming:       runtimeInfo.NativeInferenceReady,
 		SupportsTensorPlaneDemo: capability.TensorPlaneDemoSupported,
 		Reason:                  capability.Reason,
-	}, v7runtimeinventory.DefaultCandidateBackendDetector())
+	}, runtimeInventoryBackendDetector())
+}
+
+func runtimeInventoryBackendDetector() v7runtimeinventory.CandidateBackendDetector {
+	return v7runtimeinventory.CandidateBackendDetector{
+		VersionCommand: func(string, time.Duration) (string, error) {
+			return "", os.ErrNotExist
+		},
+	}
 }
 
 func sanitizeOperatorWorkLoopSnapshot(snapshot diagnostics.WorkLoopSnapshot) diagnostics.WorkLoopSnapshot {
@@ -1040,7 +1066,8 @@ func (s *operatorRuntime) v7HeartbeatPreview() (v7HeartbeatPreviewResponse, erro
 	runtimeMgr := s.runtimeMgr
 	s.mu.RUnlock()
 
-	payload, err := buildV7HeartbeatPayloadForNode(nodeID, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
+	backendRuntimes := s.backendRuntimesStatus(context.Background())
+	payload, err := buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodeID, caps, deviceType, declaredCountry, infMgr, runtimeMgr, backendRuntimes)
 	if err != nil {
 		return v7HeartbeatPreviewResponse{}, err
 	}
@@ -1062,6 +1089,8 @@ func buildV7HeartbeatPreviewResponse(nodeID string, payload v7heartbeat.V7Heartb
 			GGUFModelsLen:            len(payload.RuntimeInventory.GGUFModels),
 			BackendProbesPresent:     payload.SchemaVersion != "",
 			LlamaCPPProbePresent:     payload.SchemaVersion != "",
+			BackendRuntimesPresent:   payload.SchemaVersion != "",
+			LlamaCPPRuntimePresent:   payload.SchemaVersion != "",
 		},
 	}
 }

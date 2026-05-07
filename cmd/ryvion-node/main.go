@@ -207,7 +207,8 @@ func runHeartbeatPreview(args []string) {
 	if err != nil {
 		declaredCountry = strings.TrimSpace(os.Getenv("RYV_DECLARED_COUNTRY"))
 	}
-	payload, err := buildV7HeartbeatPayloadForNode(nodeID, caps, deviceType, declaredCountry, nil, nil)
+	backendRuntimes := buildStandaloneBackendRuntimes(context.Background())
+	payload, err := buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodeID, caps, deviceType, declaredCountry, nil, nil, backendRuntimes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to build V7 heartbeat preview: %v\n", err)
 		os.Exit(1)
@@ -809,7 +810,7 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 		GPUUtil:      metrics.GPUUtil,
 		PowerWatts:   metrics.PowerWatts,
 		GPUThrottled: throttled,
-		V7Heartbeat:  buildOptionalV7HeartbeatPayload(client.PublicKeyHex(), caps, deviceType, declaredCountry, infMgr, runtimeMgr),
+		V7Heartbeat:  buildOptionalV7HeartbeatPayloadWithBackendRuntimes(client.PublicKeyHex(), caps, deviceType, declaredCountry, infMgr, runtimeMgr, buildCurrentBackendRuntimes(ctx)),
 	}
 
 	heartbeat, err := client.Heartbeat(ctx, heartbeatMetrics)
@@ -839,10 +840,14 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 }
 
 func buildOptionalV7HeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) *v7heartbeat.V7HeartbeatPayload {
+	return buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{}))
+}
+
+func buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes v7llamacpp.BackendRuntimes) *v7heartbeat.V7HeartbeatPayload {
 	if !v7heartbeat.V7HeartbeatEnabledFromEnv() {
 		return nil
 	}
-	payload, err := buildV7HeartbeatPayloadForNode(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
+	payload, err := buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, backendRuntimes)
 	if err != nil {
 		slog.Warn("failed to build V7 heartbeat payload; sending legacy heartbeat", "error", err)
 		return nil
@@ -851,6 +856,10 @@ func buildOptionalV7HeartbeatPayload(nodePublicKey string, caps hw.CapSet, devic
 }
 
 func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) (*v7heartbeat.V7HeartbeatPayload, error) {
+	return buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{}))
+}
+
+func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes v7llamacpp.BackendRuntimes) (*v7heartbeat.V7HeartbeatPayload, error) {
 	gpuDetected := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
 	nativeSupported := inference.NativeRuntimeAvailable()
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
@@ -909,6 +918,7 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 		TensorAccess:              &tensorAccess,
 		RuntimeInventory:          &runtimeInventory,
 		BackendProbes:             &backendProbes,
+		BackendRuntimes:           &backendRuntimes,
 		SandboxCapabilitySummary:  sandboxSummary,
 		SandboxPolicy:             &sandboxPolicy,
 		EvidenceCapabilitySummary: evidenceSummary,
@@ -917,6 +927,18 @@ func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, device
 		return nil, err
 	}
 	return &payload, nil
+}
+
+func buildCurrentBackendRuntimes(ctx context.Context) v7llamacpp.BackendRuntimes {
+	if operatorRuntimeState != nil {
+		return operatorRuntimeState.backendRuntimesStatus(ctx)
+	}
+	return buildStandaloneBackendRuntimes(ctx)
+}
+
+func buildStandaloneBackendRuntimes(ctx context.Context) v7llamacpp.BackendRuntimes {
+	_ = ctx
+	return v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{})
 }
 
 func v7RuntimeManifestHash(runtimeMgr *runtimeManager) string {

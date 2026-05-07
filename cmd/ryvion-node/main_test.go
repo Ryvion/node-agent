@@ -250,6 +250,10 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if payload.RuntimeInventory.Provider != "noop" {
 		t.Fatalf("runtime_inventory provider = %q, want noop", payload.RuntimeInventory.Provider)
 	}
+	expectedBackendRuntimes := v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{})
+	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
+		t.Fatalf("backend_runtimes = %+v, want default local builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
+	}
 	expectedBackendProbes := buildBackendProbeStatus()
 	if !reflect.DeepEqual(payload.BackendProbes, expectedBackendProbes) {
 		t.Fatalf("backend_probes = %+v, want local status builder value %+v", payload.BackendProbes, expectedBackendProbes)
@@ -261,7 +265,7 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
 	}
-	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"backend_probes"`, `"llama_cpp"`} {
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"backend_probes"`, `"backend_runtimes"`, `"llama_cpp"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
 		}
@@ -271,6 +275,46 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("V7 heartbeat payload contains forbidden marker %q: %s", forbidden, raw)
 		}
+	}
+}
+
+func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	t.Setenv("RYV_LLAMA_CPP_PROBE_MODEL", "")
+	caps := hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	backendRuntimes := v7llamacpp.BuildBackendRuntimes(v7llamacpp.LlamaCppSidecarStatus{
+		Enabled:                true,
+		Available:              true,
+		Running:                true,
+		Healthy:                true,
+		BaseURL:                "http://127.0.0.1:45910",
+		ModelPath:              "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelFilename:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelSizeBytes:         2019377696,
+		ModelFamilyHint:        "llama",
+		QuantizationHint:       "Q4_K_M",
+		Backend:                v7llamacpp.BackendName,
+		OpenAICompatible:       true,
+		SupportsTextGeneration: true,
+		SupportsStreaming:      true,
+	})
+
+	payload := buildOptionalV7HeartbeatPayloadWithBackendRuntimes("pubkey", caps, "cpu", "ca", nil, nil, backendRuntimes)
+	if payload == nil {
+		t.Fatal("payload = nil, want V7 payload")
+	}
+	if !reflect.DeepEqual(payload.BackendRuntimes, backendRuntimes) {
+		t.Fatalf("backend_runtimes = %+v, want local builder value %+v", payload.BackendRuntimes, backendRuntimes)
+	}
+	runtime := payload.BackendRuntimes.LlamaCPP
+	if !runtime.Loaded || !runtime.Warm || runtime.ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+		t.Fatalf("backend runtime residency = %+v, want loaded warm llama.cpp model", runtime)
+	}
+	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
+		t.Fatalf("backend runtime should remain reporting-only without KV/tensor hooks: %+v", runtime)
 	}
 }
 
@@ -295,6 +339,10 @@ func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *
 	}, expectedTensorAccess, infMgr)
 	if !reflect.DeepEqual(payload.RuntimeInventory, expectedRuntimeInventory) {
 		t.Fatalf("runtime_inventory = %+v, want local status builder value %+v", payload.RuntimeInventory, expectedRuntimeInventory)
+	}
+	expectedBackendRuntimes := v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{})
+	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
+		t.Fatalf("backend_runtimes = %+v, want local status builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
 	}
 	if len(payload.RuntimeInventory.LoadedModels) != 1 {
 		t.Fatalf("runtime_inventory loaded_models = %+v, want one local native model entry", payload.RuntimeInventory.LoadedModels)

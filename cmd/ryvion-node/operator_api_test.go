@@ -256,6 +256,13 @@ func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
 	if status.LlamaCPPSidecar.Enabled || status.LlamaCPPSidecar.Running || status.LlamaCPPSidecar.Healthy {
 		t.Fatalf("llama_cpp_sidecar = %+v, want disabled stopped", status.LlamaCPPSidecar)
 	}
+	if status.BackendRuntimes.LlamaCPP.Enabled ||
+		status.BackendRuntimes.LlamaCPP.Running ||
+		status.BackendRuntimes.LlamaCPP.Healthy ||
+		status.BackendRuntimes.LlamaCPP.Loaded ||
+		status.BackendRuntimes.LlamaCPP.Warm {
+		t.Fatalf("backend_runtimes.llama_cpp = %+v, want disabled unloaded", status.BackendRuntimes.LlamaCPP)
+	}
 	if status.LlamaCPPSidecar.Backend != v7llamacpp.BackendName ||
 		!status.LlamaCPPSidecar.OpenAICompatible ||
 		!status.LlamaCPPSidecar.SupportsTextGeneration ||
@@ -265,13 +272,82 @@ func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
 		t.Fatalf("llama_cpp_sidecar capability flags = %+v", status.LlamaCPPSidecar)
 	}
 	text := strings.ToLower(string(respBody))
-	if !strings.Contains(text, `"llama_cpp_sidecar"`) {
-		t.Fatalf("status JSON missing llama_cpp_sidecar: %s", respBody)
+	if !strings.Contains(text, `"llama_cpp_sidecar"`) || !strings.Contains(text, `"backend_runtimes"`) {
+		t.Fatalf("status JSON missing llama.cpp runtime fields: %s", respBody)
 	}
 	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("status JSON contains forbidden marker %q: %s", forbidden, respBody)
 		}
+	}
+}
+
+func TestOperatorAPIStatusEndpointIncludesActiveBackendRuntime(t *testing.T) {
+	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/v1/models":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer llamaServer.Close()
+
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:         "test",
+		hubURL:          "https://api.ryvion.ai",
+		deviceType:      "gpu",
+		publicKeyHex:    "abc123",
+		llamaCppSidecar: testLlamaCppManagerForServer(t, llamaServer.URL),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
+	}
+	runtime := status.BackendRuntimes.LlamaCPP
+	if !runtime.Enabled || !runtime.Available || !runtime.Running || !runtime.Healthy || !runtime.Loaded || !runtime.Warm {
+		t.Fatalf("backend_runtimes.llama_cpp = %+v, want active loaded warm sidecar", runtime)
+	}
+	if runtime.ModelID != "tinyllama.Q4_K_M.gguf" ||
+		runtime.ModelFilename != "tinyllama.Q4_K_M.gguf" ||
+		!strings.HasSuffix(runtime.ModelPath, "tinyllama.Q4_K_M.gguf") {
+		t.Fatalf("backend runtime model metadata = %+v", runtime)
+	}
+	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
+		t.Fatalf("backend runtime should not advertise KV/tensor hooks: %+v", runtime)
+	}
+}
+
+func TestOperatorStatusAndHeartbeatPreviewUseSameBackendRuntimeBuilder(t *testing.T) {
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		caps: hw.CapSet{
+			CPUCores: 4,
+			RAMBytes: 8 << 30,
+		},
+		llamaCppSidecar: v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
+			Enabled: false,
+			Host:    v7llamacpp.DefaultHost,
+			Port:    v7llamacpp.DefaultPort,
+		}),
+	}
+
+	status := state.statusSnapshot(defaultOperatorAPIPort)
+	preview, err := state.v7HeartbeatPreview()
+	if err != nil {
+		t.Fatalf("v7HeartbeatPreview() error = %v", err)
+	}
+	if status.BackendRuntimes != preview.HeartbeatPreview.V7.BackendRuntimes {
+		t.Fatalf("operator backend_runtimes = %+v, heartbeat backend_runtimes = %+v", status.BackendRuntimes, preview.HeartbeatPreview.V7.BackendRuntimes)
 	}
 }
 
@@ -440,8 +516,15 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	if !preview.FieldPresence.BackendProbesPresent || !preview.FieldPresence.LlamaCPPProbePresent {
 		t.Fatalf("backend probe presence = %+v; body=%s", preview.FieldPresence, respBody)
 	}
+	if !preview.FieldPresence.BackendRuntimesPresent || !preview.FieldPresence.LlamaCPPRuntimePresent {
+		t.Fatalf("backend runtime presence = %+v; body=%s", preview.FieldPresence, respBody)
+	}
 	if !preview.HeartbeatPreview.V7.BackendProbes.LlamaCPP.Available {
 		t.Fatalf("llama_cpp probe = %+v, want available from local fixture", preview.HeartbeatPreview.V7.BackendProbes.LlamaCPP)
+	}
+	if preview.HeartbeatPreview.V7.BackendRuntimes.LlamaCPP.SupportsKVAccess ||
+		preview.HeartbeatPreview.V7.BackendRuntimes.LlamaCPP.SupportsTensorHooks {
+		t.Fatalf("llama_cpp runtime should not advertise KV/tensor hooks: %+v", preview.HeartbeatPreview.V7.BackendRuntimes.LlamaCPP)
 	}
 	if len(preview.HeartbeatPreview.V7.RuntimeInventory.BackendCandidates) == 0 {
 		t.Fatalf("heartbeat_preview.v7.runtime_inventory.backend_candidates empty: %s", respBody)

@@ -21,6 +21,7 @@ const (
 	defaultHealthTimeout = 750 * time.Millisecond
 	maxStatusReasonLen   = 256
 	maxLogBufferBytes    = 64 * 1024
+	maxRuntimePathLen    = 512
 )
 
 var ggufQuantizationPattern = regexp.MustCompile(`(?i)(?:^|[._\-\s])((?:IQ|Q)[0-9](?:_[A-Z0-9]+){0,3}|BF16|F16|F32)(?:[._\-\s]|$)`)
@@ -334,6 +335,73 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 	}
 }
 
+func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
+	return NormalizeBackendRuntimes(BackendRuntimes{
+		LlamaCPP: BackendRuntimeStatus{
+			Enabled:                status.Enabled,
+			Available:              status.Available,
+			Running:                status.Running,
+			Healthy:                status.Healthy,
+			Backend:                firstNonEmptyRuntimeText(status.Backend, BackendName),
+			BaseURL:                status.BaseURL,
+			ModelID:                status.ModelFilename,
+			ModelPath:              status.ModelPath,
+			ModelFilename:          status.ModelFilename,
+			ModelSizeBytes:         status.ModelSizeBytes,
+			ModelFamilyHint:        status.ModelFamilyHint,
+			QuantizationHint:       status.QuantizationHint,
+			OpenAICompatible:       status.OpenAICompatible,
+			SupportsTextGeneration: status.SupportsTextGeneration,
+			SupportsStreaming:      status.SupportsStreaming,
+			SupportsKVAccess:       status.SupportsKVAccess,
+			SupportsTensorHooks:    status.SupportsTensorHooks,
+			LastHealthAtUnixMs:     unixMilliOrZero(status.LastHealthAt),
+			LastError:              status.LastError,
+		},
+	})
+}
+
+func NormalizeBackendRuntimes(runtimes BackendRuntimes) BackendRuntimes {
+	llama := runtimes.LlamaCPP
+	llama.Backend = cleanRuntimeCompactText(firstNonEmptyRuntimeText(llama.Backend, BackendName), 64)
+	if llama.Backend == "" {
+		llama.Backend = BackendName
+	}
+	llama.BaseURL = cleanRuntimeBaseURL(llama.BaseURL)
+	llama.ModelPath = cleanRuntimePath(llama.ModelPath)
+	llama.ModelFilename = cleanRuntimePath(llama.ModelFilename)
+	llama.ModelID = cleanRuntimePath(firstNonEmptyRuntimeText(llama.ModelID, llama.ModelFilename))
+	llama.ModelFamilyHint = cleanRuntimeCompactText(llama.ModelFamilyHint, 64)
+	llama.QuantizationHint = cleanRuntimeCompactText(llama.QuantizationHint, 64)
+	llama.LastError = cleanStatusText(llama.LastError, maxStatusReasonLen)
+	if llama.ModelSizeBytes < 0 {
+		llama.ModelSizeBytes = 0
+	}
+	if !llama.Enabled {
+		llama.Available = false
+		llama.Running = false
+		llama.Healthy = false
+	}
+	if !llama.Available {
+		llama.Healthy = false
+	}
+	if !llama.Running {
+		llama.Healthy = false
+	}
+	if !llama.Healthy {
+		llama.LastHealthAtUnixMs = 0
+	}
+	llama.SupportsKVAccess = false
+	llama.SupportsTensorHooks = false
+	loaded := llama.Enabled && llama.Running && llama.Healthy && llama.ModelPath != "" && llama.ModelFilename != ""
+	llama.Loaded = loaded
+	llama.Warm = loaded
+	if !loaded {
+		llama.Warm = false
+	}
+	return BackendRuntimes{LlamaCPP: llama}
+}
+
 func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	cfg = normalizeConfig(cfg)
 	args := []string{
@@ -459,6 +527,56 @@ func cleanStatusText(value string, maxRunes int) string {
 		}
 	}
 	return value
+}
+
+func cleanRuntimePath(value string) string {
+	value = cleanConfigText(value, maxRuntimePathLen)
+	if sensitiveStatusText(value) {
+		return ""
+	}
+	return value
+}
+
+func cleanRuntimeBaseURL(value string) string {
+	value = cleanConfigText(value, maxRuntimePathLen)
+	if value == "" || sensitiveStatusText(value) || !isLocalBaseURL(value) {
+		return ""
+	}
+	return value
+}
+
+func cleanRuntimeCompactText(value string, maxRunes int) string {
+	value = cleanConfigText(value, maxRunes)
+	if sensitiveStatusText(value) {
+		return ""
+	}
+	return value
+}
+
+func firstNonEmptyRuntimeText(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func unixMilliOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
+}
+
+func sensitiveStatusText(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"raw_prompt", "prompt_text", "generated_text", "output_text", "model_output", "tensor_bytes", "raw_tensor", "auth_token", "bind_token", "secret"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type osManagedProcess struct {

@@ -264,6 +264,125 @@ func TestStatusJSONExcludesPromptOutputAuthAndTensorData(t *testing.T) {
 	}
 }
 
+func TestBuildBackendRuntimesMarksHealthySidecarLoadedWarm(t *testing.T) {
+	t.Parallel()
+
+	lastHealth := time.Unix(123, 456000000)
+	runtimes := BuildBackendRuntimes(LlamaCppSidecarStatus{
+		Enabled:                true,
+		Available:              true,
+		Running:                true,
+		Healthy:                true,
+		BaseURL:                "http://127.0.0.1:45910",
+		ModelPath:              "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelFilename:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelSizeBytes:         2019377696,
+		ModelFamilyHint:        "llama",
+		QuantizationHint:       "Q4_K_M",
+		LastHealthAt:           lastHealth,
+		Backend:                BackendName,
+		OpenAICompatible:       true,
+		SupportsTextGeneration: true,
+		SupportsStreaming:      true,
+	})
+
+	runtime := runtimes.LlamaCPP
+	if !runtime.Enabled || !runtime.Available || !runtime.Running || !runtime.Healthy || !runtime.Loaded || !runtime.Warm {
+		t.Fatalf("backend runtime = %+v, want active loaded warm status", runtime)
+	}
+	if runtime.ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" ||
+		runtime.ModelPath != "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf" ||
+		runtime.ModelSizeBytes != 2019377696 ||
+		runtime.ModelFamilyHint != "llama" ||
+		runtime.QuantizationHint != "Q4_K_M" {
+		t.Fatalf("model residency metadata = %+v", runtime)
+	}
+	if runtime.LastHealthAtUnixMs != lastHealth.UnixMilli() {
+		t.Fatalf("last_health_at_unix_ms = %d, want %d", runtime.LastHealthAtUnixMs, lastHealth.UnixMilli())
+	}
+	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
+		t.Fatalf("backend runtime should not advertise KV/tensor hooks: %+v", runtime)
+	}
+}
+
+func TestBuildBackendRuntimesDisabledSidecarNotLoadedWarm(t *testing.T) {
+	t.Parallel()
+
+	runtimes := BuildBackendRuntimes(LlamaCppSidecarStatus{
+		Enabled:                false,
+		Available:              true,
+		Running:                true,
+		Healthy:                true,
+		BaseURL:                "http://127.0.0.1:45910",
+		ModelPath:              "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelFilename:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		Backend:                BackendName,
+		OpenAICompatible:       true,
+		SupportsTextGeneration: true,
+		SupportsStreaming:      true,
+	})
+
+	runtime := runtimes.LlamaCPP
+	if runtime.Enabled || runtime.Available || runtime.Running || runtime.Healthy || runtime.Loaded || runtime.Warm {
+		t.Fatalf("disabled backend runtime = %+v, want inactive unloaded state", runtime)
+	}
+	if runtime.ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+		t.Fatalf("model_id = %q, want configured filename metadata preserved", runtime.ModelID)
+	}
+}
+
+func TestNormalizeBackendRuntimesSanitizesUnsafeFields(t *testing.T) {
+	t.Parallel()
+
+	longPath := "/tmp/" + strings.Repeat("p", 600)
+	runtimes := NormalizeBackendRuntimes(BackendRuntimes{
+		LlamaCPP: BackendRuntimeStatus{
+			Enabled:                true,
+			Available:              true,
+			Running:                true,
+			Healthy:                true,
+			Backend:                BackendName,
+			BaseURL:                "http://127.0.0.1:45910",
+			ModelPath:              longPath + "\n",
+			ModelFilename:          "model.Q4_K_M.gguf",
+			ModelSizeBytes:         -1,
+			Loaded:                 true,
+			Warm:                   true,
+			OpenAICompatible:       true,
+			SupportsTextGeneration: true,
+			SupportsStreaming:      true,
+			SupportsKVAccess:       true,
+			SupportsTensorHooks:    true,
+			LastHealthAtUnixMs:     99,
+			LastError:              "raw_prompt output_text auth_token tensor_bytes",
+		},
+	})
+
+	runtime := runtimes.LlamaCPP
+	if len(runtime.ModelPath) != maxRuntimePathLen {
+		t.Fatalf("model_path length = %d, want %d", len(runtime.ModelPath), maxRuntimePathLen)
+	}
+	if runtime.ModelSizeBytes != 0 {
+		t.Fatalf("model_size_bytes = %d, want 0 for negative input", runtime.ModelSizeBytes)
+	}
+	if runtime.LastError != "llama.cpp sidecar status redacted" {
+		t.Fatalf("last_error = %q, want redacted", runtime.LastError)
+	}
+	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
+		t.Fatalf("normalized runtime should not advertise KV/tensor hooks: %+v", runtime)
+	}
+	raw, err := json.Marshal(runtimes)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	body := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"server_path", "pid", "stdout", "stderr", "raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "auth_token", "bind_token"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("backend runtime JSON contains forbidden marker %q: %s", forbidden, raw)
+		}
+	}
+}
+
 func sidecarFixtureFiles(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()

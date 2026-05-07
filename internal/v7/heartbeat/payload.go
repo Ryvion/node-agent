@@ -12,6 +12,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
+	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
@@ -33,6 +34,7 @@ type V7HeartbeatPayload struct {
 	TensorAccess              tensoraccess.TensorAccessCapability   `json:"tensor_access"`
 	RuntimeInventory          runtimeinventory.Inventory            `json:"runtime_inventory"`
 	BackendProbes             backendprobe.Probes                   `json:"backend_probes"`
+	BackendRuntimes           llamacpp.BackendRuntimes              `json:"backend_runtimes"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
@@ -62,6 +64,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	TensorAccess           *tensoraccess.TensorAccessCapability
 	RuntimeInventory       *runtimeinventory.Inventory
 	BackendProbes          *backendprobe.Probes
+	BackendRuntimes        *llamacpp.BackendRuntimes
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -151,6 +154,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 	tensorAccess := cloneTensorAccessCapability(input.TensorAccess)
 	runtimeInventory := cloneRuntimeInventory(input.RuntimeInventory)
 	backendProbes := cloneBackendProbes(input.BackendProbes)
+	backendRuntimes := cloneBackendRuntimes(input.BackendRuntimes)
 
 	casSummary := cloneCASSummary(input.CASSummary)
 	if casSummary == nil && input.CASCapabilitySummary.Enabled {
@@ -200,6 +204,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		TensorAccess:         tensorAccess,
 		RuntimeInventory:     runtimeInventory,
 		BackendProbes:        backendProbes,
+		BackendRuntimes:      backendRuntimes,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,
@@ -311,6 +316,13 @@ func cloneBackendProbes(probes *backendprobe.Probes) backendprobe.Probes {
 		return backendprobe.NormalizeProbes(backendprobe.Probes{})
 	}
 	return backendprobe.NormalizeProbes(*probes)
+}
+
+func cloneBackendRuntimes(runtimes *llamacpp.BackendRuntimes) llamacpp.BackendRuntimes {
+	if runtimes == nil {
+		return llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{})
+	}
+	return llamacpp.NormalizeBackendRuntimes(*runtimes)
 }
 
 func cloneCASSummary(summary *CASSummary) *CASSummary {

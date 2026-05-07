@@ -5,11 +5,13 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
+	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	"github.com/Ryvion/node-agent/internal/v7/modellease"
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
@@ -94,6 +96,14 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	if payload.BackendProbes.LlamaCPP.SupportsKVAccess || payload.BackendProbes.LlamaCPP.SupportsTensorHooks {
 		t.Fatalf("backend_probes should not claim KV/tensor hooks: %+v", payload.BackendProbes.LlamaCPP)
 	}
+	if !payload.BackendRuntimes.LlamaCPP.Enabled ||
+		!payload.BackendRuntimes.LlamaCPP.Running ||
+		!payload.BackendRuntimes.LlamaCPP.Healthy ||
+		!payload.BackendRuntimes.LlamaCPP.Loaded ||
+		!payload.BackendRuntimes.LlamaCPP.Warm ||
+		payload.BackendRuntimes.LlamaCPP.ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+		t.Fatalf("backend_runtimes.llama_cpp = %+v, want active loaded sidecar", payload.BackendRuntimes.LlamaCPP)
+	}
 	if payload.CASSummary == nil || !payload.CASSummary.Enabled {
 		t.Fatalf("CAS summary = %+v, want enabled", payload.CASSummary)
 	}
@@ -151,8 +161,10 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 		!strings.Contains(string(raw), `"gguf_models"`) {
 		t.Fatalf("payload JSON missing runtime inventory details: %s", string(raw))
 	}
-	if !strings.Contains(string(raw), `"backend_probes"`) || !strings.Contains(string(raw), `"llama_cpp"`) {
-		t.Fatalf("payload JSON missing backend probe details: %s", string(raw))
+	if !strings.Contains(string(raw), `"backend_probes"`) ||
+		!strings.Contains(string(raw), `"backend_runtimes"`) ||
+		!strings.Contains(string(raw), `"llama_cpp"`) {
+		t.Fatalf("payload JSON missing backend details: %s", string(raw))
 	}
 }
 
@@ -273,6 +285,75 @@ func TestBuildV7HeartbeatPayloadDefaultsSafeBackendProbes(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"backend_probes"`) || !strings.Contains(string(raw), `"llama_cpp"`) {
 		t.Fatalf("payload JSON missing backend_probes: %s", raw)
+	}
+}
+
+func TestBuildV7HeartbeatPayloadDefaultsSafeBackendRuntimes(t *testing.T) {
+	input := validInput()
+	input.BackendRuntimes = nil
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	runtime := payload.BackendRuntimes.LlamaCPP
+	if runtime.Enabled || runtime.Available || runtime.Running || runtime.Healthy || runtime.Loaded || runtime.Warm {
+		t.Fatalf("default backend_runtimes.llama_cpp should be safe false values: %+v", runtime)
+	}
+	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
+		t.Fatalf("default backend_runtimes should not claim KV/tensor hooks: %+v", runtime)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"backend_runtimes"`) || !strings.Contains(string(raw), `"llama_cpp"`) {
+		t.Fatalf("payload JSON missing backend_runtimes: %s", raw)
+	}
+}
+
+func TestBuildV7HeartbeatPayloadNormalizesBackendRuntimes(t *testing.T) {
+	input := validInput()
+	longPath := "/tmp/" + strings.Repeat("p", 600)
+	input.BackendRuntimes = &llamacpp.BackendRuntimes{
+		LlamaCPP: llamacpp.BackendRuntimeStatus{
+			Enabled:                true,
+			Available:              true,
+			Running:                true,
+			Healthy:                true,
+			Backend:                llamacpp.BackendName,
+			BaseURL:                "http://127.0.0.1:45910",
+			ModelID:                "model.Q4_K_M.gguf",
+			ModelPath:              longPath + "\n",
+			ModelFilename:          "model.Q4_K_M.gguf",
+			Loaded:                 true,
+			Warm:                   true,
+			OpenAICompatible:       true,
+			SupportsTextGeneration: true,
+			SupportsStreaming:      true,
+			SupportsKVAccess:       true,
+			SupportsTensorHooks:    true,
+			LastHealthAtUnixMs:     123,
+			LastError:              strings.Repeat("r", 300) + "\n",
+		},
+	}
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	runtime := payload.BackendRuntimes.LlamaCPP
+	if len(runtime.ModelPath) != 512 {
+		t.Fatalf("model_path length = %d, want 512", len(runtime.ModelPath))
+	}
+	if len(runtime.LastError) != 256 {
+		t.Fatalf("last_error length = %d, want 256", len(runtime.LastError))
+	}
+	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
+		t.Fatalf("backend_runtimes should not advertise KV/tensor hooks: %+v", runtime)
+	}
+	if strings.ContainsAny(runtime.ModelPath+runtime.LastError, "\t\n\r") {
+		t.Fatalf("backend runtime text still contains control whitespace: %+v", runtime)
 	}
 }
 
@@ -463,6 +544,7 @@ func validInput() BuildV7HeartbeatPayloadInput {
 		},
 		RuntimeInventory: ptr(validRuntimeInventory()),
 		BackendProbes:    ptr(validBackendProbes()),
+		BackendRuntimes:  ptr(validBackendRuntimes()),
 		CASCapabilitySummary: capability.CASCapabilitySummary{
 			Enabled:  true,
 			MaxBytes: 100 * 1024 * 1024,
@@ -508,6 +590,9 @@ func validRuntimeInventory() runtimeinventory.Inventory {
 		ReadDirNames: func(dir string, limit int) ([]string, error) {
 			return []string{"model.Q4_K_M.gguf"}, nil
 		},
+		VersionCommand: func(path string, timeout time.Duration) (string, error) {
+			return "llama.cpp build 456", nil
+		},
 		ConfiguredModelDirs: []string{"/tmp/ryvion-models"},
 		UserHomeDir: func() (string, error) {
 			return "", errors.New("not configured")
@@ -534,6 +619,27 @@ func validBackendProbes() backendprobe.Probes {
 			CandidateForRealTensorAccess:   true,
 			Reason:                         "llama.cpp detected; real KV/tensor hooks require adapter implementation",
 		},
+	})
+}
+
+func validBackendRuntimes() llamacpp.BackendRuntimes {
+	return llamacpp.BuildBackendRuntimes(llamacpp.LlamaCppSidecarStatus{
+		Enabled:                true,
+		Available:              true,
+		Running:                true,
+		Healthy:                true,
+		BaseURL:                "http://127.0.0.1:45910",
+		ModelPath:              "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelFilename:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelSizeBytes:         2019377696,
+		ModelFamilyHint:        "llama",
+		QuantizationHint:       "Q4_K_M",
+		Backend:                llamacpp.BackendName,
+		OpenAICompatible:       true,
+		SupportsTextGeneration: true,
+		SupportsStreaming:      true,
+		SupportsKVAccess:       false,
+		SupportsTensorHooks:    false,
 	})
 }
 
