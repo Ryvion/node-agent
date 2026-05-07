@@ -22,6 +22,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
+	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7tensorplane "github.com/Ryvion/node-agent/internal/v7/tensorplane"
@@ -1586,6 +1587,164 @@ func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
 	}
 }
 
+func TestProcessOptionalV7LlamaCppBackendBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "")
+	oldStatus := v7BackendBenchmarkStatus
+	oldFactory := newV7LlamaCppBackendBenchmarkRunner
+	oldState := operatorRuntimeState
+	status := v7llamacpp.NewBackendBenchmarkLocalStatus()
+	fakeRunner := &fakeLlamaCppBackendBenchmarkRunner{snapshot: testLlamaCppBackendBenchmarkSnapshot(v7llamacpp.BenchmarkProofStatusMeasured)}
+	v7BackendBenchmarkStatus = status
+	operatorRuntimeState = nil
+	newV7LlamaCppBackendBenchmarkRunner = func() v7llamacpp.BackendBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7BackendBenchmarkStatus = oldStatus
+		newV7LlamaCppBackendBenchmarkRunner = oldFactory
+		operatorRuntimeState = oldState
+	})
+
+	handled, result, err := processOptionalV7LlamaCppBackendBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-llamacpp-backend-local",
+		Kind:     "benchmark",
+		SpecJSON: testLlamaCppBackendBenchmarkSpecJSON(t),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7LlamaCppBackendBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false when flag is off")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if fakeRunner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (v7llamacpp.BackendBenchmarkLocalStatusCounters{}) {
+		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "1")
+	oldStatus := v7BackendBenchmarkStatus
+	oldFactory := newV7LlamaCppBackendBenchmarkRunner
+	oldState := operatorRuntimeState
+	oldDiagnostics := workLoopDiagnostics
+	status := v7llamacpp.NewBackendBenchmarkLocalStatus()
+	fakeRunner := &fakeLlamaCppBackendBenchmarkRunner{snapshot: testLlamaCppBackendBenchmarkSnapshot(v7llamacpp.BenchmarkProofStatusMeasured)}
+	v7BackendBenchmarkStatus = status
+	operatorRuntimeState = nil
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7LlamaCppBackendBenchmarkRunner = func() v7llamacpp.BackendBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7BackendBenchmarkStatus = oldStatus
+		newV7LlamaCppBackendBenchmarkRunner = oldFactory
+		operatorRuntimeState = oldState
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-llamacpp-backend-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[v7llamacpp.BackendBenchmarkTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7llamacpp.BackendBenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != v7llamacpp.BenchmarkProofStatusMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, key := range []string{"prompt_hash", "output_hash"} {
+			value, ok := metadata[key].(string)
+			if !ok || !strings.HasPrefix(value, "sha256:") {
+				t.Errorf("%s = %#v, want sha256 hash", key, metadata[key])
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		if metadata["p50_ttft_ms"] != float64(100) || metadata["p95_total_time_ms"] != float64(1100) {
+			t.Errorf("timing metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"secret llama output", "distributed computing", "output_text", "generated_text", "raw_output", "token_logprobs", "raw_tensor"} {
+			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7LlamaCppBackendBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-llamacpp-backend-local",
+		Kind:     "benchmark",
+		SpecJSON: testLlamaCppBackendBenchmarkSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7LlamaCppBackendBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful backend benchmark receipt", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.LastJobID != "job-llamacpp-backend-local" {
+		t.Fatalf("last_job_id = %q", snapshot.LastJobID)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
 func TestProcessOptionalV7ModelBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
 	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
 	oldStatus := v7ModelBenchmarkStatus
@@ -1984,6 +2143,78 @@ func TestProcessOptionalV7ModelBenchmarkNormalJobDoesNotRecordStatus(t *testing.
 	}
 	if snapshot := status.Snapshot(); snapshot.Counters != (v7modelbench.LocalStatusCounters{}) {
 		t.Fatalf("status counters changed for normal job: %+v", snapshot.Counters)
+	}
+}
+
+type fakeLlamaCppBackendBenchmarkRunner struct {
+	snapshot v7llamacpp.BenchmarkStatusSnapshot
+	configs  []v7llamacpp.BenchmarkConfig
+	calls    int
+}
+
+func (f *fakeLlamaCppBackendBenchmarkRunner) Run(_ context.Context, config v7llamacpp.BenchmarkConfig) v7llamacpp.BenchmarkStatusSnapshot {
+	f.calls++
+	f.configs = append(f.configs, config)
+	return f.snapshot
+}
+
+func testLlamaCppBackendBenchmarkSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := v7llamacpp.BackendBenchmarkSpec{
+		Task:            v7llamacpp.BackendBenchmarkTask,
+		RequestID:       "request-llamacpp-backend-local",
+		JobID:           "job-llamacpp-backend-local",
+		Backend:         v7llamacpp.BackendName,
+		ModelID:         "tinyllama.Q4_K_M.gguf",
+		MaxTokens:       16,
+		WarmupRuns:      1,
+		MeasuredRuns:    3,
+		TimeoutMs:       30_000,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testLlamaCppBackendBenchmarkSnapshot(proofStatus string) v7llamacpp.BenchmarkStatusSnapshot {
+	available := proofStatus == v7llamacpp.BenchmarkProofStatusMeasured
+	outputHash := testSHA256ObjectID("secret llama output")
+	outputBytes := int64(len("secret llama output"))
+	status := v7llamacpp.BenchmarkStatusCompleted
+	if !available {
+		outputHash = ""
+		outputBytes = 0
+		status = v7llamacpp.BenchmarkStatusFailed
+	}
+	return v7llamacpp.BenchmarkStatusSnapshot{
+		LastRunAt: time.Unix(1_800_000_001, 0),
+		Status:    status,
+		Metrics: v7llamacpp.BenchmarkMetrics{
+			Available:      available,
+			SidecarHealthy: available,
+			ModelLoaded:    available,
+			ModelID:        "tinyllama.Q4_K_M.gguf",
+			PromptHash:     v7llamacpp.HashBenchmarkPrompt(),
+			OutputHash:     outputHash,
+			OutputBytes:    outputBytes,
+			WarmupRuns:     1,
+			MeasuredRuns:   3,
+			P50TTFTMs:      100,
+			P95TTFTMs:      200,
+			P50TotalTimeMs: 800,
+			P95TotalTimeMs: 1100,
+			P50DecodeTPS:   20.5,
+			P95DecodeTPS:   21.5,
+			P50EndToEndTPS: 18.25,
+			P95EndToEndTPS: 19.75,
+			Backend:        v7llamacpp.BackendName,
+			RuntimeKind:    v7llamacpp.BackendName,
+			ProofStatus:    proofStatus,
+			Streaming:      true,
+		},
 	}
 }
 

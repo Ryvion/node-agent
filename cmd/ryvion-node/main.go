@@ -79,6 +79,7 @@ var (
 	workLoopDiagnostics          = diagnostics.NewWorkLoopDiagnostics()
 	v7ModelBenchmarkStatus       = v7modelbench.NewLocalStatus()
 	v7TensorPlaneBenchmarkStatus = v7tensorplane.NewLocalStatus()
+	v7BackendBenchmarkStatus     = v7llamacpp.NewBackendBenchmarkLocalStatus()
 	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
 		return v7modelbench.NativeInferenceModelBenchmarkRunner{
 			Native:           infMgr,
@@ -87,6 +88,16 @@ var (
 			Arch:             runtime.GOARCH,
 			GPUDetected:      gpuDetected,
 			RuntimeAvailable: inference.NativeRuntimeAvailable,
+		}
+	}
+	newV7LlamaCppBackendBenchmarkRunner = func() v7llamacpp.BackendBenchmarkRunner {
+		sidecar := v7llamacpp.BenchmarkSidecar(v7llamacpp.NewManagerFromEnv())
+		if operatorRuntimeState != nil {
+			sidecar = operatorRuntimeState.llamaCppManager()
+		}
+		return v7llamacpp.BenchmarkRunner{
+			Sidecar: sidecar,
+			Client:  v7llamacpp.OpenAIClient{},
 		}
 	}
 )
@@ -1116,6 +1127,18 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	if handled, result, runErr := processOptionalV7LlamaCppBackendBenchmark(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("V7 llama.cpp backend benchmark execution failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("V7 llama.cpp backend benchmark completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	if handled, result, runErr := processOptionalV7ModelBenchmark(runCtx, client, work, infMgr, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
 			slog.Warn("V7 model benchmark execution failed", "job_id", work.JobID, "error", runErr)
@@ -1560,6 +1583,161 @@ func v7TensorPlaneBenchmarkWorkLoopEventContextFromReceipt(specJSON string, rece
 		}
 		if status, ok := taskMetadata["correctness_status"].(string); ok && strings.TrimSpace(status) != "" {
 			context["correctness_status"] = strings.TrimSpace(status)
+		}
+	}
+	return context
+}
+
+func currentV7BackendBenchmarkStatus() *v7llamacpp.BackendBenchmarkLocalStatus {
+	if operatorRuntimeState != nil {
+		return operatorRuntimeState.backendBenchmarkStatus()
+	}
+	return v7BackendBenchmarkStatus
+}
+
+func processOptionalV7LlamaCppBackendBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	identity, isBenchmark := v7llamacpp.BackendBenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
+	benchmarkEnabled := isBenchmark && v7llamacpp.BackendBenchmarkEnabledFromEnv(os.Getenv)
+	status := currentV7BackendBenchmarkStatus()
+	if benchmarkEnabled && status != nil {
+		status.RecordSeen(statusJobID)
+	}
+
+	runner := newV7LlamaCppBackendBenchmarkRunner()
+	executionStarted := time.Now()
+	if benchmarkEnabled {
+		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
+	}
+	receipt, handled, err := v7llamacpp.ExecuteBackendBenchmarkAssignment(ctx, work.SpecJSON, v7llamacpp.ExecuteBackendBenchmarkOptions{
+		Getenv: os.Getenv,
+		Runner: runner,
+	})
+	if !handled {
+		return false, nil, nil
+	}
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
+	if err != nil && status != nil {
+		status.RecordError(statusJobID, err)
+	}
+
+	receiptBuildStarted := time.Now()
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
+	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
+	extra := map[string]any{
+		"executor":      v7llamacpp.BackendBenchmarkTask,
+		"executor_kind": v7llamacpp.BackendBenchmarkTask,
+		"task":          v7llamacpp.BackendBenchmarkTask,
+	}
+	if strings.TrimSpace(receipt.ResultHashHex) == "" {
+		receipt = v7llamacpp.BuildBackendBenchmarkRejectionReceipt(work.JobID, err)
+	}
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		extra["exit_code"] = 1
+		extra["error"] = "v7 llama.cpp backend benchmark failed"
+	} else {
+		extra["exit_code"] = 0
+	}
+	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
+	hubReceipt := hub.Receipt{
+		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
+		ResultHashHex: receipt.ResultHashHex,
+		MeteringUnits: receipt.MeteringUnits,
+		Metadata:      metadata,
+	}
+	snapshot := &runnerResultSnapshot{
+		ResultHashHex: hubReceipt.ResultHashHex,
+		MeteringUnits: hubReceipt.MeteringUnits,
+		ExitCode:      exitCode,
+		Metadata:      metadata,
+	}
+	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
+	receiptContext := v7LlamaCppBackendBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt)
+	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_start", hubReceipt.JobID, work.Kind, receiptContext)
+	if client == nil {
+		submitErr := fmt.Errorf("hub client unavailable")
+		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+		if status != nil {
+			if err == nil {
+				status.RecordExecuted(hubReceipt.JobID)
+			}
+			status.RecordReceiptFailed(hubReceipt.JobID, submitErr)
+		}
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	submitStarted := time.Now()
+	workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+	submitErr := client.SubmitReceipt(ctx, hubReceipt)
+	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), submitErr)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+	if submitErr != nil {
+		if status != nil {
+			if err == nil {
+				status.RecordExecuted(hubReceipt.JobID)
+			}
+			status.RecordReceiptFailed(hubReceipt.JobID, submitErr)
+		}
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	if status != nil {
+		if err == nil {
+			status.RecordExecuted(hubReceipt.JobID)
+		}
+		status.RecordReceiptSubmitted(hubReceipt.JobID)
+	}
+	return true, snapshot, err
+}
+
+func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {
+	context := map[string]string{
+		"spec_task": v7llamacpp.BackendBenchmarkTask,
+	}
+	var spec struct {
+		Task         string `json:"task"`
+		Backend      string `json:"backend"`
+		ModelID      string `json:"model_id"`
+		MeasuredRuns int    `json:"measured_runs"`
+	}
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return context
+	}
+	if strings.TrimSpace(spec.Task) == v7llamacpp.BackendBenchmarkTask {
+		context["spec_task"] = v7llamacpp.BackendBenchmarkTask
+	}
+	if backend := strings.TrimSpace(spec.Backend); backend != "" {
+		context["backend"] = backend
+	}
+	if modelID := strings.TrimSpace(spec.ModelID); modelID != "" {
+		context["model_id"] = modelID
+	}
+	if spec.MeasuredRuns > 0 {
+		context["measured_runs"] = strconv.Itoa(spec.MeasuredRuns)
+	}
+	return context
+}
+
+func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v7llamacpp.BackendBenchmarkReceipt) map[string]string {
+	context := v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(specJSON)
+	if taskMetadata, ok := receipt.Metadata[v7llamacpp.BackendBenchmarkTask].(map[string]any); ok {
+		putWorkLoopAnyIntContext(context, "warmup_runs", taskMetadata["warmup_runs"])
+		putWorkLoopAnyIntContext(context, "measured_runs", taskMetadata["measured_runs"])
+		putWorkLoopAnyIntContext(context, "p50_ttft_ms", taskMetadata["p50_ttft_ms"])
+		if status, ok := taskMetadata["proof_status"].(string); ok && strings.TrimSpace(status) != "" {
+			context["proof_status"] = strings.TrimSpace(status)
 		}
 	}
 	return context
