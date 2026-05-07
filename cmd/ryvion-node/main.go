@@ -543,6 +543,7 @@ func runNode(ctx context.Context) {
 
 	operatorRuntimeState = newOperatorRuntime(version, hubURL, deviceType, declaredCountry, publicAIOptIn, caps, client)
 	operatorRuntimeState.setRuntimeManager(runtimeMgr)
+	defer operatorRuntimeState.stopLlamaCppSidecar(context.Background())
 	startOperatorAPIServer(ctx, operatorRuntimeState, operatorAPIPort(flagUIPort))
 
 	// Retry registration with backoff — on Windows the service starts before

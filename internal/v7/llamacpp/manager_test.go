@@ -1,0 +1,347 @@
+package llamacpp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestConfigFromEnv(t *testing.T) {
+	t.Parallel()
+
+	serverPath := filepath.Join(t.TempDir(), "llama-server")
+	modelPath := filepath.Join(t.TempDir(), "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	env := map[string]string{
+		EnvEnabled:   "1",
+		EnvServer:    serverPath,
+		EnvModel:     modelPath,
+		EnvHost:      "0.0.0.0",
+		EnvPort:      "45911",
+		EnvCtxSize:   "8192",
+		EnvThreads:   "6",
+		EnvGPULayers: "12",
+		EnvExtraArgs: "--host 0.0.0.0 --parallel 4 --no-webui --model secret.gguf --cache-type-k q8_0 --batch-size nope",
+	}
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			return env[name]
+		},
+	})
+
+	if !cfg.Enabled {
+		t.Fatalf("enabled = false, want true")
+	}
+	if cfg.ServerPath != serverPath || cfg.ModelPath != modelPath {
+		t.Fatalf("paths = %q/%q, want explicit env paths", cfg.ServerPath, cfg.ModelPath)
+	}
+	if cfg.Host != DefaultHost {
+		t.Fatalf("host = %q, want safe default loopback", cfg.Host)
+	}
+	if cfg.Port != 45911 || cfg.ContextSize != 8192 || cfg.Threads != 6 || cfg.GPULayers != 12 {
+		t.Fatalf("numeric config = %+v", cfg)
+	}
+	gotArgs := strings.Join(cfg.ExtraArgs, " ")
+	if gotArgs != "--parallel 4 --no-webui --cache-type-k q8_0" {
+		t.Fatalf("extra args = %q, want sanitized allowlist", gotArgs)
+	}
+}
+
+func TestConfigDiscoversKnownDirServerAndModel(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	modelDir := filepath.Join(root, "models")
+	serverPath := filepath.Join(binDir, "llama-server")
+	modelPath := filepath.Join(modelDir, "phi-4-Q4_K_M.gguf")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir models: %v", err)
+	}
+	if err := os.WriteFile(serverPath, []byte("server"), 0o755); err != nil {
+		t.Fatalf("write server: %v", err)
+	}
+	if err := os.WriteFile(modelPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			return ""
+		},
+		LookPath: func(name string) (string, error) {
+			return "", errors.New("not on path")
+		},
+		ConfiguredBinaryDirs: []string{binDir},
+		ConfiguredModelDirs:  []string{modelDir},
+	})
+
+	if cfg.ServerPath != serverPath || cfg.ModelPath != modelPath {
+		t.Fatalf("discovered paths = %q/%q, want %q/%q", cfg.ServerPath, cfg.ModelPath, serverPath, modelPath)
+	}
+}
+
+func TestDisabledModeDoesNotStartSidecar(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	starts := 0
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     false,
+		ServerPath:  serverPath,
+		ModelPath:   modelPath,
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ContextSize: DefaultContextSize,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		starts++
+		return newFakeProcess(123), nil
+	}))
+
+	status := manager.Start(context.Background())
+	if starts != 0 {
+		t.Fatalf("process starts = %d, want 0 when disabled", starts)
+	}
+	if status.Enabled || status.Running || status.Healthy {
+		t.Fatalf("disabled status = %+v, want stopped disabled", status)
+	}
+}
+
+func TestMissingBinaryReturnsUnavailableStatus(t *testing.T) {
+	t.Parallel()
+
+	_, modelPath := sidecarFixtureFiles(t)
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  filepath.Join(t.TempDir(), "missing-llama-server"),
+		ModelPath:   modelPath,
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ContextSize: DefaultContextSize,
+	})
+
+	status := manager.Status(context.Background())
+	if status.Available || status.Running || status.Healthy {
+		t.Fatalf("status = %+v, want unavailable stopped", status)
+	}
+	if status.Reason != "llama-server binary not detected" {
+		t.Fatalf("reason = %q", status.Reason)
+	}
+}
+
+func TestMockedBinaryStartRecordsRunningState(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	proc := newFakeProcess(4321)
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  serverPath,
+		ModelPath:   modelPath,
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ContextSize: DefaultContextSize,
+		Threads:     2,
+		GPULayers:   1,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		if binary != serverPath {
+			t.Fatalf("binary = %q, want %q", binary, serverPath)
+		}
+		argText := strings.Join(args, " ")
+		for _, want := range []string{"--host " + DefaultHost, "--model " + modelPath, "--ctx-size 4096", "--threads 2", "--n-gpu-layers 1"} {
+			if !strings.Contains(argText, want) {
+				t.Fatalf("args = %q, missing %q", argText, want)
+			}
+		}
+		return proc, nil
+	}), WithHealthClient(errorHealthClient{}), WithHealthTimeout(time.Millisecond))
+	t.Cleanup(func() {
+		_ = manager.Stop(context.Background())
+	})
+
+	status := manager.Start(context.Background())
+	if !status.Enabled || !status.Available || !status.Running || status.PID != 4321 {
+		t.Fatalf("status = %+v, want running managed process", status)
+	}
+	if status.Healthy {
+		t.Fatalf("healthy = true, want health unconfirmed with failing mock client")
+	}
+}
+
+func TestStopOnlyTerminatesManagedProcess(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	proc := newFakeProcess(987)
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  serverPath,
+		ModelPath:   modelPath,
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ContextSize: DefaultContextSize,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		return proc, nil
+	}), WithHealthClient(errorHealthClient{}), WithHealthTimeout(time.Millisecond))
+
+	if status := manager.Start(context.Background()); !status.Running {
+		t.Fatalf("start status = %+v, want running", status)
+	}
+	if status := manager.Stop(context.Background()); status.Running {
+		t.Fatalf("stop status = %+v, want stopped", status)
+	}
+	if proc.killCount() != 1 {
+		t.Fatalf("managed process kill count = %d, want 1", proc.killCount())
+	}
+
+	attachedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(attachedServer.Close)
+	host, port := hostPortFromURL(t, attachedServer.URL)
+	attached := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  serverPath,
+		ModelPath:   modelPath,
+		Host:        host,
+		Port:        port,
+		ContextSize: DefaultContextSize,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		t.Fatalf("attached server should not start a new process")
+		return nil, nil
+	}))
+
+	status := attached.Start(context.Background())
+	if !status.Running || !status.Healthy || !status.Attached || status.PID != 0 {
+		t.Fatalf("attached status = %+v, want healthy attached external server", status)
+	}
+	status = attached.Stop(context.Background())
+	if status.Running || status.Attached {
+		t.Fatalf("attached stop status = %+v, want detached without killing external process", status)
+	}
+}
+
+func TestStatusJSONExcludesPromptOutputAuthAndTensorData(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  serverPath,
+		ModelPath:   modelPath,
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ContextSize: DefaultContextSize,
+	}, WithHealthClient(errorHealthClient{err: errors.New("raw_prompt output_text auth_token tensor_bytes")}), WithHealthTimeout(time.Millisecond))
+
+	status := manager.Status(context.Background())
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	body := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "auth_token", "bind_token"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("status JSON contains forbidden marker %q: %s", forbidden, raw)
+		}
+	}
+	if status.SupportsKVAccess || status.SupportsTensorHooks {
+		t.Fatalf("sidecar status should not advertise KV/tensor hooks: %+v", status)
+	}
+}
+
+func sidecarFixtureFiles(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	serverPath := filepath.Join(dir, "llama-server")
+	modelPath := filepath.Join(dir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	if err := os.WriteFile(serverPath, []byte("server"), 0o755); err != nil {
+		t.Fatalf("write server fixture: %v", err)
+	}
+	if err := os.WriteFile(modelPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write model fixture: %v", err)
+	}
+	return serverPath, modelPath
+}
+
+func freePortForConfig(t *testing.T) int {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer server.Close()
+	_, port := hostPortFromURL(t, server.URL)
+	return port
+}
+
+func hostPortFromURL(t *testing.T, raw string) (string, int) {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse port %q: %v", parsed.Port(), err)
+	}
+	return parsed.Hostname(), port
+}
+
+type errorHealthClient struct {
+	err error
+}
+
+func (c errorHealthClient) Do(*http.Request) (*http.Response, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return nil, errors.New("connection refused")
+}
+
+type fakeProcess struct {
+	pid    int
+	done   chan error
+	once   sync.Once
+	kills  int
+	killsM sync.Mutex
+}
+
+func newFakeProcess(pid int) *fakeProcess {
+	return &fakeProcess{pid: pid, done: make(chan error)}
+}
+
+func (p *fakeProcess) PID() int {
+	return p.pid
+}
+
+func (p *fakeProcess) Wait() error {
+	return <-p.done
+}
+
+func (p *fakeProcess) Kill() error {
+	p.killsM.Lock()
+	p.kills++
+	p.killsM.Unlock()
+	p.once.Do(func() {
+		close(p.done)
+	})
+	return nil
+}
+
+func (p *fakeProcess) killCount() int {
+	p.killsM.Lock()
+	defer p.killsM.Unlock()
+	return p.kills
+}

@@ -22,6 +22,7 @@ import (
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
+	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7runtimeinventory "github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
@@ -68,6 +69,7 @@ type operatorRuntime struct {
 	infMgr            *inference.Manager
 	runtimeMgr        *runtimeManager
 	v7MemoryBenchmark *v7memorybench.LocalStatus
+	llamaCppSidecar   *v7llamacpp.Manager
 }
 
 type operatorJob struct {
@@ -106,6 +108,7 @@ type operatorStatusResponse struct {
 	TensorAccess      v7tensoraccess.TensorAccessCapability `json:"tensor_access"`
 	RuntimeInventory  v7runtimeinventory.Inventory          `json:"runtime_inventory"`
 	BackendProbes     v7backendprobe.Probes                 `json:"backend_probes"`
+	LlamaCPPSidecar   v7llamacpp.LlamaCppSidecarStatus      `json:"llama_cpp_sidecar"`
 	Metrics           operatorMetrics                       `json:"metrics"`
 	CurrentJob        *operatorJob                          `json:"current_job,omitempty"`
 	RecentJobs        []operatorJob                         `json:"recent_jobs"`
@@ -245,6 +248,7 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		client:            client,
 		recentJobs:        make([]operatorJob, 0, 20),
 		v7MemoryBenchmark: v7memorybench.NewLocalStatus(),
+		llamaCppSidecar:   v7llamacpp.NewManagerFromEnv(),
 	}
 }
 
@@ -326,6 +330,41 @@ func (s *operatorRuntime) memoryBenchmarkStatus() *v7memorybench.LocalStatus {
 		s.v7MemoryBenchmark = v7memorybench.NewLocalStatus()
 	}
 	return s.v7MemoryBenchmark
+}
+
+func (s *operatorRuntime) llamaCppManager() *v7llamacpp.Manager {
+	if s == nil {
+		return v7llamacpp.NewManagerFromEnv()
+	}
+	s.mu.RLock()
+	manager := s.llamaCppSidecar
+	s.mu.RUnlock()
+	if manager != nil {
+		return manager
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.llamaCppSidecar == nil {
+		s.llamaCppSidecar = v7llamacpp.NewManagerFromEnv()
+	}
+	return s.llamaCppSidecar
+}
+
+func (s *operatorRuntime) llamaCppSidecarStatus(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
+	return s.llamaCppManager().Status(ctx)
+}
+
+func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
+	return s.llamaCppManager().Start(ctx)
+}
+
+func (s *operatorRuntime) stopLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
+	return s.llamaCppManager().Stop(ctx)
+}
+
+func (s *operatorRuntime) restartLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
+	return s.llamaCppManager().Restart(ctx)
 }
 
 func (s *operatorRuntime) recordV7MemoryBenchmarkSeen(jobID, requestID string) {
@@ -646,6 +685,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
 	backendProbes := buildBackendProbeStatus()
+	llamaCppSidecar := s.llamaCppSidecarStatus(context.Background())
 
 	return operatorStatusResponse{
 		Version:          s.version,
@@ -669,6 +709,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		TensorAccess:     runtimeInfo.TensorAccess,
 		RuntimeInventory: runtimeInventory,
 		BackendProbes:    backendProbes,
+		LlamaCPPSidecar:  llamaCppSidecar,
 		Metrics: operatorMetrics{
 			CPUUtil:    metrics.CPUUtil,
 			MemUtil:    metrics.MemUtil,
@@ -1077,6 +1118,18 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 	})
 	mux.HandleFunc("GET /api/v1/operator/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, state.statusSnapshot(port))
+	})
+	mux.HandleFunc("GET /api/v1/operator/llamacpp/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.llamaCppSidecarStatus(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/operator/llamacpp/start", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.startLlamaCppSidecar(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/operator/llamacpp/stop", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.stopLlamaCppSidecar(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/operator/llamacpp/restart", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.restartLlamaCppSidecar(r.Context()))
 	})
 	mux.HandleFunc("GET /api/v1/operator/jobs", func(w http.ResponseWriter, r *http.Request) {
 		jobs, current := state.recentJobsSnapshot()

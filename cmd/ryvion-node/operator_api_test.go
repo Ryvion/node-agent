@@ -18,6 +18,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
+	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 )
@@ -224,6 +225,89 @@ func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
 	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes"} {
 		if strings.Contains(strings.ToLower(text), forbidden) {
 			t.Fatalf("status JSON contains forbidden text marker %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		llamaCppSidecar: v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
+			Enabled: false,
+			Host:    v7llamacpp.DefaultHost,
+			Port:    v7llamacpp.DefaultPort,
+		}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
+	}
+	if status.LlamaCPPSidecar.Enabled || status.LlamaCPPSidecar.Running || status.LlamaCPPSidecar.Healthy {
+		t.Fatalf("llama_cpp_sidecar = %+v, want disabled stopped", status.LlamaCPPSidecar)
+	}
+	if status.LlamaCPPSidecar.Backend != v7llamacpp.BackendName ||
+		!status.LlamaCPPSidecar.OpenAICompatible ||
+		!status.LlamaCPPSidecar.SupportsTextGeneration ||
+		!status.LlamaCPPSidecar.SupportsStreaming ||
+		status.LlamaCPPSidecar.SupportsKVAccess ||
+		status.LlamaCPPSidecar.SupportsTensorHooks {
+		t.Fatalf("llama_cpp_sidecar capability flags = %+v", status.LlamaCPPSidecar)
+	}
+	text := strings.ToLower(string(respBody))
+	if !strings.Contains(text, `"llama_cpp_sidecar"`) {
+		t.Fatalf("status JSON missing llama_cpp_sidecar: %s", respBody)
+	}
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("status JSON contains forbidden marker %q: %s", forbidden, respBody)
+		}
+	}
+}
+
+func TestOperatorAPILlamaCppEndpointsDisabledSafe(t *testing.T) {
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		llamaCppSidecar: v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
+			Enabled: false,
+			Host:    v7llamacpp.DefaultHost,
+			Port:    v7llamacpp.DefaultPort,
+		}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	for _, path := range []string{
+		"/api/v1/operator/llamacpp/status",
+		"/api/v1/operator/llamacpp/start",
+		"/api/v1/operator/llamacpp/stop",
+		"/api/v1/operator/llamacpp/restart",
+	} {
+		var body []byte
+		if strings.Contains(path, "/status") {
+			body = getOperatorAPITestJSON(t, port, path)
+		} else {
+			body = postOperatorAPITestJSON(t, port, path, nil)
+		}
+		var status v7llamacpp.LlamaCppSidecarStatus
+		if err := json.Unmarshal(body, &status); err != nil {
+			t.Fatalf("decode %s response: %v\nbody: %s", path, err, body)
+		}
+		if status.Enabled || status.Running || status.Healthy {
+			t.Fatalf("%s status = %+v, want disabled stopped", path, status)
 		}
 	}
 }
