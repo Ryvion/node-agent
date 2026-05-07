@@ -104,6 +104,10 @@ func main() {
 		runDoctor(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "heartbeat-preview" {
+		runHeartbeatPreview(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "backend-probe" {
 		runBackendProbe(os.Args[2:])
 		return
@@ -161,6 +165,52 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	runNode(ctx)
+}
+
+func runHeartbeatPreview(args []string) {
+	fs := flag.NewFlagSet("heartbeat-preview", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "Emit compact JSON")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: ryvion-node heartbeat-preview --json")
+		os.Exit(2)
+	}
+
+	nodeID, err := nodekey.PublicKeyHex(strings.TrimSpace(os.Getenv("RYV_KEY_PATH")))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to load node identity: %v\n", err)
+		os.Exit(1)
+	}
+	caps := hw.DetectCaps("")
+	deviceType := resolveDeviceType("", caps)
+	declaredCountry, err := resolveInitialDeclaredCountry("")
+	if err != nil {
+		declaredCountry = strings.TrimSpace(os.Getenv("RYV_DECLARED_COUNTRY"))
+	}
+	payload, err := buildV7HeartbeatPayloadForNode(nodeID, caps, deviceType, declaredCountry, nil, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to build V7 heartbeat preview: %v\n", err)
+		os.Exit(1)
+	}
+	preview := buildV7HeartbeatPreviewResponse(nodeID, *payload)
+	if *jsonOutput {
+		if err := json.NewEncoder(os.Stdout).Encode(preview); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	fmt.Printf("v7 heartbeat preview node_id=%s backend_candidates=%d gguf_models=%d llama_cpp_probe=%t\n",
+		preview.NodeID,
+		preview.FieldPresence.BackendCandidatesLen,
+		preview.FieldPresence.GGUFModelsLen,
+		preview.FieldPresence.LlamaCPPProbePresent,
+	)
+	os.Exit(0)
 }
 
 func runBackendProbe(args []string) {

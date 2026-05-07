@@ -228,6 +228,122 @@ func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
 	}
 }
 
+func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
+	dataDir := setupHeartbeatPreviewInventoryFixture(t)
+	t.Setenv("RYV_DATA_DIR", dataDir)
+	t.Setenv("RYV_MODEL_DIR", "")
+	t.Setenv("RYVION_MODEL_DIR", "")
+	t.Setenv("RYV_LLAMA_CPP_DIR", "")
+	t.Setenv("RYVION_LLAMA_CPP_DIR", "")
+	t.Setenv("RYV_RUNTIME_DIR", "")
+	t.Setenv("RYVION_RUNTIME_DIR", "")
+	t.Setenv("RYV_LLAMA_CPP_PROBE_MODEL", "")
+	emptyPath := filepath.Join(dataDir, "empty-path")
+	if err := os.MkdirAll(emptyPath, 0o755); err != nil {
+		t.Fatalf("create empty PATH dir: %v", err)
+	}
+	t.Setenv("PATH", emptyPath)
+
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:         "test",
+		hubURL:          "https://api.ryvion.ai",
+		deviceType:      "gpu",
+		declaredCountry: "CA",
+		publicKeyHex:    "abc123",
+		caps: hw.CapSet{
+			CPUCores:  8,
+			RAMBytes:  16 << 30,
+			GPUModel:  "test-gpu",
+			VRAMBytes: 8 << 30,
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/debug/v7-heartbeat-preview")
+	var preview v7HeartbeatPreviewResponse
+	if err := json.Unmarshal(respBody, &preview); err != nil {
+		t.Fatalf("decode heartbeat preview response: %v\nbody: %s", err, respBody)
+	}
+	if !preview.OK {
+		t.Fatalf("ok = false; body=%s", respBody)
+	}
+	if preview.NodeID != "abc123" {
+		t.Fatalf("node_id = %q, want abc123", preview.NodeID)
+	}
+	if preview.HeartbeatPreview.V7.SchemaVersion == "" {
+		t.Fatalf("heartbeat_preview.v7 missing schema_version: %+v", preview.HeartbeatPreview.V7)
+	}
+	if !preview.FieldPresence.RuntimeInventoryPresent {
+		t.Fatalf("runtime_inventory_present = false; body=%s", respBody)
+	}
+	if !preview.FieldPresence.BackendCandidatesPresent || preview.FieldPresence.BackendCandidatesLen < 1 {
+		t.Fatalf("backend_candidates presence = %+v; body=%s", preview.FieldPresence, respBody)
+	}
+	if !preview.FieldPresence.GGUFModelsPresent || preview.FieldPresence.GGUFModelsLen != 2 {
+		t.Fatalf("gguf_models presence = %+v; body=%s", preview.FieldPresence, respBody)
+	}
+	if !preview.FieldPresence.BackendProbesPresent || !preview.FieldPresence.LlamaCPPProbePresent {
+		t.Fatalf("backend probe presence = %+v; body=%s", preview.FieldPresence, respBody)
+	}
+	if !preview.HeartbeatPreview.V7.BackendProbes.LlamaCPP.Available {
+		t.Fatalf("llama_cpp probe = %+v, want available from local fixture", preview.HeartbeatPreview.V7.BackendProbes.LlamaCPP)
+	}
+	if len(preview.HeartbeatPreview.V7.RuntimeInventory.BackendCandidates) == 0 {
+		t.Fatalf("heartbeat_preview.v7.runtime_inventory.backend_candidates empty: %s", respBody)
+	}
+	if len(preview.HeartbeatPreview.V7.RuntimeInventory.GGUFModels) != 2 {
+		t.Fatalf("heartbeat_preview.v7.runtime_inventory.gguf_models = %+v", preview.HeartbeatPreview.V7.RuntimeInventory.GGUFModels)
+	}
+
+	text := strings.ToLower(string(respBody))
+	for _, forbidden := range []string{
+		"auth_token",
+		"bind_token",
+		"admin_key",
+		"wallet",
+		"raw_tensor",
+		"tensor_bytes",
+		"raw_prompt",
+		"prompt_text",
+		"output_text",
+		"generated_text",
+		"key_data",
+		"value_data",
+		"query_vector",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("heartbeat preview contains forbidden marker %q: %s", forbidden, respBody)
+		}
+	}
+}
+
+func setupHeartbeatPreviewInventoryFixture(t *testing.T) string {
+	t.Helper()
+	dataDir := t.TempDir()
+	binDir := filepath.Join(dataDir, "bin")
+	modelDir := filepath.Join(dataDir, "models")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("create bin dir: %v", err)
+	}
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("create model dir: %v", err)
+	}
+	for _, name := range []string{"llama-cli", "llama-server", "llama-bench"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("llama.cpp version test\n"), 0o755); err != nil {
+			t.Fatalf("write %s fixture: %v", name, err)
+		}
+	}
+	for _, name := range []string{"llama-3-q4_k_m.gguf", "qwen2.5-q5_k_m.gguf"} {
+		if err := os.WriteFile(filepath.Join(modelDir, name), []byte("gguf"), 0o644); err != nil {
+			t.Fatalf("write %s fixture: %v", name, err)
+		}
+	}
+	return dataDir
+}
+
 func TestStatusTokenParsing(t *testing.T) {
 	t.Parallel()
 

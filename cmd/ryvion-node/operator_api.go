@@ -20,6 +20,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
+	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
@@ -202,6 +203,27 @@ type operatorDiagnosticsResponse struct {
 	LastHeartbeatAt time.Time                 `json:"last_heartbeat_at,omitempty"`
 	LastClaimAt     time.Time                 `json:"last_claim_at,omitempty"`
 	LastPayoutAt    time.Time                 `json:"last_payout_at,omitempty"`
+}
+
+type v7HeartbeatPreviewResponse struct {
+	OK               bool                            `json:"ok"`
+	NodeID           string                          `json:"node_id"`
+	HeartbeatPreview v7HeartbeatPreviewEnvelope      `json:"heartbeat_preview"`
+	FieldPresence    v7HeartbeatPreviewFieldPresence `json:"field_presence"`
+}
+
+type v7HeartbeatPreviewEnvelope struct {
+	V7 v7heartbeat.V7HeartbeatPayload `json:"v7"`
+}
+
+type v7HeartbeatPreviewFieldPresence struct {
+	RuntimeInventoryPresent  bool `json:"runtime_inventory_present"`
+	BackendCandidatesPresent bool `json:"backend_candidates_present"`
+	BackendCandidatesLen     int  `json:"backend_candidates_len"`
+	GGUFModelsPresent        bool `json:"gguf_models_present"`
+	GGUFModelsLen            int  `json:"gguf_models_len"`
+	BackendProbesPresent     bool `json:"backend_probes_present"`
+	LlamaCPPProbePresent     bool `json:"llama_cpp_probe_present"`
 }
 
 type logRing struct {
@@ -898,6 +920,45 @@ func (s *operatorRuntime) diagnosticsSnapshot(apiPort string) operatorDiagnostic
 	}
 }
 
+func (s *operatorRuntime) v7HeartbeatPreview() (v7HeartbeatPreviewResponse, error) {
+	if s == nil {
+		return v7HeartbeatPreviewResponse{}, errors.New("operator runtime unavailable")
+	}
+	s.mu.RLock()
+	nodeID := s.publicKeyHex
+	caps := s.caps
+	deviceType := s.deviceType
+	declaredCountry := s.declaredCountry
+	infMgr := s.infMgr
+	runtimeMgr := s.runtimeMgr
+	s.mu.RUnlock()
+
+	payload, err := buildV7HeartbeatPayloadForNode(nodeID, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
+	if err != nil {
+		return v7HeartbeatPreviewResponse{}, err
+	}
+	return buildV7HeartbeatPreviewResponse(nodeID, *payload), nil
+}
+
+func buildV7HeartbeatPreviewResponse(nodeID string, payload v7heartbeat.V7HeartbeatPayload) v7HeartbeatPreviewResponse {
+	return v7HeartbeatPreviewResponse{
+		OK:     true,
+		NodeID: strings.TrimSpace(nodeID),
+		HeartbeatPreview: v7HeartbeatPreviewEnvelope{
+			V7: payload,
+		},
+		FieldPresence: v7HeartbeatPreviewFieldPresence{
+			RuntimeInventoryPresent:  payload.SchemaVersion != "",
+			BackendCandidatesPresent: payload.RuntimeInventory.BackendCandidates != nil,
+			BackendCandidatesLen:     len(payload.RuntimeInventory.BackendCandidates),
+			GGUFModelsPresent:        payload.RuntimeInventory.GGUFModels != nil,
+			GGUFModelsLen:            len(payload.RuntimeInventory.GGUFModels),
+			BackendProbesPresent:     payload.SchemaVersion != "",
+			LlamaCPPProbePresent:     payload.SchemaVersion != "",
+		},
+	}
+}
+
 func (s *operatorRuntime) runV7ModelBenchmark(ctx context.Context, modelID string, maxTokens int, timeoutMs int64) (v7modelbench.ModelBenchmarkResult, error) {
 	if maxTokens < 0 {
 		return v7modelbench.ModelBenchmarkResult{}, fmt.Errorf("max_tokens must be non-negative")
@@ -1078,6 +1139,17 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 	})
 	mux.HandleFunc("GET /api/v1/operator/diagnostics", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, state.diagnosticsSnapshot(port))
+	})
+	mux.HandleFunc("GET /api/v1/operator/debug/v7-heartbeat-preview", func(w http.ResponseWriter, r *http.Request) {
+		preview, err := state.v7HeartbeatPreview()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"ok":    false,
+				"error": "v7_heartbeat_preview_failed",
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, preview)
 	})
 	mux.HandleFunc("POST /api/v1/operator/v7/model-benchmark/run", func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
