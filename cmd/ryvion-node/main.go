@@ -81,6 +81,7 @@ var (
 	v7ModelBenchmarkStatus       = v7modelbench.NewLocalStatus()
 	v7TensorPlaneBenchmarkStatus = v7tensorplane.NewLocalStatus()
 	v7BackendBenchmarkStatus     = v7llamacpp.NewBackendBenchmarkLocalStatus()
+	v7InferenceBenchmarkStatus   = v7inferencebench.NewLocalStatus()
 	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
 		return v7modelbench.NativeInferenceModelBenchmarkRunner{
 			Native:           infMgr,
@@ -1793,10 +1794,21 @@ func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromReceipt(specJSON string, 
 	return context
 }
 
+func currentV7BackendInferenceBenchmarkStatus() *v7inferencebench.LocalStatus {
+	if operatorRuntimeState != nil {
+		return operatorRuntimeState.inferenceBenchmarkStatus()
+	}
+	return v7InferenceBenchmarkStatus
+}
+
 func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
 	identity, isBenchmark := v7inferencebench.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
 	benchmarkEnabled := isBenchmark && v7inferencebench.BenchmarkEnabledFromEnv(os.Getenv)
+	status := currentV7BackendInferenceBenchmarkStatus()
+	if benchmarkEnabled && status != nil {
+		status.RecordSeen(statusJobID)
+	}
 
 	runner := newV7BackendInferenceBenchmarkRunner()
 	executionStarted := time.Now()
@@ -1812,6 +1824,9 @@ func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub
 		return false, nil, nil
 	}
 	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
+	if err != nil && status != nil {
+		status.RecordError(statusJobID, err)
+	}
 
 	receiptBuildStarted := time.Now()
 	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
@@ -1822,7 +1837,7 @@ func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub
 		"task":          v7inferencebench.BenchmarkTask,
 	}
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		receipt = v7inferencebench.BuildBenchmarkRejectionReceipt(work.JobID, err)
+		receipt = v7inferencebench.BuildBenchmarkRejectionReceipt(statusJobID, err)
 	}
 	exitCode := 0
 	if err != nil {
@@ -1856,6 +1871,12 @@ func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub
 		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
 		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
 		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+		if status != nil {
+			if err == nil {
+				status.RecordExecuted(hubReceipt.JobID)
+			}
+			status.RecordReceiptFailed(hubReceipt.JobID, submitErr)
+		}
 		if err != nil {
 			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
 		}
@@ -1867,10 +1888,22 @@ func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub
 	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), submitErr)
 	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
 	if submitErr != nil {
+		if status != nil {
+			if err == nil {
+				status.RecordExecuted(hubReceipt.JobID)
+			}
+			status.RecordReceiptFailed(hubReceipt.JobID, submitErr)
+		}
 		if err != nil {
 			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
 		}
 		return true, snapshot, submitErr
+	}
+	if status != nil {
+		if err == nil {
+			status.RecordExecuted(firstNonEmptyString(receipt.JobID, statusJobID))
+		}
+		status.RecordReceiptSubmitted(hubReceipt.JobID)
 	}
 	return true, snapshot, err
 }
@@ -1907,8 +1940,8 @@ func v7BackendInferenceBenchmarkWorkLoopEventContextFromReceipt(specJSON string,
 	context := v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(specJSON)
 	if taskMetadata, ok := receipt.Metadata[v7inferencebench.BenchmarkTask].(map[string]any); ok {
 		putWorkLoopAnyIntContext(context, "tokens_generated", taskMetadata["tokens_generated"])
-		putWorkLoopAnyIntContext(context, "ttft_ms", taskMetadata["ttft_ms"])
-		putWorkLoopAnyIntContext(context, "total_time_ms", taskMetadata["total_time_ms"])
+		putWorkLoopAnyIntContext(context, "p50_ttft_ms", taskMetadata["p50_ttft_ms"])
+		putWorkLoopAnyIntContext(context, "p95_ttft_ms", taskMetadata["p95_ttft_ms"])
 		if status, ok := taskMetadata["proof_status"].(string); ok && strings.TrimSpace(status) != "" {
 			context["proof_status"] = strings.TrimSpace(status)
 		}

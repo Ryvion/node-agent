@@ -51,10 +51,10 @@ func TestExecuteBenchmarkAssignmentRunsMockedLlamaCppClient(t *testing.T) {
 	if metadata["backend"] != llamacpp.BackendName || metadata["model_id"] != "tinyllama.Q4_K_M.gguf" {
 		t.Fatalf("backend/model metadata = %+v", metadata)
 	}
-	if metadata["tokens_generated"] != int64(12) || metadata["ttft_ms"] != int64(100) || metadata["total_time_ms"] != int64(700) {
+	if metadata["tokens_generated"] != int64(12) || metadata["p50_ttft_ms"] != int64(100) || metadata["p95_ttft_ms"] != int64(100) {
 		t.Fatalf("metrics metadata = %+v", metadata)
 	}
-	if metadata["decode_tps"] != 20.0 || metadata["end_to_end_tps"] != 17.143 {
+	if metadata["p50_decode_tps"] != 20.0 || metadata["p50_end_to_end_tps"] != 17.143 {
 		t.Fatalf("tps metadata = %+v", metadata)
 	}
 	for _, key := range []string{"prompt_hash", "output_hash"} {
@@ -99,11 +99,11 @@ func TestExecuteBenchmarkAssignmentSidecarUnavailableBuildsSafeFailedReceipt(t *
 		t.Fatalf("client calls = %d, want zero when sidecar unavailable", client.calls)
 	}
 	metadata := receipt.Metadata[BenchmarkTask].(map[string]any)
-	if metadata["proof_status"] != ProofStatusFailed {
-		t.Fatalf("proof_status = %v, want failed", metadata["proof_status"])
+	if metadata["proof_status"] != ProofStatusRejected {
+		t.Fatalf("proof_status = %v, want rejected", metadata["proof_status"])
 	}
-	if metadata["output_hash"] != nil || metadata["output_bytes"] != int64(0) || metadata["tokens_generated"] != int64(0) {
-		t.Fatalf("failed receipt output metrics = %+v", metadata)
+	if _, ok := metadata["output_hash"]; ok {
+		t.Fatalf("rejection metadata includes output_hash: %+v", metadata)
 	}
 	if metadata["error_code"] != "llamacpp_sidecar_unavailable" {
 		t.Fatalf("error_code = %v, want safe sidecar code", metadata["error_code"])
@@ -229,10 +229,13 @@ func validInferenceBenchmarkSpec() BenchmarkSpec {
 	return BenchmarkSpec{
 		Task:            BenchmarkTask,
 		RequestID:       "request-backend-inference-local",
+		BenchmarkID:     "benchmark-backend-inference-local",
 		JobID:           "job-backend-inference-local",
 		Backend:         llamacpp.BackendName,
 		ModelID:         "tinyllama.Q4_K_M.gguf",
+		TargetNodeID:    "node-backend-inference-local",
 		PromptHash:      llamacpp.HashBenchmarkPrompt(),
+		PromptProfileID: BenchmarkPromptProfileID,
 		MaxTokens:       16,
 		TimeoutMs:       30_000,
 		CreatedAtUnixMs: 1_800_000_000_123,

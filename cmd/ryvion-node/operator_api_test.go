@@ -19,6 +19,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
@@ -1008,6 +1009,38 @@ func TestOperatorStatusSnapshotIncludesV7MemoryBenchmarkStatus(t *testing.T) {
 	}
 	if strings.Contains(text, "weighted_value") {
 		t.Fatalf("operator status JSON includes weighted_value: %s", text)
+	}
+}
+
+func TestOperatorStatusSnapshotIncludesV7InferenceBenchmarkStatus(t *testing.T) {
+	t.Parallel()
+
+	benchStatus := v7inferencebench.NewLocalStatus()
+	benchStatus.RecordSeen("job-infer-1")
+	benchStatus.RecordExecuted("job-infer-1")
+	benchStatus.RecordReceiptSubmitted("job-infer-1")
+
+	state := &operatorRuntime{
+		version:              "dev",
+		hubURL:               "https://api.ryvion.ai",
+		deviceType:           "gpu",
+		publicKeyHex:         "abc123",
+		v7InferenceBenchmark: benchStatus,
+	}
+
+	status := state.statusSnapshot("45890")
+	if status.V7InferenceBenchmark.LastJobID != "job-infer-1" {
+		t.Fatalf("v7 inference benchmark status = %+v", status.V7InferenceBenchmark)
+	}
+	if status.V7InferenceBenchmark.Counters.Seen != 1 || status.V7InferenceBenchmark.Counters.Executed != 1 || status.V7InferenceBenchmark.Counters.ReceiptSubmitted != 1 {
+		t.Fatalf("unexpected v7 inference benchmark counters: %+v", status.V7InferenceBenchmark.Counters)
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal(status) error = %v", err)
+	}
+	if !strings.Contains(string(encoded), `"v7_inference_benchmark"`) {
+		t.Fatalf("status JSON missing v7_inference_benchmark: %s", encoded)
 	}
 }
 

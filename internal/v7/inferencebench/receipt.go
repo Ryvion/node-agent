@@ -28,12 +28,11 @@ type BenchmarkReceiptMetadata struct {
 	ModelID         string  `json:"model_id"`
 	PromptHash      string  `json:"prompt_hash"`
 	OutputHash      string  `json:"output_hash,omitempty"`
-	OutputBytes     int64   `json:"output_bytes"`
 	TokensGenerated int64   `json:"tokens_generated"`
-	TTFTMs          int64   `json:"ttft_ms"`
-	TotalTimeMs     int64   `json:"total_time_ms"`
-	DecodeTPS       float64 `json:"decode_tps"`
-	EndToEndTPS     float64 `json:"end_to_end_tps"`
+	P50TTFTMs       int64   `json:"p50_ttft_ms"`
+	P95TTFTMs       int64   `json:"p95_ttft_ms"`
+	P50DecodeTPS    float64 `json:"p50_decode_tps"`
+	P50EndToEndTPS  float64 `json:"p50_end_to_end_tps"`
 	ProofStatus     string  `json:"proof_status"`
 	ErrorCode       string  `json:"error_code,omitempty"`
 }
@@ -86,8 +85,8 @@ func BuildBenchmarkRejectionReceipt(jobID string, runErr error) BenchmarkReceipt
 	metadata := map[string]any{
 		"job_id":       jobID,
 		"backend":      llamacpp.BackendName,
-		"prompt_hash":  llamacpp.HashBenchmarkPrompt(),
-		"proof_status": ProofStatusFailed,
+		"proof_status": ProofStatusRejected,
+		"error":        reason,
 		"error_code":   reason,
 	}
 	payload := struct {
@@ -120,13 +119,13 @@ func HashBenchmarkReceiptMetadata(jobID string, metadata BenchmarkReceiptMetadat
 		return "", err
 	}
 	envelope := struct {
-		Task     string                   `json:"task"`
-		JobID    string                   `json:"job_id"`
-		Metadata BenchmarkReceiptMetadata `json:"v7_backend_inference_benchmark"`
+		Task     string         `json:"task"`
+		JobID    string         `json:"job_id"`
+		Metadata map[string]any `json:"v7_backend_inference_benchmark"`
 	}{
 		Task:     BenchmarkTask,
 		JobID:    jobID,
-		Metadata: metadata.clone(),
+		Metadata: metadata.Map(),
 	}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
@@ -138,25 +137,38 @@ func HashBenchmarkReceiptMetadata(jobID string, metadata BenchmarkReceiptMetadat
 
 func (m BenchmarkReceiptMetadata) Map() map[string]any {
 	m = m.clone()
+	if m.ProofStatus != ProofStatusMeasured {
+		out := map[string]any{
+			"job_id":       m.JobID,
+			"backend":      m.Backend,
+			"prompt_hash":  m.PromptHash,
+			"proof_status": ProofStatusRejected,
+		}
+		if m.RequestID != "" {
+			out["request_id"] = m.RequestID
+		}
+		if m.ModelID != "" {
+			out["model_id"] = m.ModelID
+		}
+		if m.ErrorCode != "" {
+			out["error"] = m.ErrorCode
+			out["error_code"] = m.ErrorCode
+		}
+		return out
+	}
 	out := map[string]any{
-		"request_id":       m.RequestID,
-		"job_id":           m.JobID,
-		"backend":          m.Backend,
-		"model_id":         m.ModelID,
-		"prompt_hash":      m.PromptHash,
-		"output_bytes":     m.OutputBytes,
-		"tokens_generated": m.TokensGenerated,
-		"ttft_ms":          m.TTFTMs,
-		"total_time_ms":    m.TotalTimeMs,
-		"decode_tps":       m.DecodeTPS,
-		"end_to_end_tps":   m.EndToEndTPS,
-		"proof_status":     m.ProofStatus,
-	}
-	if m.OutputHash != "" {
-		out["output_hash"] = m.OutputHash
-	}
-	if m.ErrorCode != "" {
-		out["error_code"] = m.ErrorCode
+		"request_id":         m.RequestID,
+		"job_id":             m.JobID,
+		"backend":            m.Backend,
+		"model_id":           m.ModelID,
+		"prompt_hash":        m.PromptHash,
+		"output_hash":        m.OutputHash,
+		"tokens_generated":   m.TokensGenerated,
+		"p50_ttft_ms":        m.P50TTFTMs,
+		"p95_ttft_ms":        m.P95TTFTMs,
+		"p50_decode_tps":     m.P50DecodeTPS,
+		"p50_end_to_end_tps": m.P50EndToEndTPS,
+		"proof_status":       m.ProofStatus,
 	}
 	return out
 }
@@ -169,21 +181,27 @@ func (m BenchmarkReceiptMetadata) clone() BenchmarkReceiptMetadata {
 	m.PromptHash = strings.TrimSpace(m.PromptHash)
 	m.OutputHash = strings.TrimSpace(m.OutputHash)
 	m.ProofStatus = cleanBenchmarkText(m.ProofStatus, maxBenchmarkIDLen)
-	m.ErrorCode = cleanBenchmarkErrorCode(m.ErrorCode)
-	if m.OutputBytes < 0 {
-		m.OutputBytes = 0
+	if m.ProofStatus == ProofStatusFailed {
+		m.ProofStatus = ProofStatusRejected
 	}
+	m.ErrorCode = cleanBenchmarkErrorCode(m.ErrorCode)
 	if m.TokensGenerated < 0 {
 		m.TokensGenerated = 0
 	}
-	if m.TTFTMs < 0 {
-		m.TTFTMs = 0
+	if m.P50TTFTMs < 0 {
+		m.P50TTFTMs = 0
 	}
-	if m.TotalTimeMs < 0 {
-		m.TotalTimeMs = 0
+	if m.P95TTFTMs < 0 {
+		m.P95TTFTMs = 0
 	}
-	m.DecodeTPS = roundTPS(m.DecodeTPS)
-	m.EndToEndTPS = roundTPS(m.EndToEndTPS)
+	if m.P95TTFTMs == 0 {
+		m.P95TTFTMs = m.P50TTFTMs
+	}
+	if m.P95TTFTMs < m.P50TTFTMs {
+		m.P95TTFTMs = m.P50TTFTMs
+	}
+	m.P50DecodeTPS = roundTPS(m.P50DecodeTPS)
+	m.P50EndToEndTPS = roundTPS(m.P50EndToEndTPS)
 	return m
 }
 
@@ -196,12 +214,11 @@ func benchmarkReceiptMetadataFromResult(result BenchmarkExecutionResult) Benchma
 		ModelID:         firstNonEmpty(result.ModelID, result.Spec.ModelID),
 		PromptHash:      firstNonEmpty(result.PromptHash, result.Spec.PromptHash),
 		OutputHash:      result.OutputHash,
-		OutputBytes:     result.OutputBytes,
 		TokensGenerated: result.TokensGenerated,
-		TTFTMs:          result.TTFTMs,
-		TotalTimeMs:     result.TotalTimeMs,
-		DecodeTPS:       result.DecodeTPS,
-		EndToEndTPS:     result.EndToEndTPS,
+		P50TTFTMs:       result.TTFTMs,
+		P95TTFTMs:       firstPositiveInt64(result.P95TTFTMs, result.TTFTMs),
+		P50DecodeTPS:    result.DecodeTPS,
+		P50EndToEndTPS:  result.EndToEndTPS,
 		ProofStatus:     result.ProofStatus,
 		ErrorCode:       result.ErrorCode,
 	}.clone()
@@ -214,8 +231,11 @@ func normalizeExecutionResult(result BenchmarkExecutionResult) BenchmarkExecutio
 	result.PromptHash = strings.TrimSpace(firstNonEmpty(result.PromptHash, result.Spec.PromptHash))
 	result.OutputHash = strings.TrimSpace(result.OutputHash)
 	result.ProofStatus = cleanBenchmarkText(result.ProofStatus, maxBenchmarkIDLen)
+	if result.ProofStatus == ProofStatusFailed {
+		result.ProofStatus = ProofStatusRejected
+	}
 	if result.ProofStatus == "" {
-		result.ProofStatus = ProofStatusFailed
+		result.ProofStatus = ProofStatusRejected
 	}
 	result.ErrorCode = cleanBenchmarkErrorCode(result.ErrorCode)
 	if result.OutputBytes < 0 {
@@ -226,6 +246,9 @@ func normalizeExecutionResult(result BenchmarkExecutionResult) BenchmarkExecutio
 	}
 	if result.TTFTMs < 0 {
 		result.TTFTMs = 0
+	}
+	if result.P95TTFTMs < 0 {
+		result.P95TTFTMs = 0
 	}
 	if result.TotalTimeMs < 0 {
 		result.TotalTimeMs = 0
@@ -285,10 +308,10 @@ func validateBenchmarkReceiptMetadataForHash(metadata BenchmarkReceiptMetadata) 
 			errs = append(errs, err)
 		}
 	}
-	if metadata.OutputBytes < 0 || metadata.TokensGenerated < 0 || metadata.TTFTMs < 0 || metadata.TotalTimeMs < 0 {
+	if metadata.TokensGenerated < 0 || metadata.P50TTFTMs < 0 || metadata.P95TTFTMs < 0 {
 		errs = append(errs, fmt.Errorf("%w: receipt metrics must be non-negative", ErrInvalidBenchmarkReceipt))
 	}
-	if !finiteTPS(metadata.DecodeTPS) || !finiteTPS(metadata.EndToEndTPS) {
+	if !finiteTPS(metadata.P50DecodeTPS) || !finiteTPS(metadata.P50EndToEndTPS) {
 		errs = append(errs, fmt.Errorf("%w: receipt tps metrics must be finite", ErrInvalidBenchmarkReceipt))
 	}
 	switch metadata.ProofStatus {
@@ -296,16 +319,16 @@ func validateBenchmarkReceiptMetadataForHash(metadata BenchmarkReceiptMetadata) 
 		if metadata.OutputHash == "" {
 			errs = append(errs, fmt.Errorf("%w: measured receipt requires output_hash", ErrInvalidBenchmarkReceipt))
 		}
-		if metadata.OutputBytes <= 0 {
-			errs = append(errs, fmt.Errorf("%w: measured receipt requires output_bytes", ErrInvalidBenchmarkReceipt))
-		}
 		if metadata.TokensGenerated <= 0 {
 			errs = append(errs, fmt.Errorf("%w: measured receipt requires tokens_generated", ErrInvalidBenchmarkReceipt))
 		}
-		if metadata.TotalTimeMs <= 0 {
-			errs = append(errs, fmt.Errorf("%w: measured receipt requires total_time_ms", ErrInvalidBenchmarkReceipt))
+		if metadata.P50TTFTMs < 0 || metadata.P95TTFTMs < metadata.P50TTFTMs {
+			errs = append(errs, fmt.Errorf("%w: measured receipt requires p95_ttft_ms >= p50_ttft_ms", ErrInvalidBenchmarkReceipt))
 		}
-	case ProofStatusFailed:
+	case ProofStatusRejected:
+		if metadata.ErrorCode == "" {
+			errs = append(errs, fmt.Errorf("%w: rejected receipt requires error", ErrInvalidBenchmarkReceipt))
+		}
 	default:
 		errs = append(errs, fmt.Errorf("%w: receipt proof_status unknown %q", ErrInvalidBenchmarkReceipt, metadata.ProofStatus))
 	}
@@ -334,11 +357,19 @@ func BenchmarkReceiptJSONContainsNoRawText(receipt BenchmarkReceipt) bool {
 		[]byte("distributed computing"),
 		[]byte("raw_prompt"),
 		[]byte("prompt_text"),
+		[]byte("messages"),
+		[]byte("input_text"),
 		[]byte("output_text"),
 		[]byte("generated_text"),
 		[]byte("raw_output"),
+		[]byte("model_output"),
+		[]byte("completion"),
 		[]byte("logprobs"),
-		[]byte("tensor"),
+		[]byte("key_data"),
+		[]byte("value_data"),
+		[]byte("query_vector"),
+		[]byte("tensor_bytes"),
+		[]byte("raw_tensor"),
 	} {
 		if bytes.Contains(lower, bytes.ToLower(forbidden)) {
 			return false
@@ -354,6 +385,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstPositiveInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func errorsJoin(errs ...error) error {

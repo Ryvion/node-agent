@@ -21,6 +21,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/inference"
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
+	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
@@ -53,26 +54,27 @@ type operatorRuntime struct {
 	caps               hw.CapSet
 	client             *hub.Client
 
-	registered         bool
-	lastRegisterError  string
-	lastHeartbeatAt    time.Time
-	lastHeartbeatErr   string
-	latestVersion      string
-	lastMetrics        hw.Metrics
-	lastHealthReport   hub.HealthReport
-	lastClaimAt        time.Time
-	lastClaimError     string
-	lastPayoutAt       time.Time
-	lastPayoutError    string
-	currentJob         *operatorJob
-	recentJobs         []operatorJob
-	infMgr             *inference.Manager
-	runtimeMgr         *runtimeManager
-	v7MemoryBenchmark  *v7memorybench.LocalStatus
-	v7BackendBenchmark *v7llamacpp.BackendBenchmarkLocalStatus
-	llamaCppSidecar    *v7llamacpp.Manager
-	llamaCppKeeper     *v7llamacpp.ResidencyKeeper
-	llamaCppBenchmark  *v7llamacpp.BenchmarkLocalStatus
+	registered           bool
+	lastRegisterError    string
+	lastHeartbeatAt      time.Time
+	lastHeartbeatErr     string
+	latestVersion        string
+	lastMetrics          hw.Metrics
+	lastHealthReport     hub.HealthReport
+	lastClaimAt          time.Time
+	lastClaimError       string
+	lastPayoutAt         time.Time
+	lastPayoutError      string
+	currentJob           *operatorJob
+	recentJobs           []operatorJob
+	infMgr               *inference.Manager
+	runtimeMgr           *runtimeManager
+	v7MemoryBenchmark    *v7memorybench.LocalStatus
+	v7BackendBenchmark   *v7llamacpp.BackendBenchmarkLocalStatus
+	v7InferenceBenchmark *v7inferencebench.LocalStatus
+	llamaCppSidecar      *v7llamacpp.Manager
+	llamaCppKeeper       *v7llamacpp.ResidencyKeeper
+	llamaCppBenchmark    *v7llamacpp.BenchmarkLocalStatus
 }
 
 type operatorJob struct {
@@ -95,35 +97,36 @@ type operatorJob struct {
 }
 
 type operatorStatusResponse struct {
-	Version            string                                         `json:"version"`
-	HubURL             string                                         `json:"hub_url"`
-	PublicKeyHex       string                                         `json:"public_key_hex"`
-	DeviceType         string                                         `json:"device_type"`
-	DeclaredCountry    string                                         `json:"declared_country,omitempty"`
-	VerifiedCountry    string                                         `json:"verified_country,omitempty"`
-	Registered         bool                                           `json:"registered"`
-	RegisterError      string                                         `json:"register_error,omitempty"`
-	LatestVersion      string                                         `json:"latest_version,omitempty"`
-	LastHeartbeatAt    time.Time                                      `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatErr   string                                         `json:"last_heartbeat_error,omitempty"`
-	Machine            operatorMachine                                `json:"machine"`
-	Runtime            operatorRuntimeInfo                            `json:"runtime"`
-	TensorAccess       v7tensoraccess.TensorAccessCapability          `json:"tensor_access"`
-	RuntimeInventory   v7runtimeinventory.Inventory                   `json:"runtime_inventory"`
-	BackendProbes      v7backendprobe.Probes                          `json:"backend_probes"`
-	BackendRuntimes    v7llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
-	LlamaCPPSidecar    v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
-	LlamaCPPBenchmark  v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
-	Metrics            operatorMetrics                                `json:"metrics"`
-	CurrentJob         *operatorJob                                   `json:"current_job,omitempty"`
-	RecentJobs         []operatorJob                                  `json:"recent_jobs"`
-	LastClaimAt        time.Time                                      `json:"last_claim_at,omitempty"`
-	LastClaimError     string                                         `json:"last_claim_error,omitempty"`
-	LastPayoutAt       time.Time                                      `json:"last_payout_at,omitempty"`
-	LastPayoutError    string                                         `json:"last_payout_error,omitempty"`
-	V7MemoryBenchmark  v7memorybench.LocalStatusSnapshot              `json:"v7_memory_benchmark"`
-	V7BackendBenchmark v7llamacpp.BackendBenchmarkLocalStatusSnapshot `json:"v7_backend_benchmark"`
-	WorkLoop           diagnostics.WorkLoopSnapshot                   `json:"work_loop"`
+	Version              string                                         `json:"version"`
+	HubURL               string                                         `json:"hub_url"`
+	PublicKeyHex         string                                         `json:"public_key_hex"`
+	DeviceType           string                                         `json:"device_type"`
+	DeclaredCountry      string                                         `json:"declared_country,omitempty"`
+	VerifiedCountry      string                                         `json:"verified_country,omitempty"`
+	Registered           bool                                           `json:"registered"`
+	RegisterError        string                                         `json:"register_error,omitempty"`
+	LatestVersion        string                                         `json:"latest_version,omitempty"`
+	LastHeartbeatAt      time.Time                                      `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatErr     string                                         `json:"last_heartbeat_error,omitempty"`
+	Machine              operatorMachine                                `json:"machine"`
+	Runtime              operatorRuntimeInfo                            `json:"runtime"`
+	TensorAccess         v7tensoraccess.TensorAccessCapability          `json:"tensor_access"`
+	RuntimeInventory     v7runtimeinventory.Inventory                   `json:"runtime_inventory"`
+	BackendProbes        v7backendprobe.Probes                          `json:"backend_probes"`
+	BackendRuntimes      v7llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
+	LlamaCPPSidecar      v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
+	LlamaCPPBenchmark    v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
+	Metrics              operatorMetrics                                `json:"metrics"`
+	CurrentJob           *operatorJob                                   `json:"current_job,omitempty"`
+	RecentJobs           []operatorJob                                  `json:"recent_jobs"`
+	LastClaimAt          time.Time                                      `json:"last_claim_at,omitempty"`
+	LastClaimError       string                                         `json:"last_claim_error,omitempty"`
+	LastPayoutAt         time.Time                                      `json:"last_payout_at,omitempty"`
+	LastPayoutError      string                                         `json:"last_payout_error,omitempty"`
+	V7MemoryBenchmark    v7memorybench.LocalStatusSnapshot              `json:"v7_memory_benchmark"`
+	V7BackendBenchmark   v7llamacpp.BackendBenchmarkLocalStatusSnapshot `json:"v7_backend_benchmark"`
+	V7InferenceBenchmark v7inferencebench.LocalStatusSnapshot           `json:"v7_inference_benchmark"`
+	WorkLoop             diagnostics.WorkLoopSnapshot                   `json:"work_loop"`
 }
 
 type operatorMachine struct {
@@ -247,20 +250,21 @@ type logRing struct {
 func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, publicAIOptIn bool, caps hw.CapSet, client *hub.Client) *operatorRuntime {
 	llamaCppSidecar := v7llamacpp.NewManagerFromEnv()
 	return &operatorRuntime{
-		version:            strings.TrimSpace(version),
-		hubURL:             strings.TrimSpace(hubURL),
-		deviceType:         strings.TrimSpace(deviceType),
-		declaredCountry:    strings.ToUpper(strings.TrimSpace(declaredCountry)),
-		publicKeyHex:       client.PublicKeyHex(),
-		publicAIOptIn:      publicAIOptIn,
-		caps:               caps,
-		client:             client,
-		recentJobs:         make([]operatorJob, 0, 20),
-		v7MemoryBenchmark:  v7memorybench.NewLocalStatus(),
-		v7BackendBenchmark: v7llamacpp.NewBackendBenchmarkLocalStatus(),
-		llamaCppSidecar:    llamaCppSidecar,
-		llamaCppKeeper:     v7llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
-		llamaCppBenchmark:  v7llamacpp.NewBenchmarkLocalStatus(),
+		version:              strings.TrimSpace(version),
+		hubURL:               strings.TrimSpace(hubURL),
+		deviceType:           strings.TrimSpace(deviceType),
+		declaredCountry:      strings.ToUpper(strings.TrimSpace(declaredCountry)),
+		publicKeyHex:         client.PublicKeyHex(),
+		publicAIOptIn:        publicAIOptIn,
+		caps:                 caps,
+		client:               client,
+		recentJobs:           make([]operatorJob, 0, 20),
+		v7MemoryBenchmark:    v7memorybench.NewLocalStatus(),
+		v7BackendBenchmark:   v7llamacpp.NewBackendBenchmarkLocalStatus(),
+		v7InferenceBenchmark: v7inferencebench.NewLocalStatus(),
+		llamaCppSidecar:      llamaCppSidecar,
+		llamaCppKeeper:       v7llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
+		llamaCppBenchmark:    v7llamacpp.NewBenchmarkLocalStatus(),
 	}
 }
 
@@ -342,6 +346,25 @@ func (s *operatorRuntime) memoryBenchmarkStatus() *v7memorybench.LocalStatus {
 		s.v7MemoryBenchmark = v7memorybench.NewLocalStatus()
 	}
 	return s.v7MemoryBenchmark
+}
+
+func (s *operatorRuntime) inferenceBenchmarkStatus() *v7inferencebench.LocalStatus {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	status := s.v7InferenceBenchmark
+	s.mu.RUnlock()
+	if status != nil {
+		return status
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.v7InferenceBenchmark == nil {
+		s.v7InferenceBenchmark = v7inferencebench.NewLocalStatus()
+	}
+	return s.v7InferenceBenchmark
 }
 
 func (s *operatorRuntime) llamaCppManager() *v7llamacpp.Manager {
@@ -729,6 +752,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	publicAIOptIn := s.publicAIOptIn
 	memoryBenchmarkStatus := s.v7MemoryBenchmark
 	backendBenchmarkStatus := s.v7BackendBenchmark
+	inferenceBenchmarkStatus := s.v7InferenceBenchmark
 	s.mu.RUnlock()
 
 	report = freshOperatorHealthReport(caps, infMgr, runtimeMgr, report)
@@ -739,6 +763,10 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	var backendBenchmarkSnapshot v7llamacpp.BackendBenchmarkLocalStatusSnapshot
 	if backendBenchmarkStatus != nil {
 		backendBenchmarkSnapshot = backendBenchmarkStatus.Snapshot()
+	}
+	var inferenceBenchmarkSnapshot v7inferencebench.LocalStatusSnapshot
+	if inferenceBenchmarkStatus != nil {
+		inferenceBenchmarkSnapshot = inferenceBenchmarkStatus.Snapshot()
 	}
 	workLoopSnapshot := sanitizeOperatorWorkLoopSnapshot(workLoopDiagnostics.Snapshot())
 
@@ -836,15 +864,16 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUUtil:    metrics.GPUUtil,
 			PowerWatts: metrics.PowerWatts,
 		},
-		CurrentJob:         currentJob,
-		RecentJobs:         recent,
-		LastClaimAt:        lastClaimAt,
-		LastClaimError:     lastClaimErr,
-		LastPayoutAt:       lastPayoutAt,
-		LastPayoutError:    lastPayoutErr,
-		V7MemoryBenchmark:  memoryBenchmarkSnapshot,
-		V7BackendBenchmark: backendBenchmarkSnapshot,
-		WorkLoop:           workLoopSnapshot,
+		CurrentJob:           currentJob,
+		RecentJobs:           recent,
+		LastClaimAt:          lastClaimAt,
+		LastClaimError:       lastClaimErr,
+		LastPayoutAt:         lastPayoutAt,
+		LastPayoutError:      lastPayoutErr,
+		V7MemoryBenchmark:    memoryBenchmarkSnapshot,
+		V7BackendBenchmark:   backendBenchmarkSnapshot,
+		V7InferenceBenchmark: inferenceBenchmarkSnapshot,
+		WorkLoop:             workLoopSnapshot,
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
@@ -12,6 +13,7 @@ import (
 
 const (
 	ProofStatusMeasured = "backend_inference_measured"
+	ProofStatusRejected = "rejected"
 	ProofStatusFailed   = "backend_inference_failed"
 )
 
@@ -49,11 +51,63 @@ type BenchmarkExecutionResult struct {
 	OutputBytes     int64
 	TokensGenerated int64
 	TTFTMs          int64
+	P95TTFTMs       int64
 	TotalTimeMs     int64
 	DecodeTPS       float64
 	EndToEndTPS     float64
 	ProofStatus     string
 	ErrorCode       string
+}
+
+type LocalStatusCounters struct {
+	Seen             uint64 `json:"seen"`
+	Executed         uint64 `json:"executed"`
+	ReceiptSubmitted uint64 `json:"receipt_submitted"`
+	ReceiptFailed    uint64 `json:"receipt_failed"`
+}
+
+type LocalStatusSnapshot struct {
+	LastJobID string              `json:"last_job_id"`
+	LastError string              `json:"last_error"`
+	Counters  LocalStatusCounters `json:"counters"`
+}
+
+type LocalStatus struct {
+	mu       sync.RWMutex
+	snapshot LocalStatusSnapshot
+}
+
+func NewLocalStatus() *LocalStatus {
+	return &LocalStatus{}
+}
+
+func (s *LocalStatus) RecordSeen(jobID string) {
+	s.recordSeen(jobID)
+}
+
+func (s *LocalStatus) RecordExecuted(jobID string) {
+	s.recordExecuted(jobID)
+}
+
+func (s *LocalStatus) RecordReceiptSubmitted(jobID string) {
+	s.recordReceiptSubmitted(jobID)
+}
+
+func (s *LocalStatus) RecordReceiptFailed(jobID string, err error) {
+	s.recordReceiptFailed(jobID, err)
+}
+
+func (s *LocalStatus) RecordError(jobID string, err error) {
+	s.recordError(jobID, err)
+}
+
+func (s *LocalStatus) Snapshot() LocalStatusSnapshot {
+	if s == nil {
+		return LocalStatusSnapshot{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snapshot
 }
 
 func ExecuteBenchmarkAssignment(ctx context.Context, specJSON string, opts ExecuteOptions) (BenchmarkReceipt, bool, error) {
@@ -206,6 +260,7 @@ func measuredExecutionResult(spec BenchmarkSpec, completion llamacpp.CompletionR
 		OutputBytes:     outputBytes,
 		TokensGenerated: tokens,
 		TTFTMs:          ttft,
+		P95TTFTMs:       ttft,
 		TotalTimeMs:     total,
 		DecodeTPS:       roundTPS(decodeTPS),
 		EndToEndTPS:     roundTPS(endToEndTPS),
@@ -223,7 +278,7 @@ func failedExecutionResult(spec BenchmarkSpec, code string) BenchmarkExecutionRe
 		Backend:     spec.Backend,
 		ModelID:     spec.ModelID,
 		PromptHash:  spec.PromptHash,
-		ProofStatus: ProofStatusFailed,
+		ProofStatus: ProofStatusRejected,
 		ErrorCode:   code,
 	}
 }
@@ -285,6 +340,71 @@ func roundTPS(value float64) float64 {
 
 func finiteTPS(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+}
+
+func (s *LocalStatus) recordSeen(jobID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshot.LastJobID = cleanBenchmarkText(jobID, maxBenchmarkIDLen)
+	s.snapshot.LastError = ""
+	s.snapshot.Counters.Seen++
+}
+
+func (s *LocalStatus) recordExecuted(jobID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshot.LastJobID = cleanBenchmarkText(jobID, maxBenchmarkIDLen)
+	s.snapshot.LastError = ""
+	s.snapshot.Counters.Executed++
+}
+
+func (s *LocalStatus) recordReceiptSubmitted(jobID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshot.LastJobID = cleanBenchmarkText(jobID, maxBenchmarkIDLen)
+	s.snapshot.LastError = ""
+	s.snapshot.Counters.ReceiptSubmitted++
+}
+
+func (s *LocalStatus) recordReceiptFailed(jobID string, err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshot.LastJobID = cleanBenchmarkText(jobID, maxBenchmarkIDLen)
+	s.snapshot.LastError = cleanLocalStatusError(err)
+	s.snapshot.Counters.ReceiptFailed++
+}
+
+func (s *LocalStatus) recordError(jobID string, err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshot.LastJobID = cleanBenchmarkText(jobID, maxBenchmarkIDLen)
+	s.snapshot.LastError = cleanLocalStatusError(err)
+}
+
+func cleanLocalStatusError(err error) string {
+	if err == nil {
+		return ""
+	}
+	value := cleanBenchmarkErrorCode(err.Error())
+	if value == "" {
+		return "backend_inference_benchmark_error"
+	}
+	return value
 }
 
 func ensureMeasuredMetrics(result BenchmarkExecutionResult) error {

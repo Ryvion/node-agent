@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	BenchmarkTask    = "v7_backend_inference_benchmark"
-	BenchmarkFlagEnv = "RYV_NODE_V7_INFERENCE_BENCH"
+	BenchmarkTask            = "v7_backend_inference_benchmark"
+	BenchmarkFlagEnv         = "RYV_NODE_V7_INFERENCE_BENCH"
+	BenchmarkPromptProfileID = "standard_backend_probe"
 
 	maxBenchmarkIDLen      = 256
 	maxBenchmarkModelIDLen = 256
@@ -24,10 +25,13 @@ var ErrInvalidBenchmarkSpec = errors.New("inferencebench: invalid benchmark spec
 type BenchmarkSpec struct {
 	Task            string `json:"task"`
 	RequestID       string `json:"request_id"`
+	BenchmarkID     string `json:"benchmark_id"`
 	JobID           string `json:"job_id"`
 	Backend         string `json:"backend"`
 	ModelID         string `json:"model_id"`
+	TargetNodeID    string `json:"target_node_id"`
 	PromptHash      string `json:"prompt_hash"`
+	PromptProfileID string `json:"prompt_profile_id"`
 	MaxTokens       int    `json:"max_tokens"`
 	TimeoutMs       int64  `json:"timeout_ms"`
 	CreatedAtUnixMs int64  `json:"created_at_unix_ms"`
@@ -105,6 +109,9 @@ func ValidateBenchmarkSpec(spec BenchmarkSpec) error {
 	if spec.RequestID == "" {
 		errs = append(errs, fmt.Errorf("%w: request_id required", ErrInvalidBenchmarkSpec))
 	}
+	if spec.BenchmarkID == "" {
+		errs = append(errs, fmt.Errorf("%w: benchmark_id required", ErrInvalidBenchmarkSpec))
+	}
 	if spec.JobID == "" {
 		errs = append(errs, fmt.Errorf("%w: job_id required", ErrInvalidBenchmarkSpec))
 	}
@@ -115,6 +122,12 @@ func ValidateBenchmarkSpec(spec BenchmarkSpec) error {
 	}
 	if spec.ModelID == "" {
 		errs = append(errs, fmt.Errorf("%w: model_id required", ErrInvalidBenchmarkSpec))
+	}
+	if spec.TargetNodeID == "" {
+		errs = append(errs, fmt.Errorf("%w: target_node_id required", ErrInvalidBenchmarkSpec))
+	}
+	if spec.PromptProfileID != "" && spec.PromptProfileID != BenchmarkPromptProfileID {
+		errs = append(errs, fmt.Errorf("%w: prompt_profile_id must be %q", ErrInvalidBenchmarkSpec, BenchmarkPromptProfileID))
 	}
 	if err := validateSHA256ID(spec.PromptHash, "prompt_hash", ErrInvalidBenchmarkSpec); err != nil {
 		errs = append(errs, err)
@@ -140,10 +153,13 @@ func ValidateBenchmarkSpec(spec BenchmarkSpec) error {
 func normalizeBenchmarkSpec(spec BenchmarkSpec) BenchmarkSpec {
 	spec.Task = strings.TrimSpace(spec.Task)
 	spec.RequestID = cleanBenchmarkText(spec.RequestID, maxBenchmarkIDLen)
+	spec.BenchmarkID = cleanBenchmarkText(spec.BenchmarkID, maxBenchmarkIDLen)
 	spec.JobID = cleanBenchmarkText(spec.JobID, maxBenchmarkIDLen)
 	spec.Backend = normalizeBackendName(spec.Backend)
 	spec.ModelID = cleanBenchmarkText(spec.ModelID, maxBenchmarkModelIDLen)
+	spec.TargetNodeID = cleanBenchmarkText(spec.TargetNodeID, maxBenchmarkIDLen)
 	spec.PromptHash = strings.TrimSpace(spec.PromptHash)
+	spec.PromptProfileID = cleanBenchmarkText(spec.PromptProfileID, maxBenchmarkIDLen)
 	return spec
 }
 

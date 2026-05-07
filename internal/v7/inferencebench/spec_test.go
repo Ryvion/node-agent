@@ -23,6 +23,12 @@ func TestDecodeBenchmarkSpecAcceptsLlamaCppAliasAndPromptHash(t *testing.T) {
 	if got.PromptHash != llamacpp.HashBenchmarkPrompt() {
 		t.Fatalf("prompt_hash = %q, want internal prompt hash", got.PromptHash)
 	}
+	if got.BenchmarkID != "benchmark-backend-inference-local" || got.TargetNodeID != "node-backend-inference-local" {
+		t.Fatalf("benchmark_id/target_node_id = %q/%q, want parsed ids", got.BenchmarkID, got.TargetNodeID)
+	}
+	if got.PromptProfileID != BenchmarkPromptProfileID {
+		t.Fatalf("prompt_profile_id = %q, want %q", got.PromptProfileID, BenchmarkPromptProfileID)
+	}
 }
 
 func TestDecodeBenchmarkSpecRejectsPromptHashMismatch(t *testing.T) {
