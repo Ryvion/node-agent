@@ -256,6 +256,12 @@ func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
 	if status.LlamaCPPSidecar.Enabled || status.LlamaCPPSidecar.Running || status.LlamaCPPSidecar.Healthy {
 		t.Fatalf("llama_cpp_sidecar = %+v, want disabled stopped", status.LlamaCPPSidecar)
 	}
+	if status.LlamaCPPSidecar.KeepWarmEnabled ||
+		status.LlamaCPPSidecar.RestartCount != 0 ||
+		status.LlamaCPPSidecar.LastKeepWarmError != "" ||
+		status.LlamaCPPSidecar.RestartBackoffSeconds != int(v7llamacpp.DefaultRestartBackoff/time.Second) {
+		t.Fatalf("llama_cpp_sidecar keepwarm fields = %+v, want disabled defaults", status.LlamaCPPSidecar)
+	}
 	if status.BackendRuntimes.LlamaCPP.Enabled ||
 		status.BackendRuntimes.LlamaCPP.Running ||
 		status.BackendRuntimes.LlamaCPP.Healthy ||
@@ -272,7 +278,12 @@ func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
 		t.Fatalf("llama_cpp_sidecar capability flags = %+v", status.LlamaCPPSidecar)
 	}
 	text := strings.ToLower(string(respBody))
-	if !strings.Contains(text, `"llama_cpp_sidecar"`) || !strings.Contains(text, `"backend_runtimes"`) {
+	if !strings.Contains(text, `"llama_cpp_sidecar"`) ||
+		!strings.Contains(text, `"backend_runtimes"`) ||
+		!strings.Contains(text, `"keep_warm_enabled"`) ||
+		!strings.Contains(text, `"restart_count"`) ||
+		!strings.Contains(text, `"last_keepwarm_error"`) ||
+		!strings.Contains(text, `"restart_backoff_seconds"`) {
 		t.Fatalf("status JSON missing llama.cpp runtime fields: %s", respBody)
 	}
 	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {

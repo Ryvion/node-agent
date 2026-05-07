@@ -645,6 +645,7 @@ func runNode(ctx context.Context) {
 	operatorRuntimeState.setRuntimeManager(runtimeMgr)
 	defer operatorRuntimeState.stopLlamaCppSidecar(context.Background())
 	startOperatorAPIServer(ctx, operatorRuntimeState, operatorAPIPort(flagUIPort))
+	operatorRuntimeState.startLlamaCppResidencyKeeper(ctx)
 
 	// Retry registration with backoff — on Windows the service starts before
 	// Windows service startup can race the managed runtime, WSL2, and network.

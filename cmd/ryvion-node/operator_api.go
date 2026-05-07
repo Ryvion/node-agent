@@ -71,6 +71,7 @@ type operatorRuntime struct {
 	v7MemoryBenchmark  *v7memorybench.LocalStatus
 	v7BackendBenchmark *v7llamacpp.BackendBenchmarkLocalStatus
 	llamaCppSidecar    *v7llamacpp.Manager
+	llamaCppKeeper     *v7llamacpp.ResidencyKeeper
 	llamaCppBenchmark  *v7llamacpp.BenchmarkLocalStatus
 }
 
@@ -111,7 +112,7 @@ type operatorStatusResponse struct {
 	RuntimeInventory   v7runtimeinventory.Inventory                   `json:"runtime_inventory"`
 	BackendProbes      v7backendprobe.Probes                          `json:"backend_probes"`
 	BackendRuntimes    v7llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
-	LlamaCPPSidecar    v7llamacpp.LlamaCppSidecarStatus               `json:"llama_cpp_sidecar"`
+	LlamaCPPSidecar    v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
 	LlamaCPPBenchmark  v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
 	Metrics            operatorMetrics                                `json:"metrics"`
 	CurrentJob         *operatorJob                                   `json:"current_job,omitempty"`
@@ -244,6 +245,7 @@ type logRing struct {
 }
 
 func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, publicAIOptIn bool, caps hw.CapSet, client *hub.Client) *operatorRuntime {
+	llamaCppSidecar := v7llamacpp.NewManagerFromEnv()
 	return &operatorRuntime{
 		version:            strings.TrimSpace(version),
 		hubURL:             strings.TrimSpace(hubURL),
@@ -256,7 +258,8 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		recentJobs:         make([]operatorJob, 0, 20),
 		v7MemoryBenchmark:  v7memorybench.NewLocalStatus(),
 		v7BackendBenchmark: v7llamacpp.NewBackendBenchmarkLocalStatus(),
-		llamaCppSidecar:    v7llamacpp.NewManagerFromEnv(),
+		llamaCppSidecar:    llamaCppSidecar,
+		llamaCppKeeper:     v7llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
 		llamaCppBenchmark:  v7llamacpp.NewBenchmarkLocalStatus(),
 	}
 }
@@ -360,6 +363,28 @@ func (s *operatorRuntime) llamaCppManager() *v7llamacpp.Manager {
 	return s.llamaCppSidecar
 }
 
+func (s *operatorRuntime) llamaCppResidencyKeeper() *v7llamacpp.ResidencyKeeper {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	keeper := s.llamaCppKeeper
+	s.mu.RUnlock()
+	if keeper != nil {
+		return keeper
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.llamaCppSidecar == nil {
+		s.llamaCppSidecar = v7llamacpp.NewManagerFromEnv()
+	}
+	if s.llamaCppKeeper == nil {
+		s.llamaCppKeeper = v7llamacpp.NewResidencyKeeperFromEnv(s.llamaCppSidecar)
+	}
+	return s.llamaCppKeeper
+}
+
 func (s *operatorRuntime) backendBenchmarkStatus() *v7llamacpp.BackendBenchmarkLocalStatus {
 	if s == nil {
 		return nil
@@ -406,20 +431,41 @@ func (s *operatorRuntime) llamaCppSidecarStatus(ctx context.Context) v7llamacpp.
 	return s.llamaCppManager().Status(ctx)
 }
 
+func (s *operatorRuntime) llamaCppSidecarStatusView(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
+	return v7llamacpp.BuildLlamaCppSidecarStatusView(s.llamaCppSidecarStatus(ctx), s.llamaCppResidencyKeeperStatus())
+}
+
+func (s *operatorRuntime) llamaCppResidencyKeeperStatus() v7llamacpp.ResidencyKeeperStatus {
+	keeper := s.llamaCppResidencyKeeper()
+	if keeper == nil {
+		return v7llamacpp.ResidencyKeeperStatus{}
+	}
+	return keeper.Snapshot()
+}
+
+func (s *operatorRuntime) startLlamaCppResidencyKeeper(ctx context.Context) {
+	if keeper := s.llamaCppResidencyKeeper(); keeper != nil {
+		keeper.Start(ctx)
+	}
+}
+
 func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) v7llamacpp.BackendRuntimes {
 	return v7llamacpp.BuildBackendRuntimes(s.llamaCppSidecarStatus(ctx))
 }
 
-func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
-	return s.llamaCppManager().Start(ctx)
+func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
+	status := s.llamaCppManager().Start(ctx)
+	return v7llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
 }
 
-func (s *operatorRuntime) stopLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
-	return s.llamaCppManager().Stop(ctx)
+func (s *operatorRuntime) stopLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
+	status := s.llamaCppManager().Stop(ctx)
+	return v7llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
 }
 
-func (s *operatorRuntime) restartLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
-	return s.llamaCppManager().Restart(ctx)
+func (s *operatorRuntime) restartLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
+	status := s.llamaCppManager().Restart(ctx)
+	return v7llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
 }
 
 func (s *operatorRuntime) runLlamaCppBenchmark(ctx context.Context, config v7llamacpp.BenchmarkConfig) v7llamacpp.BenchmarkStatusSnapshot {
@@ -755,8 +801,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
 	backendProbes := buildBackendProbeStatus()
-	llamaCppSidecar := s.llamaCppSidecarStatus(context.Background())
-	backendRuntimes := v7llamacpp.BuildBackendRuntimes(llamaCppSidecar)
+	llamaCppSidecar := s.llamaCppSidecarStatusView(context.Background())
+	backendRuntimes := v7llamacpp.BuildBackendRuntimes(llamaCppSidecar.LlamaCppSidecarStatus)
 	llamaCppBenchmark := s.llamaCppBenchmarkSnapshot()
 
 	return operatorStatusResponse{
@@ -1215,7 +1261,7 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		writeJSON(w, http.StatusOK, state.statusSnapshot(port))
 	})
 	mux.HandleFunc("GET /api/v1/operator/llamacpp/status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, state.llamaCppSidecarStatus(r.Context()))
+		writeJSON(w, http.StatusOK, state.llamaCppSidecarStatusView(r.Context()))
 	})
 	mux.HandleFunc("POST /api/v1/operator/llamacpp/start", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, state.startLlamaCppSidecar(r.Context()))

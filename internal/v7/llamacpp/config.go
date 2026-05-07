@@ -8,12 +8,23 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 )
 
 const maxConfigTextLen = 1024
+
+const (
+	EnvKeepWarm               = "RYV_LLAMA_CPP_KEEP_WARM"
+	EnvHealthIntervalSecs     = "RYV_LLAMA_CPP_HEALTH_INTERVAL_SECONDS"
+	EnvRestartBackoffSecs     = "RYV_LLAMA_CPP_RESTART_BACKOFF_SECONDS"
+	EnvMaxRestartsPerHour     = "RYV_LLAMA_CPP_MAX_RESTARTS_PER_HOUR"
+	DefaultHealthInterval     = 30 * time.Second
+	DefaultRestartBackoff     = 10 * time.Second
+	DefaultMaxRestartsPerHour = 10
+)
 
 type ConfigSource struct {
 	Getenv               func(string) string
@@ -27,8 +38,29 @@ type ConfigSource struct {
 	RuntimeInventory     *runtimeinventory.Inventory
 }
 
+type ResidencyKeeperConfig struct {
+	Enabled            bool
+	HealthInterval     time.Duration
+	RestartBackoff     time.Duration
+	MaxRestartsPerHour int
+}
+
 func ConfigFromEnv() LlamaCppSidecarConfig {
 	return ConfigFromEnvWith(ConfigSource{})
+}
+
+func ResidencyKeeperConfigFromEnv() ResidencyKeeperConfig {
+	return ResidencyKeeperConfigFromEnvWith(ConfigSource{})
+}
+
+func ResidencyKeeperConfigFromEnvWith(source ConfigSource) ResidencyKeeperConfig {
+	source = normalizeConfigSource(source)
+	return normalizeResidencyKeeperConfig(ResidencyKeeperConfig{
+		Enabled:            envBool(source.Getenv(EnvKeepWarm)),
+		HealthInterval:     envDurationSeconds(source.Getenv(EnvHealthIntervalSecs), DefaultHealthInterval),
+		RestartBackoff:     envDurationSeconds(source.Getenv(EnvRestartBackoffSecs), DefaultRestartBackoff),
+		MaxRestartsPerHour: envInt(source.Getenv(EnvMaxRestartsPerHour), DefaultMaxRestartsPerHour),
+	})
 }
 
 func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
@@ -70,6 +102,19 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 		cfg.GPULayers = 0
 	}
 	cfg.ExtraArgs = sanitizeExtraArgs(strings.Join(cfg.ExtraArgs, " "))
+	return cfg
+}
+
+func normalizeResidencyKeeperConfig(cfg ResidencyKeeperConfig) ResidencyKeeperConfig {
+	if cfg.HealthInterval <= 0 {
+		cfg.HealthInterval = DefaultHealthInterval
+	}
+	if cfg.RestartBackoff < 0 {
+		cfg.RestartBackoff = DefaultRestartBackoff
+	}
+	if cfg.MaxRestartsPerHour <= 0 {
+		cfg.MaxRestartsPerHour = DefaultMaxRestartsPerHour
+	}
 	return cfg
 }
 
@@ -165,6 +210,14 @@ func envInt(value string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envDurationSeconds(value string, fallback time.Duration) time.Duration {
+	n := envInt(value, int(fallback/time.Second))
+	if n <= 0 {
+		return fallback
+	}
+	return time.Duration(n) * time.Second
 }
 
 func normalizeHost(value string) string {
