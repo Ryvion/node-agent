@@ -52,6 +52,19 @@ func DetectBackendCandidates(detector CandidateBackendDetector) []BackendCandida
 	return detectBackendCandidateInventory(detector).BackendCandidates
 }
 
+func DetectLlamaCPPBackendCandidate(detector CandidateBackendDetector) BackendCandidate {
+	detector = normalizeCandidateBackendDetector(detector)
+	candidates := normalizeBackendCandidates([]BackendCandidate{detectLlamaCPPCandidate(detector)})
+	if len(candidates) == 0 {
+		return BackendCandidate{
+			Backend: BackendCandidateLlamaCPP,
+			Version: unknownVersion,
+			Reason:  "llama.cpp binary not detected",
+		}
+	}
+	return candidates[0]
+}
+
 func DetectGGUFModels(detector CandidateBackendDetector) []GGUFModelCandidate {
 	return detectBackendCandidateInventory(detector).GGUFModels
 }

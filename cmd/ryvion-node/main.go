@@ -29,6 +29,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	"github.com/Ryvion/node-agent/internal/update"
 	v7artifact "github.com/Ryvion/node-agent/internal/v7/artifact"
+	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
@@ -103,6 +104,10 @@ func main() {
 		runDoctor(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "backend-probe" {
+		runBackendProbe(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "memorybench-selftest" {
 		runMemoryBenchSelfTest(os.Args[2:])
 		return
@@ -156,6 +161,45 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	runNode(ctx)
+}
+
+func runBackendProbe(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ryvion-node backend-probe llamacpp --json")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "llamacpp":
+		runLlamaCPPBackendProbe(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown backend probe %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func runLlamaCPPBackendProbe(args []string) {
+	fs := flag.NewFlagSet("backend-probe llamacpp", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOutput := fs.Bool("json", false, "Emit compact JSON")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: ryvion-node backend-probe llamacpp --json")
+		os.Exit(2)
+	}
+
+	probe := v7backendprobe.ProbeLlamaCPP(v7backendprobe.Detector{})
+	if *jsonOutput {
+		if err := json.NewEncoder(os.Stdout).Encode(probe); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	fmt.Printf("llama.cpp available=%t reason=%s\n", probe.Available, probe.Reason)
+	os.Exit(0)
 }
 
 func runDoctor(args []string) {

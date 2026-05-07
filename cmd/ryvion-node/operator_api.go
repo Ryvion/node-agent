@@ -19,6 +19,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
+	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
@@ -103,6 +104,7 @@ type operatorStatusResponse struct {
 	Runtime           operatorRuntimeInfo                   `json:"runtime"`
 	TensorAccess      v7tensoraccess.TensorAccessCapability `json:"tensor_access"`
 	RuntimeInventory  v7runtimeinventory.Inventory          `json:"runtime_inventory"`
+	BackendProbes     v7backendprobe.Probes                 `json:"backend_probes"`
 	Metrics           operatorMetrics                       `json:"metrics"`
 	CurrentJob        *operatorJob                          `json:"current_job,omitempty"`
 	RecentJobs        []operatorJob                         `json:"recent_jobs"`
@@ -621,6 +623,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInfo.RuntimeBackendPresent = runtimeInfo.RuntimeBackend != ""
 	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
+	backendProbes := buildBackendProbeStatus()
 
 	return operatorStatusResponse{
 		Version:          s.version,
@@ -643,6 +646,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		Runtime:          runtimeInfo,
 		TensorAccess:     runtimeInfo.TensorAccess,
 		RuntimeInventory: runtimeInventory,
+		BackendProbes:    backendProbes,
 		Metrics: operatorMetrics{
 			CPUUtil:    metrics.CPUUtil,
 			MemUtil:    metrics.MemUtil,
@@ -658,6 +662,10 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		V7MemoryBenchmark: memoryBenchmarkSnapshot,
 		WorkLoop:          workLoopSnapshot,
 	}
+}
+
+func buildBackendProbeStatus() v7backendprobe.Probes {
+	return v7backendprobe.ProbeAll(v7backendprobe.Detector{})
 }
 
 func buildNativeTensorAccessCapability(infMgr *inference.Manager) v7kvprobe.Capability {
