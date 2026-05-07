@@ -32,6 +32,7 @@ import (
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
+	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
@@ -98,6 +99,20 @@ var (
 		return v7llamacpp.BenchmarkRunner{
 			Sidecar: sidecar,
 			Client:  v7llamacpp.OpenAIClient{},
+		}
+	}
+	newV7BackendInferenceBenchmarkRunner = func() v7inferencebench.BenchmarkRunner {
+		var sidecar v7inferencebench.LlamaCppSidecar = v7llamacpp.NewManagerFromEnv()
+		var keepWarm v7inferencebench.KeepWarmChecker
+		if operatorRuntimeState != nil {
+			sidecar = operatorRuntimeState.llamaCppManager()
+			keepWarm = operatorRuntimeState.llamaCppResidencyKeeper()
+		}
+		return v7inferencebench.LlamaCppBenchmarkRunner{
+			Sidecar:  sidecar,
+			KeepWarm: keepWarm,
+			Client:   v7llamacpp.OpenAIClient{},
+			Getenv:   os.Getenv,
 		}
 	}
 )
@@ -1162,6 +1177,18 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	if handled, result, runErr := processOptionalV7BackendInferenceBenchmark(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("V7 backend inference benchmark execution failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("V7 backend inference benchmark completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	if handled, result, runErr := processOptionalV7ModelBenchmark(runCtx, client, work, infMgr, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
 			slog.Warn("V7 model benchmark execution failed", "job_id", work.JobID, "error", runErr)
@@ -1759,6 +1786,129 @@ func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromReceipt(specJSON string, 
 		putWorkLoopAnyIntContext(context, "warmup_runs", taskMetadata["warmup_runs"])
 		putWorkLoopAnyIntContext(context, "measured_runs", taskMetadata["measured_runs"])
 		putWorkLoopAnyIntContext(context, "p50_ttft_ms", taskMetadata["p50_ttft_ms"])
+		if status, ok := taskMetadata["proof_status"].(string); ok && strings.TrimSpace(status) != "" {
+			context["proof_status"] = strings.TrimSpace(status)
+		}
+	}
+	return context
+}
+
+func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	identity, isBenchmark := v7inferencebench.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
+	benchmarkEnabled := isBenchmark && v7inferencebench.BenchmarkEnabledFromEnv(os.Getenv)
+
+	runner := newV7BackendInferenceBenchmarkRunner()
+	executionStarted := time.Now()
+	if benchmarkEnabled {
+		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
+	}
+	receipt, handled, err := v7inferencebench.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, v7inferencebench.ExecuteOptions{
+		Getenv: os.Getenv,
+		Runner: runner,
+	})
+	if !handled {
+		return false, nil, nil
+	}
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
+
+	receiptBuildStarted := time.Now()
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
+	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
+	extra := map[string]any{
+		"executor":      v7inferencebench.BenchmarkTask,
+		"executor_kind": v7inferencebench.BenchmarkTask,
+		"task":          v7inferencebench.BenchmarkTask,
+	}
+	if strings.TrimSpace(receipt.ResultHashHex) == "" {
+		receipt = v7inferencebench.BuildBenchmarkRejectionReceipt(work.JobID, err)
+	}
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+		extra["exit_code"] = 1
+		extra["error"] = "v7 backend inference benchmark failed"
+	} else {
+		extra["exit_code"] = 0
+	}
+	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
+	hubReceipt := hub.Receipt{
+		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
+		ResultHashHex: receipt.ResultHashHex,
+		MeteringUnits: receipt.MeteringUnits,
+		Metadata:      metadata,
+	}
+	snapshot := &runnerResultSnapshot{
+		ResultHashHex: hubReceipt.ResultHashHex,
+		MeteringUnits: hubReceipt.MeteringUnits,
+		ExitCode:      exitCode,
+		Metadata:      metadata,
+	}
+	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
+	receiptContext := v7BackendInferenceBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt)
+	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_start", hubReceipt.JobID, work.Kind, receiptContext)
+	if client == nil {
+		submitErr := fmt.Errorf("hub client unavailable")
+		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	submitStarted := time.Now()
+	workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+	submitErr := client.SubmitReceipt(ctx, hubReceipt)
+	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), submitErr)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+	if submitErr != nil {
+		if err != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", err, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	return true, snapshot, err
+}
+
+func v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {
+	context := map[string]string{
+		"spec_task": v7inferencebench.BenchmarkTask,
+	}
+	var spec struct {
+		Task      string `json:"task"`
+		Backend   string `json:"backend"`
+		ModelID   string `json:"model_id"`
+		MaxTokens int    `json:"max_tokens"`
+	}
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return context
+	}
+	if strings.TrimSpace(spec.Task) == v7inferencebench.BenchmarkTask {
+		context["spec_task"] = v7inferencebench.BenchmarkTask
+	}
+	if backend := strings.TrimSpace(spec.Backend); backend != "" {
+		context["backend"] = backend
+	}
+	if modelID := strings.TrimSpace(spec.ModelID); modelID != "" {
+		context["model_id"] = modelID
+	}
+	if spec.MaxTokens > 0 {
+		context["max_tokens"] = strconv.Itoa(spec.MaxTokens)
+	}
+	return context
+}
+
+func v7BackendInferenceBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v7inferencebench.BenchmarkReceipt) map[string]string {
+	context := v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(specJSON)
+	if taskMetadata, ok := receipt.Metadata[v7inferencebench.BenchmarkTask].(map[string]any); ok {
+		putWorkLoopAnyIntContext(context, "tokens_generated", taskMetadata["tokens_generated"])
+		putWorkLoopAnyIntContext(context, "ttft_ms", taskMetadata["ttft_ms"])
+		putWorkLoopAnyIntContext(context, "total_time_ms", taskMetadata["total_time_ms"])
 		if status, ok := taskMetadata["proof_status"].(string); ok && strings.TrimSpace(status) != "" {
 			context["proof_status"] = strings.TrimSpace(status)
 		}

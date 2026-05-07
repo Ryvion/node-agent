@@ -158,6 +158,48 @@ func TestBenchmarkLocalStatusStoresLastRun(t *testing.T) {
 	}
 }
 
+func TestCompleteInternalBenchmarkPromptUsesFixedPromptAndFallback(t *testing.T) {
+	client := &queuedCompletionClient{steps: []completionStep{
+		{err: ClientError{Code: "llamacpp_stream_unavailable", StatusCode: 400}},
+		{result: completionResult("fallback measured", 5, 500, 500, false)},
+	}}
+	result, streamed, err := CompleteInternalBenchmarkPrompt(context.Background(), client, CompletionRequest{
+		BaseURL:   "http://127.0.0.1:45910",
+		ModelID:   "tinyllama.Q4_K_M.gguf",
+		MaxTokens: 8,
+		Stream:    true,
+	})
+	if err != nil {
+		t.Fatalf("CompleteInternalBenchmarkPrompt() error = %v", err)
+	}
+	if streamed {
+		t.Fatal("streamed = true, want false after fallback")
+	}
+	if result.TokensGenerated != 5 {
+		t.Fatalf("tokens_generated = %d, want 5", result.TokensGenerated)
+	}
+	if len(client.requests) != 2 || client.requests[0].Prompt == "" || client.requests[1].Prompt == "" {
+		t.Fatalf("requests = %+v, want fixed prompt on both attempts", client.requests)
+	}
+	if client.requests[0].Prompt != client.requests[1].Prompt {
+		t.Fatalf("prompt changed across fallback")
+	}
+}
+
+func TestKeepWarmEnabledFromEnv(t *testing.T) {
+	if !KeepWarmEnabledFromEnv(func(key string) string {
+		if key == EnvKeepWarm {
+			return "true"
+		}
+		return ""
+	}) {
+		t.Fatal("KeepWarmEnabledFromEnv(true) = false")
+	}
+	if KeepWarmEnabledFromEnv(func(string) string { return "" }) {
+		t.Fatal("KeepWarmEnabledFromEnv(empty) = true")
+	}
+}
+
 type fakeBenchmarkSidecar struct {
 	status LlamaCppSidecarStatus
 }

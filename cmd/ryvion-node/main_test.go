@@ -21,6 +21,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
@@ -1675,6 +1676,144 @@ func TestProcessOptionalV7LlamaCppBackendBenchmarkFlagOffDoesNotHandle(t *testin
 	}
 }
 
+func TestProcessOptionalV7BackendInferenceBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	t.Setenv(v7inferencebench.BenchmarkFlagEnv, "")
+	oldFactory := newV7BackendInferenceBenchmarkRunner
+	fakeRunner := &fakeBackendInferenceBenchmarkRunner{result: testBackendInferenceBenchmarkResult(v7inferencebench.ProofStatusMeasured)}
+	newV7BackendInferenceBenchmarkRunner = func() v7inferencebench.BenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7BackendInferenceBenchmarkRunner = oldFactory
+	})
+
+	handled, result, err := processOptionalV7BackendInferenceBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-backend-inference-local",
+		Kind:     "benchmark",
+		SpecJSON: testBackendInferenceBenchmarkSpecJSON(t),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7BackendInferenceBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false when flag is off")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if fakeRunner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
+	}
+}
+
+func TestProcessOptionalV7BackendInferenceBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(v7inferencebench.BenchmarkFlagEnv, "1")
+	oldFactory := newV7BackendInferenceBenchmarkRunner
+	oldDiagnostics := workLoopDiagnostics
+	fakeRunner := &fakeBackendInferenceBenchmarkRunner{result: testBackendInferenceBenchmarkResult(v7inferencebench.ProofStatusMeasured)}
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7BackendInferenceBenchmarkRunner = func() v7inferencebench.BenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7BackendInferenceBenchmarkRunner = oldFactory
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-backend-inference-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[v7inferencebench.BenchmarkTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7inferencebench.BenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != v7inferencebench.ProofStatusMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, key := range []string{"prompt_hash", "output_hash"} {
+			value, ok := metadata[key].(string)
+			if !ok || !strings.HasPrefix(value, "sha256:") {
+				t.Errorf("%s = %#v, want sha256 hash", key, metadata[key])
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		if metadata["tokens_generated"] != float64(12) || metadata["ttft_ms"] != float64(100) || metadata["total_time_ms"] != float64(700) {
+			t.Errorf("metrics metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"secret measured output", "distributed computing", "output_text", "generated_text", "raw_output", "token_logprobs", "raw_tensor"} {
+			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7BackendInferenceBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-backend-inference-local",
+		Kind:     "benchmark",
+		SpecJSON: testBackendInferenceBenchmarkSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7BackendInferenceBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful backend inference benchmark receipt", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.ReceiptSubmittedCount != 1 || workSnapshot.ReceiptFailedCount != 0 {
+		t.Fatalf("unexpected work-loop receipt counters: %+v", workSnapshot)
+	}
+}
+
 func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
 	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "1")
 	oldStatus := v7BackendBenchmarkStatus
@@ -2264,6 +2403,81 @@ func testLlamaCppBackendBenchmarkSnapshot(proofStatus string) v7llamacpp.Benchma
 			Streaming:      true,
 		},
 	}
+}
+
+type fakeBackendInferenceBenchmarkRunner struct {
+	result v7inferencebench.BenchmarkExecutionResult
+	err    error
+	specs  []v7inferencebench.BenchmarkSpec
+	calls  int
+}
+
+func (f *fakeBackendInferenceBenchmarkRunner) RunBackendInferenceBenchmark(_ context.Context, spec v7inferencebench.BenchmarkSpec) (v7inferencebench.BenchmarkExecutionResult, error) {
+	f.calls++
+	f.specs = append(f.specs, spec)
+	if f.err != nil {
+		return v7inferencebench.BenchmarkExecutionResult{}, f.err
+	}
+	return f.result, nil
+}
+
+func testBackendInferenceBenchmarkSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := v7inferencebench.BenchmarkSpec{
+		Task:            v7inferencebench.BenchmarkTask,
+		RequestID:       "request-backend-inference-local",
+		JobID:           "job-backend-inference-local",
+		Backend:         v7llamacpp.BackendName,
+		ModelID:         "tinyllama.Q4_K_M.gguf",
+		PromptHash:      v7llamacpp.HashBenchmarkPrompt(),
+		MaxTokens:       16,
+		TimeoutMs:       30_000,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testBackendInferenceBenchmarkResult(proofStatus string) v7inferencebench.BenchmarkExecutionResult {
+	spec := v7inferencebench.BenchmarkSpec{
+		Task:            v7inferencebench.BenchmarkTask,
+		RequestID:       "request-backend-inference-local",
+		JobID:           "job-backend-inference-local",
+		Backend:         v7llamacpp.BackendName,
+		ModelID:         "tinyllama.Q4_K_M.gguf",
+		PromptHash:      v7llamacpp.HashBenchmarkPrompt(),
+		MaxTokens:       16,
+		TimeoutMs:       30_000,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	result := v7inferencebench.BenchmarkExecutionResult{
+		Spec:            spec,
+		Backend:         v7llamacpp.BackendName,
+		ModelID:         "tinyllama.Q4_K_M.gguf",
+		PromptHash:      v7llamacpp.HashBenchmarkPrompt(),
+		OutputHash:      testSHA256ObjectID("secret measured output"),
+		OutputBytes:     int64(len("secret measured output")),
+		TokensGenerated: 12,
+		TTFTMs:          100,
+		TotalTimeMs:     700,
+		DecodeTPS:       20,
+		EndToEndTPS:     17.143,
+		ProofStatus:     proofStatus,
+	}
+	if proofStatus != v7inferencebench.ProofStatusMeasured {
+		result.OutputHash = ""
+		result.OutputBytes = 0
+		result.TokensGenerated = 0
+		result.TTFTMs = 0
+		result.TotalTimeMs = 0
+		result.DecodeTPS = 0
+		result.EndToEndTPS = 0
+		result.ErrorCode = "backend_inference_failed"
+	}
+	return result
 }
 
 type fakeModelBenchmarkRunner struct {

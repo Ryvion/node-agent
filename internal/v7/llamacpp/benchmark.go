@@ -191,6 +191,21 @@ func HashBenchmarkPrompt() string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+func KeepWarmEnabledFromEnv(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	return envBool(getenv(EnvKeepWarm))
+}
+
+func CompleteInternalBenchmarkPrompt(ctx context.Context, client CompletionClient, req CompletionRequest) (CompletionResult, bool, error) {
+	if client == nil {
+		client = OpenAIClient{}
+	}
+	req.Prompt = internalBenchmarkPrompt
+	return completeWithFallback(ctx, client, req)
+}
+
 func (r BenchmarkRunner) Run(ctx context.Context, config BenchmarkConfig) BenchmarkStatusSnapshot {
 	if ctx == nil {
 		ctx = context.Background()
