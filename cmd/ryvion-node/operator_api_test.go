@@ -416,12 +416,15 @@ func TestOperatorStatusIncludesCapabilityProfile(t *testing.T) {
 		status.CapabilityProfile.BackendRuntime.Backend == "" {
 		t.Fatalf("capability_profile compact summaries missing: %+v", status.CapabilityProfile)
 	}
+	if status.CapabilityProfile.SpeculativeDecoding.Methods == nil {
+		t.Fatalf("capability_profile.speculative_decoding missing method list: %+v", status.CapabilityProfile.SpeculativeDecoding)
+	}
 	raw, err := json.Marshal(status)
 	if err != nil {
 		t.Fatalf("json.Marshal(status) error = %v", err)
 	}
 	text := strings.ToLower(string(raw))
-	for _, want := range []string{`"capability_profile"`, `"v7_dashboard_inference"`, `"text_output"`, `"streaming"`, `"hash_metrics_receipts"`, `"backend_text_generation"`, `"backend_warm"`, `"models"`} {
+	for _, want := range []string{`"capability_profile"`, `"speculative_decoding"`, `"speculative_profiles"`, `"v7_dashboard_inference"`, `"text_output"`, `"streaming"`, `"hash_metrics_receipts"`, `"backend_text_generation"`, `"backend_warm"`, `"models"`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("status JSON missing %s: %s", want, raw)
 		}
@@ -565,6 +568,9 @@ func TestOperatorStatusAndHeartbeatPreviewUseSameBackendRuntimeBuilder(t *testin
 	}
 	if !reflect.DeepEqual(status.BackendRuntimes, preview.HeartbeatPreview.V7.BackendRuntimes) {
 		t.Fatalf("operator backend_runtimes = %+v, heartbeat backend_runtimes = %+v", status.BackendRuntimes, preview.HeartbeatPreview.V7.BackendRuntimes)
+	}
+	if !reflect.DeepEqual(status.SpeculativeProfiles, preview.HeartbeatPreview.V7.SpeculativeProfiles) {
+		t.Fatalf("operator speculative_profiles = %+v, heartbeat speculative_profiles = %+v", status.SpeculativeProfiles, preview.HeartbeatPreview.V7.SpeculativeProfiles)
 	}
 }
 
@@ -743,6 +749,9 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	if !preview.FieldPresence.BackendRuntimesPresent || !preview.FieldPresence.LlamaCPPRuntimePresent {
 		t.Fatalf("backend runtime presence = %+v; body=%s", preview.FieldPresence, respBody)
 	}
+	if !preview.FieldPresence.SpeculativeProfilesPresent {
+		t.Fatalf("speculative profile presence = %+v; body=%s", preview.FieldPresence, respBody)
+	}
 	if !preview.HeartbeatPreview.V7.BackendProbes.LlamaCPP.Available {
 		t.Fatalf("llama_cpp probe = %+v, want available from local fixture", preview.HeartbeatPreview.V7.BackendProbes.LlamaCPP)
 	}
@@ -765,6 +774,12 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	}
 	if len(preview.HeartbeatPreview.V7.ModelCache.Models) != 2 {
 		t.Fatalf("heartbeat_preview.v7.model_cache = %+v", preview.HeartbeatPreview.V7.ModelCache)
+	}
+	if preview.HeartbeatPreview.V7.CapabilityProfile.SpeculativeDecoding.Methods == nil {
+		t.Fatalf("heartbeat_preview.v7.capability_profile.speculative_decoding missing methods: %+v", preview.HeartbeatPreview.V7.CapabilityProfile.SpeculativeDecoding)
+	}
+	if len(preview.HeartbeatPreview.V7.SpeculativeProfiles) == 0 {
+		t.Fatalf("heartbeat_preview.v7.speculative_profiles empty: %s", respBody)
 	}
 
 	text := strings.ToLower(string(respBody))

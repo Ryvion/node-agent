@@ -21,6 +21,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/netprofile"
 	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	"github.com/Ryvion/node-agent/internal/v7/sandbox"
+	"github.com/Ryvion/node-agent/internal/v7/speculative"
 	"github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
 
@@ -43,6 +44,7 @@ type V7HeartbeatPayload struct {
 	BackendProbes             backendprobe.Probes                   `json:"backend_probes"`
 	BackendRuntimes           llamacpp.BackendRuntimes              `json:"backend_runtimes"`
 	CapabilityProfile         capabilityprofile.Profile             `json:"capability_profile"`
+	SpeculativeProfiles       []speculative.Profile                 `json:"speculative_profiles"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
@@ -77,6 +79,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	BackendProbes          *backendprobe.Probes
 	BackendRuntimes        *llamacpp.BackendRuntimes
 	CapabilityProfile      *capabilityprofile.Profile
+	SpeculativeProfiles    []speculative.Profile
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -170,14 +173,29 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 	modelCache := cloneModelCache(input.ModelCache)
 	backendProbes := cloneBackendProbes(input.BackendProbes)
 	backendRuntimes := cloneBackendRuntimes(input.BackendRuntimes)
+	speculativeProfiles := cloneSpeculativeProfiles(input.SpeculativeProfiles)
+	if input.SpeculativeProfiles == nil {
+		speculativeReport := speculative.BuildReport(speculative.BuildInput{
+			Hardware:         hardwareCapacity,
+			Policy:           modelPolicy,
+			ModelCache:       modelCache,
+			BackendProbes:    backendProbes,
+			BackendRuntimes:  backendRuntimes,
+			RuntimeInventory: runtimeInventory,
+		})
+		speculativeProfiles = speculativeReport.SpeculativeProfiles
+	}
+	speculativeDecoding := speculative.BuildCapabilityFromProfiles(speculativeProfiles)
 	capabilityProfile := cloneCapabilityProfile(input.CapabilityProfile, capabilityprofile.BuildInput{
-		Hardware:        hardwareCapacity,
-		Policy:          modelPolicy,
-		ModelCache:      modelCache,
-		BackendProbes:   backendProbes,
-		BackendRuntimes: backendRuntimes,
-		KVCapability:    kvCapability,
-		TensorAccess:    tensorAccess,
+		Hardware:            hardwareCapacity,
+		Policy:              modelPolicy,
+		ModelCache:          modelCache,
+		BackendProbes:       backendProbes,
+		BackendRuntimes:     backendRuntimes,
+		RuntimeInventory:    runtimeInventory,
+		SpeculativeDecoding: &speculativeDecoding,
+		KVCapability:        kvCapability,
+		TensorAccess:        tensorAccess,
 	})
 
 	casSummary := cloneCASSummary(input.CASSummary)
@@ -233,6 +251,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		BackendProbes:        backendProbes,
 		BackendRuntimes:      backendRuntimes,
 		CapabilityProfile:    capabilityProfile,
+		SpeculativeProfiles:  speculativeProfiles,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,
@@ -383,6 +402,10 @@ func cloneCapabilityProfile(profile *capabilityprofile.Profile, input capability
 		return capabilityprofile.BuildProfile(input)
 	}
 	return capabilityprofile.NormalizeProfile(*profile)
+}
+
+func cloneSpeculativeProfiles(profiles []speculative.Profile) []speculative.Profile {
+	return speculative.NormalizeProfiles(profiles)
 }
 
 func cloneCASSummary(summary *CASSummary) *CASSummary {

@@ -145,6 +145,14 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 		!payload.CapabilityProfile.Models[0].Runnable {
 		t.Fatalf("capability_profile models = %+v, want resident runnable llama", payload.CapabilityProfile.Models)
 	}
+	if !payload.CapabilityProfile.SpeculativeDecoding.Supported ||
+		!payload.CapabilityProfile.SpeculativeDecoding.Enabled ||
+		payload.CapabilityProfile.SpeculativeDecoding.DefaultMethod != "ngram" {
+		t.Fatalf("capability_profile.speculative_decoding = %+v, want enabled ngram", payload.CapabilityProfile.SpeculativeDecoding)
+	}
+	if len(payload.SpeculativeProfiles) == 0 {
+		t.Fatalf("speculative_profiles empty, want compact speculative heartbeat summary")
+	}
 	if payload.CASSummary == nil || !payload.CASSummary.Enabled {
 		t.Fatalf("CAS summary = %+v, want enabled", payload.CASSummary)
 	}
@@ -217,6 +225,8 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 		t.Fatalf("payload JSON missing backend details: %s", string(raw))
 	}
 	if !strings.Contains(string(raw), `"capability_profile"`) ||
+		!strings.Contains(string(raw), `"speculative_decoding"`) ||
+		!strings.Contains(string(raw), `"speculative_profiles"`) ||
 		!strings.Contains(string(raw), `"v7_dashboard_inference"`) ||
 		!strings.Contains(string(raw), `"hash_metrics_receipts"`) {
 		t.Fatalf("payload JSON missing capability profile: %s", string(raw))

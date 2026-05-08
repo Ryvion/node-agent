@@ -35,6 +35,7 @@ import (
 	v7modelprepare "github.com/Ryvion/node-agent/internal/v7/modelprepare"
 	v7modelwarm "github.com/Ryvion/node-agent/internal/v7/modelwarm"
 	v7runtimeinventory "github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
+	v7speculative "github.com/Ryvion/node-agent/internal/v7/speculative"
 	v7tensoraccess "github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
 
@@ -133,6 +134,7 @@ type operatorStatusResponse struct {
 	BackendProbes        v7backendprobe.Probes                          `json:"backend_probes"`
 	BackendRuntimes      v7llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
 	CapabilityProfile    v7capabilityprofile.Profile                    `json:"capability_profile"`
+	SpeculativeProfiles  []v7speculative.Profile                        `json:"speculative_profiles"`
 	LlamaCPPSidecar      v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
 	LlamaCPPBenchmark    v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
 	Metrics              operatorMetrics                                `json:"metrics"`
@@ -251,21 +253,23 @@ type v7HeartbeatPreviewEnvelope struct {
 }
 
 type v7HeartbeatPreviewFieldPresence struct {
-	RuntimeInventoryPresent  bool `json:"runtime_inventory_present"`
-	HardwareCapacityPresent  bool `json:"hardware_capacity_present"`
-	BackendCandidatesPresent bool `json:"backend_candidates_present"`
-	BackendCandidatesLen     int  `json:"backend_candidates_len"`
-	GGUFModelsPresent        bool `json:"gguf_models_present"`
-	GGUFModelsLen            int  `json:"gguf_models_len"`
-	ModelPolicyPresent       bool `json:"model_policy_present"`
-	ModelCachePresent        bool `json:"model_cache_present"`
-	ModelCacheModelsLen      int  `json:"model_cache_models_len"`
-	BackendProbesPresent     bool `json:"backend_probes_present"`
-	LlamaCPPProbePresent     bool `json:"llama_cpp_probe_present"`
-	BackendRuntimesPresent   bool `json:"backend_runtimes_present"`
-	LlamaCPPRuntimePresent   bool `json:"llama_cpp_runtime_present"`
-	CapabilityProfilePresent bool `json:"capability_profile_present"`
-	CapabilityModelsLen      int  `json:"capability_models_len"`
+	RuntimeInventoryPresent    bool `json:"runtime_inventory_present"`
+	HardwareCapacityPresent    bool `json:"hardware_capacity_present"`
+	BackendCandidatesPresent   bool `json:"backend_candidates_present"`
+	BackendCandidatesLen       int  `json:"backend_candidates_len"`
+	GGUFModelsPresent          bool `json:"gguf_models_present"`
+	GGUFModelsLen              int  `json:"gguf_models_len"`
+	ModelPolicyPresent         bool `json:"model_policy_present"`
+	ModelCachePresent          bool `json:"model_cache_present"`
+	ModelCacheModelsLen        int  `json:"model_cache_models_len"`
+	BackendProbesPresent       bool `json:"backend_probes_present"`
+	LlamaCPPProbePresent       bool `json:"llama_cpp_probe_present"`
+	BackendRuntimesPresent     bool `json:"backend_runtimes_present"`
+	LlamaCPPRuntimePresent     bool `json:"llama_cpp_runtime_present"`
+	CapabilityProfilePresent   bool `json:"capability_profile_present"`
+	CapabilityModelsLen        int  `json:"capability_models_len"`
+	SpeculativeProfilesPresent bool `json:"speculative_profiles_present"`
+	SpeculativeProfilesLen     int  `json:"speculative_profiles_len"`
 }
 
 type logRing struct {
@@ -954,7 +958,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	backendRuntimes := buildBackendRuntimesStatus(llamaCppSidecar.LlamaCppSidecarStatus, runtimeInventory, hardwareCapacity)
 	modelCache := buildModelCacheRuntimeStatus(buildModelCacheStatus(modelPolicy), modelPolicy, hardwareCapacity, backendProbes, backendRuntimes)
 	kvCapability := buildNativeTensorAccessCapability(infMgr)
-	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, &kvCapability, runtimeInfo.TensorAccess)
+	speculativeReport := buildSpeculativeReportStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory)
+	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory, &speculativeReport.SpeculativeDecoding, &kvCapability, runtimeInfo.TensorAccess)
 	llamaCppBenchmark := s.llamaCppBenchmarkSnapshot()
 
 	return operatorStatusResponse{
@@ -979,17 +984,18 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUModel:  caps.GPUModel,
 			VRAMBytes: caps.VRAMBytes,
 		},
-		Runtime:           runtimeInfo,
-		TensorAccess:      runtimeInfo.TensorAccess,
-		RuntimeInventory:  runtimeInventory,
-		HardwareCapacity:  hardwareCapacity,
-		ModelPolicy:       modelPolicy,
-		ModelCache:        modelCache,
-		BackendProbes:     backendProbes,
-		BackendRuntimes:   backendRuntimes,
-		CapabilityProfile: capabilityProfile,
-		LlamaCPPSidecar:   llamaCppSidecar,
-		LlamaCPPBenchmark: llamaCppBenchmark,
+		Runtime:             runtimeInfo,
+		TensorAccess:        runtimeInfo.TensorAccess,
+		RuntimeInventory:    runtimeInventory,
+		HardwareCapacity:    hardwareCapacity,
+		ModelPolicy:         modelPolicy,
+		ModelCache:          modelCache,
+		BackendProbes:       backendProbes,
+		BackendRuntimes:     backendRuntimes,
+		CapabilityProfile:   capabilityProfile,
+		SpeculativeProfiles: speculativeReport.SpeculativeProfiles,
+		LlamaCPPSidecar:     llamaCppSidecar,
+		LlamaCPPBenchmark:   llamaCppBenchmark,
 		Metrics: operatorMetrics{
 			CPUUtil:    metrics.CPUUtil,
 			MemUtil:    metrics.MemUtil,
@@ -1125,16 +1131,30 @@ func ggufBackendTextGenerationAvailable(backendProbes v7backendprobe.Probes, bac
 		(backendProbes.LlamaCPP.Available && backendProbes.LlamaCPP.SupportsTextGeneration)
 }
 
-func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {
+func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory, speculativeDecoding *v7speculative.DecodingCapability, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {
 	return v7capabilityprofile.BuildProfile(v7capabilityprofile.BuildInput{
-		Hardware:        hardware,
-		Policy:          policy,
-		ModelCache:      modelCache,
-		BackendProbes:   backendProbes,
-		BackendRuntimes: backendRuntimes,
-		KVCapability:    kvCapability,
-		TensorAccess:    tensorAccess,
-		Getenv:          os.Getenv,
+		Hardware:            hardware,
+		Policy:              policy,
+		ModelCache:          modelCache,
+		BackendProbes:       backendProbes,
+		BackendRuntimes:     backendRuntimes,
+		RuntimeInventory:    runtimeInventory,
+		SpeculativeDecoding: speculativeDecoding,
+		KVCapability:        kvCapability,
+		TensorAccess:        tensorAccess,
+		Getenv:              os.Getenv,
+	})
+}
+
+func buildSpeculativeReportStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory) v7speculative.Report {
+	return v7speculative.BuildReport(v7speculative.BuildInput{
+		Hardware:         hardware,
+		Policy:           policy,
+		ModelCache:       modelCache,
+		BackendProbes:    backendProbes,
+		BackendRuntimes:  backendRuntimes,
+		RuntimeInventory: runtimeInventory,
+		Getenv:           os.Getenv,
 	})
 }
 
@@ -1351,21 +1371,23 @@ func buildV7HeartbeatPreviewResponse(nodeID string, payload v7heartbeat.V7Heartb
 			V7: payload,
 		},
 		FieldPresence: v7HeartbeatPreviewFieldPresence{
-			RuntimeInventoryPresent:  payload.SchemaVersion != "",
-			HardwareCapacityPresent:  payload.HardwareCapacity.OS != "" || payload.HardwareCapacity.Arch != "",
-			BackendCandidatesPresent: payload.RuntimeInventory.BackendCandidates != nil,
-			BackendCandidatesLen:     len(payload.RuntimeInventory.BackendCandidates),
-			GGUFModelsPresent:        payload.RuntimeInventory.GGUFModels != nil,
-			GGUFModelsLen:            len(payload.RuntimeInventory.GGUFModels),
-			ModelPolicyPresent:       payload.ModelPolicy.CacheDir != "",
-			ModelCachePresent:        payload.ModelCache.CacheDir != "",
-			ModelCacheModelsLen:      len(payload.ModelCache.Models),
-			BackendProbesPresent:     payload.SchemaVersion != "",
-			LlamaCPPProbePresent:     payload.SchemaVersion != "",
-			BackendRuntimesPresent:   payload.SchemaVersion != "",
-			LlamaCPPRuntimePresent:   payload.SchemaVersion != "",
-			CapabilityProfilePresent: payload.CapabilityProfile.SchemaVersion != "",
-			CapabilityModelsLen:      len(payload.CapabilityProfile.Models),
+			RuntimeInventoryPresent:    payload.SchemaVersion != "",
+			HardwareCapacityPresent:    payload.HardwareCapacity.OS != "" || payload.HardwareCapacity.Arch != "",
+			BackendCandidatesPresent:   payload.RuntimeInventory.BackendCandidates != nil,
+			BackendCandidatesLen:       len(payload.RuntimeInventory.BackendCandidates),
+			GGUFModelsPresent:          payload.RuntimeInventory.GGUFModels != nil,
+			GGUFModelsLen:              len(payload.RuntimeInventory.GGUFModels),
+			ModelPolicyPresent:         payload.ModelPolicy.CacheDir != "",
+			ModelCachePresent:          payload.ModelCache.CacheDir != "",
+			ModelCacheModelsLen:        len(payload.ModelCache.Models),
+			BackendProbesPresent:       payload.SchemaVersion != "",
+			LlamaCPPProbePresent:       payload.SchemaVersion != "",
+			BackendRuntimesPresent:     payload.SchemaVersion != "",
+			LlamaCPPRuntimePresent:     payload.SchemaVersion != "",
+			CapabilityProfilePresent:   payload.CapabilityProfile.SchemaVersion != "",
+			CapabilityModelsLen:        len(payload.CapabilityProfile.Models),
+			SpeculativeProfilesPresent: payload.SpeculativeProfiles != nil,
+			SpeculativeProfilesLen:     len(payload.SpeculativeProfiles),
 		},
 	}
 }

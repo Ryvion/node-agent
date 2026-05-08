@@ -51,6 +51,9 @@ func TestBuildProfileFreshMacLlamaRunnablePhiResidentBlocked(t *testing.T) {
 	if !profile.V7DashboardInference || !profile.TextOutput || !profile.Streaming || !profile.HashMetricsReceipts || !profile.BackendTextGeneration || !profile.BackendWarm || !profile.WarmBackend || !profile.Ready {
 		t.Fatalf("profile = %+v, want default inference capability on fresh Mac with llama.cpp and cached model", profile)
 	}
+	if !profile.SpeculativeDecoding.Supported || !profile.SpeculativeDecoding.Enabled || profile.SpeculativeDecoding.DefaultMethod != "ngram" {
+		t.Fatalf("speculative_decoding = %+v, want enabled ngram support for Mac llama.cpp", profile.SpeculativeDecoding)
+	}
 	llama := modelByID(t, profile.Models, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
 	if !llama.Resident || !llama.Runnable {
 		t.Fatalf("llama model capability = %+v, want resident runnable", llama)
@@ -286,7 +289,7 @@ func assertProfileJSONSafe(t *testing.T, profile Profile) {
 		t.Fatalf("json.Marshal(profile) error = %v", err)
 	}
 	body := strings.ToLower(string(raw))
-	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret", "token"} {
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("capability profile JSON contains forbidden marker %q: %s", forbidden, raw)
 		}

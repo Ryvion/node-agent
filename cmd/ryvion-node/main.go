@@ -931,7 +931,8 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 	backendProbes := buildBackendProbeStatus()
 	backendRuntimes = v7llamacpp.EnrichBackendRuntimes(backendRuntimes, runtimeInventory, hardwareCapacity)
 	modelCache := buildModelCacheRuntimeStatus(buildModelCacheStatus(modelPolicy), modelPolicy, hardwareCapacity, backendProbes, backendRuntimes)
-	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, &kvCapability, tensorAccess)
+	speculativeReport := buildSpeculativeReportStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory)
+	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory, &speculativeReport.SpeculativeDecoding, &kvCapability, tensorAccess)
 
 	evidenceSummary := v7capability.EvidenceCapabilitySummary{
 		SupportsArtifactManifest:    true,
@@ -969,6 +970,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 		BackendProbes:             &backendProbes,
 		BackendRuntimes:           &backendRuntimes,
 		CapabilityProfile:         &capabilityProfile,
+		SpeculativeProfiles:       speculativeReport.SpeculativeProfiles,
 		SandboxCapabilitySummary:  sandboxSummary,
 		SandboxPolicy:             &sandboxPolicy,
 		EvidenceCapabilitySummary: evidenceSummary,

@@ -11,6 +11,8 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	"github.com/Ryvion/node-agent/internal/v7/modelcache"
 	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
+	"github.com/Ryvion/node-agent/internal/v7/speculative"
 	"github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
 
@@ -21,14 +23,16 @@ const (
 )
 
 type BuildInput struct {
-	Hardware        v7hardware.CapacityInventory
-	Policy          modelpolicy.Policy
-	ModelCache      modelcache.Status
-	BackendProbes   backendprobe.Probes
-	BackendRuntimes llamacpp.BackendRuntimes
-	KVCapability    *kvprobe.Capability
-	TensorAccess    tensoraccess.TensorAccessCapability
-	Getenv          func(string) string
+	Hardware            v7hardware.CapacityInventory
+	Policy              modelpolicy.Policy
+	ModelCache          modelcache.Status
+	BackendProbes       backendprobe.Probes
+	BackendRuntimes     llamacpp.BackendRuntimes
+	RuntimeInventory    runtimeinventory.Inventory
+	SpeculativeDecoding *speculative.DecodingCapability
+	KVCapability        *kvprobe.Capability
+	TensorAccess        tensoraccess.TensorAccessCapability
+	Getenv              func(string) string
 }
 
 func BuildProfile(input BuildInput) Profile {
@@ -57,6 +61,7 @@ func BuildProfile(input BuildInput) Profile {
 	models, anyRunnable := modelCapabilities(cache, policy, hardwareOK, ggufBackendText, inferenceEnabled, runtimes)
 	models = appendRuntimeModelIfMissing(models, policy, hardwareOK, ggufBackendText, inferenceEnabled, runtimes)
 	anyRunnable = anyRunnable || anyRunnableModel(models)
+	speculativeDecoding := speculativeDecodingSummary(input, hardware, policy, cache, probes, runtimes)
 
 	backendText := hardwareOK && backend.SupportsTextGeneration && inferenceEnabled
 	ready := hardwareOK && inferenceEnabled && anyRunnable
@@ -77,6 +82,7 @@ func BuildProfile(input BuildInput) Profile {
 		ModelPrepare:          modelPrepare,
 		BackendTextGeneration: hardwareOK && backend.SupportsTextGeneration && inferenceEnabled,
 		BackendWarm:           backendWarm,
+		SpeculativeDecoding:   speculativeDecoding,
 		StatefulSession:       false,
 		KVAccess:              input.KVCapability != nil && input.KVCapability.KVAccessSupported,
 		TensorHooks:           tensor.KVAccessSupported || tensor.KVSnapshotSupported || tensor.HiddenStateAccessSupported || tensor.LogitsAccessSupported || tensor.AttentionHookSupported,
@@ -113,10 +119,27 @@ func NormalizeProfile(profile Profile) Profile {
 	profile.BackendRuntime.Backend = cleanProfileText(profile.BackendRuntime.Backend, maxProfileTextRunes)
 	profile.BackendRuntime.Reason = cleanProfileText(profile.BackendRuntime.Reason, maxProfileReasonRunes)
 	profile.BackendRuntime.Acceleration = cleanProfileList(profile.BackendRuntime.Acceleration)
+	profile.SpeculativeDecoding = speculative.NormalizeCapability(profile.SpeculativeDecoding)
 	profile.WarmModel.Backend = cleanProfileText(profile.WarmModel.Backend, maxProfileTextRunes)
 	profile.WarmModel.ModelID = cleanProfileText(profile.WarmModel.ModelID, maxProfileTextRunes)
 	profile.Models = normalizeModels(profile.Models)
 	return profile
+}
+
+func speculativeDecodingSummary(input BuildInput, hardware v7hardware.CapacityInventory, policy modelpolicy.Policy, cache modelcache.Status, probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes) speculative.DecodingCapability {
+	if input.SpeculativeDecoding != nil {
+		return speculative.NormalizeCapability(*input.SpeculativeDecoding)
+	}
+	report := speculative.BuildReport(speculative.BuildInput{
+		Hardware:         hardware,
+		Policy:           policy,
+		ModelCache:       cache,
+		BackendProbes:    probes,
+		BackendRuntimes:  runtimes,
+		RuntimeInventory: input.RuntimeInventory,
+		Getenv:           input.Getenv,
+	})
+	return report.SpeculativeDecoding
 }
 
 func hardwareSummary(hardware v7hardware.CapacityInventory) HardwareSummary {

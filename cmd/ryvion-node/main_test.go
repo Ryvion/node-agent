@@ -278,7 +278,7 @@ func TestBuildOptionalV7HeartbeatPayloadDefaultsOnAndHonorsExplicitOff(t *testin
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
 	}
-	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"hardware_capacity"`, `"cpu_logical_cores"`, `"gpu_vram_bytes"`, `"model_policy"`, `"runtime_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"capability_profile"`, `"llama_cpp"`} {
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"hardware_capacity"`, `"cpu_logical_cores"`, `"gpu_vram_bytes"`, `"model_policy"`, `"runtime_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"capability_profile"`, `"speculative_decoding"`, `"speculative_profiles"`, `"llama_cpp"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
 		}
@@ -329,6 +329,14 @@ func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
 	}
 	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
 		t.Fatalf("backend runtime should remain reporting-only without KV/tensor hooks: %+v", runtime)
+	}
+	if !payload.CapabilityProfile.SpeculativeDecoding.Supported ||
+		!payload.CapabilityProfile.SpeculativeDecoding.Enabled ||
+		payload.CapabilityProfile.SpeculativeDecoding.DefaultMethod != "ngram" {
+		t.Fatalf("speculative_decoding = %+v, want enabled ngram profile for warm llama.cpp runtime", payload.CapabilityProfile.SpeculativeDecoding)
+	}
+	if len(payload.SpeculativeProfiles) == 0 {
+		t.Fatalf("speculative_profiles empty, want compact heartbeat summary for warm llama.cpp runtime")
 	}
 }
 
@@ -381,6 +389,8 @@ func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *
 		!strings.Contains(string(raw), `"runtime_policy"`) ||
 		!strings.Contains(string(raw), `"model_cache"`) ||
 		!strings.Contains(string(raw), `"backend_probes"`) ||
+		!strings.Contains(string(raw), `"speculative_decoding"`) ||
+		!strings.Contains(string(raw), `"speculative_profiles"`) ||
 		!strings.Contains(string(raw), `"llama_cpp"`) {
 		t.Fatalf("V7 heartbeat payload missing runtime inventory fields: %s", raw)
 	}
