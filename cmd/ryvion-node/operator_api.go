@@ -30,6 +30,7 @@ import (
 	v7modelcache "github.com/Ryvion/node-agent/internal/v7/modelcache"
 	v7modelpolicy "github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 	v7modelprepare "github.com/Ryvion/node-agent/internal/v7/modelprepare"
+	v7modelwarm "github.com/Ryvion/node-agent/internal/v7/modelwarm"
 	v7runtimeinventory "github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	v7tensoraccess "github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 )
@@ -78,6 +79,7 @@ type operatorRuntime struct {
 	v7InferenceBenchmark *v7inferencebench.LocalStatus
 	v7DashboardInference *v7dashboardinference.LocalStatus
 	v7ModelPrepare       *v7modelprepare.LocalStatus
+	v7ModelWarm          *v7modelwarm.LocalStatus
 	llamaCppSidecar      *v7llamacpp.Manager
 	llamaCppKeeper       *v7llamacpp.ResidencyKeeper
 	llamaCppBenchmark    *v7llamacpp.BenchmarkLocalStatus
@@ -136,6 +138,7 @@ type operatorStatusResponse struct {
 	V7InferenceBenchmark v7inferencebench.LocalStatusSnapshot           `json:"v7_inference_benchmark"`
 	V7DashboardInference v7dashboardinference.LocalStatusSnapshot       `json:"v7_dashboard_inference"`
 	V7ModelPrepare       v7modelprepare.LocalStatusSnapshot             `json:"v7_model_prepare"`
+	V7ModelWarm          v7modelwarm.LocalStatusSnapshot                `json:"v7_model_warm"`
 	WorkLoop             diagnostics.WorkLoopSnapshot                   `json:"work_loop"`
 }
 
@@ -277,6 +280,7 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		v7InferenceBenchmark: v7inferencebench.NewLocalStatus(),
 		v7DashboardInference: v7dashboardinference.NewLocalStatus(),
 		v7ModelPrepare:       v7modelprepare.NewLocalStatus(),
+		v7ModelWarm:          v7modelwarm.NewLocalStatus(),
 		llamaCppSidecar:      llamaCppSidecar,
 		llamaCppKeeper:       v7llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
 		llamaCppBenchmark:    v7llamacpp.NewBenchmarkLocalStatus(),
@@ -459,6 +463,25 @@ func (s *operatorRuntime) modelPrepareStatus() *v7modelprepare.LocalStatus {
 		s.v7ModelPrepare = v7modelprepare.NewLocalStatus()
 	}
 	return s.v7ModelPrepare
+}
+
+func (s *operatorRuntime) modelWarmStatus() *v7modelwarm.LocalStatus {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	status := s.v7ModelWarm
+	s.mu.RUnlock()
+	if status != nil {
+		return status
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.v7ModelWarm == nil {
+		s.v7ModelWarm = v7modelwarm.NewLocalStatus()
+	}
+	return s.v7ModelWarm
 }
 
 func (s *operatorRuntime) backendBenchmarkStatus() *v7llamacpp.BackendBenchmarkLocalStatus {
@@ -808,6 +831,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	inferenceBenchmarkStatus := s.v7InferenceBenchmark
 	dashboardInferenceStatus := s.v7DashboardInference
 	modelPrepareStatus := s.v7ModelPrepare
+	modelWarmStatus := s.v7ModelWarm
 	s.mu.RUnlock()
 
 	report = freshOperatorHealthReport(caps, infMgr, runtimeMgr, report)
@@ -830,6 +854,10 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	var modelPrepareSnapshot v7modelprepare.LocalStatusSnapshot
 	if modelPrepareStatus != nil {
 		modelPrepareSnapshot = modelPrepareStatus.Snapshot()
+	}
+	var modelWarmSnapshot v7modelwarm.LocalStatusSnapshot
+	if modelWarmStatus != nil {
+		modelWarmSnapshot = modelWarmStatus.Snapshot()
 	}
 	workLoopSnapshot := sanitizeOperatorWorkLoopSnapshot(workLoopDiagnostics.Snapshot())
 
@@ -942,6 +970,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		V7InferenceBenchmark: inferenceBenchmarkSnapshot,
 		V7DashboardInference: dashboardInferenceSnapshot,
 		V7ModelPrepare:       modelPrepareSnapshot,
+		V7ModelWarm:          modelWarmSnapshot,
 		WorkLoop:             workLoopSnapshot,
 	}
 }

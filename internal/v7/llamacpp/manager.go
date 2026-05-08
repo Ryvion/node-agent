@@ -113,6 +113,17 @@ func (m *Manager) Config() LlamaCppSidecarConfig {
 	return m.cfg
 }
 
+func (m *Manager) SetEnabled(enabled bool) LlamaCppSidecarConfig {
+	if m == nil {
+		return NewManager(LlamaCppSidecarConfig{}).SetEnabled(enabled)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cfg.Enabled = enabled
+	m.cfg = normalizeConfig(m.cfg)
+	return m.cfg
+}
+
 func (m *Manager) SetModelPath(modelPath string) LlamaCppSidecarConfig {
 	if m == nil {
 		return NewManager(LlamaCppSidecarConfig{}).SetModelPath(modelPath)

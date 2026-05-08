@@ -39,6 +39,7 @@ import (
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7modelpolicy "github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 	v7modelprepare "github.com/Ryvion/node-agent/internal/v7/modelprepare"
+	v7modelwarm "github.com/Ryvion/node-agent/internal/v7/modelwarm"
 	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
 	v7proofrunner "github.com/Ryvion/node-agent/internal/v7/proofrunner"
 	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -87,6 +88,7 @@ var (
 	v7InferenceBenchmarkStatus   = v7inferencebench.NewLocalStatus()
 	v7DashboardInferenceStatus   = v7dashboardinference.NewLocalStatus()
 	v7ModelPrepareStatus         = v7modelprepare.NewLocalStatus()
+	v7ModelWarmStatus            = v7modelwarm.NewLocalStatus()
 	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
 		return v7modelbench.NativeInferenceModelBenchmarkRunner{
 			Native:           infMgr,
@@ -1189,6 +1191,18 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	if handled, result, runErr := processOptionalV7ModelWarm(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("V7 model warm execution failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("V7 model warm completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	if handled, result, runErr := processOptionalV7LlamaCppBackendBenchmark(runCtx, client, work, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
 			slog.Warn("V7 llama.cpp backend benchmark execution failed", "job_id", work.JobID, "error", runErr)
@@ -1681,6 +1695,209 @@ func v7TensorPlaneBenchmarkWorkLoopEventContextFromReceipt(specJSON string, rece
 		}
 		if status, ok := taskMetadata["correctness_status"].(string); ok && strings.TrimSpace(status) != "" {
 			context["correctness_status"] = strings.TrimSpace(status)
+		}
+	}
+	return context
+}
+
+func currentV7ModelWarmStatus() *v7modelwarm.LocalStatus {
+	if operatorRuntimeState != nil {
+		return operatorRuntimeState.modelWarmStatus()
+	}
+	return v7ModelWarmStatus
+}
+
+func processOptionalV7ModelWarm(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	identity, isWarm := v7modelwarm.WarmAssignmentIdentityFromJSON(work.SpecJSON)
+	if !isWarm {
+		return false, nil, nil
+	}
+	status := currentV7ModelWarmStatus()
+	if status != nil {
+		status.RecordSeen(identity.WarmID, identity.ModelID)
+	}
+	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
+	executionStarted := time.Now()
+	if v7modelwarm.WarmEnabledFromEnv(os.Getenv) {
+		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7ModelWarmWorkLoopEventContextFromSpec(work.SpecJSON))
+	}
+
+	var manager v7modelwarm.LlamaCppManager
+	if operatorRuntimeState != nil {
+		manager = operatorRuntimeState.llamaCppManager()
+	}
+	warmOptions := v7modelwarm.ExecuteOptions{
+		Getenv:          os.Getenv,
+		Policy:          v7modelpolicy.FromEnv(),
+		LlamaCppManager: manager,
+	}
+	if manager != nil {
+		warmOptions.BenchmarkRunner = v7llamacpp.BenchmarkRunner{
+			Sidecar: benchmarkSidecarFromWarmManager(manager),
+			Client:  v7llamacpp.OpenAIClient{},
+		}
+	}
+	receipt, handled, err := v7modelwarm.ExecuteWarmAssignment(ctx, work.SpecJSON, warmOptions)
+	if !handled {
+		return false, nil, nil
+	}
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
+	if strings.TrimSpace(receipt.ResultHashHex) == "" {
+		receipt = v7modelwarm.BuildWarmRejectionReceiptFromIdentity(identity, err)
+	}
+
+	receiptBuildStarted := time.Now()
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7ModelWarmWorkLoopEventContextFromSpec(work.SpecJSON))
+	extra := map[string]any{
+		"executor":      v7modelwarm.WarmTask,
+		"executor_kind": v7modelwarm.WarmTask,
+		"task":          v7modelwarm.WarmTask,
+	}
+	warmed := v7ModelWarmReceiptWarmed(receipt)
+	recordErr := err
+	if !warmed && recordErr == nil {
+		recordErr = v7ModelWarmRejectionError(receipt)
+	}
+	exitCode := 0
+	if recordErr != nil || !warmed {
+		exitCode = 1
+		extra["exit_code"] = 1
+		extra["error"] = "v7 model warm failed"
+	} else {
+		extra["exit_code"] = 0
+	}
+	metadata := receiptMetadataBase(work, v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected), receipt.Metadata, extra)
+	hubReceipt := hub.Receipt{
+		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
+		ResultHashHex: receipt.ResultHashHex,
+		MeteringUnits: receipt.MeteringUnits,
+		Metadata:      metadata,
+	}
+	snapshot := &runnerResultSnapshot{
+		ResultHashHex: hubReceipt.ResultHashHex,
+		MeteringUnits: hubReceipt.MeteringUnits,
+		ExitCode:      exitCode,
+		Metadata:      metadata,
+	}
+	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
+	receiptContext := v7ModelWarmWorkLoopEventContextFromReceipt(work.SpecJSON, receipt)
+	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_start", hubReceipt.JobID, work.Kind, receiptContext)
+	if client == nil {
+		submitErr := fmt.Errorf("hub client unavailable")
+		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+		if status != nil {
+			if warmed {
+				status.RecordExecuted(identity.WarmID, identity.ModelID)
+			} else {
+				status.RecordRejected(identity.WarmID, identity.ModelID, recordErr)
+			}
+			status.RecordReceiptFailed(identity.WarmID, identity.ModelID, submitErr)
+		}
+		if recordErr != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", recordErr, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	submitStarted := time.Now()
+	workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+	submitErr := client.SubmitReceipt(ctx, hubReceipt)
+	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), submitErr)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+	if submitErr != nil {
+		if status != nil {
+			if warmed {
+				status.RecordExecuted(identity.WarmID, identity.ModelID)
+			} else {
+				status.RecordRejected(identity.WarmID, identity.ModelID, recordErr)
+			}
+			status.RecordReceiptFailed(identity.WarmID, identity.ModelID, submitErr)
+		}
+		if recordErr != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", recordErr, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	if status != nil {
+		if warmed {
+			status.RecordExecuted(identity.WarmID, identity.ModelID)
+		} else {
+			status.RecordRejected(identity.WarmID, identity.ModelID, recordErr)
+		}
+		status.RecordReceiptSubmitted(identity.WarmID, identity.ModelID)
+	}
+	return true, snapshot, recordErr
+}
+
+func benchmarkSidecarFromWarmManager(manager v7modelwarm.LlamaCppManager) v7llamacpp.BenchmarkSidecar {
+	if sidecar, ok := manager.(v7llamacpp.BenchmarkSidecar); ok && sidecar != nil {
+		return sidecar
+	}
+	return v7llamacpp.NewManagerFromEnv()
+}
+
+func v7ModelWarmReceiptWarmed(receipt v7modelwarm.WarmReceipt) bool {
+	if taskMetadata, ok := receipt.Metadata[v7modelwarm.WarmTask].(map[string]any); ok {
+		proofStatus, _ := taskMetadata["proof_status"].(string)
+		warm, _ := taskMetadata["warm"].(bool)
+		return warm && strings.TrimSpace(proofStatus) == v7modelwarm.ProofStatusModelWarmed
+	}
+	return false
+}
+
+func v7ModelWarmRejectionError(receipt v7modelwarm.WarmReceipt) error {
+	code := "model_warm_failed"
+	if taskMetadata, ok := receipt.Metadata[v7modelwarm.WarmTask].(map[string]any); ok {
+		if value, ok := taskMetadata["error_code"].(string); ok && strings.TrimSpace(value) != "" {
+			code = strings.TrimSpace(value)
+		}
+	}
+	return fmt.Errorf("%s", code)
+}
+
+func v7ModelWarmWorkLoopEventContextFromSpec(specJSON string) map[string]string {
+	context := map[string]string{
+		"spec_task": v7modelwarm.WarmTask,
+	}
+	var spec struct {
+		Task                  string `json:"task"`
+		WarmID                string `json:"warm_id"`
+		Backend               string `json:"backend"`
+		ModelID               string `json:"model_id"`
+		RunBenchmarkAfterWarm bool   `json:"run_benchmark_after_warm"`
+	}
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return context
+	}
+	if strings.TrimSpace(spec.Task) == v7modelwarm.WarmTask {
+		context["spec_task"] = v7modelwarm.WarmTask
+	}
+	if warmID := strings.TrimSpace(spec.WarmID); warmID != "" {
+		context["warm_id"] = warmID
+	}
+	if backend := strings.TrimSpace(spec.Backend); backend != "" {
+		context["backend"] = backend
+	}
+	if modelID := strings.TrimSpace(spec.ModelID); modelID != "" {
+		context["model_id"] = modelID
+	}
+	context["run_benchmark_after_warm"] = strconv.FormatBool(spec.RunBenchmarkAfterWarm)
+	return context
+}
+
+func v7ModelWarmWorkLoopEventContextFromReceipt(specJSON string, receipt v7modelwarm.WarmReceipt) map[string]string {
+	context := v7ModelWarmWorkLoopEventContextFromSpec(specJSON)
+	if taskMetadata, ok := receipt.Metadata[v7modelwarm.WarmTask].(map[string]any); ok {
+		if warm, ok := taskMetadata["warm"].(bool); ok {
+			context["warm"] = strconv.FormatBool(warm)
+		}
+		if status, ok := taskMetadata["proof_status"].(string); ok && strings.TrimSpace(status) != "" {
+			context["proof_status"] = strings.TrimSpace(status)
 		}
 	}
 	return context
