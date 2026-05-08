@@ -285,6 +285,7 @@ func (d *WorkLoopDiagnostics) RecordReceiptReady(jobID, kind string, readyAt tim
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	readyAt = d.nonDecreasingEventTimeLocked(readyAt)
 	if cleanJobID == "" {
 		cleanJobID = d.snapshot.LastWorkJobID
 	}
@@ -570,6 +571,7 @@ func (d *WorkLoopDiagnostics) recordEventLocked(now time.Time, name, jobID, kind
 	if name == "" {
 		return
 	}
+	now = d.nonDecreasingEventTimeLocked(now)
 	d.ensureEventBufferLocked()
 	event := WorkLoopEvent{
 		Name:        name,
@@ -587,6 +589,13 @@ func (d *WorkLoopDiagnostics) recordEventLocked(now time.Time, name, jobID, kind
 	if d.eventCount < d.eventLimit {
 		d.eventCount++
 	}
+}
+
+func (d *WorkLoopDiagnostics) nonDecreasingEventTimeLocked(now time.Time) time.Time {
+	if !d.lastEventAt.IsZero() && now.Before(d.lastEventAt) {
+		return d.lastEventAt
+	}
+	return now
 }
 
 func (d *WorkLoopDiagnostics) ensureEventBufferLocked() {

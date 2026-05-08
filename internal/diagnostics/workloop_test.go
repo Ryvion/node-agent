@@ -171,6 +171,37 @@ func TestWorkLoopDiagnosticsImmediateReceiptSubmitGapIsSmall(t *testing.T) {
 	}
 }
 
+func TestWorkLoopDiagnosticsReceiptReadyTimestampIsMonotonic(t *testing.T) {
+	recorder := NewWorkLoopDiagnostics()
+	recorder.RecordEvent("v7_fast_path_receipt_ready", "job-ready", "benchmark", map[string]string{
+		"spec_task": "v7_memory_benchmark",
+	})
+	previous := mustParseWorkLoopTestTime(t, recorder.EventTimeline()[0].At)
+	recorder.RecordReceiptReady("job-ready", "benchmark", previous.Add(-time.Second), map[string]string{
+		"spec_task": "v7_memory_benchmark",
+	})
+	recorder.RecordReceiptSubmitStart("job-ready", 1)
+
+	snapshot := recorder.Snapshot()
+	events := snapshot.RecentEvents
+	if len(events) < 3 {
+		t.Fatalf("events = %+v, want receipt ready and submit events", events)
+	}
+	for i := 1; i < len(events); i++ {
+		prev := mustParseWorkLoopTestTime(t, events[i-1].At)
+		next := mustParseWorkLoopTestTime(t, events[i].At)
+		if next.Before(prev) {
+			t.Fatalf("event[%d] time %s before previous %s; events=%+v", i, events[i].At, events[i-1].At, events)
+		}
+		if events[i].SincePrevUs < 0 {
+			t.Fatalf("event[%d].since_prev_us = %d, want non-negative", i, events[i].SincePrevUs)
+		}
+	}
+	if snapshot.LastReceiptReadyToSubmitUs < 0 || snapshot.LastReceiptSubmitQueueGapUs < 0 {
+		t.Fatalf("ready-to-submit gap went negative after monotonic clamp: %+v", snapshot)
+	}
+}
+
 func TestWorkLoopDiagnosticsSanitizesErrors(t *testing.T) {
 	recorder := NewWorkLoopDiagnostics()
 	errText := " fetch failed\n\t" + strings.Repeat("x", maxWorkLoopErrorLen+50)
