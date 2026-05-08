@@ -924,10 +924,12 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 		runtimeInfo.NativeModel = infMgr.ModelName()
 	}
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, tensorAccess, infMgr)
-	modelPolicy := buildModelPolicyStatus()
-	hardwareCapacity := buildHardwareCapacityStatus(modelPolicy.CacheDir)
+	baseModelPolicy := buildModelPolicyStatus()
+	hardwareCapacity := buildHardwareCapacityStatus(baseModelPolicy.CacheDir)
+	modelPolicy := buildDerivedModelPolicyStatus(baseModelPolicy, hardwareCapacity)
 	modelCache := buildModelCacheStatus(modelPolicy)
 	backendProbes := buildBackendProbeStatus()
+	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, &kvCapability, tensorAccess)
 
 	evidenceSummary := v7capability.EvidenceCapabilitySummary{
 		SupportsArtifactManifest:    true,
@@ -964,6 +966,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 		ModelCache:                &modelCache,
 		BackendProbes:             &backendProbes,
 		BackendRuntimes:           &backendRuntimes,
+		CapabilityProfile:         &capabilityProfile,
 		SandboxCapabilitySummary:  sandboxSummary,
 		SandboxPolicy:             &sandboxPolicy,
 		EvidenceCapabilitySummary: evidenceSummary,

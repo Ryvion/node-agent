@@ -180,7 +180,7 @@ func TestExecuteAssignmentReturnTextFlagDisabledRejects(t *testing.T) {
 		t.Fatalf("json.Marshal(spec) error = %v", err)
 	}
 	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
-		Getenv: getenvEnabled,
+		Getenv: getenvTextOutputDisabled,
 		Runner: LlamaCppRunner{
 			Sidecar: &fakeSidecar{status: healthySidecarStatus()},
 			Client:  client,
@@ -318,7 +318,7 @@ func TestLlamaCppRunnerDoesNotPostChunksWhenStreamingFlagDisabled(t *testing.T) 
 	runner := LlamaCppRunner{
 		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
 		Client:  client,
-		Getenv:  getenvTextOutputEnabled,
+		Getenv:  getenvStreamingDisabled,
 	}
 	result, err := runner.RunDashboardInferenceWithProgress(context.Background(), spec, progress)
 	if err != nil {
@@ -441,7 +441,7 @@ func TestExecuteAssignmentReturnTextTruncatesDeterministically(t *testing.T) {
 func TestExecuteAssignmentFlagDisabledReturnsSafeRejection(t *testing.T) {
 	client := &fakeCompletionClient{}
 	receipt, handled, err := ExecuteAssignment(context.Background(), validSpecJSON(t), ExecuteOptions{
-		Getenv: func(string) string { return "" },
+		Getenv: getenvInferenceDisabled,
 		Runner: LlamaCppRunner{
 			Sidecar: &fakeSidecar{status: healthySidecarStatus()},
 			Client:  client,
@@ -651,6 +651,27 @@ func healthySidecarStatus() llamacpp.LlamaCppSidecarStatus {
 
 func getenvEnabled(key string) string {
 	if key == FlagEnv {
+		return "1"
+	}
+	return ""
+}
+
+func getenvInferenceDisabled(key string) string {
+	if key == DisableFlagEnv {
+		return "1"
+	}
+	return ""
+}
+
+func getenvTextOutputDisabled(key string) string {
+	if key == DisableTextEnv {
+		return "1"
+	}
+	return ""
+}
+
+func getenvStreamingDisabled(key string) string {
+	if key == DisableStreamEnv {
 		return "1"
 	}
 	return ""

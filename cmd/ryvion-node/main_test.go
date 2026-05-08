@@ -210,7 +210,7 @@ func TestSubmitReceiptWithRetryTestableV7ProofBuildFailureStillSubmits(t *testin
 	}
 }
 
-func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
+func TestBuildOptionalV7HeartbeatPayloadDefaultsOnAndHonorsExplicitOff(t *testing.T) {
 	t.Setenv("RYV_DISABLE_OCI", "1")
 	t.Setenv("RYV_LLAMA_CPP_PROBE_MODEL", "")
 	caps := hw.CapSet{
@@ -219,15 +219,15 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	}
 	runtimeMgr := newRuntimeManager("test", runtimeContractMetadata{})
 
-	t.Setenv("RYV_NODE_V7_CAPS", "")
+	t.Setenv("RYV_NODE_V7_CAPS", "0")
 	if payload := buildOptionalV7HeartbeatPayload("pubkey", caps, "cpu", "ca", nil, runtimeMgr); payload != nil {
-		t.Fatalf("payload = %+v, want nil when RYV_NODE_V7_CAPS is off", payload)
+		t.Fatalf("payload = %+v, want nil when RYV_NODE_V7_CAPS is explicitly off", payload)
 	}
 
-	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	t.Setenv("RYV_NODE_V7_CAPS", "")
 	payload := buildOptionalV7HeartbeatPayload("pubkey", caps, "cpu", "ca", nil, runtimeMgr)
 	if payload == nil {
-		t.Fatal("payload = nil, want V7 payload when RYV_NODE_V7_CAPS=1")
+		t.Fatal("payload = nil, want V7 payload by default")
 	}
 	if payload.CapabilityPassport.NodePublicKey != "pubkey" {
 		t.Fatalf("node public key = %q, want pubkey", payload.CapabilityPassport.NodePublicKey)
@@ -268,6 +268,9 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if !reflect.DeepEqual(payload.BackendProbes, expectedBackendProbes) {
 		t.Fatalf("backend_probes = %+v, want local status builder value %+v", payload.BackendProbes, expectedBackendProbes)
 	}
+	if payload.CapabilityProfile.SchemaVersion == "" || payload.CapabilityProfile.Reason == "" {
+		t.Fatalf("capability_profile missing compact status: %+v", payload.CapabilityProfile)
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("json.Marshal(payload) error = %v", err)
@@ -275,7 +278,7 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
 	}
-	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"hardware_capacity"`, `"cpu_logical_cores"`, `"gpu_vram_bytes"`, `"model_policy"`, `"runtime_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"llama_cpp"`} {
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"hardware_capacity"`, `"cpu_logical_cores"`, `"gpu_vram_bytes"`, `"model_policy"`, `"runtime_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"capability_profile"`, `"llama_cpp"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
 		}
@@ -415,7 +418,7 @@ func TestBuildOptionalV7HeartbeatPayloadDoesNotProbeRuntime(t *testing.T) {
 }
 
 func TestSendHeartbeatOmitsV7WhenFlagOff(t *testing.T) {
-	t.Setenv("RYV_NODE_V7_CAPS", "")
+	t.Setenv("RYV_NODE_V7_CAPS", "0")
 	client, gotV7, calls := heartbeatTestClient(t)
 
 	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
@@ -426,12 +429,12 @@ func TestSendHeartbeatOmitsV7WhenFlagOff(t *testing.T) {
 		t.Fatalf("heartbeat calls = %d, want 1", calls.Load())
 	}
 	if gotV7.Load() {
-		t.Fatal("heartbeat sent V7 payload with RYV_NODE_V7_CAPS off")
+		t.Fatal("heartbeat sent V7 payload with RYV_NODE_V7_CAPS explicitly off")
 	}
 }
 
-func TestSendHeartbeatIncludesV7WhenFlagOn(t *testing.T) {
-	t.Setenv("RYV_NODE_V7_CAPS", "1")
+func TestSendHeartbeatIncludesV7ByDefault(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "")
 	client, gotV7, calls := heartbeatTestClient(t)
 
 	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
@@ -442,7 +445,7 @@ func TestSendHeartbeatIncludesV7WhenFlagOn(t *testing.T) {
 		t.Fatalf("heartbeat calls = %d, want 1", calls.Load())
 	}
 	if !gotV7.Load() {
-		t.Fatal("heartbeat did not send V7 payload with RYV_NODE_V7_CAPS=1")
+		t.Fatal("heartbeat did not send V7 payload by default")
 	}
 }
 

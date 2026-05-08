@@ -101,7 +101,12 @@ func TestExecuteWarmAssignmentFlagOffBuildsDisabledReceipt(t *testing.T) {
 	t.Parallel()
 
 	receipt, handled, err := ExecuteWarmAssignment(context.Background(), testWarmSpecJSON(t, testWarmSpec()), ExecuteOptions{
-		Getenv: func(string) string { return "" },
+		Getenv: func(key string) string {
+			if key == WarmDisableEnv {
+				return "1"
+			}
+			return ""
+		},
 	})
 	if !handled {
 		t.Fatal("handled = false, want true for explicit warm task")

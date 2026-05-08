@@ -50,6 +50,10 @@ type KeepWarmChecker interface {
 	CheckOnce(context.Context) llamacpp.LlamaCppSidecarStatus
 }
 
+type LlamaCppEnabler interface {
+	SetEnabled(bool) llamacpp.LlamaCppSidecarConfig
+}
+
 type LlamaCppRunner struct {
 	Sidecar  LlamaCppSidecar
 	KeepWarm KeepWarmChecker
@@ -229,6 +233,9 @@ func shouldStreamDashboardInference(spec Spec, status llamacpp.LlamaCppSidecarSt
 
 func (r LlamaCppRunner) ensureSidecar(ctx context.Context) llamacpp.LlamaCppSidecarStatus {
 	sidecar := r.sidecar()
+	if enabler, ok := sidecar.(LlamaCppEnabler); ok {
+		enabler.SetEnabled(true)
+	}
 	if llamacpp.KeepWarmEnabledFromEnv(r.getenv()) {
 		if r.KeepWarm != nil {
 			status := r.KeepWarm.CheckOnce(ctx)

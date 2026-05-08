@@ -24,13 +24,13 @@ import (
 
 func TestV7HeartbeatEnabledFromEnv(t *testing.T) {
 	t.Setenv(EnvV7Caps, "")
-	if V7HeartbeatEnabledFromEnv() {
-		t.Fatal("flag should be disabled when env is empty")
+	if !V7HeartbeatEnabledFromEnv() {
+		t.Fatal("V7 heartbeat should be enabled by default when env is empty")
 	}
 
-	t.Setenv(EnvV7Caps, "1")
-	if !V7HeartbeatEnabledFromEnv() {
-		t.Fatal("flag should be enabled for 1")
+	t.Setenv(EnvV7Caps, "0")
+	if V7HeartbeatEnabledFromEnv() {
+		t.Fatal("V7 heartbeat should be disabled for explicit 0")
 	}
 }
 
@@ -130,6 +130,21 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 		payload.BackendRuntimes.LlamaCPP.ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
 		t.Fatalf("backend_runtimes.llama_cpp = %+v, want active loaded sidecar", payload.BackendRuntimes.LlamaCPP)
 	}
+	if !payload.CapabilityProfile.V7DashboardInference ||
+		!payload.CapabilityProfile.TextOutput ||
+		!payload.CapabilityProfile.Streaming ||
+		!payload.CapabilityProfile.HashMetricsReceipts ||
+		!payload.CapabilityProfile.BackendTextGeneration ||
+		!payload.CapabilityProfile.BackendWarm ||
+		!payload.CapabilityProfile.Ready {
+		t.Fatalf("capability_profile = %+v, want default inference capabilities from mocked backend/model", payload.CapabilityProfile)
+	}
+	if len(payload.CapabilityProfile.Models) != 1 ||
+		payload.CapabilityProfile.Models[0].ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" ||
+		!payload.CapabilityProfile.Models[0].Resident ||
+		!payload.CapabilityProfile.Models[0].Runnable {
+		t.Fatalf("capability_profile models = %+v, want resident runnable llama", payload.CapabilityProfile.Models)
+	}
 	if payload.CASSummary == nil || !payload.CASSummary.Enabled {
 		t.Fatalf("CAS summary = %+v, want enabled", payload.CASSummary)
 	}
@@ -200,6 +215,11 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 		!strings.Contains(string(raw), `"backend_runtimes"`) ||
 		!strings.Contains(string(raw), `"llama_cpp"`) {
 		t.Fatalf("payload JSON missing backend details: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"capability_profile"`) ||
+		!strings.Contains(string(raw), `"v7_dashboard_inference"`) ||
+		!strings.Contains(string(raw), `"hash_metrics_receipts"`) {
+		t.Fatalf("payload JSON missing capability profile: %s", string(raw))
 	}
 }
 

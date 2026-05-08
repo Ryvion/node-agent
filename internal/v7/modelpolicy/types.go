@@ -16,12 +16,16 @@ const (
 	EnvModelAllowIDs               = "RYV_MODEL_ALLOW_IDS"
 	EnvModelRuntimeAllowLarge      = "RYV_MODEL_RUNTIME_ALLOW_LARGE"
 	EnvModelRequireExplicitLarge   = "RYV_MODEL_REQUIRE_EXPLICIT_ALLOW_LARGE"
+	EnvModelMaxWarmModels          = "RYV_MODEL_MAX_WARM_MODELS"
+	EnvModelMaxConcurrentInference = "RYV_MODEL_MAX_CONCURRENT_INFERENCE_JOBS"
 
 	DefaultMaxSingleModelGB  = 8
 	DefaultMaxCacheGB        = 50
 	DefaultEvictionPolicy    = "lru"
 	DefaultRuntimeMaxModelGB = 8
 	DefaultRuntimeMaxParamsB = 8
+	DefaultMaxWarmModels     = 1
+	DefaultMaxConcurrentJobs = 1
 )
 
 var (
@@ -54,6 +58,8 @@ type RuntimePolicy struct {
 	DenyFamilies                       []string `json:"deny_families"`
 	AllowFamilies                      []string `json:"allow_families"`
 	RequireExplicitAllowForLargeModels bool     `json:"require_explicit_allow_for_large_models"`
+	MaxWarmModels                      int      `json:"max_warm_models"`
+	MaxConcurrentInferenceJobs         int      `json:"max_concurrent_inference_jobs"`
 }
 
 type Status = Policy

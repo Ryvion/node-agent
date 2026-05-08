@@ -70,6 +70,8 @@ func defaultRuntimePolicy() RuntimePolicy {
 		DenyFamilies:                       []string{},
 		AllowFamilies:                      cloneStrings(DefaultRuntimeAllowedFamilies),
 		RequireExplicitAllowForLargeModels: true,
+		MaxWarmModels:                      DefaultMaxWarmModels,
+		MaxConcurrentInferenceJobs:         DefaultMaxConcurrentJobs,
 	}
 }
 
@@ -90,6 +92,18 @@ func normalizeRuntimePolicy(policy RuntimePolicy) RuntimePolicy {
 	if policy.MaxRuntimeParameterCountBillions > maxPolicyParamsB {
 		policy.MaxRuntimeParameterCountBillions = maxPolicyParamsB
 	}
+	if policy.MaxWarmModels <= 0 {
+		policy.MaxWarmModels = DefaultMaxWarmModels
+	}
+	if policy.MaxWarmModels > 8 {
+		policy.MaxWarmModels = 8
+	}
+	if policy.MaxConcurrentInferenceJobs <= 0 {
+		policy.MaxConcurrentInferenceJobs = DefaultMaxConcurrentJobs
+	}
+	if policy.MaxConcurrentInferenceJobs > 16 {
+		policy.MaxConcurrentInferenceJobs = 16
+	}
 	policy.DenyModelIDs = normalizeModelIDs(policy.DenyModelIDs)
 	policy.AllowModelIDs = normalizeModelIDs(policy.AllowModelIDs)
 	policy.DenyFamilies = normalizeList(policy.DenyFamilies, maxPolicyCompactLen, nil)
@@ -107,7 +121,9 @@ func runtimePolicyIsZero(policy RuntimePolicy) bool {
 		len(policy.AllowModelIDs) == 0 &&
 		len(policy.DenyFamilies) == 0 &&
 		len(policy.AllowFamilies) == 0 &&
-		!policy.RequireExplicitAllowForLargeModels
+		!policy.RequireExplicitAllowForLargeModels &&
+		policy.MaxWarmModels == 0 &&
+		policy.MaxConcurrentInferenceJobs == 0
 }
 
 func normalizeList(values []string, maxRunes int, fallback []string) []string {

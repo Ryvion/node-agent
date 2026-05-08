@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Ryvion/node-agent/internal/v7/inferenceconfig"
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
 )
 
@@ -14,6 +15,9 @@ const (
 	FlagEnv           = "RYV_NODE_V7_DASHBOARD_INFERENCE"
 	TextOutputFlagEnv = "RYV_NODE_V7_INFERENCE_TEXT_OUTPUT"
 	StreamingFlagEnv  = "RYV_NODE_V7_INFERENCE_STREAMING"
+	DisableFlagEnv    = inferenceconfig.EnvDisableV7Inference
+	DisableTextEnv    = inferenceconfig.EnvDisableTextOutput
+	DisableStreamEnv  = inferenceconfig.EnvDisableStreaming
 
 	defaultTimeoutMs = int64(2 * 60 * 1000)
 
@@ -66,24 +70,15 @@ func IsSpecJSON(specJSON string) bool {
 }
 
 func EnabledFromEnv(getenv func(string) string) bool {
-	if getenv == nil {
-		return false
-	}
-	return strings.TrimSpace(getenv(FlagEnv)) == "1"
+	return inferenceconfig.V7InferenceEnabled(getenv)
 }
 
 func TextOutputEnabledFromEnv(getenv func(string) string) bool {
-	if getenv == nil {
-		return false
-	}
-	return strings.TrimSpace(getenv(TextOutputFlagEnv)) == "1"
+	return inferenceconfig.TextOutputEnabled(getenv)
 }
 
 func StreamingEnabledFromEnv(getenv func(string) string) bool {
-	if getenv == nil {
-		return false
-	}
-	return strings.TrimSpace(getenv(StreamingFlagEnv)) == "1"
+	return inferenceconfig.StreamingEnabled(getenv)
 }
 
 func AssignmentIdentityFromJSON(specJSON string) (AssignmentIdentity, bool) {

@@ -212,6 +212,7 @@ func TestOperatorAPIStatusEndpointIncludesHardwareCapacity(t *testing.T) {
 		`"unified_memory"`,
 		`"metal_available"`,
 		`"cuda_available"`,
+		`"vulkan_available"`,
 		`"disk_free_bytes_model_cache"`,
 		`"power_profile"`,
 		`"thermal_risk"`,
@@ -372,6 +373,53 @@ func TestOperatorAPIStatusEndpointIncludesModelPolicyAndCache(t *testing.T) {
 	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("operator status contains forbidden marker %q: %s", forbidden, respBody)
+		}
+	}
+}
+
+func TestOperatorStatusIncludesCapabilityProfile(t *testing.T) {
+	cacheDir := t.TempDir()
+	modelPath := filepath.Join(cacheDir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	if err := os.WriteFile(modelPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write model fixture: %v", err)
+	}
+	t.Setenv("RYV_MODEL_CACHE_DIR", cacheDir)
+
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		caps: hw.CapSet{
+			CPUCores:  8,
+			RAMBytes:  32 << 30,
+			GPUModel:  "Apple M4 Pro",
+			VRAMBytes: 0,
+		},
+	}
+
+	status := state.statusSnapshot(defaultOperatorAPIPort)
+	if status.CapabilityProfile.SchemaVersion == "" {
+		t.Fatalf("capability_profile missing: %+v", status.CapabilityProfile)
+	}
+	if status.CapabilityProfile.Hardware.OS == "" ||
+		status.CapabilityProfile.Policy.MaxRuntimeModelBytes == 0 ||
+		status.CapabilityProfile.BackendRuntime.Backend == "" {
+		t.Fatalf("capability_profile compact summaries missing: %+v", status.CapabilityProfile)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal(status) error = %v", err)
+	}
+	text := strings.ToLower(string(raw))
+	for _, want := range []string{`"capability_profile"`, `"v7_dashboard_inference"`, `"text_output"`, `"streaming"`, `"hash_metrics_receipts"`, `"backend_text_generation"`, `"backend_warm"`, `"models"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status JSON missing %s: %s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("status JSON contains forbidden marker %q: %s", forbidden, raw)
 		}
 	}
 }

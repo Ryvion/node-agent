@@ -11,6 +11,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
+	"github.com/Ryvion/node-agent/internal/v7/capabilityprofile"
 	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
@@ -41,6 +42,7 @@ type V7HeartbeatPayload struct {
 	ModelCache                modelcache.Status                     `json:"model_cache"`
 	BackendProbes             backendprobe.Probes                   `json:"backend_probes"`
 	BackendRuntimes           llamacpp.BackendRuntimes              `json:"backend_runtimes"`
+	CapabilityProfile         capabilityprofile.Profile             `json:"capability_profile"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
@@ -74,6 +76,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	ModelCache             *modelcache.Status
 	BackendProbes          *backendprobe.Probes
 	BackendRuntimes        *llamacpp.BackendRuntimes
+	CapabilityProfile      *capabilityprofile.Profile
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -120,10 +123,10 @@ type SandboxPolicySummary struct {
 
 func V7HeartbeatEnabledFromEnv() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvV7Caps))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
+	case "0", "false", "no", "off", "disabled":
 		return false
+	default:
+		return true
 	}
 }
 
@@ -167,6 +170,15 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 	modelCache := cloneModelCache(input.ModelCache)
 	backendProbes := cloneBackendProbes(input.BackendProbes)
 	backendRuntimes := cloneBackendRuntimes(input.BackendRuntimes)
+	capabilityProfile := cloneCapabilityProfile(input.CapabilityProfile, capabilityprofile.BuildInput{
+		Hardware:        hardwareCapacity,
+		Policy:          modelPolicy,
+		ModelCache:      modelCache,
+		BackendProbes:   backendProbes,
+		BackendRuntimes: backendRuntimes,
+		KVCapability:    kvCapability,
+		TensorAccess:    tensorAccess,
+	})
 
 	casSummary := cloneCASSummary(input.CASSummary)
 	if casSummary == nil && input.CASCapabilitySummary.Enabled {
@@ -220,6 +232,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		ModelCache:           modelCache,
 		BackendProbes:        backendProbes,
 		BackendRuntimes:      backendRuntimes,
+		CapabilityProfile:    capabilityProfile,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,
@@ -363,6 +376,13 @@ func cloneBackendRuntimes(runtimes *llamacpp.BackendRuntimes) llamacpp.BackendRu
 		return llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{})
 	}
 	return llamacpp.NormalizeBackendRuntimes(*runtimes)
+}
+
+func cloneCapabilityProfile(profile *capabilityprofile.Profile, input capabilityprofile.BuildInput) capabilityprofile.Profile {
+	if profile == nil {
+		return capabilityprofile.BuildProfile(input)
+	}
+	return capabilityprofile.NormalizeProfile(*profile)
 }
 
 func cloneCASSummary(summary *CASSummary) *CASSummary {

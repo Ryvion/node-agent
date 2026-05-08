@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/Ryvion/node-agent/internal/v7/inferenceconfig"
 )
 
 const (
-	WarmTask    = "v7_warm_model"
-	WarmFlagEnv = "RYV_NODE_V7_MODEL_WARM"
+	WarmTask       = "v7_warm_model"
+	WarmFlagEnv    = "RYV_NODE_V7_MODEL_WARM"
+	WarmDisableEnv = inferenceconfig.EnvDisableModelWarm
 
 	defaultWarmTimeoutMs = int64(10 * 60 * 1000)
 	maxWarmTimeoutMs     = int64(60 * 60 * 1000)
@@ -50,10 +53,7 @@ func IsWarmSpecJSON(specJSON string) bool {
 }
 
 func WarmEnabledFromEnv(getenv func(string) string) bool {
-	if getenv == nil {
-		return false
-	}
-	return strings.TrimSpace(getenv(WarmFlagEnv)) == "1"
+	return inferenceconfig.ModelWarmEnabled(getenv)
 }
 
 func WarmAssignmentIdentityFromJSON(specJSON string) (WarmAssignmentIdentity, bool) {

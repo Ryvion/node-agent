@@ -20,6 +20,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
+	v7capabilityprofile "github.com/Ryvion/node-agent/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
@@ -126,6 +127,7 @@ type operatorStatusResponse struct {
 	ModelCache           v7modelcache.Status                            `json:"model_cache"`
 	BackendProbes        v7backendprobe.Probes                          `json:"backend_probes"`
 	BackendRuntimes      v7llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
+	CapabilityProfile    v7capabilityprofile.Profile                    `json:"capability_profile"`
 	LlamaCPPSidecar      v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
 	LlamaCPPBenchmark    v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
 	Metrics              operatorMetrics                                `json:"metrics"`
@@ -257,6 +259,8 @@ type v7HeartbeatPreviewFieldPresence struct {
 	LlamaCPPProbePresent     bool `json:"llama_cpp_probe_present"`
 	BackendRuntimesPresent   bool `json:"backend_runtimes_present"`
 	LlamaCPPRuntimePresent   bool `json:"llama_cpp_runtime_present"`
+	CapabilityProfilePresent bool `json:"capability_profile_present"`
+	CapabilityModelsLen      int  `json:"capability_models_len"`
 }
 
 type logRing struct {
@@ -922,12 +926,15 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInfo.RuntimeBackendPresent = runtimeInfo.RuntimeBackend != ""
 	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
-	modelPolicy := buildModelPolicyStatus()
-	hardwareCapacity := buildHardwareCapacityStatus(modelPolicy.CacheDir)
+	baseModelPolicy := buildModelPolicyStatus()
+	hardwareCapacity := buildHardwareCapacityStatus(baseModelPolicy.CacheDir)
+	modelPolicy := buildDerivedModelPolicyStatus(baseModelPolicy, hardwareCapacity)
 	modelCache := buildModelCacheStatus(modelPolicy)
 	backendProbes := buildBackendProbeStatus()
 	llamaCppSidecar := s.llamaCppSidecarStatusView(context.Background())
 	backendRuntimes := v7llamacpp.BuildBackendRuntimes(llamaCppSidecar.LlamaCppSidecarStatus)
+	kvCapability := buildNativeTensorAccessCapability(infMgr)
+	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, &kvCapability, runtimeInfo.TensorAccess)
 	llamaCppBenchmark := s.llamaCppBenchmarkSnapshot()
 
 	return operatorStatusResponse{
@@ -956,6 +963,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		ModelCache:        modelCache,
 		BackendProbes:     backendProbes,
 		BackendRuntimes:   backendRuntimes,
+		CapabilityProfile: capabilityProfile,
 		LlamaCPPSidecar:   llamaCppSidecar,
 		LlamaCPPBenchmark: llamaCppBenchmark,
 		Metrics: operatorMetrics{
@@ -1051,12 +1059,32 @@ func buildModelPolicyStatus() v7modelpolicy.Status {
 	return v7modelpolicy.StatusFromEnv()
 }
 
+func buildDerivedModelPolicyStatus(policy v7modelpolicy.Status, hardware v7hardware.CapacityInventory) v7modelpolicy.Status {
+	return v7modelpolicy.BuildDerivedPolicy(v7modelpolicy.DerivedPolicyInput{
+		BasePolicy: policy,
+		Hardware:   hardware,
+	})
+}
+
 func buildHardwareCapacityStatus(modelCacheDir string) v7hardware.CapacityInventory {
 	return v7hardware.DetectInventory(modelCacheDir)
 }
 
 func buildModelCacheStatus(policy v7modelpolicy.Status) v7modelcache.Status {
 	return v7modelcache.BuildStatus(policy.CacheDir)
+}
+
+func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {
+	return v7capabilityprofile.BuildProfile(v7capabilityprofile.BuildInput{
+		Hardware:        hardware,
+		Policy:          policy,
+		ModelCache:      modelCache,
+		BackendProbes:   backendProbes,
+		BackendRuntimes: backendRuntimes,
+		KVCapability:    kvCapability,
+		TensorAccess:    tensorAccess,
+		Getenv:          os.Getenv,
+	})
 }
 
 func runtimeInventoryBackendDetector() v7runtimeinventory.CandidateBackendDetector {
@@ -1285,6 +1313,8 @@ func buildV7HeartbeatPreviewResponse(nodeID string, payload v7heartbeat.V7Heartb
 			LlamaCPPProbePresent:     payload.SchemaVersion != "",
 			BackendRuntimesPresent:   payload.SchemaVersion != "",
 			LlamaCPPRuntimePresent:   payload.SchemaVersion != "",
+			CapabilityProfilePresent: payload.CapabilityProfile.SchemaVersion != "",
+			CapabilityModelsLen:      len(payload.CapabilityProfile.Models),
 		},
 	}
 }

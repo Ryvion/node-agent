@@ -42,6 +42,7 @@ type CapacityInventory struct {
 	UnifiedMemory           bool   `json:"unified_memory"`
 	MetalAvailable          bool   `json:"metal_available"`
 	CUDAAvailable           bool   `json:"cuda_available"`
+	VulkanAvailable         bool   `json:"vulkan_available"`
 	DiskFreeBytesModelCache uint64 `json:"disk_free_bytes_model_cache"`
 	PowerProfile            string `json:"power_profile"`
 	ThermalRisk             string `json:"thermal_risk"`
@@ -80,6 +81,7 @@ func NormalizeInventory(inventory CapacityInventory) CapacityInventory {
 		inventory.GPUVRAMBytes = 0
 		inventory.MetalAvailable = false
 		inventory.CUDAAvailable = false
+		inventory.VulkanAvailable = false
 	}
 	if inventory.GPUName == "" {
 		inventory.GPUName = "unknown"

@@ -25,6 +25,8 @@ func TestFromConfigSourceParsesEnvPolicy(t *testing.T) {
 		EnvModelAllowIDs:               "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
 		EnvModelRuntimeAllowLarge:      "0",
 		EnvModelRequireExplicitLarge:   "1",
+		EnvModelMaxWarmModels:          "2",
+		EnvModelMaxConcurrentInference: "3",
 	}
 	policy := FromConfigSource(ConfigSource{
 		Getenv: func(name string) string {
@@ -74,6 +76,9 @@ func TestFromConfigSourceParsesEnvPolicy(t *testing.T) {
 	}
 	if policy.RuntimePolicy.AllowLargeModels || !policy.RuntimePolicy.RequireExplicitAllowForLargeModels {
 		t.Fatalf("runtime policy large-model flags = %+v, want allow_large=false require_explicit=true", policy.RuntimePolicy)
+	}
+	if policy.RuntimePolicy.MaxWarmModels != 2 || policy.RuntimePolicy.MaxConcurrentInferenceJobs != 3 {
+		t.Fatalf("runtime warm/concurrency policy = %+v, want 2/3", policy.RuntimePolicy)
 	}
 	if got, want := strings.Join(policy.RuntimePolicy.AllowFamilies, ","), "llama"; got != want {
 		t.Fatalf("runtime allow_families = %q, want %q", got, want)
@@ -128,6 +133,10 @@ func TestDefaultPolicyValues(t *testing.T) {
 	}
 	if !policy.RuntimePolicy.AllowCPUOffload || policy.RuntimePolicy.AllowLargeModels || !policy.RuntimePolicy.RequireExplicitAllowForLargeModels {
 		t.Fatalf("runtime policy default flags = %+v", policy.RuntimePolicy)
+	}
+	if policy.RuntimePolicy.MaxWarmModels != DefaultMaxWarmModels ||
+		policy.RuntimePolicy.MaxConcurrentInferenceJobs != DefaultMaxConcurrentJobs {
+		t.Fatalf("runtime warm/concurrency defaults = %+v", policy.RuntimePolicy)
 	}
 	if len(policy.RuntimePolicy.DenyModelIDs) != 0 || len(policy.RuntimePolicy.AllowModelIDs) != 0 || len(policy.RuntimePolicy.DenyFamilies) != 0 {
 		t.Fatalf("runtime policy default id/family lists = %+v", policy.RuntimePolicy)

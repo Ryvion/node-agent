@@ -74,6 +74,12 @@ func FromConfigSource(source ConfigSource) Policy {
 	if raw := strings.TrimSpace(source.Getenv(EnvModelRequireExplicitLarge)); raw != "" {
 		policy.RuntimePolicy.RequireExplicitAllowForLargeModels = parseBool(raw)
 	}
+	if raw := strings.TrimSpace(source.Getenv(EnvModelMaxWarmModels)); raw != "" {
+		policy.RuntimePolicy.MaxWarmModels = parsePositiveInt(raw, DefaultMaxWarmModels, 8)
+	}
+	if raw := strings.TrimSpace(source.Getenv(EnvModelMaxConcurrentInference)); raw != "" {
+		policy.RuntimePolicy.MaxConcurrentInferenceJobs = parsePositiveInt(raw, DefaultMaxConcurrentJobs, 16)
+	}
 
 	return NormalizePolicy(policy)
 }
@@ -139,6 +145,17 @@ func parseGiB(raw string, fallbackGB uint64, maxGB uint64) uint64 {
 
 func parseBillions(raw string, fallback float64, maxValue float64) float64 {
 	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	if maxValue > 0 && value > maxValue {
+		value = maxValue
+	}
+	return value
+}
+
+func parsePositiveInt(raw string, fallback int, maxValue int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || value <= 0 {
 		return fallback
 	}

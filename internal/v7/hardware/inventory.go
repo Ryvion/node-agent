@@ -45,6 +45,7 @@ func BuildInventory(detector Detector) CapacityInventory {
 	default:
 		inventory.SystemRAMBytes, inventory.AvailableRAMBytes = detectProcMeminfo(detector)
 	}
+	inventory.VulkanAvailable = detectVulkanAvailable(detector)
 
 	if strings.TrimSpace(detector.ModelCacheDir) != "" && detector.DiskFreeBytes != nil {
 		if free, err := detector.DiskFreeBytes(detector.ModelCacheDir); err == nil {
@@ -329,6 +330,30 @@ func detectNVIDIAGPU(detector Detector) gpuInfo {
 		cuda:        true,
 		thermalRisk: thermalRisk,
 	}
+}
+
+func detectVulkanAvailable(detector Detector) bool {
+	if detector.LookPath == nil {
+		return false
+	}
+	for _, name := range executableNameVariants(detector.GOOS, "vulkaninfo") {
+		if path, err := detector.LookPath(name); err == nil && strings.TrimSpace(path) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func executableNameVariants(goos, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	variants := []string{name}
+	if strings.EqualFold(strings.TrimSpace(goos), "windows") && !strings.HasSuffix(strings.ToLower(name), ".exe") {
+		variants = append(variants, name+".exe")
+	}
+	return variants
 }
 
 func detectLinuxLspciGPU(detector Detector) gpuInfo {
