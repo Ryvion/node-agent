@@ -21,6 +21,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/inference"
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
+	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
@@ -120,6 +121,7 @@ type operatorStatusResponse struct {
 	Runtime              operatorRuntimeInfo                            `json:"runtime"`
 	TensorAccess         v7tensoraccess.TensorAccessCapability          `json:"tensor_access"`
 	RuntimeInventory     v7runtimeinventory.Inventory                   `json:"runtime_inventory"`
+	HardwareCapacity     v7hardware.CapacityInventory                   `json:"hardware_capacity"`
 	ModelPolicy          v7modelpolicy.Status                           `json:"model_policy"`
 	ModelCache           v7modelcache.Status                            `json:"model_cache"`
 	BackendProbes        v7backendprobe.Probes                          `json:"backend_probes"`
@@ -243,6 +245,7 @@ type v7HeartbeatPreviewEnvelope struct {
 
 type v7HeartbeatPreviewFieldPresence struct {
 	RuntimeInventoryPresent  bool `json:"runtime_inventory_present"`
+	HardwareCapacityPresent  bool `json:"hardware_capacity_present"`
 	BackendCandidatesPresent bool `json:"backend_candidates_present"`
 	BackendCandidatesLen     int  `json:"backend_candidates_len"`
 	GGUFModelsPresent        bool `json:"gguf_models_present"`
@@ -920,6 +923,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	runtimeInfo.ManagedOCIGPUReady = runtimeInfo.RuntimeGPUReady
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, runtimeInfo.TensorAccess, infMgr)
 	modelPolicy := buildModelPolicyStatus()
+	hardwareCapacity := buildHardwareCapacityStatus(modelPolicy.CacheDir)
 	modelCache := buildModelCacheStatus(modelPolicy)
 	backendProbes := buildBackendProbeStatus()
 	llamaCppSidecar := s.llamaCppSidecarStatusView(context.Background())
@@ -947,6 +951,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		Runtime:           runtimeInfo,
 		TensorAccess:      runtimeInfo.TensorAccess,
 		RuntimeInventory:  runtimeInventory,
+		HardwareCapacity:  hardwareCapacity,
 		ModelPolicy:       modelPolicy,
 		ModelCache:        modelCache,
 		BackendProbes:     backendProbes,
@@ -1044,6 +1049,10 @@ func buildRuntimeInventoryStatus(runtimeInfo operatorRuntimeInfo, capability v7t
 
 func buildModelPolicyStatus() v7modelpolicy.Status {
 	return v7modelpolicy.StatusFromEnv()
+}
+
+func buildHardwareCapacityStatus(modelCacheDir string) v7hardware.CapacityInventory {
+	return v7hardware.DetectInventory(modelCacheDir)
 }
 
 func buildModelCacheStatus(policy v7modelpolicy.Status) v7modelcache.Status {
@@ -1264,6 +1273,7 @@ func buildV7HeartbeatPreviewResponse(nodeID string, payload v7heartbeat.V7Heartb
 		},
 		FieldPresence: v7HeartbeatPreviewFieldPresence{
 			RuntimeInventoryPresent:  payload.SchemaVersion != "",
+			HardwareCapacityPresent:  payload.HardwareCapacity.OS != "" || payload.HardwareCapacity.Arch != "",
 			BackendCandidatesPresent: payload.RuntimeInventory.BackendCandidates != nil,
 			BackendCandidatesLen:     len(payload.RuntimeInventory.BackendCandidates),
 			GGUFModelsPresent:        payload.RuntimeInventory.GGUFModels != nil,

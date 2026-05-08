@@ -10,6 +10,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
+	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 	"github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	"github.com/Ryvion/node-agent/internal/v7/modelcache"
@@ -79,6 +80,13 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	}
 	if len(payload.RuntimeInventory.GGUFModels) != 1 {
 		t.Fatalf("runtime_inventory gguf_models = %+v, want one mocked GGUF model", payload.RuntimeInventory.GGUFModels)
+	}
+	if payload.HardwareCapacity.OS != "linux" ||
+		payload.HardwareCapacity.Arch != "amd64" ||
+		payload.HardwareCapacity.GPUVendor != v7hardware.GPUVendorNVIDIA ||
+		payload.HardwareCapacity.GPUName != "NVIDIA GeForce RTX 4090" ||
+		payload.HardwareCapacity.GPUVRAMBytes != 24*1024*1024*1024 {
+		t.Fatalf("hardware_capacity = %+v, want mocked RTX 4090 capacity", payload.HardwareCapacity)
 	}
 	if payload.ModelPolicy.CacheDir != "/tmp/ryvion-models" || payload.ModelPolicy.MaxSingleModelBytes != 8*1024*1024*1024 {
 		t.Fatalf("model_policy = %+v, want mocked cache policy", payload.ModelPolicy)
@@ -162,6 +170,9 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"runtime_inventory"`) {
 		t.Fatalf("payload JSON missing runtime_inventory: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"hardware_capacity"`) {
+		t.Fatalf("payload JSON missing hardware_capacity: %s", string(raw))
 	}
 	if !strings.Contains(string(raw), `"model_policy"`) || !strings.Contains(string(raw), `"model_cache"`) {
 		t.Fatalf("payload JSON missing model policy/cache: %s", string(raw))
@@ -265,6 +276,33 @@ func TestBuildV7HeartbeatPayloadDefaultsUnsupportedNoopRuntimeInventory(t *testi
 	}
 	if !strings.Contains(string(raw), `"runtime_inventory"`) {
 		t.Fatalf("payload JSON missing runtime_inventory: %s", raw)
+	}
+}
+
+func TestBuildV7HeartbeatPayloadDefaultsSafeHardwareCapacity(t *testing.T) {
+	input := validInput()
+	input.HardwareCapacity = nil
+
+	payload, err := BuildV7HeartbeatPayload(input)
+	if err != nil {
+		t.Fatalf("BuildV7HeartbeatPayload() error = %v", err)
+	}
+	if payload.HardwareCapacity.OS != "linux" || payload.HardwareCapacity.Arch != "amd64" {
+		t.Fatalf("hardware_capacity identity = %+v, want input OS/arch fallback", payload.HardwareCapacity)
+	}
+	if payload.HardwareCapacity.GPUDetected ||
+		payload.HardwareCapacity.GPUVendor != v7hardware.GPUVendorUnknown ||
+		payload.HardwareCapacity.GPUName != "unknown" ||
+		payload.HardwareCapacity.PowerProfile != v7hardware.PowerProfileUnknown ||
+		payload.HardwareCapacity.ThermalRisk != v7hardware.ThermalRiskUnknown {
+		t.Fatalf("default hardware_capacity should be safe unknown capacity: %+v", payload.HardwareCapacity)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"hardware_capacity"`) {
+		t.Fatalf("payload JSON missing hardware_capacity: %s", raw)
 	}
 }
 
@@ -554,6 +592,7 @@ func validInput() BuildV7HeartbeatPayloadInput {
 			Reason:                     tensoraccess.ReasonTextGenerationOnly,
 		},
 		RuntimeInventory: ptr(validRuntimeInventory()),
+		HardwareCapacity: ptr(validHardwareCapacity()),
 		ModelPolicy: ptr(modelpolicy.Status{
 			AutoDownload:           false,
 			MaxSingleModelBytes:    8 * 1024 * 1024 * 1024,
@@ -601,6 +640,24 @@ func validInput() BuildV7HeartbeatPayloadInput {
 		},
 		CreatedAtUnixMs: 123,
 	}
+}
+
+func validHardwareCapacity() v7hardware.CapacityInventory {
+	return v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		OS:                      "linux",
+		Arch:                    "amd64",
+		CPULogicalCores:         16,
+		SystemRAMBytes:          64 * 1024 * 1024 * 1024,
+		AvailableRAMBytes:       48 * 1024 * 1024 * 1024,
+		GPUDetected:             true,
+		GPUVendor:               v7hardware.GPUVendorNVIDIA,
+		GPUName:                 "NVIDIA GeForce RTX 4090",
+		GPUVRAMBytes:            24 * 1024 * 1024 * 1024,
+		CUDAAvailable:           true,
+		DiskFreeBytesModelCache: 90 * 1024 * 1024 * 1024,
+		PowerProfile:            v7hardware.PowerProfileDesktop,
+		ThermalRisk:             v7hardware.ThermalRiskLow,
+	})
 }
 
 func validRuntimeInventory() runtimeinventory.Inventory {

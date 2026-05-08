@@ -924,6 +924,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 	}
 	runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, tensorAccess, infMgr)
 	modelPolicy := buildModelPolicyStatus()
+	hardwareCapacity := buildHardwareCapacityStatus(modelPolicy.CacheDir)
 	modelCache := buildModelCacheStatus(modelPolicy)
 	backendProbes := buildBackendProbeStatus()
 
@@ -957,6 +958,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 		KVCapability:              &kvCapability,
 		TensorAccess:              &tensorAccess,
 		RuntimeInventory:          &runtimeInventory,
+		HardwareCapacity:          &hardwareCapacity,
 		ModelPolicy:               &modelPolicy,
 		ModelCache:                &modelCache,
 		BackendProbes:             &backendProbes,

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -168,6 +169,61 @@ func TestOperatorAPIStatusEndpointIncludesWorkLoop(t *testing.T) {
 	}
 	if _, err := json.Marshal(status.WorkLoop); err != nil {
 		t.Fatalf("json.Marshal(status.WorkLoop) error = %v", err)
+	}
+}
+
+func TestOperatorAPIStatusEndpointIncludesHardwareCapacity(t *testing.T) {
+	t.Setenv("RYV_MODEL_CACHE_DIR", t.TempDir())
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
+	}
+	if status.HardwareCapacity.OS != runtime.GOOS || status.HardwareCapacity.Arch != runtime.GOARCH {
+		t.Fatalf("hardware_capacity identity = %+v, want %s/%s", status.HardwareCapacity, runtime.GOOS, runtime.GOARCH)
+	}
+	if status.HardwareCapacity.GPUVendor == "" ||
+		status.HardwareCapacity.GPUName == "" ||
+		status.HardwareCapacity.PowerProfile == "" ||
+		status.HardwareCapacity.ThermalRisk == "" {
+		t.Fatalf("hardware_capacity missing safe fields: %+v", status.HardwareCapacity)
+	}
+	text := strings.ToLower(string(respBody))
+	for _, want := range []string{
+		`"hardware_capacity"`,
+		`"cpu_logical_cores"`,
+		`"system_ram_bytes"`,
+		`"available_ram_bytes"`,
+		`"gpu_detected"`,
+		`"gpu_vendor"`,
+		`"gpu_name"`,
+		`"gpu_vram_bytes"`,
+		`"unified_memory"`,
+		`"metal_available"`,
+		`"cuda_available"`,
+		`"disk_free_bytes_model_cache"`,
+		`"power_profile"`,
+		`"thermal_risk"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("operator status missing %s: %s", want, respBody)
+		}
+	}
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("status JSON contains forbidden marker %q: %s", forbidden, respBody)
+		}
 	}
 }
 
@@ -589,6 +645,9 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	}
 	if !preview.FieldPresence.RuntimeInventoryPresent {
 		t.Fatalf("runtime_inventory_present = false; body=%s", respBody)
+	}
+	if !preview.FieldPresence.HardwareCapacityPresent {
+		t.Fatalf("hardware_capacity_present = false; body=%s", respBody)
 	}
 	if !preview.FieldPresence.BackendCandidatesPresent || preview.FieldPresence.BackendCandidatesLen < 1 {
 		t.Fatalf("backend_candidates presence = %+v; body=%s", preview.FieldPresence, respBody)

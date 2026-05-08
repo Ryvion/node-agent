@@ -252,6 +252,13 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if payload.RuntimeInventory.Provider != "noop" {
 		t.Fatalf("runtime_inventory provider = %q, want noop", payload.RuntimeInventory.Provider)
 	}
+	if payload.HardwareCapacity.OS == "" ||
+		payload.HardwareCapacity.Arch == "" ||
+		payload.HardwareCapacity.GPUName == "" ||
+		payload.HardwareCapacity.PowerProfile == "" ||
+		payload.HardwareCapacity.ThermalRisk == "" {
+		t.Fatalf("hardware_capacity missing safe status fields: %+v", payload.HardwareCapacity)
+	}
 	expectedBackendRuntimes := v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{})
 	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
 		t.Fatalf("backend_runtimes = %+v, want default local builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
@@ -267,7 +274,7 @@ func TestBuildOptionalV7HeartbeatPayloadHonorsEnvFlag(t *testing.T) {
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
 	}
-	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"model_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"llama_cpp"`} {
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"hardware_capacity"`, `"cpu_logical_cores"`, `"gpu_vram_bytes"`, `"model_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"llama_cpp"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
 		}
@@ -364,6 +371,7 @@ func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *
 		!strings.Contains(string(raw), `"candidate_backends"`) ||
 		!strings.Contains(string(raw), `"backend_candidates"`) ||
 		!strings.Contains(string(raw), `"gguf_models"`) ||
+		!strings.Contains(string(raw), `"hardware_capacity"`) ||
 		!strings.Contains(string(raw), `"model_policy"`) ||
 		!strings.Contains(string(raw), `"model_cache"`) ||
 		!strings.Contains(string(raw), `"backend_probes"`) ||
