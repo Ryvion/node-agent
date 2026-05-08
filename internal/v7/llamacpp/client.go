@@ -195,10 +195,7 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time)
 			}
 		}
 		for _, choice := range chunk.Choices {
-			content := choice.Delta.Content
-			if content == "" {
-				content = choice.Text
-			}
+			content := generatedTextFromStreamChoice(choice)
 			if content == "" {
 				continue
 			}
@@ -237,13 +234,7 @@ func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Ti
 		return CompletionResult{}, ClientError{Code: "llamacpp_response_error"}
 	}
 	var output bytes.Buffer
-	for _, choice := range payload.Choices {
-		content := choice.Message.Content
-		if content == "" {
-			content = choice.Text
-		}
-		output.WriteString(content)
-	}
+	output.WriteString(generatedTextFromChatResponse(payload))
 	if output.Len() == 0 {
 		return CompletionResult{}, ClientError{Code: "llamacpp_empty_output"}
 	}
@@ -330,23 +321,72 @@ type openAIError struct {
 }
 
 type openAIChatStreamChunk struct {
-	Choices []struct {
-		Delta struct {
-			Content string `json:"content"`
-		} `json:"delta"`
-		Text string `json:"text"`
-	} `json:"choices"`
-	Usage *openAIUsage `json:"usage,omitempty"`
-	Error openAIError  `json:"error,omitempty"`
+	Choices []openAIChatStreamChoice `json:"choices"`
+	Usage   *openAIUsage             `json:"usage,omitempty"`
+	Error   openAIError              `json:"error,omitempty"`
+}
+
+type openAIChatStreamChoice struct {
+	Delta struct {
+		Content string `json:"content"`
+	} `json:"delta"`
+	Content string `json:"content"`
+	Text    string `json:"text"`
 }
 
 type openAIChatResponse struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-		Text string `json:"text"`
-	} `json:"choices"`
-	Usage *openAIUsage `json:"usage,omitempty"`
-	Error openAIError  `json:"error,omitempty"`
+	Choices  []openAIChatChoice `json:"choices"`
+	Content  string             `json:"content"`
+	Response string             `json:"response"`
+	Text     string             `json:"text"`
+	Usage    *openAIUsage       `json:"usage,omitempty"`
+	Error    openAIError        `json:"error,omitempty"`
+}
+
+type openAIChatChoice struct {
+	Message struct {
+		Content string `json:"content"`
+	} `json:"message"`
+	Content string `json:"content"`
+	Text    string `json:"text"`
+}
+
+func generatedTextFromStreamChoice(choice openAIChatStreamChoice) string {
+	switch {
+	case choice.Delta.Content != "":
+		return choice.Delta.Content
+	case choice.Content != "":
+		return choice.Content
+	default:
+		return choice.Text
+	}
+}
+
+func generatedTextFromChatResponse(payload openAIChatResponse) string {
+	var output strings.Builder
+	for _, choice := range payload.Choices {
+		output.WriteString(generatedTextFromChatChoice(choice))
+	}
+	if output.Len() > 0 {
+		return output.String()
+	}
+	switch {
+	case payload.Content != "":
+		return payload.Content
+	case payload.Response != "":
+		return payload.Response
+	default:
+		return payload.Text
+	}
+}
+
+func generatedTextFromChatChoice(choice openAIChatChoice) string {
+	switch {
+	case choice.Message.Content != "":
+		return choice.Message.Content
+	case choice.Content != "":
+		return choice.Content
+	default:
+		return choice.Text
+	}
 }

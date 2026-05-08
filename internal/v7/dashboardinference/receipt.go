@@ -22,22 +22,24 @@ type Receipt struct {
 }
 
 type ReceiptMetadata struct {
-	RequestID       string  `json:"request_id"`
-	RunID           string  `json:"run_id"`
-	JobID           string  `json:"job_id"`
-	Backend         string  `json:"backend"`
-	ModelID         string  `json:"model_id"`
-	OutputHash      string  `json:"output_hash"`
-	OutputBytes     int64   `json:"output_bytes"`
-	TokensGenerated int64   `json:"tokens_generated"`
-	TTFTMs          int64   `json:"ttft_ms"`
-	TotalTimeMs     int64   `json:"total_time_ms"`
-	DecodeTPS       float64 `json:"decode_tps"`
-	EndToEndTPS     float64 `json:"end_to_end_tps"`
-	ProofStatus     string  `json:"proof_status"`
-	PromptHash      string  `json:"prompt_hash,omitempty"`
-	PromptProfileID string  `json:"prompt_profile_id,omitempty"`
-	ErrorCode       string  `json:"error_code,omitempty"`
+	RequestID              string  `json:"request_id"`
+	RunID                  string  `json:"run_id"`
+	JobID                  string  `json:"job_id"`
+	Backend                string  `json:"backend"`
+	ModelID                string  `json:"model_id"`
+	OutputHash             string  `json:"output_hash"`
+	OutputBytes            int64   `json:"output_bytes"`
+	TokensGenerated        int64   `json:"tokens_generated"`
+	TTFTMs                 int64   `json:"ttft_ms"`
+	TotalTimeMs            int64   `json:"total_time_ms"`
+	DecodeTPS              float64 `json:"decode_tps"`
+	EndToEndTPS            float64 `json:"end_to_end_tps"`
+	ProofStatus            string  `json:"proof_status"`
+	PromptHash             string  `json:"prompt_hash,omitempty"`
+	PromptProfileID        string  `json:"prompt_profile_id,omitempty"`
+	ErrorCode              string  `json:"error_code,omitempty"`
+	GeneratedText          string  `json:"generated_text,omitempty"`
+	GeneratedTextTruncated bool    `json:"generated_text_truncated,omitempty"`
 }
 
 func BuildReceipt(result ExecutionResult) (Receipt, error) {
@@ -184,6 +186,10 @@ func (m ReceiptMetadata) Map() map[string]any {
 	if m.ErrorCode != "" {
 		out["error_code"] = m.ErrorCode
 	}
+	if m.GeneratedText != "" {
+		out["generated_text"] = m.GeneratedText
+		out["generated_text_truncated"] = m.GeneratedTextTruncated
+	}
 	return out
 }
 
@@ -227,28 +233,38 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 	if m.ProofStatus == "" {
 		m.ProofStatus = ProofStatusRejected
 	}
+	if m.ProofStatus == ProofStatusRejected {
+		m.GeneratedText = ""
+		m.GeneratedTextTruncated = false
+	} else if m.GeneratedText != "" {
+		text, truncated := truncateGeneratedText([]byte(m.GeneratedText), defaultMaxReturnChars)
+		m.GeneratedText = text
+		m.GeneratedTextTruncated = m.GeneratedTextTruncated || truncated
+	}
 	return m
 }
 
 func receiptMetadataFromResult(result ExecutionResult) ReceiptMetadata {
 	result = normalizeExecutionResult(result)
 	return ReceiptMetadata{
-		RequestID:       result.Spec.RequestID,
-		RunID:           result.Spec.RunID,
-		JobID:           result.Spec.JobID,
-		Backend:         firstNonEmpty(result.Backend, result.Spec.Backend),
-		ModelID:         firstNonEmpty(result.ModelID, result.Spec.ModelID),
-		OutputHash:      firstNonEmpty(result.OutputHash, HashOutput(result.Spec.JobID, nil)),
-		OutputBytes:     result.OutputBytes,
-		TokensGenerated: result.TokensGenerated,
-		TTFTMs:          result.TTFTMs,
-		TotalTimeMs:     result.TotalTimeMs,
-		DecodeTPS:       result.DecodeTPS,
-		EndToEndTPS:     result.EndToEndTPS,
-		ProofStatus:     result.ProofStatus,
-		PromptHash:      result.Spec.PromptHash,
-		PromptProfileID: result.Spec.PromptProfileID,
-		ErrorCode:       result.ErrorCode,
+		RequestID:              result.Spec.RequestID,
+		RunID:                  result.Spec.RunID,
+		JobID:                  result.Spec.JobID,
+		Backend:                firstNonEmpty(result.Backend, result.Spec.Backend),
+		ModelID:                firstNonEmpty(result.ModelID, result.Spec.ModelID),
+		OutputHash:             firstNonEmpty(result.OutputHash, HashOutput(result.Spec.JobID, nil)),
+		OutputBytes:            result.OutputBytes,
+		TokensGenerated:        result.TokensGenerated,
+		TTFTMs:                 result.TTFTMs,
+		TotalTimeMs:            result.TotalTimeMs,
+		DecodeTPS:              result.DecodeTPS,
+		EndToEndTPS:            result.EndToEndTPS,
+		ProofStatus:            result.ProofStatus,
+		PromptHash:             result.Spec.PromptHash,
+		PromptProfileID:        result.Spec.PromptProfileID,
+		ErrorCode:              result.ErrorCode,
+		GeneratedText:          result.GeneratedText,
+		GeneratedTextTruncated: result.GeneratedTextTruncated,
 	}.clone()
 }
 
@@ -262,6 +278,14 @@ func normalizeExecutionResult(result ExecutionResult) ExecutionResult {
 		result.ProofStatus = ProofStatusRejected
 	}
 	result.ErrorCode = cleanErrorCode(result.ErrorCode)
+	if !result.Spec.ReturnText || result.ProofStatus != ProofStatusMeasured {
+		result.GeneratedText = ""
+		result.GeneratedTextTruncated = false
+	} else if result.GeneratedText != "" {
+		text, truncated := truncateGeneratedText([]byte(result.GeneratedText), result.Spec.MaxReturnChars)
+		result.GeneratedText = text
+		result.GeneratedTextTruncated = result.GeneratedTextTruncated || truncated
+	}
 	if result.OutputBytes < 0 {
 		result.OutputBytes = 0
 	}
@@ -350,6 +374,9 @@ func validateReceiptMetadataForHash(metadata ReceiptMetadata) error {
 	case ProofStatusRejected:
 		if metadata.ErrorCode == "" {
 			errs = append(errs, fmt.Errorf("%w: rejected receipt requires error_code", ErrInvalidReceipt))
+		}
+		if metadata.GeneratedText != "" {
+			errs = append(errs, fmt.Errorf("%w: rejected receipt must not include generated_text", ErrInvalidReceipt))
 		}
 	default:
 		errs = append(errs, fmt.Errorf("%w: receipt proof_status unknown %q", ErrInvalidReceipt, metadata.ProofStatus))

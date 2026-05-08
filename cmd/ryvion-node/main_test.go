@@ -1989,6 +1989,90 @@ func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T)
 	}
 }
 
+func TestProcessOptionalV7DashboardInferenceSubmitsOptInGeneratedText(t *testing.T) {
+	t.Setenv(v7dashboardinference.FlagEnv, "1")
+	t.Setenv(v7dashboardinference.TextOutputFlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := v7dashboardinference.NewLocalStatus()
+	result := testDashboardInferenceResult(v7dashboardinference.ProofStatusMeasured)
+	result.Spec = v7dashboardinference.Spec{}
+	result.GeneratedText = "Ryvion routes AI work to warm, ready nodes."
+	fakeRunner := &fakeDashboardInferenceRunner{result: result}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		var req struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[v7dashboardinference.Task].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7dashboardinference.Task, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["generated_text"] != "Ryvion routes AI work to warm, ready nodes." || metadata["generated_text_truncated"] != false {
+			t.Errorf("generated text metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["output_hash"] == "" || metadata["tokens_generated"] != float64(9) || metadata["ttft_ms"] != float64(120) {
+			t.Errorf("metadata missing hash/timing: %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"private dashboard prompt", "raw_prompt", "prompt_text", "messages", "input_text", "output_text", "raw_output", "completion", "token_logprobs", "key_data", "value_data", "query_vector", "tensor_bytes", "secret"} {
+			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, processResult, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceTextSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7DashboardInference() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if processResult == nil || processResult.ResultHashHex == "" || processResult.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful dashboard inference receipt", processResult)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+}
+
 func TestProcessOptionalV7DashboardInferenceRecordsRejectedCounter(t *testing.T) {
 	t.Setenv(v7dashboardinference.FlagEnv, "1")
 	oldFactory := newV7DashboardInferenceRunner
@@ -2815,6 +2899,30 @@ func testDashboardInferenceSpecJSON(t *testing.T) string {
 		Backend:         v7llamacpp.BackendName,
 		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
 		TargetNodeID:    "node-dashboard-local",
+		MaxTokens:       32,
+		Stream:          true,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testDashboardInferenceTextSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := v7dashboardinference.Spec{
+		Task:            v7dashboardinference.Task,
+		RequestID:       "dashboardinfer_request",
+		RunID:           "dashboardinfer_run",
+		JobID:           "v7dashboardinfer_job",
+		Backend:         v7llamacpp.BackendName,
+		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		TargetNodeID:    "node-dashboard-local",
+		Prompt:          "private dashboard prompt",
+		ReturnText:      true,
+		MaxReturnChars:  8192,
 		MaxTokens:       32,
 		Stream:          true,
 		CreatedAtUnixMs: 1_800_000_000_123,

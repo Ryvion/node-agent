@@ -106,6 +106,56 @@ func TestOpenAIClientNonStreamingCompletion(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientNormalizesAlternateGeneratedTextShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "choice_content",
+			body: `{"choices":[{"content":"direct choice"}],"usage":{"completion_tokens":2}}`,
+			want: "direct choice",
+		},
+		{
+			name: "top_level_content",
+			body: `{"content":"top level content","usage":{"completion_tokens":3}}`,
+			want: "top level content",
+		},
+		{
+			name: "top_level_response",
+			body: `{"response":"response text","usage":{"completion_tokens":2}}`,
+			want: "response text",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := time.Unix(1_800_000_000, 0)
+			clock := &sequenceClock{times: []time.Time{base, base.Add(100 * time.Millisecond)}}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, tt.body)
+			}))
+			defer server.Close()
+
+			result, err := (OpenAIClient{HTTPClient: server.Client(), Now: clock.Now}).Complete(context.Background(), CompletionRequest{
+				BaseURL:     server.URL,
+				ModelID:     "tinyllama.Q4_K_M.gguf",
+				Prompt:      internalBenchmarkPrompt,
+				MaxTokens:   8,
+				Temperature: 0,
+				Stream:      false,
+			})
+			if err != nil {
+				t.Fatalf("Complete() error = %v", err)
+			}
+			if string(result.Output) != tt.want {
+				t.Fatalf("output = %q, want %q", result.Output, tt.want)
+			}
+		})
+	}
+}
+
 type sequenceClock struct {
 	times []time.Time
 	idx   int

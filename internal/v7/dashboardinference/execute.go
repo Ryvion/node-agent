@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 )
 
 const (
@@ -20,7 +21,10 @@ const (
 
 const internalDashboardPrompt = "Answer in one short sentence: confirm the local Ryvion dashboard inference path is ready."
 
-var ErrDisabled = errors.New("dashboardinference: feature disabled")
+var (
+	ErrDisabled           = errors.New("dashboardinference: feature disabled")
+	ErrTextOutputDisabled = errors.New("dashboardinference: text output disabled")
+)
 
 type Runner interface {
 	RunDashboardInference(context.Context, Spec) (ExecutionResult, error)
@@ -29,6 +33,7 @@ type Runner interface {
 type ExecuteOptions struct {
 	Getenv func(string) string
 	Runner Runner
+	Policy modelpolicy.Policy
 }
 
 type LlamaCppSidecar interface {
@@ -45,21 +50,24 @@ type LlamaCppRunner struct {
 	KeepWarm KeepWarmChecker
 	Client   llamacpp.CompletionClient
 	Getenv   func(string) string
+	Policy   modelpolicy.Policy
 }
 
 type ExecutionResult struct {
-	Spec            Spec
-	Backend         string
-	ModelID         string
-	OutputHash      string
-	OutputBytes     int64
-	TokensGenerated int64
-	TTFTMs          int64
-	TotalTimeMs     int64
-	DecodeTPS       float64
-	EndToEndTPS     float64
-	ProofStatus     string
-	ErrorCode       string
+	Spec                   Spec
+	Backend                string
+	ModelID                string
+	OutputHash             string
+	OutputBytes            int64
+	TokensGenerated        int64
+	TTFTMs                 int64
+	TotalTimeMs            int64
+	DecodeTPS              float64
+	EndToEndTPS            float64
+	ProofStatus            string
+	ErrorCode              string
+	GeneratedText          string
+	GeneratedTextTruncated bool
 }
 
 type LocalStatusCounters struct {
@@ -114,6 +122,9 @@ func ExecuteSpec(ctx context.Context, spec Spec, opts ExecuteOptions) (Receipt, 
 	if !EnabledFromEnv(opts.getenv()) {
 		return Receipt{}, codedError{code: "dashboard_inference_disabled", err: ErrDisabled}
 	}
+	if spec.ReturnText && !TextOutputEnabledFromEnv(opts.getenv()) {
+		return Receipt{}, codedError{code: "text_output_disabled", err: ErrTextOutputDisabled}
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -123,6 +134,7 @@ func ExecuteSpec(ctx context.Context, spec Spec, opts ExecuteOptions) (Receipt, 
 			Sidecar: llamacpp.NewManagerFromEnv(),
 			Client:  llamacpp.OpenAIClient{},
 			Getenv:  opts.getenv(),
+			Policy:  opts.policy(),
 		}
 	}
 	result, err := runner.RunDashboardInference(ctx, spec)
@@ -153,11 +165,18 @@ func (r LlamaCppRunner) RunDashboardInference(ctx context.Context, spec Spec) (E
 	if !sidecarModelMatches(status, spec.ModelID) {
 		return failedExecutionResult(spec, "llamacpp_model_mismatch"), nil
 	}
+	if decision := r.runtimeDecision(status, spec); !decision.Allowed {
+		return failedExecutionResult(spec, decision.Reason), nil
+	}
 
+	prompt := spec.Prompt
+	if prompt == "" {
+		prompt = internalDashboardPrompt
+	}
 	req := llamacpp.CompletionRequest{
 		BaseURL:     status.BaseURL,
 		ModelID:     spec.ModelID,
-		Prompt:      internalDashboardPrompt,
+		Prompt:      prompt,
 		MaxTokens:   spec.MaxTokens,
 		Temperature: 0,
 		Stream:      spec.Stream && status.SupportsStreaming,
@@ -208,11 +227,42 @@ func (r LlamaCppRunner) getenv() func(string) string {
 	return func(string) string { return "" }
 }
 
+func (r LlamaCppRunner) policy() modelpolicy.Policy {
+	if strings.TrimSpace(r.Policy.CacheDir) == "" {
+		return modelpolicy.FromConfigSource(modelpolicy.ConfigSource{Getenv: r.getenv()})
+	}
+	return modelpolicy.NormalizePolicy(r.Policy)
+}
+
+func (r LlamaCppRunner) runtimeDecision(status llamacpp.LlamaCppSidecarStatus, spec Spec) modelpolicy.RuntimeDecision {
+	policy := r.policy()
+	if err := modelpolicy.ValidatePolicy(policy); err != nil {
+		return modelpolicy.RuntimeDecision{Allowed: false, Reason: "runtime_policy_invalid"}
+	}
+	var modelSize uint64
+	if status.ModelSizeBytes > 0 {
+		modelSize = uint64(status.ModelSizeBytes)
+	}
+	return modelpolicy.EvaluateRuntimeRequest(policy, modelpolicy.RuntimeRequest{
+		ModelID:        spec.ModelID,
+		ModelSizeBytes: modelSize,
+		Family:         firstNonEmpty(inferRuntimeModelFamily(status.ModelFamilyHint), inferRuntimeModelFamily(status.ModelFilename), inferRuntimeModelFamily(status.ModelPath), inferRuntimeModelFamily(spec.ModelID)),
+		CPUOffload:     false,
+	})
+}
+
 func (opts ExecuteOptions) getenv() func(string) string {
 	if opts.Getenv != nil {
 		return opts.Getenv
 	}
 	return func(string) string { return "" }
+}
+
+func (opts ExecuteOptions) policy() modelpolicy.Policy {
+	if strings.TrimSpace(opts.Policy.CacheDir) == "" {
+		return modelpolicy.FromConfigSource(modelpolicy.ConfigSource{Getenv: opts.getenv()})
+	}
+	return modelpolicy.NormalizePolicy(opts.Policy)
 }
 
 func completeWithFallback(ctx context.Context, client llamacpp.CompletionClient, req llamacpp.CompletionRequest) (llamacpp.CompletionResult, error) {
@@ -254,6 +304,22 @@ func normalizeModelComparable(value string) string {
 	return strings.ToLower(filepath.Base(value))
 }
 
+func inferRuntimeModelFamily(value string) string {
+	lower := strings.ToLower(strings.TrimSpace(filepath.Base(value)))
+	switch {
+	case strings.Contains(lower, "llama"):
+		return "llama"
+	case strings.Contains(lower, "phi"):
+		return "phi"
+	case strings.Contains(lower, "qwen"):
+		return "qwen"
+	case strings.Contains(lower, "gemma"):
+		return "gemma"
+	default:
+		return ""
+	}
+}
+
 func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) ExecutionResult {
 	tokens := completion.TokensGenerated
 	if tokens <= 0 {
@@ -286,7 +352,7 @@ func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) Ex
 	if tokens > 0 && total > 0 {
 		endToEndTPS = float64(tokens) / (float64(total) / 1000)
 	}
-	return ExecutionResult{
+	result := ExecutionResult{
 		Spec:            spec,
 		Backend:         spec.Backend,
 		ModelID:         spec.ModelID,
@@ -299,6 +365,21 @@ func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) Ex
 		EndToEndTPS:     roundTPS(endToEndTPS),
 		ProofStatus:     ProofStatusMeasured,
 	}
+	if spec.ReturnText {
+		result.GeneratedText, result.GeneratedTextTruncated = truncateGeneratedText(completion.Output, spec.MaxReturnChars)
+	}
+	return result
+}
+
+func truncateGeneratedText(output []byte, maxChars int) (string, bool) {
+	if maxChars <= 0 || maxChars > defaultMaxReturnChars {
+		maxChars = defaultMaxReturnChars
+	}
+	runes := []rune(string(output))
+	if len(runes) <= maxChars {
+		return string(runes), false
+	}
+	return string(runes[:maxChars]), true
 }
 
 func failedExecutionResult(spec Spec, code string) ExecutionResult {

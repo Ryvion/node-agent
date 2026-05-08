@@ -135,6 +135,7 @@ var (
 			KeepWarm: keepWarm,
 			Client:   v7llamacpp.OpenAIClient{},
 			Getenv:   os.Getenv,
+			Policy:   v7modelpolicy.FromEnv(),
 		}
 	}
 )

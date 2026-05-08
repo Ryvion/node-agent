@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 )
 
 type fakeSidecar struct {
@@ -87,6 +89,9 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	if metadata["output_hash"] == "" || metadata["tokens_generated"] != int64(7) {
 		t.Fatalf("metadata missing hash/metrics: %+v", metadata)
 	}
+	if _, ok := metadata["generated_text"]; ok {
+		t.Fatalf("metadata included generated_text without opt-in: %+v", metadata)
+	}
 	if metadata["ttft_ms"] != int64(80) || metadata["total_time_ms"] != int64(430) {
 		t.Fatalf("timing metadata = %+v", metadata)
 	}
@@ -96,6 +101,163 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	if !ReceiptJSONContainsNoRawText(receipt) {
 		raw, _ := json.Marshal(receipt.Metadata)
 		t.Fatalf("metadata leaked raw text: %s", raw)
+	}
+}
+
+func TestExecuteAssignmentUsesPromptWithoutReturningText(t *testing.T) {
+	sidecar := &fakeSidecar{status: healthySidecarStatus()}
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("private completion text"),
+		OutputBytes:     int64(len("private completion text")),
+		TokensGenerated: 3,
+		TTFTMs:          20,
+		TotalTimeMs:     120,
+	}}
+	spec := validSpec(t)
+	spec.Prompt = "private dashboard prompt"
+	spec.ReturnText = false
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvEnabled,
+		Runner: LlamaCppRunner{
+			Sidecar: sidecar,
+			Client:  client,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteAssignment() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(client.reqs) != 1 || client.reqs[0].Prompt != "private dashboard prompt" {
+		t.Fatal("completion request did not use supplied prompt")
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if _, ok := metadata["generated_text"]; ok {
+		t.Fatalf("metadata included generated_text without return_text: %+v", metadata)
+	}
+	encoded, _ := json.Marshal(receipt.Metadata)
+	for _, forbidden := range []string{"private dashboard prompt", "private completion text", "generated_text"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("metadata leaked %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestExecuteAssignmentReturnTextFlagDisabledRejects(t *testing.T) {
+	client := &fakeCompletionClient{}
+	spec := validSpec(t)
+	spec.Prompt = "private dashboard prompt"
+	spec.ReturnText = true
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvEnabled,
+		Runner: LlamaCppRunner{
+			Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+			Client:  client,
+		},
+	})
+	if err == nil {
+		t.Fatal("ExecuteAssignment() error = nil, want text output disabled error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(client.reqs) != 0 {
+		t.Fatalf("client calls = %d, want 0", len(client.reqs))
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["proof_status"] != ProofStatusRejected || metadata["error_code"] != "text_output_disabled" {
+		t.Fatalf("disabled text metadata = %+v", metadata)
+	}
+	encoded, _ := json.Marshal(receipt.Metadata)
+	if strings.Contains(string(encoded), "private dashboard prompt") || strings.Contains(string(encoded), "generated_text") {
+		t.Fatalf("disabled text receipt leaked prompt/text field: %s", encoded)
+	}
+}
+
+func TestExecuteAssignmentReturnTextFlagEnabledIncludesGeneratedText(t *testing.T) {
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("Ryvion routes AI work to warm, ready nodes."),
+		OutputBytes:     int64(len("Ryvion routes AI work to warm, ready nodes.")),
+		TokensGenerated: 8,
+		TTFTMs:          123,
+		TotalTimeMs:     456,
+	}}
+	spec := validSpec(t)
+	spec.Prompt = "Write one short sentence about Ryvion."
+	spec.ReturnText = true
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvTextOutputEnabled,
+		Runner: LlamaCppRunner{
+			Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+			Client:  client,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteAssignment() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["generated_text"] != "Ryvion routes AI work to warm, ready nodes." {
+		t.Fatalf("generated_text = %#v", metadata["generated_text"])
+	}
+	if metadata["generated_text_truncated"] != false {
+		t.Fatalf("generated_text_truncated = %#v", metadata["generated_text_truncated"])
+	}
+	if metadata["output_hash"] == "" || metadata["tokens_generated"] != int64(8) || metadata["ttft_ms"] != int64(123) {
+		t.Fatalf("metadata missing hash/timing metrics: %+v", metadata)
+	}
+	if len(receipt.ResultHashHex) != 64 {
+		t.Fatalf("result hash = %q, want 64 hex chars", receipt.ResultHashHex)
+	}
+}
+
+func TestExecuteAssignmentReturnTextTruncatesDeterministically(t *testing.T) {
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("abcdef"),
+		OutputBytes:     6,
+		TokensGenerated: 1,
+		TTFTMs:          1,
+		TotalTimeMs:     2,
+	}}
+	spec := validSpec(t)
+	spec.Prompt = "Write six letters."
+	spec.ReturnText = true
+	spec.MaxReturnChars = 3
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	receipt, _, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvTextOutputEnabled,
+		Runner: LlamaCppRunner{
+			Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+			Client:  client,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteAssignment() error = %v", err)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["generated_text"] != "abc" || metadata["generated_text_truncated"] != true {
+		t.Fatalf("truncated generated metadata = %+v", metadata)
+	}
+	if metadata["output_hash"] != HashOutput(spec.JobID, []byte("abcdef")) {
+		t.Fatalf("output_hash = %v, want hash over full output", metadata["output_hash"])
 	}
 }
 
@@ -151,6 +313,45 @@ func TestExecuteAssignmentSidecarUnavailableReturnsSafeRejection(t *testing.T) {
 	}
 	if metadata["output_hash"] == "" || metadata["output_bytes"] != int64(0) {
 		t.Fatalf("safe rejection output metadata = %+v", metadata)
+	}
+}
+
+func TestLlamaCppRunnerRejectsPhi4WhenRuntimePolicyBlocksFamily(t *testing.T) {
+	status := healthySidecarStatus()
+	status.ModelPath = "/models/phi-4-Q4_K_M.gguf"
+	status.ModelFilename = "phi-4-Q4_K_M.gguf"
+	status.ModelFamilyHint = "phi"
+	status.ModelSizeBytes = 4 * 1024 * 1024 * 1024
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{Output: []byte("should not run")}}
+	spec := validSpec(t)
+	spec.ModelID = "phi-4-Q4_K_M.gguf"
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{status: status},
+		Client:  client,
+		Policy: modelpolicy.Policy{
+			CacheDir:            "/models",
+			MaxSingleModelBytes: 8 * 1024 * 1024 * 1024,
+			MaxCacheBytes:       50 * 1024 * 1024 * 1024,
+			AllowedFamilies:     []string{"llama", "phi"},
+			AllowedFormats:      []string{"gguf"},
+			RuntimePolicy: modelpolicy.RuntimePolicy{
+				AllowRuntimeExecution:            true,
+				MaxRuntimeModelBytes:             8 * 1024 * 1024 * 1024,
+				MaxRuntimeParameterCountBillions: 8,
+				AllowCPUOffload:                  true,
+				AllowFamilies:                    []string{"llama"},
+			},
+		},
+	}
+	result, err := runner.RunDashboardInference(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("RunDashboardInference() error = %v", err)
+	}
+	if result.ProofStatus != ProofStatusRejected || result.ErrorCode != modelpolicy.RuntimeDecisionFamilyNotAllowed {
+		t.Fatalf("result = %+v, want runtime policy family rejection", result)
+	}
+	if len(client.reqs) != 0 {
+		t.Fatalf("client calls = %d, want 0", len(client.reqs))
 	}
 }
 
@@ -266,6 +467,15 @@ func getenvEnabled(key string) string {
 		return "1"
 	}
 	return ""
+}
+
+func getenvTextOutputEnabled(key string) string {
+	switch key {
+	case FlagEnv, TextOutputFlagEnv:
+		return "1"
+	default:
+		return ""
+	}
 }
 
 func testSHA256(value string) string {

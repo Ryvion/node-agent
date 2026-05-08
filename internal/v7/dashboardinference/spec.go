@@ -10,15 +10,18 @@ import (
 )
 
 const (
-	Task    = "v7_dashboard_inference"
-	FlagEnv = "RYV_NODE_V7_DASHBOARD_INFERENCE"
+	Task              = "v7_dashboard_inference"
+	FlagEnv           = "RYV_NODE_V7_DASHBOARD_INFERENCE"
+	TextOutputFlagEnv = "RYV_NODE_V7_INFERENCE_TEXT_OUTPUT"
 
 	defaultTimeoutMs = int64(2 * 60 * 1000)
 
-	maxIDLen        = 256
-	maxModelIDLen   = 256
-	maxMaxTokens    = 8192
-	maxStatusErrLen = 512
+	defaultMaxReturnChars = 8192
+	maxIDLen              = 256
+	maxModelIDLen         = 256
+	maxPromptChars        = 32768
+	maxMaxTokens          = 8192
+	maxStatusErrLen       = 512
 )
 
 var ErrInvalidSpec = errors.New("dashboardinference: invalid spec")
@@ -31,6 +34,9 @@ type Spec struct {
 	Backend         string `json:"backend"`
 	ModelID         string `json:"model_id"`
 	TargetNodeID    string `json:"target_node_id"`
+	Prompt          string `json:"prompt,omitempty"`
+	ReturnText      bool   `json:"return_text,omitempty"`
+	MaxReturnChars  int    `json:"max_return_chars,omitempty"`
 	MaxTokens       int    `json:"max_tokens"`
 	Stream          bool   `json:"stream"`
 	CreatedAtUnixMs int64  `json:"created_at_unix_ms"`
@@ -63,6 +69,13 @@ func EnabledFromEnv(getenv func(string) string) bool {
 		return false
 	}
 	return strings.TrimSpace(getenv(FlagEnv)) == "1"
+}
+
+func TextOutputEnabledFromEnv(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	return strings.TrimSpace(getenv(TextOutputFlagEnv)) == "1"
 }
 
 func AssignmentIdentityFromJSON(specJSON string) (AssignmentIdentity, bool) {
@@ -137,6 +150,9 @@ func ValidateSpec(spec Spec) error {
 	if spec.TargetNodeID == "" {
 		errs = append(errs, fmt.Errorf("%w: target_node_id required", ErrInvalidSpec))
 	}
+	if spec.ReturnText && spec.Prompt == "" {
+		errs = append(errs, fmt.Errorf("%w: prompt required when return_text is true", ErrInvalidSpec))
+	}
 	if spec.MaxTokens <= 0 {
 		errs = append(errs, fmt.Errorf("%w: max_tokens must be greater than zero", ErrInvalidSpec))
 	} else if spec.MaxTokens > maxMaxTokens {
@@ -161,6 +177,10 @@ func normalizeSpec(spec Spec) Spec {
 	spec.Backend = normalizeBackendName(spec.Backend)
 	spec.ModelID = cleanText(spec.ModelID, maxModelIDLen)
 	spec.TargetNodeID = cleanText(spec.TargetNodeID, maxIDLen)
+	spec.Prompt = cleanPrompt(spec.Prompt, maxPromptChars)
+	if spec.MaxReturnChars <= 0 || spec.MaxReturnChars > defaultMaxReturnChars {
+		spec.MaxReturnChars = defaultMaxReturnChars
+	}
 	spec.PromptHash = strings.TrimSpace(spec.PromptHash)
 	spec.PromptProfileID = cleanText(spec.PromptProfileID, maxIDLen)
 	return spec
@@ -197,6 +217,20 @@ func cleanText(value string, maxRunes int) string {
 	value = strings.ReplaceAll(value, "\r", " ")
 	value = strings.ReplaceAll(value, "\n", " ")
 	value = strings.Join(strings.Fields(value), " ")
+	if maxRunes <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes])
+}
+
+func cleanPrompt(value string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
 	if maxRunes <= 0 {
 		return value
 	}
