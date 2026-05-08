@@ -34,6 +34,15 @@ func TestBuildBackendBenchmarkReceiptContainsHashesAndMetrics(t *testing.T) {
 	if metadata["p50_decode_tps"] != 20.5 || metadata["p95_end_to_end_tps"] != 19.75 {
 		t.Fatalf("tps metadata = %+v", metadata)
 	}
+	if metadata["tokens_generated"] != int64(48) || metadata["p50_tpot_ms"] != 48.78 {
+		t.Fatalf("workload metrics = %+v", metadata)
+	}
+	if metadata["acceleration"] != "cpu" || metadata["context_length_bucket"] != "" || metadata["output_token_bucket"] != "" || metadata["streaming_supported"] != true {
+		t.Fatalf("profile metadata = %+v", metadata)
+	}
+	if metadata["benchmark_timestamp_unix_ms"] != int64(1_800_000_001_000) {
+		t.Fatalf("benchmark timestamp = %+v", metadata["benchmark_timestamp_unix_ms"])
+	}
 	assertBackendBenchmarkReceiptJSONSafe(t, receipt, "secret llama output")
 }
 

@@ -1654,7 +1654,7 @@ func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
 }
 
 func TestProcessOptionalV7LlamaCppBackendBenchmarkFlagOffDoesNotHandle(t *testing.T) {
-	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "")
+	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "0")
 	oldStatus := v7BackendBenchmarkStatus
 	oldFactory := newV7LlamaCppBackendBenchmarkRunner
 	oldState := operatorRuntimeState
@@ -2382,6 +2382,11 @@ func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *test
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if metadata["tokens_generated"] != float64(16) || metadata["acceleration"] != "cpu" || metadata["streaming_supported"] != true {
+			t.Errorf("routing metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		encoded, _ := json.Marshal(req.Metadata)
 		for _, forbidden := range []string{"secret llama output", "distributed computing", "output_text", "generated_text", "raw_output", "token_logprobs", "raw_tensor"} {
 			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
@@ -2871,27 +2876,31 @@ func testLlamaCppBackendBenchmarkSnapshot(proofStatus string) v7llamacpp.Benchma
 		LastRunAt: time.Unix(1_800_000_001, 0),
 		Status:    status,
 		Metrics: v7llamacpp.BenchmarkMetrics{
-			Available:      available,
-			SidecarHealthy: available,
-			ModelLoaded:    available,
-			ModelID:        "tinyllama.Q4_K_M.gguf",
-			PromptHash:     v7llamacpp.HashBenchmarkPrompt(),
-			OutputHash:     outputHash,
-			OutputBytes:    outputBytes,
-			WarmupRuns:     1,
-			MeasuredRuns:   3,
-			P50TTFTMs:      100,
-			P95TTFTMs:      200,
-			P50TotalTimeMs: 800,
-			P95TotalTimeMs: 1100,
-			P50DecodeTPS:   20.5,
-			P95DecodeTPS:   21.5,
-			P50EndToEndTPS: 18.25,
-			P95EndToEndTPS: 19.75,
-			Backend:        v7llamacpp.BackendName,
-			RuntimeKind:    v7llamacpp.BackendName,
-			ProofStatus:    proofStatus,
-			Streaming:      true,
+			Available:        available,
+			SidecarHealthy:   available,
+			ModelLoaded:      available,
+			ModelID:          "tinyllama.Q4_K_M.gguf",
+			PromptHash:       v7llamacpp.HashBenchmarkPrompt(),
+			OutputHash:       outputHash,
+			OutputBytes:      outputBytes,
+			WarmupRuns:       1,
+			MeasuredRuns:     3,
+			P50TTFTMs:        100,
+			P95TTFTMs:        200,
+			P50TotalTimeMs:   800,
+			P95TotalTimeMs:   1100,
+			P50DecodeTPS:     20.5,
+			P95DecodeTPS:     21.5,
+			P50EndToEndTPS:   18.25,
+			P95EndToEndTPS:   19.75,
+			TokensGenerated:  16,
+			PromptTokens:     8,
+			CompletionTokens: 16,
+			Backend:          v7llamacpp.BackendName,
+			RuntimeKind:      v7llamacpp.BackendName,
+			Acceleration:     "cpu",
+			ProofStatus:      proofStatus,
+			Streaming:        true,
 		},
 	}
 }

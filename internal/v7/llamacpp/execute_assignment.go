@@ -12,8 +12,17 @@ type BackendBenchmarkRunner interface {
 }
 
 type ExecuteBackendBenchmarkOptions struct {
-	Getenv func(string) string
-	Runner BackendBenchmarkRunner
+	Getenv  func(string) string
+	Runner  BackendBenchmarkRunner
+	Profile BackendBenchmarkProfile
+}
+
+type BackendBenchmarkProfile struct {
+	NodeID              string
+	Acceleration        string
+	Warm                bool
+	ContextLengthTokens int
+	StreamingSupported  bool
 }
 
 type BackendBenchmarkLocalStatusCounters struct {
@@ -69,13 +78,18 @@ func ExecuteBackendBenchmarkSpec(ctx context.Context, spec BackendBenchmarkSpec,
 		ctx = context.Background()
 	}
 	snapshot := runner.Run(ctx, BenchmarkConfig{
-		ModelID:      spec.ModelID,
-		MaxTokens:    spec.MaxTokens,
-		Temperature:  0,
-		TimeoutMs:    spec.TimeoutMs,
-		Streaming:    true,
-		MeasuredRuns: spec.MeasuredRuns,
-		WarmupRuns:   spec.WarmupRuns,
+		NodeID:              opts.Profile.NodeID,
+		ModelID:             spec.ModelID,
+		MaxTokens:           spec.MaxTokens,
+		Temperature:         0,
+		TimeoutMs:           spec.TimeoutMs,
+		Streaming:           true,
+		MeasuredRuns:        spec.MeasuredRuns,
+		WarmupRuns:          spec.WarmupRuns,
+		Acceleration:        opts.Profile.Acceleration,
+		Warm:                opts.Profile.Warm,
+		ContextLengthTokens: opts.Profile.ContextLengthTokens,
+		StreamingSupported:  opts.Profile.StreamingSupported,
 	})
 	receipt, err := BuildBackendBenchmarkReceipt(spec, snapshot)
 	if err != nil {

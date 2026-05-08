@@ -34,42 +34,55 @@ const (
 const internalBenchmarkPrompt = "Write one short sentence about distributed computing."
 
 type BenchmarkConfig struct {
-	ModelID      string  `json:"model_id,omitempty"`
-	MaxTokens    int     `json:"max_tokens"`
-	Temperature  float64 `json:"temperature"`
-	TimeoutMs    int64   `json:"timeout_ms"`
-	Streaming    bool    `json:"streaming"`
-	MeasuredRuns int     `json:"measured_runs"`
-	WarmupRuns   int     `json:"warmup_runs"`
+	NodeID              string  `json:"node_id,omitempty"`
+	ModelID             string  `json:"model_id,omitempty"`
+	MaxTokens           int     `json:"max_tokens"`
+	Temperature         float64 `json:"temperature"`
+	TimeoutMs           int64   `json:"timeout_ms"`
+	Streaming           bool    `json:"streaming"`
+	MeasuredRuns        int     `json:"measured_runs"`
+	WarmupRuns          int     `json:"warmup_runs"`
+	Acceleration        string  `json:"acceleration,omitempty"`
+	Warm                bool    `json:"warm"`
+	ContextLengthTokens int     `json:"context_length_tokens,omitempty"`
+	StreamingSupported  bool    `json:"streaming_supported"`
 }
 
 type BenchmarkMetrics struct {
-	Available        bool    `json:"available"`
-	SidecarHealthy   bool    `json:"sidecar_healthy"`
-	ModelLoaded      bool    `json:"model_loaded"`
-	ModelID          string  `json:"model_id,omitempty"`
-	ModelPath        string  `json:"model_path,omitempty"`
-	ModelFilename    string  `json:"model_filename,omitempty"`
-	PromptHash       string  `json:"prompt_hash"`
-	OutputHash       string  `json:"output_hash,omitempty"`
-	OutputBytes      int64   `json:"output_bytes"`
-	WarmupRuns       int     `json:"warmup_runs"`
-	MeasuredRuns     int     `json:"measured_runs"`
-	P50TTFTMs        int64   `json:"p50_ttft_ms"`
-	P95TTFTMs        int64   `json:"p95_ttft_ms"`
-	P50TotalTimeMs   int64   `json:"p50_total_time_ms"`
-	P95TotalTimeMs   int64   `json:"p95_total_time_ms"`
-	P50DecodeTPS     float64 `json:"p50_decode_tps"`
-	P95DecodeTPS     float64 `json:"p95_decode_tps"`
-	P50EndToEndTPS   float64 `json:"p50_end_to_end_tps"`
-	P95EndToEndTPS   float64 `json:"p95_end_to_end_tps"`
-	TokensGenerated  int64   `json:"tokens_generated"`
-	Backend          string  `json:"backend"`
-	RuntimeKind      string  `json:"runtime_kind"`
-	ProofStatus      string  `json:"proof_status"`
-	Streaming        bool    `json:"streaming"`
-	PromptTokens     int64   `json:"prompt_tokens,omitempty"`
-	CompletionTokens int64   `json:"completion_tokens,omitempty"`
+	NodeID              string  `json:"node_id,omitempty"`
+	Available           bool    `json:"available"`
+	SidecarHealthy      bool    `json:"sidecar_healthy"`
+	ModelLoaded         bool    `json:"model_loaded"`
+	ModelID             string  `json:"model_id,omitempty"`
+	ModelPath           string  `json:"model_path,omitempty"`
+	ModelFilename       string  `json:"model_filename,omitempty"`
+	PromptHash          string  `json:"prompt_hash"`
+	OutputHash          string  `json:"output_hash,omitempty"`
+	OutputBytes         int64   `json:"output_bytes"`
+	WarmupRuns          int     `json:"warmup_runs"`
+	MeasuredRuns        int     `json:"measured_runs"`
+	P50TTFTMs           int64   `json:"p50_ttft_ms"`
+	P95TTFTMs           int64   `json:"p95_ttft_ms"`
+	P50TotalTimeMs      int64   `json:"p50_total_time_ms"`
+	P95TotalTimeMs      int64   `json:"p95_total_time_ms"`
+	P50DecodeTPS        float64 `json:"p50_decode_tps"`
+	P95DecodeTPS        float64 `json:"p95_decode_tps"`
+	P50TPOTMs           float64 `json:"p50_tpot_ms"`
+	P95TPOTMs           float64 `json:"p95_tpot_ms"`
+	P50EndToEndTPS      float64 `json:"p50_end_to_end_tps"`
+	P95EndToEndTPS      float64 `json:"p95_end_to_end_tps"`
+	TokensGenerated     int64   `json:"tokens_generated"`
+	Backend             string  `json:"backend"`
+	RuntimeKind         string  `json:"runtime_kind"`
+	Acceleration        string  `json:"acceleration"`
+	Warm                bool    `json:"warm"`
+	ContextLengthBucket string  `json:"context_length_bucket,omitempty"`
+	OutputTokenBucket   string  `json:"output_token_bucket,omitempty"`
+	ProofStatus         string  `json:"proof_status"`
+	Streaming           bool    `json:"streaming"`
+	StreamingSupported  bool    `json:"streaming_supported"`
+	PromptTokens        int64   `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int64   `json:"completion_tokens,omitempty"`
 }
 
 type BenchmarkStatusSnapshot struct {
@@ -167,7 +180,9 @@ func ValidateBenchmarkConfig(config BenchmarkConfig) error {
 
 func NormalizeBenchmarkConfig(config BenchmarkConfig) BenchmarkConfig {
 	defaults := DefaultBenchmarkConfig()
+	config.NodeID = cleanStatusText(config.NodeID, maxStatusReasonLen)
 	config.ModelID = cleanStatusText(config.ModelID, maxStatusReasonLen)
+	config.Acceleration = normalizeBenchmarkAcceleration(config.Acceleration)
 	if config.MaxTokens == 0 {
 		config.MaxTokens = defaults.MaxTokens
 	}
@@ -182,6 +197,9 @@ func NormalizeBenchmarkConfig(config BenchmarkConfig) BenchmarkConfig {
 	}
 	if config.Temperature < 0 {
 		config.Temperature = 0
+	}
+	if config.ContextLengthTokens < 0 {
+		config.ContextLengthTokens = 0
 	}
 	return config
 }
@@ -308,20 +326,26 @@ func baseBenchmarkMetrics(status LlamaCppSidecarStatus, config BenchmarkConfig) 
 		modelID = firstNonEmpty(status.ModelFilename, status.ModelPath)
 	}
 	return normalizeBenchmarkMetrics(BenchmarkMetrics{
-		Available:       status.Available,
-		SidecarHealthy:  status.Healthy,
-		ModelLoaded:     status.Healthy && strings.TrimSpace(status.ModelPath) != "",
-		ModelID:         modelID,
-		ModelPath:       status.ModelPath,
-		ModelFilename:   status.ModelFilename,
-		PromptHash:      HashBenchmarkPrompt(),
-		WarmupRuns:      config.WarmupRuns,
-		MeasuredRuns:    config.MeasuredRuns,
-		Backend:         BackendName,
-		RuntimeKind:     BackendName,
-		ProofStatus:     BenchmarkProofStatusUnavailable,
-		Streaming:       config.Streaming,
-		TokensGenerated: 0,
+		NodeID:              config.NodeID,
+		Available:           status.Available,
+		SidecarHealthy:      status.Healthy,
+		ModelLoaded:         status.Healthy && strings.TrimSpace(status.ModelPath) != "",
+		ModelID:             modelID,
+		ModelPath:           status.ModelPath,
+		ModelFilename:       status.ModelFilename,
+		PromptHash:          HashBenchmarkPrompt(),
+		WarmupRuns:          config.WarmupRuns,
+		MeasuredRuns:        config.MeasuredRuns,
+		Backend:             BackendName,
+		RuntimeKind:         BackendName,
+		Acceleration:        config.Acceleration,
+		Warm:                config.Warm,
+		ContextLengthBucket: contextLengthBucket(config.ContextLengthTokens),
+		OutputTokenBucket:   outputTokenBucket(config.MaxTokens),
+		ProofStatus:         BenchmarkProofStatusUnavailable,
+		Streaming:           config.Streaming,
+		StreamingSupported:  config.StreamingSupported || status.SupportsStreaming,
+		TokensGenerated:     0,
 	})
 }
 
@@ -390,6 +414,8 @@ func applyMeasurements(metrics BenchmarkMetrics, measurements []runMeasurement, 
 	metrics.P95TotalTimeMs = percentileInt64(totals, 95)
 	metrics.P50DecodeTPS = roundTPS(percentileFloat64(decodeTPS, 50))
 	metrics.P95DecodeTPS = roundTPS(percentileFloat64(decodeTPS, 95))
+	metrics.P50TPOTMs = tpotMsFromTPS(metrics.P50DecodeTPS)
+	metrics.P95TPOTMs = tpotMsFromTPS(metrics.P95DecodeTPS)
 	metrics.P50EndToEndTPS = roundTPS(percentileFloat64(endToEndTPS, 50))
 	metrics.P95EndToEndTPS = roundTPS(percentileFloat64(endToEndTPS, 95))
 	metrics.TokensGenerated = tokensGenerated
@@ -460,6 +486,20 @@ func roundTPS(value float64) float64 {
 	return math.Round(value*1000) / 1000
 }
 
+func roundMillis(value float64) float64 {
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	return math.Round(value*1000) / 1000
+}
+
+func tpotMsFromTPS(tps float64) float64 {
+	if tps <= 0 || math.IsNaN(tps) || math.IsInf(tps, 0) {
+		return 0
+	}
+	return roundMillis(1000 / tps)
+}
+
 func FormatBenchmarkStatus(snapshot BenchmarkStatusSnapshot, jsonOutput bool) string {
 	snapshot = normalizeBenchmarkStatusSnapshot(snapshot)
 	if jsonOutput {
@@ -487,6 +527,7 @@ func normalizeBenchmarkStatusSnapshot(snapshot BenchmarkStatusSnapshot) Benchmar
 }
 
 func normalizeBenchmarkMetrics(metrics BenchmarkMetrics) BenchmarkMetrics {
+	metrics.NodeID = cleanStatusText(metrics.NodeID, maxStatusReasonLen)
 	metrics.ModelID = cleanStatusText(metrics.ModelID, maxStatusReasonLen)
 	metrics.ModelPath = cleanStatusText(metrics.ModelPath, maxConfigTextLen)
 	metrics.ModelFilename = cleanStatusText(metrics.ModelFilename, maxStatusReasonLen)
@@ -494,6 +535,9 @@ func normalizeBenchmarkMetrics(metrics BenchmarkMetrics) BenchmarkMetrics {
 	metrics.OutputHash = cleanHash(metrics.OutputHash)
 	metrics.Backend = cleanStatusText(firstNonEmpty(metrics.Backend, BackendName), maxStatusReasonLen)
 	metrics.RuntimeKind = cleanStatusText(firstNonEmpty(metrics.RuntimeKind, BackendName), maxStatusReasonLen)
+	metrics.Acceleration = normalizeBenchmarkAcceleration(metrics.Acceleration)
+	metrics.ContextLengthBucket = normalizeLengthBucket(metrics.ContextLengthBucket)
+	metrics.OutputTokenBucket = normalizeLengthBucket(metrics.OutputTokenBucket)
 	metrics.ProofStatus = cleanStatusText(metrics.ProofStatus, maxStatusReasonLen)
 	if metrics.ProofStatus == "" {
 		metrics.ProofStatus = BenchmarkProofStatusUnavailable
@@ -516,11 +560,81 @@ func normalizeBenchmarkMetrics(metrics BenchmarkMetrics) BenchmarkMetrics {
 	if metrics.CompletionTokens < 0 {
 		metrics.CompletionTokens = 0
 	}
+	if metrics.Streaming {
+		metrics.StreamingSupported = true
+	}
 	metrics.P50DecodeTPS = roundTPS(metrics.P50DecodeTPS)
 	metrics.P95DecodeTPS = roundTPS(metrics.P95DecodeTPS)
+	if metrics.P50TPOTMs <= 0 {
+		metrics.P50TPOTMs = tpotMsFromTPS(metrics.P50DecodeTPS)
+	} else {
+		metrics.P50TPOTMs = roundMillis(metrics.P50TPOTMs)
+	}
+	if metrics.P95TPOTMs <= 0 {
+		metrics.P95TPOTMs = tpotMsFromTPS(metrics.P95DecodeTPS)
+	} else {
+		metrics.P95TPOTMs = roundMillis(metrics.P95TPOTMs)
+	}
 	metrics.P50EndToEndTPS = roundTPS(metrics.P50EndToEndTPS)
 	metrics.P95EndToEndTPS = roundTPS(metrics.P95EndToEndTPS)
 	return metrics
+}
+
+func normalizeBenchmarkAcceleration(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "cuda":
+		return "cuda"
+	case "vulkan":
+		return "vulkan"
+	case "cpu", "":
+		return "cpu"
+	default:
+		return "other"
+	}
+}
+
+func contextLengthBucket(tokens int) string {
+	switch {
+	case tokens <= 0:
+		return "unknown"
+	case tokens <= 2048:
+		return "ctx_0_2k"
+	case tokens <= 4096:
+		return "ctx_2k_4k"
+	case tokens <= 8192:
+		return "ctx_4k_8k"
+	case tokens <= 32768:
+		return "ctx_8k_32k"
+	default:
+		return "ctx_32k_plus"
+	}
+}
+
+func outputTokenBucket(tokens int) string {
+	switch {
+	case tokens <= 0:
+		return "unknown"
+	case tokens <= 64:
+		return "out_0_64"
+	case tokens <= 256:
+		return "out_65_256"
+	case tokens <= 1024:
+		return "out_257_1024"
+	default:
+		return "out_1025_plus"
+	}
+}
+
+func normalizeLengthBucket(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "unknown",
+		"ctx_0_2k", "ctx_2k_4k", "ctx_4k_8k", "ctx_8k_32k", "ctx_32k_plus",
+		"out_0_64", "out_65_256", "out_257_1024", "out_1025_plus":
+		return value
+	default:
+		return ""
+	}
 }
 
 func cleanHash(value string) string {

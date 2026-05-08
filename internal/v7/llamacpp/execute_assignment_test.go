@@ -14,13 +14,14 @@ func TestExecuteBackendBenchmarkAssignmentRunsMockedBenchmark(t *testing.T) {
 	}
 
 	receipt, handled, err := ExecuteBackendBenchmarkAssignment(context.Background(), specJSON, ExecuteBackendBenchmarkOptions{
-		Getenv: func(key string) string {
-			if key == BackendBenchmarkFlagEnv {
-				return "1"
-			}
-			return ""
-		},
 		Runner: runner,
+		Profile: BackendBenchmarkProfile{
+			NodeID:              "node-a",
+			Acceleration:        "cuda",
+			Warm:                true,
+			ContextLengthTokens: 4096,
+			StreamingSupported:  true,
+		},
 	})
 	if err != nil {
 		t.Fatalf("ExecuteBackendBenchmarkAssignment() error = %v", err)
@@ -31,7 +32,8 @@ func TestExecuteBackendBenchmarkAssignmentRunsMockedBenchmark(t *testing.T) {
 	if runner.calls != 1 {
 		t.Fatalf("runner calls = %d, want 1", runner.calls)
 	}
-	if got := runner.configs[0]; got.ModelID != "tinyllama.Q4_K_M.gguf" || got.MaxTokens != 16 || got.WarmupRuns != 1 || got.MeasuredRuns != 3 || got.TimeoutMs != 30_000 {
+	if got := runner.configs[0]; got.ModelID != "tinyllama.Q4_K_M.gguf" || got.MaxTokens != 16 || got.WarmupRuns != 1 || got.MeasuredRuns != 3 || got.TimeoutMs != 30_000 ||
+		got.NodeID != "node-a" || got.Acceleration != "cuda" || !got.Warm || got.ContextLengthTokens != 4096 || !got.StreamingSupported {
 		t.Fatalf("runner config = %+v, want spec-derived benchmark config", got)
 	}
 	metadata := receipt.Metadata[BackendBenchmarkTask].(map[string]any)
@@ -49,7 +51,12 @@ func TestExecuteBackendBenchmarkAssignmentFlagOffDoesNotHandleOrRun(t *testing.T
 		snapshot: testBackendBenchmarkSnapshot(BenchmarkProofStatusMeasured),
 	}
 	receipt, handled, err := ExecuteBackendBenchmarkAssignment(context.Background(), testBackendBenchmarkSpecJSON(t), ExecuteBackendBenchmarkOptions{
-		Getenv: func(string) string { return "" },
+		Getenv: func(key string) string {
+			if key == BackendBenchmarkFlagEnv {
+				return "0"
+			}
+			return ""
+		},
 		Runner: runner,
 	})
 	if err != nil {
@@ -85,12 +92,6 @@ func TestExecuteBackendBenchmarkAssignmentSidecarUnavailableBuildsSafeReceipt(t 
 		snapshot: testBackendBenchmarkSnapshot(BenchmarkProofStatusUnavailable),
 	}
 	receipt, handled, err := ExecuteBackendBenchmarkAssignment(context.Background(), specJSON, ExecuteBackendBenchmarkOptions{
-		Getenv: func(key string) string {
-			if key == BackendBenchmarkFlagEnv {
-				return "1"
-			}
-			return ""
-		},
 		Runner: runner,
 	})
 	if err != nil {

@@ -32,6 +32,7 @@ import (
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
 	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
+	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
@@ -1917,6 +1918,64 @@ func currentV7BackendBenchmarkStatus() *v7llamacpp.BackendBenchmarkLocalStatus {
 	return v7BackendBenchmarkStatus
 }
 
+func currentV7LlamaCppBackendBenchmarkProfile(ctx context.Context, client *hub.Client) v7llamacpp.BackendBenchmarkProfile {
+	cfg := v7llamacpp.ConfigFromEnv()
+	if operatorRuntimeState != nil {
+		cfg = operatorRuntimeState.llamaCppManager().Config()
+	}
+	basePolicy := buildModelPolicyStatus()
+	hardware := buildHardwareCapacityStatus(basePolicy.CacheDir)
+	runtimes := buildCurrentBackendRuntimes(ctx)
+	nodeID := ""
+	if client != nil {
+		nodeID = client.PublicKeyHex()
+	}
+	return v7llamacpp.BackendBenchmarkProfile{
+		NodeID:              nodeID,
+		Acceleration:        llamaCppBenchmarkAccelerationMode(cfg, hardware),
+		Warm:                runtimes.LlamaCPP.Warm,
+		ContextLengthTokens: cfg.ContextSize,
+		StreamingSupported:  runtimes.LlamaCPP.SupportsStreaming,
+	}
+}
+
+func llamaCppBenchmarkAccelerationMode(cfg v7llamacpp.LlamaCppSidecarConfig, hardware v7hardware.CapacityInventory) string {
+	if !llamaCppConfigUsesGPU(cfg) {
+		return "cpu"
+	}
+	hardware = v7hardware.NormalizeInventory(hardware)
+	switch {
+	case hardware.CUDAAvailable:
+		return "cuda"
+	case hardware.VulkanAvailable:
+		return "vulkan"
+	default:
+		return "other"
+	}
+}
+
+func llamaCppConfigUsesGPU(cfg v7llamacpp.LlamaCppSidecarConfig) bool {
+	if cfg.GPULayers > 0 {
+		return true
+	}
+	for i, arg := range cfg.ExtraArgs {
+		arg = strings.TrimSpace(arg)
+		switch {
+		case strings.HasPrefix(arg, "--n-gpu-layers="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--n-gpu-layers="))
+			n, err := strconv.Atoi(value)
+			return err == nil && n != 0
+		case arg == "--n-gpu-layers" || arg == "-ngl":
+			if i+1 >= len(cfg.ExtraArgs) {
+				return false
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(cfg.ExtraArgs[i+1]))
+			return err == nil && n != 0
+		}
+	}
+	return false
+}
+
 func processOptionalV7LlamaCppBackendBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
 	identity, isBenchmark := v7llamacpp.BackendBenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
@@ -1933,8 +1992,9 @@ func processOptionalV7LlamaCppBackendBenchmark(ctx context.Context, client *hub.
 		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
 	}
 	receipt, handled, err := v7llamacpp.ExecuteBackendBenchmarkAssignment(ctx, work.SpecJSON, v7llamacpp.ExecuteBackendBenchmarkOptions{
-		Getenv: os.Getenv,
-		Runner: runner,
+		Getenv:  os.Getenv,
+		Runner:  runner,
+		Profile: currentV7LlamaCppBackendBenchmarkProfile(ctx, client),
 	})
 	if !handled {
 		return false, nil, nil

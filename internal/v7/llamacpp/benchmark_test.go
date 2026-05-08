@@ -22,11 +22,16 @@ func TestBenchmarkComputesStreamingMetricsDeterministically(t *testing.T) {
 	}
 
 	snapshot := runner.Run(context.Background(), BenchmarkConfig{
-		MaxTokens:    8,
-		TimeoutMs:    10_000,
-		Streaming:    true,
-		WarmupRuns:   1,
-		MeasuredRuns: 3,
+		NodeID:              "node-a",
+		MaxTokens:           8,
+		TimeoutMs:           10_000,
+		Streaming:           true,
+		WarmupRuns:          1,
+		MeasuredRuns:        3,
+		Acceleration:        "cuda",
+		Warm:                true,
+		ContextLengthTokens: 4096,
+		StreamingSupported:  true,
 	})
 	if snapshot.Status != BenchmarkStatusCompleted {
 		t.Fatalf("status = %q, want completed: %+v", snapshot.Status, snapshot)
@@ -53,8 +58,15 @@ func TestBenchmarkComputesStreamingMetricsDeterministically(t *testing.T) {
 	if metrics.P50DecodeTPS != 20 || metrics.P95DecodeTPS != 20 {
 		t.Fatalf("decode tps percentiles = %.3f/%.3f, want 20/20", metrics.P50DecodeTPS, metrics.P95DecodeTPS)
 	}
+	if metrics.P50TPOTMs != 50 || metrics.P95TPOTMs != 50 {
+		t.Fatalf("tpot percentiles = %.3f/%.3f, want 50/50", metrics.P50TPOTMs, metrics.P95TPOTMs)
+	}
 	if metrics.P50EndToEndTPS != 14.286 || metrics.P95EndToEndTPS != 16.667 {
 		t.Fatalf("end-to-end tps percentiles = %.3f/%.3f, want 14.286/16.667", metrics.P50EndToEndTPS, metrics.P95EndToEndTPS)
+	}
+	if metrics.NodeID != "node-a" || metrics.Acceleration != "cuda" || !metrics.Warm ||
+		metrics.ContextLengthBucket != "ctx_2k_4k" || metrics.OutputTokenBucket != "out_0_64" || !metrics.StreamingSupported {
+		t.Fatalf("profile metrics = %+v", metrics)
 	}
 	if metrics.Backend != BackendName || metrics.RuntimeKind != BackendName || metrics.ProofStatus != BenchmarkProofStatusMeasured {
 		t.Fatalf("backend/proof metrics = %+v", metrics)

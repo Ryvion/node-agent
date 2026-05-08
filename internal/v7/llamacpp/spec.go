@@ -50,9 +50,14 @@ func IsBackendBenchmarkSpecJSON(specJSON string) bool {
 
 func BackendBenchmarkEnabledFromEnv(getenv func(string) string) bool {
 	if getenv == nil {
-		return false
+		return true
 	}
-	return strings.TrimSpace(getenv(BackendBenchmarkFlagEnv)) == "1"
+	switch strings.ToLower(strings.TrimSpace(getenv(BackendBenchmarkFlagEnv))) {
+	case "0", "false", "no", "off", "disabled":
+		return false
+	default:
+		return true
+	}
 }
 
 func BackendBenchmarkAssignmentIdentityFromJSON(specJSON string) (BackendBenchmarkAssignmentIdentity, bool) {
