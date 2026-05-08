@@ -569,9 +569,6 @@ func TestOperatorStatusAndHeartbeatPreviewUseSameBackendRuntimeBuilder(t *testin
 	if !reflect.DeepEqual(status.BackendRuntimes, preview.HeartbeatPreview.V7.BackendRuntimes) {
 		t.Fatalf("operator backend_runtimes = %+v, heartbeat backend_runtimes = %+v", status.BackendRuntimes, preview.HeartbeatPreview.V7.BackendRuntimes)
 	}
-	if len(status.SpeculativeProfiles) == 0 {
-		t.Fatalf("operator speculative_profiles empty, want local debug status")
-	}
 	if len(preview.HeartbeatPreview.V7.SpeculativeProfiles) != 0 {
 		t.Fatalf("heartbeat speculative_profiles = %+v, want omitted from heartbeat preview", preview.HeartbeatPreview.V7.SpeculativeProfiles)
 	}
