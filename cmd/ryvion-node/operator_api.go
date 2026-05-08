@@ -67,6 +67,7 @@ type operatorRuntime struct {
 	lastRegisterError    string
 	lastHeartbeatAt      time.Time
 	lastHeartbeatErr     string
+	heartbeatStatus      operatorHeartbeatStatus
 	latestVersion        string
 	lastMetrics          hw.Metrics
 	lastHealthReport     hub.HealthReport
@@ -124,6 +125,7 @@ type operatorStatusResponse struct {
 	LatestVersion        string                                         `json:"latest_version,omitempty"`
 	LastHeartbeatAt      time.Time                                      `json:"last_heartbeat_at,omitempty"`
 	LastHeartbeatErr     string                                         `json:"last_heartbeat_error,omitempty"`
+	Heartbeat            operatorHeartbeatStatus                        `json:"heartbeat"`
 	Machine              operatorMachine                                `json:"machine"`
 	Runtime              operatorRuntimeInfo                            `json:"runtime"`
 	TensorAccess         v7tensoraccess.TensorAccessCapability          `json:"tensor_access"`
@@ -151,6 +153,25 @@ type operatorStatusResponse struct {
 	V7ModelPrepare       v7modelprepare.LocalStatusSnapshot             `json:"v7_model_prepare"`
 	V7ModelWarm          v7modelwarm.LocalStatusSnapshot                `json:"v7_model_warm"`
 	WorkLoop             diagnostics.WorkLoopSnapshot                   `json:"work_loop"`
+}
+
+type operatorHeartbeatStatus struct {
+	LastStartedAt      string                          `json:"last_started_at"`
+	LastCompletedAt    string                          `json:"last_completed_at"`
+	LastDurationMs     int64                           `json:"last_duration_ms"`
+	LastError          string                          `json:"last_error"`
+	SuccessCount       uint64                          `json:"success_count"`
+	FailedCount        uint64                          `json:"failed_count"`
+	LastPayloadSummary operatorHeartbeatPayloadSummary `json:"last_payload_summary"`
+}
+
+type operatorHeartbeatPayloadSummary struct {
+	ModelCount           int    `json:"model_count"`
+	BackendCount         int    `json:"backend_count"`
+	HasCapabilityProfile bool   `json:"has_capability_profile"`
+	TextOutput           bool   `json:"text_output"`
+	Streaming            bool   `json:"streaming"`
+	WarmModelID          string `json:"warm_model_id"`
 }
 
 type operatorMachine struct {
@@ -723,6 +744,59 @@ func (s *operatorRuntime) recordHeartbeat(metrics hw.Metrics, heartbeat hub.Hear
 	s.trustReason = strings.TrimSpace(heartbeat.TrustReason)
 }
 
+func (s *operatorRuntime) recordCapabilityHeartbeat(started time.Time, completed time.Time, summary operatorHeartbeatPayloadSummary, err error) {
+	if s == nil {
+		return
+	}
+	if started.IsZero() {
+		started = time.Now()
+	}
+	if completed.IsZero() || completed.Before(started) {
+		completed = started
+	}
+	status := operatorHeartbeatStatus{
+		LastStartedAt:      formatHeartbeatStatusTime(started),
+		LastCompletedAt:    formatHeartbeatStatusTime(completed),
+		LastDurationMs:     completed.Sub(started).Milliseconds(),
+		LastPayloadSummary: summary,
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status.SuccessCount = s.heartbeatStatus.SuccessCount
+	status.FailedCount = s.heartbeatStatus.FailedCount
+	if err != nil {
+		status.LastError = cleanHeartbeatStatusError(err)
+		status.FailedCount++
+	} else {
+		status.SuccessCount++
+	}
+	s.heartbeatStatus = status
+}
+
+func formatHeartbeatStatusTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func cleanHeartbeatStatusError(err error) string {
+	if err == nil {
+		return ""
+	}
+	const maxRunes = 512
+	text := strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes])
+}
+
 func (s *operatorRuntime) recordHealthReport(report hub.HealthReport) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -840,6 +914,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	latestVersion := s.latestVersion
 	lastHeartbeatAt := s.lastHeartbeatAt
 	lastHeartbeatErr := s.lastHeartbeatErr
+	heartbeatStatus := s.heartbeatStatus
 	lastClaimAt := s.lastClaimAt
 	lastClaimErr := s.lastClaimError
 	lastPayoutAt := s.lastPayoutAt
@@ -978,6 +1053,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		LatestVersion:    latestVersion,
 		LastHeartbeatAt:  lastHeartbeatAt,
 		LastHeartbeatErr: lastHeartbeatErr,
+		Heartbeat:        heartbeatStatus,
 		Machine: operatorMachine{
 			CPUCores:  caps.CPUCores,
 			RAMBytes:  caps.RAMBytes,

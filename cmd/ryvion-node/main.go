@@ -74,6 +74,16 @@ var jobActive atomic.Int32
 // Written by heartbeat goroutine, read by work loop for auto-update checks.
 var latestHubVersion atomic.Value // string
 
+// v7CapabilityHeartbeatRequests wakes the heartbeat loop when local inventory
+// or hub connectivity changes before the next periodic tick.
+var v7CapabilityHeartbeatRequests = make(chan string, 1)
+
+type heartbeatSendResult struct {
+	hubOK               bool
+	capabilitySubmitted bool
+	payloadSummary      operatorHeartbeatPayloadSummary
+}
+
 const (
 	v7ProofFlagEnv                  = "RYV_NODE_V7_PROOF"
 	v7ProofMetadataKey              = "v7_proof"
@@ -789,52 +799,81 @@ func runNode(ctx context.Context) {
 	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr, runtimeMgr, strings.TrimSpace(caps.GPUModel) != "")
 }
 
-// heartbeatLoop sends heartbeats on a fixed interval, completely independent
-// of the work loop. Implements a circuit breaker: after 30 consecutive failures
-// (~5 min at 10s), the interval increases to 60s with a warning. Resets on success.
+// heartbeatLoop sends heartbeats independently of the work loop. It also accepts
+// explicit wakeups when hub connectivity or local capability inventory changes.
 func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
 	const (
-		normalInterval    = 30 * time.Second
-		backoffInterval   = 60 * time.Second
-		circuitBreakerMax = 30
+		normalInterval         = 30 * time.Second
+		backoffInterval        = 60 * time.Second
+		inventoryCheckInterval = 10 * time.Second
+		circuitBreakerMax      = 30
 	)
 
 	ticker := time.NewTicker(normalInterval)
 	defer ticker.Stop()
+	inventoryTicker := time.NewTicker(inventoryCheckInterval)
+	defer inventoryTicker.Stop()
 
 	var consecutiveFailures int
+	var lastSubmittedSummary operatorHeartbeatPayloadSummary
+	var haveSubmittedSummary bool
+
+	sendNow := func(reason string) {
+		result := sendHeartbeatDetailed(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
+		if result.hubOK {
+			if consecutiveFailures >= circuitBreakerMax {
+				slog.Info("hub heartbeat recovered after circuit breaker", "prev_failures", consecutiveFailures)
+				ticker.Reset(normalInterval)
+			} else if consecutiveFailures > 0 {
+				slog.Info("hub heartbeat recovered", "prev_failures", consecutiveFailures)
+			}
+			consecutiveFailures = 0
+			if result.capabilitySubmitted {
+				lastSubmittedSummary = result.payloadSummary
+				haveSubmittedSummary = true
+			}
+			return
+		}
+		consecutiveFailures++
+		if consecutiveFailures == circuitBreakerMax {
+			slog.Warn("hub heartbeat circuit breaker tripped — backing off to 60s interval",
+				"consecutive_failures", consecutiveFailures)
+			ticker.Reset(backoffInterval)
+		}
+		if reason != "" {
+			slog.Debug("capability heartbeat attempt failed", "reason", reason, "consecutive_failures", consecutiveFailures)
+		}
+	}
 
 	// Send first heartbeat immediately.
-	if sendHeartbeat(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr) {
-		consecutiveFailures = 0
-	} else {
-		consecutiveFailures++
-	}
+	sendNow("startup")
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if sendHeartbeat(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr) {
-				if consecutiveFailures >= circuitBreakerMax {
-					slog.Info("hub heartbeat recovered after circuit breaker", "prev_failures", consecutiveFailures)
-					ticker.Reset(normalInterval)
-				}
-				consecutiveFailures = 0
-			} else {
-				consecutiveFailures++
-				if consecutiveFailures == circuitBreakerMax {
-					slog.Warn("hub heartbeat circuit breaker tripped — backing off to 60s interval",
-						"consecutive_failures", consecutiveFailures)
-					ticker.Reset(backoffInterval)
-				}
+			sendNow("periodic")
+		case reason := <-v7CapabilityHeartbeatRequests:
+			sendNow(reason)
+		case <-inventoryTicker.C:
+			if consecutiveFailures >= circuitBreakerMax {
+				continue
+			}
+			summary, ok := currentV7HeartbeatPayloadSummary(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
+			if ok && (!haveSubmittedSummary || summary != lastSubmittedSummary) {
+				sendNow("inventory_changed")
 			}
 		}
 	}
 }
 
 func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) bool {
+	return sendHeartbeatDetailed(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr).hubOK
+}
+
+func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) heartbeatSendResult {
+	started := time.Now()
 	metrics := hw.SampleMetrics()
 
 	// Cache GPU utilization for the work loop's throttle check.
@@ -843,6 +882,21 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 	// Report whether the node is self-throttling due to operator GPU usage.
 	throttled := flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 && metrics.GPUUtil > flagMaxGPUUtil
 
+	var v7Payload *v7heartbeat.V7HeartbeatPayload
+	var payloadSummary operatorHeartbeatPayloadSummary
+	if v7heartbeat.V7HeartbeatEnabledFromEnv() {
+		payload, err := buildV7HeartbeatPayloadForNodeWithBackendRuntimes(client.PublicKeyHex(), caps, deviceType, declaredCountry, infMgr, runtimeMgr, buildCurrentBackendRuntimes(ctx))
+		if err != nil {
+			slog.Warn("failed to build V7 heartbeat payload; sending legacy heartbeat", "error", err)
+			if operatorRuntimeState != nil {
+				operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, err)
+			}
+		} else {
+			v7Payload = payload
+			payloadSummary = summarizeV7HeartbeatPayload(payload)
+		}
+	}
+
 	heartbeatMetrics := hub.Metrics{
 		TimestampMs:  time.Now().UnixMilli(),
 		CPUUtil:      metrics.CPUUtil,
@@ -850,11 +904,14 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 		GPUUtil:      metrics.GPUUtil,
 		PowerWatts:   metrics.PowerWatts,
 		GPUThrottled: throttled,
-		V7Heartbeat:  buildOptionalV7HeartbeatPayloadWithBackendRuntimes(client.PublicKeyHex(), caps, deviceType, declaredCountry, infMgr, runtimeMgr, buildCurrentBackendRuntimes(ctx)),
+		V7Heartbeat:  v7Payload,
 	}
 
 	heartbeat, err := client.Heartbeat(ctx, heartbeatMetrics)
 	if err != nil && heartbeatMetrics.V7Heartbeat != nil {
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, err)
+		}
 		heartbeatMetrics.V7Heartbeat = nil
 		if retryHeartbeat, retryErr := client.Heartbeat(ctx, heartbeatMetrics); retryErr == nil {
 			slog.Warn("heartbeat with V7 payload failed; retried without V7 payload", "error", err)
@@ -867,16 +924,131 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 			operatorRuntimeState.recordHeartbeat(metrics, hub.HeartbeatResponse{}, err)
 		}
 		slog.Warn("heartbeat failed", "error", err)
-		return false
+		return heartbeatSendResult{hubOK: false, payloadSummary: payloadSummary}
 	}
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.recordHeartbeat(metrics, heartbeat, nil)
+		if v7Payload != nil && heartbeatMetrics.V7Heartbeat != nil {
+			operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, nil)
+		}
 	}
 	// Store latest version for work loop update checks.
 	if heartbeat.LatestVersion != "" {
 		latestHubVersion.Store(heartbeat.LatestVersion)
 	}
-	return true
+	return heartbeatSendResult{
+		hubOK:               true,
+		capabilitySubmitted: v7Payload != nil && heartbeatMetrics.V7Heartbeat != nil,
+		payloadSummary:      payloadSummary,
+	}
+}
+
+func requestV7CapabilityHeartbeat(reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "requested"
+	}
+	select {
+	case v7CapabilityHeartbeatRequests <- reason:
+	default:
+	}
+}
+
+func currentV7HeartbeatPayloadSummary(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) (operatorHeartbeatPayloadSummary, bool) {
+	if !v7heartbeat.V7HeartbeatEnabledFromEnv() || client == nil {
+		return operatorHeartbeatPayloadSummary{}, false
+	}
+	payload, err := buildV7HeartbeatPayloadForNodeWithBackendRuntimes(client.PublicKeyHex(), caps, deviceType, declaredCountry, infMgr, runtimeMgr, buildCurrentBackendRuntimes(ctx))
+	if err != nil {
+		slog.Debug("failed to build V7 heartbeat inventory summary", "error", err)
+		return operatorHeartbeatPayloadSummary{}, false
+	}
+	return summarizeV7HeartbeatPayload(payload), true
+}
+
+func summarizeV7HeartbeatPayload(payload *v7heartbeat.V7HeartbeatPayload) operatorHeartbeatPayloadSummary {
+	if payload == nil {
+		return operatorHeartbeatPayloadSummary{}
+	}
+	models := make(map[string]struct{})
+	addModel := func(values ...string) {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			models[value] = struct{}{}
+			return
+		}
+	}
+	for _, model := range payload.ModelCache.Models {
+		addModel(model.ModelID, model.Filename)
+	}
+	for _, model := range payload.RuntimeInventory.LoadedModels {
+		addModel(model.ModelID)
+	}
+	for _, model := range payload.RuntimeInventory.GGUFModels {
+		addModel(model.Filename)
+	}
+	for _, model := range payload.CapabilityProfile.Models {
+		addModel(model.ModelID)
+	}
+	addModel(payload.BackendRuntimes.LlamaCPP.ModelID, payload.BackendRuntimes.LlamaCPP.ModelFilename)
+	addModel(payload.CapabilityProfile.WarmModel.ModelID)
+
+	backends := make(map[string]struct{})
+	addBackend := func(name string, available bool) {
+		name = strings.TrimSpace(name)
+		if name == "" || !available {
+			return
+		}
+		backends[name] = struct{}{}
+	}
+	addBackend(payload.BackendRuntimes.LlamaCPP.Backend, heartbeatRuntimeAvailable(payload.BackendRuntimes.LlamaCPP))
+	addBackend(payload.BackendRuntimes.TensorRTLLM.Backend, heartbeatRuntimeAvailable(payload.BackendRuntimes.TensorRTLLM))
+	addBackend(payload.BackendRuntimes.VLLM.Backend, heartbeatRuntimeAvailable(payload.BackendRuntimes.VLLM))
+	addBackend(payload.BackendRuntimes.SGLang.Backend, heartbeatRuntimeAvailable(payload.BackendRuntimes.SGLang))
+	for _, runtime := range payload.BackendRuntimes.Other {
+		addBackend(runtime.Backend, heartbeatRuntimeAvailable(runtime))
+	}
+	for _, candidate := range payload.RuntimeInventory.BackendCandidates {
+		addBackend(candidate.Backend, candidate.Detected)
+	}
+	if payload.RuntimeInventory.CandidateBackends.LlamaCPPDetected || payload.BackendProbes.LlamaCPP.Available {
+		addBackend(v7llamacpp.BackendName, true)
+	}
+	if payload.RuntimeInventory.CandidateBackends.TensorRTLLMDetected {
+		addBackend("tensorrt_llm", true)
+	}
+	if payload.RuntimeInventory.CandidateBackends.VLLMDetected {
+		addBackend("vllm", true)
+	}
+	if payload.RuntimeInventory.CandidateBackends.SGLangDetected {
+		addBackend("sglang", true)
+	}
+	if payload.RuntimeInventory.CandidateBackends.OllamaDetected {
+		addBackend("ollama", true)
+	}
+	if payload.RuntimeInventory.CandidateBackends.PythonTransformersDetected {
+		addBackend("python_transformers", true)
+	}
+
+	return operatorHeartbeatPayloadSummary{
+		ModelCount:           len(models),
+		BackendCount:         len(backends),
+		HasCapabilityProfile: payload.CapabilityProfile.SchemaVersion != "",
+		TextOutput:           payload.CapabilityProfile.TextOutput,
+		Streaming:            payload.CapabilityProfile.Streaming,
+		WarmModelID:          firstNonEmptyString(payload.BackendRuntimes.LlamaCPP.WarmModelID, payload.CapabilityProfile.WarmModel.ModelID),
+	}
+}
+
+func heartbeatRuntimeAvailable(runtime v7llamacpp.BackendRuntimeStatus) bool {
+	return runtime.Available ||
+		runtime.Running ||
+		runtime.Healthy ||
+		runtime.Loaded ||
+		runtime.Warm
 }
 
 func buildOptionalV7HeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) *v7heartbeat.V7HeartbeatPayload {
@@ -1064,6 +1236,7 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 	var lastUpdateAttempt time.Time
 	backoff := 5 * time.Second
 	maxBackoff := 2 * time.Minute
+	hadPollFailure := false
 
 	for {
 		// Check for version updates (read from atomic, never missed).
@@ -1106,6 +1279,7 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		workLoopDiagnostics.RecordPollStart()
 		work, err := client.FetchWork(ctx)
 		if err != nil {
+			hadPollFailure = true
 			slog.Warn("fetch work failed", "error", err)
 			select {
 			case <-ctx.Done():
@@ -1121,6 +1295,10 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 			continue
 		}
 		workLoopDiagnostics.RecordPollEnd(nil)
+		if hadPollFailure {
+			requestV7CapabilityHeartbeat("work_poll_recovered")
+			hadPollFailure = false
+		}
 
 		// Successful fetch — reset backoff.
 		backoff = 5 * time.Second
@@ -1840,6 +2018,9 @@ func processOptionalV7ModelWarm(ctx context.Context, client *hub.Client, work *h
 			status.RecordRejected(identity.WarmID, identity.ModelID, recordErr)
 		}
 		status.RecordReceiptSubmitted(identity.WarmID, identity.ModelID)
+	}
+	if warmed {
+		requestV7CapabilityHeartbeat("v7_model_warm_changed")
 	}
 	return true, snapshot, recordErr
 }
@@ -2707,6 +2888,9 @@ func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work
 			status.RecordRejected(identity.PrepareID, identity.ModelID, err)
 		}
 		status.RecordReceiptSubmitted(identity.PrepareID, identity.ModelID)
+	}
+	if err == nil {
+		requestV7CapabilityHeartbeat("v7_model_prepare_changed")
 	}
 	return true, snapshot, err
 }

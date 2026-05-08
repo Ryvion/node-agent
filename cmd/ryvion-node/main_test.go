@@ -460,6 +460,127 @@ func TestSendHeartbeatIncludesV7ByDefault(t *testing.T) {
 	}
 }
 
+func TestSendHeartbeatRecordsCapabilityHeartbeatStatus(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/v1/models":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer llamaServer.Close()
+
+	client, _, _ := heartbeatTestClient(t)
+	prevState := operatorRuntimeState
+	state := &operatorRuntime{
+		version:         "test",
+		hubURL:          "https://api.ryvion.ai",
+		deviceType:      "gpu",
+		publicKeyHex:    client.PublicKeyHex(),
+		llamaCppSidecar: testLlamaCppManagerForServer(t, llamaServer.URL),
+		caps:            validHeartbeatCaps(),
+	}
+	operatorRuntimeState = state
+	t.Cleanup(func() { operatorRuntimeState = prevState })
+
+	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "gpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want true")
+	}
+	status := state.statusSnapshot(defaultOperatorAPIPort).Heartbeat
+	if status.LastStartedAt == "" || status.LastCompletedAt == "" {
+		t.Fatalf("heartbeat timestamps missing: %+v", status)
+	}
+	if status.LastDurationMs < 0 {
+		t.Fatalf("last_duration_ms = %d, want non-negative", status.LastDurationMs)
+	}
+	if status.LastError != "" || status.SuccessCount != 1 || status.FailedCount != 0 {
+		t.Fatalf("heartbeat status = %+v, want one successful capability submission", status)
+	}
+	summary := status.LastPayloadSummary
+	if summary.ModelCount == 0 ||
+		summary.BackendCount == 0 ||
+		!summary.HasCapabilityProfile ||
+		!summary.TextOutput ||
+		!summary.Streaming ||
+		summary.WarmModelID != "tinyllama.Q4_K_M.gguf" {
+		t.Fatalf("payload summary = %+v, want compact active llama.cpp capability summary", summary)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal(status) error = %v", err)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "generated_text", "model_output", "output_text", "secret", "tensor_bytes", "raw_tensor"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("heartbeat status contains forbidden marker %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestSendHeartbeatRecordsCapabilityFailureWhenV7FallbackSucceeds(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	calls := &atomic.Int32{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		calls.Add(1)
+		var req struct {
+			V7 json.RawMessage `json:"v7"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.V7) > 0 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("temporary v7 ingest failure"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	client := hub.New(ts.URL, pub, priv)
+	prevState := operatorRuntimeState
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       ts.URL,
+		deviceType:   "cpu",
+		publicKeyHex: client.PublicKeyHex(),
+		caps:         validHeartbeatCaps(),
+	}
+	operatorRuntimeState = state
+	t.Cleanup(func() { operatorRuntimeState = prevState })
+
+	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want legacy heartbeat fallback success")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("heartbeat calls = %d, want V7 attempt plus legacy fallback", calls.Load())
+	}
+	status := state.statusSnapshot(defaultOperatorAPIPort).Heartbeat
+	if status.SuccessCount != 0 || status.FailedCount != 1 || status.LastError == "" {
+		t.Fatalf("heartbeat status = %+v, want recorded V7 capability failure", status)
+	}
+	if !status.LastPayloadSummary.HasCapabilityProfile {
+		t.Fatalf("payload summary missing from failed V7 attempt: %+v", status.LastPayloadSummary)
+	}
+	if state.statusSnapshot(defaultOperatorAPIPort).LastHeartbeatAt.IsZero() {
+		t.Fatal("legacy heartbeat liveness was not recorded after fallback success")
+	}
+}
+
 func TestSendHeartbeatFallsBackToLegacyWhenV7BuildFails(t *testing.T) {
 	t.Setenv("RYV_NODE_V7_CAPS", "1")
 	client, gotV7, calls := heartbeatTestClient(t)
