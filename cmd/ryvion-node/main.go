@@ -31,6 +31,7 @@ import (
 	v7artifact "github.com/Ryvion/node-agent/internal/v7/artifact"
 	v7backendprobe "github.com/Ryvion/node-agent/internal/v7/backendprobe"
 	v7capability "github.com/Ryvion/node-agent/internal/v7/capability"
+	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
@@ -84,6 +85,7 @@ var (
 	v7TensorPlaneBenchmarkStatus = v7tensorplane.NewLocalStatus()
 	v7BackendBenchmarkStatus     = v7llamacpp.NewBackendBenchmarkLocalStatus()
 	v7InferenceBenchmarkStatus   = v7inferencebench.NewLocalStatus()
+	v7DashboardInferenceStatus   = v7dashboardinference.NewLocalStatus()
 	v7ModelPrepareStatus         = v7modelprepare.NewLocalStatus()
 	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
 		return v7modelbench.NativeInferenceModelBenchmarkRunner{
@@ -113,6 +115,20 @@ var (
 			keepWarm = operatorRuntimeState.llamaCppResidencyKeeper()
 		}
 		return v7inferencebench.LlamaCppBenchmarkRunner{
+			Sidecar:  sidecar,
+			KeepWarm: keepWarm,
+			Client:   v7llamacpp.OpenAIClient{},
+			Getenv:   os.Getenv,
+		}
+	}
+	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+		var sidecar v7dashboardinference.LlamaCppSidecar = v7llamacpp.NewManagerFromEnv()
+		var keepWarm v7dashboardinference.KeepWarmChecker
+		if operatorRuntimeState != nil {
+			sidecar = operatorRuntimeState.llamaCppManager()
+			keepWarm = operatorRuntimeState.llamaCppResidencyKeeper()
+		}
+		return v7dashboardinference.LlamaCppRunner{
 			Sidecar:  sidecar,
 			KeepWarm: keepWarm,
 			Client:   v7llamacpp.OpenAIClient{},
@@ -1185,6 +1201,18 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	if handled, result, runErr := processOptionalV7DashboardInference(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("V7 dashboard inference execution failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("V7 dashboard inference completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	if handled, result, runErr := processOptionalV7BackendInferenceBenchmark(runCtx, client, work, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
 			slog.Warn("V7 backend inference benchmark execution failed", "job_id", work.JobID, "error", runErr)
@@ -1811,6 +1839,187 @@ func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromReceipt(specJSON string, 
 		}
 	}
 	return context
+}
+
+func currentV7DashboardInferenceStatus() *v7dashboardinference.LocalStatus {
+	if operatorRuntimeState != nil {
+		return operatorRuntimeState.dashboardInferenceStatus()
+	}
+	return v7DashboardInferenceStatus
+}
+
+func processOptionalV7DashboardInference(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	identity, isDashboardInference := v7dashboardinference.AssignmentIdentityFromJSON(work.SpecJSON)
+	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
+	statusRunID := identity.RunID
+	status := currentV7DashboardInferenceStatus()
+	if isDashboardInference && status != nil {
+		status.RecordSeen(statusRunID, statusJobID)
+	}
+
+	runner := newV7DashboardInferenceRunner()
+	executionStarted := time.Now()
+	if isDashboardInference {
+		workLoopDiagnostics.RecordExecutionStart(statusJobID)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7DashboardInferenceWorkLoopEventContextFromSpec(work.SpecJSON))
+	}
+	receipt, handled, err := v7dashboardinference.ExecuteAssignment(ctx, work.SpecJSON, v7dashboardinference.ExecuteOptions{
+		Getenv: os.Getenv,
+		Runner: runner,
+	})
+	if !handled {
+		return false, nil, nil
+	}
+	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
+	if err != nil && status != nil {
+		status.RecordError(statusRunID, statusJobID, err)
+	}
+
+	receiptBuildStarted := time.Now()
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7DashboardInferenceWorkLoopEventContextFromSpec(work.SpecJSON))
+	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
+	extra := map[string]any{
+		"executor":      v7dashboardinference.Task,
+		"executor_kind": v7dashboardinference.Task,
+		"task":          v7dashboardinference.Task,
+	}
+	if strings.TrimSpace(receipt.ResultHashHex) == "" {
+		receipt = v7dashboardinference.BuildRejectionReceiptFromIdentity(identity, err)
+	}
+	proofStatus := v7dashboardinference.ReceiptProofStatus(receipt)
+	measured := proofStatus == v7dashboardinference.ProofStatusMeasured
+	recordErr := err
+	if !measured && recordErr == nil {
+		recordErr = v7DashboardInferenceRejectionError(receipt)
+	}
+	exitCode := 0
+	if recordErr != nil || !measured {
+		exitCode = 1
+		extra["exit_code"] = 1
+		extra["error"] = "v7 dashboard inference failed"
+	} else {
+		extra["exit_code"] = 0
+	}
+	metadata := receiptMetadataBase(work, runtimeMeta, receipt.Metadata, extra)
+	hubReceipt := hub.Receipt{
+		JobID:         firstNonEmptyString(receipt.JobID, work.JobID),
+		ResultHashHex: receipt.ResultHashHex,
+		MeteringUnits: receipt.MeteringUnits,
+		Metadata:      metadata,
+	}
+	snapshot := &runnerResultSnapshot{
+		ResultHashHex: hubReceipt.ResultHashHex,
+		MeteringUnits: hubReceipt.MeteringUnits,
+		ExitCode:      exitCode,
+		Metadata:      metadata,
+	}
+	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
+	receiptContext := v7DashboardInferenceWorkLoopEventContextFromReceipt(work.SpecJSON, receipt)
+	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
+	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), receiptContext)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_start", hubReceipt.JobID, work.Kind, receiptContext)
+	if client == nil {
+		submitErr := fmt.Errorf("hub client unavailable")
+		workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+		workLoopDiagnostics.RecordReceiptSubmitEnd(0, submitErr)
+		workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+		if status != nil {
+			if measured {
+				status.RecordExecuted(statusRunID, hubReceipt.JobID)
+			} else {
+				status.RecordRejected(statusRunID, hubReceipt.JobID, recordErr)
+			}
+			status.RecordReceiptFailed(statusRunID, hubReceipt.JobID, submitErr)
+		}
+		if recordErr != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", recordErr, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	submitStarted := time.Now()
+	workLoopDiagnostics.RecordReceiptSubmitStart(hubReceipt.JobID, 1)
+	submitErr := client.SubmitReceipt(ctx, hubReceipt)
+	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), submitErr)
+	workLoopDiagnostics.RecordEvent("v7_fast_path_submit_end", hubReceipt.JobID, work.Kind, receiptContext)
+	if submitErr != nil {
+		if status != nil {
+			if measured {
+				status.RecordExecuted(statusRunID, hubReceipt.JobID)
+			} else {
+				status.RecordRejected(statusRunID, hubReceipt.JobID, recordErr)
+			}
+			status.RecordReceiptFailed(statusRunID, hubReceipt.JobID, submitErr)
+		}
+		if recordErr != nil {
+			return true, snapshot, fmt.Errorf("%v; receipt submit failed: %w", recordErr, submitErr)
+		}
+		return true, snapshot, submitErr
+	}
+	if status != nil {
+		if measured {
+			status.RecordExecuted(statusRunID, hubReceipt.JobID)
+		} else {
+			status.RecordRejected(statusRunID, hubReceipt.JobID, recordErr)
+		}
+		status.RecordReceiptSubmitted(statusRunID, hubReceipt.JobID)
+	}
+	return true, snapshot, recordErr
+}
+
+func v7DashboardInferenceWorkLoopEventContextFromSpec(specJSON string) map[string]string {
+	context := map[string]string{
+		"spec_task": v7dashboardinference.Task,
+	}
+	var spec struct {
+		Task      string `json:"task"`
+		RunID     string `json:"run_id"`
+		Backend   string `json:"backend"`
+		ModelID   string `json:"model_id"`
+		MaxTokens int    `json:"max_tokens"`
+	}
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return context
+	}
+	if strings.TrimSpace(spec.Task) == v7dashboardinference.Task {
+		context["spec_task"] = v7dashboardinference.Task
+	}
+	if runID := strings.TrimSpace(spec.RunID); runID != "" {
+		context["run_id"] = runID
+	}
+	if backend := strings.TrimSpace(spec.Backend); backend != "" {
+		context["backend"] = backend
+	}
+	if modelID := strings.TrimSpace(spec.ModelID); modelID != "" {
+		context["model_id"] = modelID
+	}
+	if spec.MaxTokens > 0 {
+		context["max_tokens"] = strconv.Itoa(spec.MaxTokens)
+	}
+	return context
+}
+
+func v7DashboardInferenceWorkLoopEventContextFromReceipt(specJSON string, receipt v7dashboardinference.Receipt) map[string]string {
+	context := v7DashboardInferenceWorkLoopEventContextFromSpec(specJSON)
+	if taskMetadata, ok := receipt.Metadata[v7dashboardinference.Task].(map[string]any); ok {
+		putWorkLoopAnyIntContext(context, "tokens_generated", taskMetadata["tokens_generated"])
+		putWorkLoopAnyIntContext(context, "ttft_ms", taskMetadata["ttft_ms"])
+		putWorkLoopAnyIntContext(context, "total_time_ms", taskMetadata["total_time_ms"])
+		if status, ok := taskMetadata["proof_status"].(string); ok && strings.TrimSpace(status) != "" {
+			context["proof_status"] = strings.TrimSpace(status)
+		}
+	}
+	return context
+}
+
+func v7DashboardInferenceRejectionError(receipt v7dashboardinference.Receipt) error {
+	code := "dashboard_inference_rejected"
+	if taskMetadata, ok := receipt.Metadata[v7dashboardinference.Task].(map[string]any); ok {
+		if value, ok := taskMetadata["error_code"].(string); ok && strings.TrimSpace(value) != "" {
+			code = strings.TrimSpace(value)
+		}
+	}
+	return fmt.Errorf("%s", code)
 }
 
 func currentV7BackendInferenceBenchmarkStatus() *v7inferencebench.LocalStatus {

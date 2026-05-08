@@ -21,6 +21,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
@@ -1846,6 +1847,139 @@ func TestProcessOptionalV7BackendInferenceBenchmarkSubmitsMeasuredReceipt(t *tes
 	}
 }
 
+func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(v7dashboardinference.FlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := v7dashboardinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(v7dashboardinference.ProofStatusMeasured)}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "v7dashboardinfer_job" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[v7dashboardinference.Task].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", v7dashboardinference.Task, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != v7dashboardinference.ProofStatusMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["request_id"] != "dashboardinfer_request" || metadata["run_id"] != "dashboardinfer_run" {
+			t.Errorf("request/run metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["backend"] != v7llamacpp.BackendName || metadata["model_id"] != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+			t.Errorf("backend/model metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		outputHash, ok := metadata["output_hash"].(string)
+		if !ok || !strings.HasPrefix(outputHash, "sha256:") {
+			t.Errorf("output_hash = %#v, want sha256 hash", metadata["output_hash"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["output_bytes"] != float64(len("dashboard measured output")) || metadata["tokens_generated"] != float64(9) {
+			t.Errorf("output metric metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["ttft_ms"] != float64(120) || metadata["total_time_ms"] != float64(720) {
+			t.Errorf("timing metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["decode_tps"] != float64(15) || metadata["end_to_end_tps"] != float64(12.5) {
+			t.Errorf("tps metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"dashboard measured output", "raw_prompt", "prompt_text", "messages", "input_text", "output_text", "generated_text", "raw_output", "completion", "token_logprobs", "key_data", "value_data", "query_vector", "tensor_bytes", "secret"} {
+			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7DashboardInference() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful dashboard inference receipt", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.LastRunID != "dashboardinfer_run" || snapshot.LastJobID != "v7dashboardinfer_job" || snapshot.LastError != "" {
+		t.Fatalf("unexpected dashboard inference status: %+v", snapshot)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 || snapshot.Counters.Rejected != 0 {
+		t.Fatalf("unexpected dashboard inference counters: %+v", snapshot.Counters)
+	}
+}
+
 func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
 	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "1")
 	oldStatus := v7BackendBenchmarkStatus
@@ -2515,6 +2649,86 @@ func testBackendInferenceBenchmarkResult(proofStatus string) v7inferencebench.Be
 		result.DecodeTPS = 0
 		result.EndToEndTPS = 0
 		result.ErrorCode = "backend_inference_failed"
+	}
+	return result
+}
+
+type fakeDashboardInferenceRunner struct {
+	result v7dashboardinference.ExecutionResult
+	err    error
+	specs  []v7dashboardinference.Spec
+	calls  int
+}
+
+func (f *fakeDashboardInferenceRunner) RunDashboardInference(_ context.Context, spec v7dashboardinference.Spec) (v7dashboardinference.ExecutionResult, error) {
+	f.calls++
+	f.specs = append(f.specs, spec)
+	if f.err != nil {
+		return v7dashboardinference.ExecutionResult{}, f.err
+	}
+	result := f.result
+	if result.Spec.Task == "" {
+		result.Spec = spec
+	}
+	return result, nil
+}
+
+func testDashboardInferenceSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := v7dashboardinference.Spec{
+		Task:            v7dashboardinference.Task,
+		RequestID:       "dashboardinfer_request",
+		RunID:           "dashboardinfer_run",
+		JobID:           "v7dashboardinfer_job",
+		Backend:         v7llamacpp.BackendName,
+		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		TargetNodeID:    "node-dashboard-local",
+		MaxTokens:       32,
+		Stream:          true,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testDashboardInferenceResult(proofStatus string) v7dashboardinference.ExecutionResult {
+	spec := v7dashboardinference.Spec{
+		Task:            v7dashboardinference.Task,
+		RequestID:       "dashboardinfer_request",
+		RunID:           "dashboardinfer_run",
+		JobID:           "v7dashboardinfer_job",
+		Backend:         v7llamacpp.BackendName,
+		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		TargetNodeID:    "node-dashboard-local",
+		MaxTokens:       32,
+		Stream:          true,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	result := v7dashboardinference.ExecutionResult{
+		Spec:            spec,
+		Backend:         v7llamacpp.BackendName,
+		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		OutputHash:      testSHA256ObjectID("dashboard measured output"),
+		OutputBytes:     int64(len("dashboard measured output")),
+		TokensGenerated: 9,
+		TTFTMs:          120,
+		TotalTimeMs:     720,
+		DecodeTPS:       15,
+		EndToEndTPS:     12.5,
+		ProofStatus:     proofStatus,
+	}
+	if proofStatus != v7dashboardinference.ProofStatusMeasured {
+		result.OutputHash = v7dashboardinference.HashOutput(spec.JobID, nil)
+		result.OutputBytes = 0
+		result.TokensGenerated = 0
+		result.TTFTMs = 0
+		result.TotalTimeMs = 0
+		result.DecodeTPS = 0
+		result.EndToEndTPS = 0
+		result.ErrorCode = "dashboard_inference_failed"
 	}
 	return result
 }
