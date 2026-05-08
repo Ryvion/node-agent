@@ -1,6 +1,10 @@
 package modelcache
 
-import "time"
+import (
+	"time"
+
+	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+)
 
 const (
 	DefaultMaxModels = 100
@@ -8,16 +12,20 @@ const (
 )
 
 type Model struct {
-	ModelID          string    `json:"model_id"`
-	Filename         string    `json:"filename"`
-	Path             string    `json:"path"`
-	SizeBytes        int64     `json:"size_bytes"`
-	FamilyHint       string    `json:"family_hint"`
-	QuantizationHint string    `json:"quantization_hint"`
-	Format           string    `json:"format"`
-	Installed        bool      `json:"installed"`
-	HashVerified     bool      `json:"hash_verified"`
-	LastSeenAt       time.Time `json:"last_seen_at"`
+	ModelID                string    `json:"model_id"`
+	Filename               string    `json:"filename"`
+	Path                   string    `json:"path"`
+	SizeBytes              int64     `json:"size_bytes"`
+	FamilyHint             string    `json:"family_hint"`
+	QuantizationHint       string    `json:"quantization_hint"`
+	ParameterCountBillions float64   `json:"parameter_count_billions,omitempty"`
+	Format                 string    `json:"format"`
+	Installed              bool      `json:"installed"`
+	Resident               bool      `json:"resident"`
+	Runnable               bool      `json:"runnable"`
+	BlockedReasons         []string  `json:"blocked_reasons"`
+	HashVerified           bool      `json:"hash_verified"`
+	LastSeenAt             time.Time `json:"last_seen_at"`
 }
 
 type Status struct {
@@ -35,6 +43,14 @@ type ScanOptions struct {
 	Stat         func(string) (FileInfo, error)
 	Now          func() time.Time
 	GOOS         string
+}
+
+type RuntimeAnnotationInput struct {
+	Status                         Status
+	Policy                         modelpolicy.Policy
+	HardwareCapacityAvailable      bool
+	BackendTextGenerationAvailable bool
+	V7InferenceEnabled             bool
 }
 
 type FileInfo interface {

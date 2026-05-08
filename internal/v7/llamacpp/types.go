@@ -42,6 +42,7 @@ type LlamaCppSidecarStatus struct {
 	BaseURL                string    `json:"base_url"`
 	ServerPath             string    `json:"server_path,omitempty"`
 	ModelPath              string    `json:"model_path,omitempty"`
+	ContextSize            int       `json:"context_size,omitempty"`
 	ModelFilename          string    `json:"model_filename,omitempty"`
 	ModelSizeBytes         int64     `json:"model_size_bytes"`
 	ModelFamilyHint        string    `json:"model_family_hint,omitempty"`
@@ -59,31 +60,42 @@ type LlamaCppSidecarStatus struct {
 }
 
 type BackendRuntimes struct {
-	LlamaCPP BackendRuntimeStatus `json:"llama_cpp"`
+	LlamaCPP    BackendRuntimeStatus   `json:"llama_cpp"`
+	TensorRTLLM BackendRuntimeStatus   `json:"tensorrt_llm"`
+	VLLM        BackendRuntimeStatus   `json:"vllm"`
+	SGLang      BackendRuntimeStatus   `json:"sglang"`
+	Other       []BackendRuntimeStatus `json:"other"`
 }
 
 type BackendRuntimeStatus struct {
-	Enabled                bool   `json:"enabled"`
-	Available              bool   `json:"available"`
-	Running                bool   `json:"running"`
-	Healthy                bool   `json:"healthy"`
-	Backend                string `json:"backend"`
-	BaseURL                string `json:"base_url"`
-	ModelID                string `json:"model_id,omitempty"`
-	ModelPath              string `json:"model_path,omitempty"`
-	ModelFilename          string `json:"model_filename,omitempty"`
-	ModelSizeBytes         int64  `json:"model_size_bytes"`
-	ModelFamilyHint        string `json:"model_family_hint,omitempty"`
-	QuantizationHint       string `json:"quantization_hint,omitempty"`
-	Loaded                 bool   `json:"loaded"`
-	Warm                   bool   `json:"warm"`
-	OpenAICompatible       bool   `json:"openai_compatible"`
-	SupportsTextGeneration bool   `json:"supports_text_generation"`
-	SupportsStreaming      bool   `json:"supports_streaming"`
-	SupportsKVAccess       bool   `json:"supports_kv_access"`
-	SupportsTensorHooks    bool   `json:"supports_tensor_hooks"`
-	LastHealthAtUnixMs     int64  `json:"last_health_at_unix_ms"`
-	LastError              string `json:"last_error"`
+	Enabled                  bool     `json:"enabled"`
+	Available                bool     `json:"available"`
+	Running                  bool     `json:"running"`
+	Healthy                  bool     `json:"healthy"`
+	Health                   string   `json:"health"`
+	Backend                  string   `json:"backend"`
+	BaseURL                  string   `json:"base_url"`
+	ModelID                  string   `json:"model_id,omitempty"`
+	ModelPath                string   `json:"model_path,omitempty"`
+	ModelFilename            string   `json:"model_filename,omitempty"`
+	ModelSizeBytes           int64    `json:"model_size_bytes"`
+	ModelFamilyHint          string   `json:"model_family_hint,omitempty"`
+	QuantizationHint         string   `json:"quantization_hint,omitempty"`
+	Loaded                   bool     `json:"loaded"`
+	Warm                     bool     `json:"warm"`
+	WarmModelID              string   `json:"warm_model_id,omitempty"`
+	Acceleration             []string `json:"acceleration"`
+	OpenAICompatible         bool     `json:"openai_compatible"`
+	SupportsTextGeneration   bool     `json:"supports_text_generation"`
+	SupportsStreaming        bool     `json:"supports_streaming"`
+	SupportsStatefulSessions bool     `json:"supports_stateful_sessions"`
+	SupportsKVAccess         bool     `json:"supports_kv_access"`
+	SupportsKVHooks          bool     `json:"supports_kv_hooks"`
+	SupportsTensorHooks      bool     `json:"supports_tensor_hooks"`
+	SupportsDistributedKV    bool     `json:"supports_distributed_kv"`
+	MaxContextTokens         int      `json:"max_context_tokens,omitempty"`
+	LastHealthAtUnixMs       int64    `json:"last_health_at_unix_ms"`
+	LastError                string   `json:"last_error"`
 }
 
 type HealthResult struct {

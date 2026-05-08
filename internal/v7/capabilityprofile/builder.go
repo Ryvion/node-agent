@@ -46,23 +46,35 @@ func BuildProfile(input BuildInput) Profile {
 	streamingEnabled := inferenceconfig.StreamingEnabled(input.Getenv)
 	warmEnabled := inferenceconfig.ModelWarmEnabled(input.Getenv)
 
-	models, anyRunnable := modelCapabilities(cache, policy, hardwareOK, backend.SupportsTextGeneration, inferenceEnabled, runtimes)
-	models = appendRuntimeModelIfMissing(models, policy, hardwareOK, backend.SupportsTextGeneration, inferenceEnabled, runtimes)
+	ggufBackendText := ggufBackendSupportsText(probes, runtimes)
+	cache = modelcache.AnnotateRuntimeStatus(modelcache.RuntimeAnnotationInput{
+		Status:                         cache,
+		Policy:                         policy,
+		HardwareCapacityAvailable:      hardwareOK,
+		BackendTextGenerationAvailable: ggufBackendText,
+		V7InferenceEnabled:             inferenceEnabled,
+	})
+	models, anyRunnable := modelCapabilities(cache, policy, hardwareOK, ggufBackendText, inferenceEnabled, runtimes)
+	models = appendRuntimeModelIfMissing(models, policy, hardwareOK, ggufBackendText, inferenceEnabled, runtimes)
 	anyRunnable = anyRunnable || anyRunnableModel(models)
 
-	ready := hardwareOK && backend.SupportsTextGeneration && inferenceEnabled && anyRunnable
-	hashMetrics := ready
-	textOutput := hashMetrics && textEnabled
+	backendText := hardwareOK && backend.SupportsTextGeneration && inferenceEnabled
+	ready := hardwareOK && inferenceEnabled && anyRunnable
+	hashMetrics := backendText
+	textOutput := backendText && textEnabled
 	streaming := textOutput && streamingEnabled && backend.SupportsStreaming
-	backendWarm := hardwareOK && backend.SupportsWarmResidency && warmEnabled && (len(models) > 0 || policy.AutoDownload)
+	backendWarm := hardwareOK && backend.SupportsWarmResidency && warmEnabled
+	modelPrepare := backendText && policy.AutoDownload
 
 	reason := readinessReason(hardwareOK, backend, inferenceEnabled, anyRunnable, policy)
 	return NormalizeProfile(Profile{
 		SchemaVersion:         SchemaVersionV1,
-		V7DashboardInference:  hardwareOK && backend.SupportsTextGeneration && inferenceEnabled && (anyRunnable || policy.AutoDownload),
+		V7DashboardInference:  backendText,
 		TextOutput:            textOutput,
 		Streaming:             streaming,
 		HashMetricsReceipts:   hashMetrics,
+		WarmBackend:           backendWarm,
+		ModelPrepare:          modelPrepare,
 		BackendTextGeneration: hardwareOK && backend.SupportsTextGeneration && inferenceEnabled,
 		BackendWarm:           backendWarm,
 		StatefulSession:       false,
@@ -100,6 +112,7 @@ func NormalizeProfile(profile Profile) Profile {
 	}
 	profile.BackendRuntime.Backend = cleanProfileText(profile.BackendRuntime.Backend, maxProfileTextRunes)
 	profile.BackendRuntime.Reason = cleanProfileText(profile.BackendRuntime.Reason, maxProfileReasonRunes)
+	profile.BackendRuntime.Acceleration = cleanProfileList(profile.BackendRuntime.Acceleration)
 	profile.WarmModel.Backend = cleanProfileText(profile.WarmModel.Backend, maxProfileTextRunes)
 	profile.WarmModel.ModelID = cleanProfileText(profile.WarmModel.ModelID, maxProfileTextRunes)
 	profile.Models = normalizeModels(profile.Models)
@@ -132,6 +145,7 @@ func policySummary(policy modelpolicy.Policy) PolicySummary {
 		AllowedFamilies:                  cloneStrings(policy.RuntimePolicy.AllowFamilies),
 		DeniedModelIDs:                   cloneStrings(policy.RuntimePolicy.DenyModelIDs),
 		DeniedFamilies:                   cloneStrings(policy.RuntimePolicy.DenyFamilies),
+		AllowLargeModels:                 policy.RuntimePolicy.AllowLargeModels,
 		AllowManagedPrepareDownload:      policy.AutoDownload,
 		MaxWarmModels:                    policy.RuntimePolicy.MaxWarmModels,
 		MaxConcurrentInferenceJobs:       policy.RuntimePolicy.MaxConcurrentInferenceJobs,
@@ -141,13 +155,15 @@ func policySummary(policy modelpolicy.Policy) PolicySummary {
 func backendSummary(probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes) BackendSummary {
 	runtime := runtimes.LlamaCPP
 	probe := probes.LlamaCPP
-	backend := llamacpp.BackendName
-	if strings.TrimSpace(runtime.Backend) != "" {
-		backend = runtime.Backend
-	}
-	available := (runtime.Available && runtime.SupportsTextGeneration) || (probe.Available && probe.SupportsTextGeneration)
+	selected := selectBackendRuntime(runtimes)
+	backend := firstNonEmpty(selected.Backend, llamacpp.BackendName)
+	available := (runtime.Available && runtime.SupportsTextGeneration) ||
+		(probe.Available && probe.SupportsTextGeneration) ||
+		(selected.Available && selected.SupportsTextGeneration)
 	supportsText := available
-	supportsStreaming := (runtime.Available && runtime.SupportsStreaming) || (probe.Available && probe.SupportsStreaming)
+	supportsStreaming := (runtime.Available && runtime.SupportsStreaming) ||
+		(probe.Available && probe.SupportsStreaming) ||
+		(selected.Available && selected.SupportsStreaming)
 	supportsWarm := available && ((runtime.Available && runtime.OpenAICompatible) || probe.SupportsOpenAICompatibleServer || supportsStreaming)
 	reason := firstNonEmpty(runtime.LastError, probe.Reason)
 	if supportsText {
@@ -158,13 +174,35 @@ func backendSummary(probes backendprobe.Probes, runtimes llamacpp.BackendRuntime
 	return BackendSummary{
 		Backend:                backend,
 		Available:              available,
-		Running:                runtime.Running,
-		Healthy:                runtime.Healthy,
+		Running:                selected.Running,
+		Healthy:                selected.Healthy,
 		SupportsTextGeneration: supportsText,
 		SupportsStreaming:      supportsStreaming,
 		SupportsWarmResidency:  supportsWarm,
+		Acceleration:           selected.Acceleration,
 		Reason:                 reason,
 	}
+}
+
+func selectBackendRuntime(runtimes llamacpp.BackendRuntimes) llamacpp.BackendRuntimeStatus {
+	candidates := []llamacpp.BackendRuntimeStatus{runtimes.LlamaCPP, runtimes.TensorRTLLM, runtimes.VLLM, runtimes.SGLang}
+	candidates = append(candidates, runtimes.Other...)
+	for _, candidate := range candidates {
+		if candidate.Running && candidate.Healthy && candidate.SupportsTextGeneration {
+			return candidate
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate.Available && candidate.SupportsTextGeneration {
+			return candidate
+		}
+	}
+	return runtimes.LlamaCPP
+}
+
+func ggufBackendSupportsText(probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes) bool {
+	return (runtimes.LlamaCPP.Available && runtimes.LlamaCPP.SupportsTextGeneration) ||
+		(probes.LlamaCPP.Available && probes.LlamaCPP.SupportsTextGeneration)
 }
 
 func warmModelSummary(runtimes llamacpp.BackendRuntimes) WarmModelSummary {
@@ -198,13 +236,18 @@ func modelCapabilities(cache modelcache.Status, policy modelpolicy.Policy, hardw
 
 func buildModelCapability(model modelcache.Model, policy modelpolicy.Policy, hardwareOK bool, backendText bool, inferenceEnabled bool, runtimes llamacpp.BackendRuntimes) ModelCapability {
 	decision := modelpolicy.EvaluateRuntimeRequest(policy, modelpolicy.RuntimeRequest{
-		ModelID:        model.ModelID,
-		ModelSizeBytes: uint64NonNegative(model.SizeBytes),
-		Family:         model.FamilyHint,
+		ModelID:                model.ModelID,
+		ModelSizeBytes:         uint64NonNegative(model.SizeBytes),
+		ParameterCountBillions: model.ParameterCountBillions,
+		Family:                 model.FamilyHint,
 	})
 	warm := modelMatchesRuntime(model, runtimes.LlamaCPP) && runtimes.LlamaCPP.Warm
-	reason := decision.Reason
-	runnable := decision.Allowed && hardwareOK && backendText && inferenceEnabled
+	blockedReasons := model.BlockedReasons
+	reason := firstNonEmpty(blockedReasons...)
+	if reason == "" {
+		reason = decision.Reason
+	}
+	runnable := model.Runnable && decision.Allowed && hardwareOK && backendText && inferenceEnabled
 	switch {
 	case !inferenceEnabled:
 		reason = "v7_inference_disabled"
@@ -216,14 +259,15 @@ func buildModelCapability(model modelcache.Model, policy modelpolicy.Policy, har
 		reason = "runnable"
 	}
 	return ModelCapability{
-		ModelID:   model.ModelID,
-		Family:    model.FamilyHint,
-		Format:    model.Format,
-		SizeBytes: model.SizeBytes,
-		Resident:  model.Installed,
-		Warm:      warm,
-		Runnable:  runnable,
-		Reason:    reason,
+		ModelID:        model.ModelID,
+		Family:         model.FamilyHint,
+		Format:         model.Format,
+		SizeBytes:      model.SizeBytes,
+		Resident:       model.Installed,
+		Warm:           warm,
+		Runnable:       runnable,
+		BlockedReasons: blockedReasons,
+		Reason:         reason,
 	}
 }
 
@@ -239,12 +283,14 @@ func appendRuntimeModelIfMissing(models []ModelCapability, policy modelpolicy.Po
 		}
 	}
 	model := modelcache.Model{
-		ModelID:    modelID,
-		Filename:   runtime.ModelFilename,
-		SizeBytes:  runtime.ModelSizeBytes,
-		FamilyHint: runtime.ModelFamilyHint,
-		Format:     modelcache.DefaultFormat,
-		Installed:  true,
+		ModelID:                modelID,
+		Filename:               runtime.ModelFilename,
+		SizeBytes:              runtime.ModelSizeBytes,
+		FamilyHint:             runtime.ModelFamilyHint,
+		ParameterCountBillions: modelcache.InferParameterCountBillions(firstNonEmpty(runtime.ModelFilename, runtime.ModelID)),
+		Format:                 modelcache.DefaultFormat,
+		Installed:              true,
+		Resident:               true,
 	}
 	return append(models, buildModelCapability(model, policy, hardwareOK, backendText, inferenceEnabled, runtimes))
 }
@@ -322,6 +368,7 @@ func normalizeModels(models []ModelCapability) []ModelCapability {
 			model.SizeBytes = 0
 		}
 		model.Reason = cleanProfileText(model.Reason, maxProfileReasonRunes)
+		model.BlockedReasons = cleanProfileList(model.BlockedReasons)
 		out = append(out, model)
 	}
 	if len(out) == 0 {

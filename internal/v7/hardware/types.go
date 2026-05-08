@@ -30,22 +30,26 @@ const (
 )
 
 type CapacityInventory struct {
-	OS                      string `json:"os"`
-	Arch                    string `json:"arch"`
-	CPULogicalCores         int    `json:"cpu_logical_cores"`
-	SystemRAMBytes          uint64 `json:"system_ram_bytes"`
-	AvailableRAMBytes       uint64 `json:"available_ram_bytes"`
-	GPUDetected             bool   `json:"gpu_detected"`
-	GPUVendor               string `json:"gpu_vendor"`
-	GPUName                 string `json:"gpu_name"`
-	GPUVRAMBytes            uint64 `json:"gpu_vram_bytes"`
-	UnifiedMemory           bool   `json:"unified_memory"`
-	MetalAvailable          bool   `json:"metal_available"`
-	CUDAAvailable           bool   `json:"cuda_available"`
-	VulkanAvailable         bool   `json:"vulkan_available"`
-	DiskFreeBytesModelCache uint64 `json:"disk_free_bytes_model_cache"`
-	PowerProfile            string `json:"power_profile"`
-	ThermalRisk             string `json:"thermal_risk"`
+	OS                      string   `json:"os"`
+	Arch                    string   `json:"arch"`
+	CPUName                 string   `json:"cpu_name"`
+	CPULogicalCores         int      `json:"cpu_logical_cores"`
+	SystemRAMBytes          uint64   `json:"system_ram_bytes"`
+	AvailableRAMBytes       uint64   `json:"available_ram_bytes"`
+	GPUDetected             bool     `json:"gpu_detected"`
+	GPUVendor               string   `json:"gpu_vendor"`
+	GPUName                 string   `json:"gpu_name"`
+	GPUVRAMBytes            uint64   `json:"gpu_vram_bytes"`
+	UnifiedMemory           bool     `json:"unified_memory"`
+	MetalAvailable          bool     `json:"metal_available"`
+	CUDAAvailable           bool     `json:"cuda_available"`
+	VulkanAvailable         bool     `json:"vulkan_available"`
+	DirectMLAvailable       bool     `json:"directml_available"`
+	ComputeCapability       string   `json:"compute_capability,omitempty"`
+	AccelerationHints       []string `json:"acceleration_hints"`
+	DiskFreeBytesModelCache uint64   `json:"disk_free_bytes_model_cache"`
+	PowerProfile            string   `json:"power_profile"`
+	ThermalRisk             string   `json:"thermal_risk"`
 }
 
 type CommandRunner func(name string, args []string, timeout time.Duration) ([]byte, error)
@@ -62,6 +66,7 @@ type Detector struct {
 	Stat            func(string) (os.FileInfo, error)
 	DiskFreeBytes   func(string) (uint64, error)
 	CPULogicalCores func() int
+	Getenv          func(string) string
 }
 
 func NormalizeInventory(inventory CapacityInventory) CapacityInventory {
@@ -70,8 +75,10 @@ func NormalizeInventory(inventory CapacityInventory) CapacityInventory {
 	if inventory.CPULogicalCores < 0 {
 		inventory.CPULogicalCores = 0
 	}
+	inventory.CPUName = cleanName(inventory.CPUName)
 	inventory.GPUName = cleanName(inventory.GPUName)
 	inventory.GPUVendor = normalizeGPUVendor(firstNonEmpty(inventory.GPUVendor, inferGPUVendor(inventory.GPUName)))
+	inventory.ComputeCapability = cleanName(inventory.ComputeCapability)
 	if !inventory.GPUDetected && inventory.GPUName != "" {
 		inventory.GPUDetected = true
 	}
@@ -82,10 +89,13 @@ func NormalizeInventory(inventory CapacityInventory) CapacityInventory {
 		inventory.MetalAvailable = false
 		inventory.CUDAAvailable = false
 		inventory.VulkanAvailable = false
+		inventory.DirectMLAvailable = false
+		inventory.ComputeCapability = ""
 	}
 	if inventory.GPUName == "" {
 		inventory.GPUName = "unknown"
 	}
+	inventory.AccelerationHints = normalizeAccelerationHints(inventory)
 	inventory.PowerProfile = normalizePowerProfile(inventory.PowerProfile)
 	inventory.ThermalRisk = normalizeThermalRisk(inventory.ThermalRisk)
 	return inventory
@@ -142,6 +152,44 @@ func inferGPUVendor(name string) string {
 	default:
 		return GPUVendorUnknown
 	}
+}
+
+func normalizeAccelerationHints(inventory CapacityInventory) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 5)
+	add := func(value string) {
+		value = cleanName(strings.ToLower(strings.TrimSpace(value)))
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	for _, value := range inventory.AccelerationHints {
+		add(value)
+	}
+	if inventory.CPULogicalCores > 0 {
+		add("cpu")
+	}
+	if inventory.CUDAAvailable {
+		add("cuda")
+	}
+	if inventory.VulkanAvailable {
+		add("vulkan")
+	}
+	if inventory.MetalAvailable {
+		add("metal")
+	}
+	if inventory.DirectMLAvailable {
+		add("directml")
+	}
+	if len(out) == 0 {
+		return []string{}
+	}
+	return out
 }
 
 func cleanName(value string) string {

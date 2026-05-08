@@ -927,8 +927,9 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 	baseModelPolicy := buildModelPolicyStatus()
 	hardwareCapacity := buildHardwareCapacityStatus(baseModelPolicy.CacheDir)
 	modelPolicy := buildDerivedModelPolicyStatus(baseModelPolicy, hardwareCapacity)
-	modelCache := buildModelCacheStatus(modelPolicy)
 	backendProbes := buildBackendProbeStatus()
+	backendRuntimes = v7llamacpp.EnrichBackendRuntimes(backendRuntimes, runtimeInventory, hardwareCapacity)
+	modelCache := buildModelCacheRuntimeStatus(buildModelCacheStatus(modelPolicy), modelPolicy, hardwareCapacity, backendProbes, backendRuntimes)
 	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, &kvCapability, tensorAccess)
 
 	evidenceSummary := v7capability.EvidenceCapabilitySummary{

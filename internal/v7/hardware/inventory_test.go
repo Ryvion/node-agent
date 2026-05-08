@@ -101,9 +101,11 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 		},
 		RunCommand: func(name string, args []string, _ time.Duration) ([]byte, error) {
 			if strings.Contains(strings.ToLower(name), "nvidia-smi") {
-				return []byte("NVIDIA GeForce RTX 4070 Ti SUPER, 16384, 68\n"), nil
+				return []byte("NVIDIA GeForce RTX 4070 Ti SUPER, 16384, 68, 8.9\n"), nil
 			}
 			switch commandKey(name, args) {
+			case "wmic CPU get Name /format:csv":
+				return []byte("Node,Name\nDESKTOP,AMD Ryzen 9 7900X\n"), nil
 			case "wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:csv":
 				return []byte("Node,FreePhysicalMemory,TotalVisibleMemorySize\nDESKTOP,12582912,33554432\n"), nil
 			case "wmic SystemEnclosure get ChassisTypes /format:csv":
@@ -118,6 +120,12 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 			}
 			return 512 * 1024 * 1024 * 1024, nil
 		},
+		Stat: func(path string) (os.FileInfo, error) {
+			if path == `C:\Windows\System32\DirectML.dll` {
+				return fakeHardwareFileInfo{name: "DirectML.dll"}, nil
+			}
+			return nil, os.ErrNotExist
+		},
 	}
 
 	inventory := BuildInventory(detector)
@@ -127,6 +135,9 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 	if inventory.CPULogicalCores != 24 {
 		t.Fatalf("cpu_logical_cores = %d, want 24", inventory.CPULogicalCores)
 	}
+	if inventory.CPUName != "AMD Ryzen 9 7900X" {
+		t.Fatalf("cpu_name = %q", inventory.CPUName)
+	}
 	if inventory.SystemRAMBytes != 33554432*1024 || inventory.AvailableRAMBytes != 12582912*1024 {
 		t.Fatalf("memory = %+v", inventory)
 	}
@@ -135,6 +146,12 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 	}
 	if inventory.GPUVRAMBytes != 16384*1024*1024 || !inventory.CUDAAvailable || inventory.MetalAvailable || inventory.UnifiedMemory {
 		t.Fatalf("gpu capacity flags = %+v", inventory)
+	}
+	if inventory.ComputeCapability != "8.9" || !inventory.DirectMLAvailable {
+		t.Fatalf("windows acceleration fields = %+v", inventory)
+	}
+	if got := strings.Join(inventory.AccelerationHints, ","); !strings.Contains(got, "cpu") || !strings.Contains(got, "cuda") || !strings.Contains(got, "directml") {
+		t.Fatalf("acceleration_hints = %q, want cpu/cuda/directml", got)
 	}
 	if inventory.PowerProfile != PowerProfileDesktop || inventory.ThermalRisk != ThermalRiskLow {
 		t.Fatalf("power/thermal = %q/%q", inventory.PowerProfile, inventory.ThermalRisk)
@@ -206,3 +223,14 @@ func commandKey(name string, args []string) string {
 	}
 	return name + " " + strings.Join(args, " ")
 }
+
+type fakeHardwareFileInfo struct {
+	name string
+}
+
+func (f fakeHardwareFileInfo) Name() string       { return f.name }
+func (f fakeHardwareFileInfo) Size() int64        { return 1 }
+func (f fakeHardwareFileInfo) Mode() os.FileMode  { return 0 }
+func (f fakeHardwareFileInfo) ModTime() time.Time { return time.Unix(1, 0) }
+func (f fakeHardwareFileInfo) IsDir() bool        { return false }
+func (f fakeHardwareFileInfo) Sys() any           { return nil }

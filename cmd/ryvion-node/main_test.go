@@ -260,7 +260,7 @@ func TestBuildOptionalV7HeartbeatPayloadDefaultsOnAndHonorsExplicitOff(t *testin
 		payload.HardwareCapacity.ThermalRisk == "" {
 		t.Fatalf("hardware_capacity missing safe status fields: %+v", payload.HardwareCapacity)
 	}
-	expectedBackendRuntimes := v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{})
+	expectedBackendRuntimes := v7llamacpp.EnrichBackendRuntimes(v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{}), expectedRuntimeInventory, payload.HardwareCapacity)
 	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
 		t.Fatalf("backend_runtimes = %+v, want default local builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
 	}
@@ -319,8 +319,9 @@ func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
 	if payload == nil {
 		t.Fatal("payload = nil, want V7 payload")
 	}
-	if !reflect.DeepEqual(payload.BackendRuntimes, backendRuntimes) {
-		t.Fatalf("backend_runtimes = %+v, want local builder value %+v", payload.BackendRuntimes, backendRuntimes)
+	expectedBackendRuntimes := v7llamacpp.EnrichBackendRuntimes(backendRuntimes, payload.RuntimeInventory, payload.HardwareCapacity)
+	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
+		t.Fatalf("backend_runtimes = %+v, want local builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
 	}
 	runtime := payload.BackendRuntimes.LlamaCPP
 	if !runtime.Loaded || !runtime.Warm || runtime.ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
@@ -353,7 +354,7 @@ func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *
 	if !reflect.DeepEqual(payload.RuntimeInventory, expectedRuntimeInventory) {
 		t.Fatalf("runtime_inventory = %+v, want local status builder value %+v", payload.RuntimeInventory, expectedRuntimeInventory)
 	}
-	expectedBackendRuntimes := v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{})
+	expectedBackendRuntimes := v7llamacpp.EnrichBackendRuntimes(v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{}), expectedRuntimeInventory, payload.HardwareCapacity)
 	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
 		t.Fatalf("backend_runtimes = %+v, want local status builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
 	}

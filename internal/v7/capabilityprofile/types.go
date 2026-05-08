@@ -8,6 +8,8 @@ type Profile struct {
 	TextOutput            bool              `json:"text_output"`
 	Streaming             bool              `json:"streaming"`
 	HashMetricsReceipts   bool              `json:"hash_metrics_receipts"`
+	WarmBackend           bool              `json:"warm_backend"`
+	ModelPrepare          bool              `json:"model_prepare"`
 	BackendTextGeneration bool              `json:"backend_text_generation"`
 	BackendWarm           bool              `json:"backend_warm"`
 	StatefulSession       bool              `json:"stateful_session"`
@@ -46,20 +48,22 @@ type PolicySummary struct {
 	AllowedFamilies                  []string `json:"allowed_families"`
 	DeniedModelIDs                   []string `json:"denied_model_ids"`
 	DeniedFamilies                   []string `json:"denied_families"`
+	AllowLargeModels                 bool     `json:"allow_large_models"`
 	AllowManagedPrepareDownload      bool     `json:"allow_managed_prepare_download"`
 	MaxWarmModels                    int      `json:"max_warm_models"`
 	MaxConcurrentInferenceJobs       int      `json:"max_concurrent_inference_jobs"`
 }
 
 type BackendSummary struct {
-	Backend                string `json:"backend"`
-	Available              bool   `json:"available"`
-	Running                bool   `json:"running"`
-	Healthy                bool   `json:"healthy"`
-	SupportsTextGeneration bool   `json:"supports_text_generation"`
-	SupportsStreaming      bool   `json:"supports_streaming"`
-	SupportsWarmResidency  bool   `json:"supports_warm_residency"`
-	Reason                 string `json:"reason,omitempty"`
+	Backend                string   `json:"backend"`
+	Available              bool     `json:"available"`
+	Running                bool     `json:"running"`
+	Healthy                bool     `json:"healthy"`
+	SupportsTextGeneration bool     `json:"supports_text_generation"`
+	SupportsStreaming      bool     `json:"supports_streaming"`
+	SupportsWarmResidency  bool     `json:"supports_warm_residency"`
+	Acceleration           []string `json:"acceleration"`
+	Reason                 string   `json:"reason,omitempty"`
 }
 
 type WarmModelSummary struct {
@@ -70,12 +74,13 @@ type WarmModelSummary struct {
 }
 
 type ModelCapability struct {
-	ModelID   string `json:"model_id"`
-	Family    string `json:"family"`
-	Format    string `json:"format"`
-	SizeBytes int64  `json:"size_bytes"`
-	Resident  bool   `json:"resident"`
-	Warm      bool   `json:"warm"`
-	Runnable  bool   `json:"runnable"`
-	Reason    string `json:"reason,omitempty"`
+	ModelID        string   `json:"model_id"`
+	Family         string   `json:"family"`
+	Format         string   `json:"format"`
+	SizeBytes      int64    `json:"size_bytes"`
+	Resident       bool     `json:"resident"`
+	Warm           bool     `json:"warm"`
+	Runnable       bool     `json:"runnable"`
+	BlockedReasons []string `json:"blocked_reasons"`
+	Reason         string   `json:"reason,omitempty"`
 }

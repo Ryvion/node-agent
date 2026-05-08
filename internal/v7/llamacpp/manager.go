@@ -15,6 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
+	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 )
 
 const (
@@ -348,6 +351,7 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		BaseURL:                baseURL(cfg.Host, cfg.Port),
 		ServerPath:             cfg.ServerPath,
 		ModelPath:              cfg.ModelPath,
+		ContextSize:            cfg.ContextSize,
 		ModelFilename:          meta.filename,
 		ModelSizeBytes:         meta.sizeBytes,
 		ModelFamilyHint:        meta.familyHint,
@@ -376,6 +380,7 @@ func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 			BaseURL:                status.BaseURL,
 			ModelID:                status.ModelFilename,
 			ModelPath:              status.ModelPath,
+			MaxContextTokens:       status.ContextSize,
 			ModelFilename:          status.ModelFilename,
 			ModelSizeBytes:         status.ModelSizeBytes,
 			ModelFamilyHint:        status.ModelFamilyHint,
@@ -383,6 +388,7 @@ func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 			OpenAICompatible:       status.OpenAICompatible,
 			SupportsTextGeneration: status.SupportsTextGeneration,
 			SupportsStreaming:      status.SupportsStreaming,
+			Acceleration:           []string{"cpu"},
 			SupportsKVAccess:       status.SupportsKVAccess,
 			SupportsTensorHooks:    status.SupportsTensorHooks,
 			LastHealthAtUnixMs:     unixMilliOrZero(status.LastHealthAt),
@@ -391,19 +397,66 @@ func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 	})
 }
 
+func BuildBackendRuntimesWithInventory(status LlamaCppSidecarStatus, inventory runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) BackendRuntimes {
+	return EnrichBackendRuntimes(BuildBackendRuntimes(status), inventory, hardware)
+}
+
+func EnrichBackendRuntimes(runtimes BackendRuntimes, inventory runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) BackendRuntimes {
+	inventory = runtimeinventory.NormalizeInventory(inventory)
+	hardware = v7hardware.NormalizeInventory(hardware)
+	runtimes = NormalizeBackendRuntimes(runtimes)
+	runtimes.LlamaCPP.Acceleration = mergeAcceleration(runtimes.LlamaCPP.Acceleration, accelerationFromHardware(hardware))
+	for _, candidate := range inventory.BackendCandidates {
+		runtime := runtimeFromBackendCandidate(candidate, hardware)
+		switch candidate.Backend {
+		case runtimeinventory.BackendCandidateLlamaCPP:
+			if !runtimes.LlamaCPP.Available && runtime.Available {
+				runtimes.LlamaCPP = mergeDetectedRuntime(runtimes.LlamaCPP, runtime)
+			}
+		case runtimeinventory.BackendCandidateTensorRTLLM:
+			runtimes.TensorRTLLM = runtime
+		case runtimeinventory.BackendCandidateVLLM:
+			runtimes.VLLM = runtime
+		case runtimeinventory.BackendCandidateSGLang:
+			runtimes.SGLang = runtime
+		case runtimeinventory.BackendCandidateOllama:
+			if runtime.Available {
+				runtimes.Other = append(runtimes.Other, runtime)
+			}
+		}
+	}
+	return NormalizeBackendRuntimes(runtimes)
+}
+
 func NormalizeBackendRuntimes(runtimes BackendRuntimes) BackendRuntimes {
-	llama := runtimes.LlamaCPP
+	llama := normalizeBackendRuntimeStatus(runtimes.LlamaCPP, BackendName)
+	tensorRTLLM := normalizeBackendRuntimeStatus(runtimes.TensorRTLLM, runtimeinventory.BackendCandidateTensorRTLLM)
+	vllm := normalizeBackendRuntimeStatus(runtimes.VLLM, runtimeinventory.BackendCandidateVLLM)
+	sglang := normalizeBackendRuntimeStatus(runtimes.SGLang, runtimeinventory.BackendCandidateSGLang)
+	other := normalizeOtherBackendRuntimes(runtimes.Other)
+	return BackendRuntimes{LlamaCPP: llama, TensorRTLLM: tensorRTLLM, VLLM: vllm, SGLang: sglang, Other: other}
+}
+
+func normalizeBackendRuntimeStatus(llama BackendRuntimeStatus, defaultBackend string) BackendRuntimeStatus {
 	llama.Backend = cleanRuntimeCompactText(firstNonEmptyRuntimeText(llama.Backend, BackendName), 64)
+	if strings.TrimSpace(defaultBackend) != "" && llama.Backend == BackendName && defaultBackend != BackendName {
+		llama.Backend = cleanRuntimeCompactText(defaultBackend, 64)
+	}
 	if llama.Backend == "" {
-		llama.Backend = BackendName
+		llama.Backend = cleanRuntimeCompactText(defaultBackend, 64)
 	}
 	llama.BaseURL = cleanRuntimeBaseURL(llama.BaseURL)
 	llama.ModelPath = cleanRuntimePath(llama.ModelPath)
 	llama.ModelFilename = cleanRuntimePath(llama.ModelFilename)
 	llama.ModelID = cleanRuntimePath(firstNonEmptyRuntimeText(llama.ModelID, llama.ModelFilename))
+	llama.WarmModelID = cleanRuntimePath(llama.WarmModelID)
 	llama.ModelFamilyHint = cleanRuntimeCompactText(llama.ModelFamilyHint, 64)
 	llama.QuantizationHint = cleanRuntimeCompactText(llama.QuantizationHint, 64)
 	llama.LastError = cleanStatusText(llama.LastError, maxStatusReasonLen)
+	llama.Acceleration = normalizeAcceleration(llama.Acceleration)
+	if llama.MaxContextTokens < 0 {
+		llama.MaxContextTokens = 0
+	}
 	if llama.ModelSizeBytes < 0 {
 		llama.ModelSizeBytes = 0
 	}
@@ -422,14 +475,181 @@ func NormalizeBackendRuntimes(runtimes BackendRuntimes) BackendRuntimes {
 		llama.LastHealthAtUnixMs = 0
 	}
 	llama.SupportsKVAccess = false
+	llama.SupportsKVHooks = false
 	llama.SupportsTensorHooks = false
+	llama.SupportsDistributedKV = false
 	loaded := llama.Enabled && llama.Running && llama.Healthy && llama.ModelPath != "" && llama.ModelFilename != ""
 	llama.Loaded = loaded
 	llama.Warm = loaded
 	if !loaded {
 		llama.Warm = false
+		llama.WarmModelID = ""
+	} else if llama.WarmModelID == "" {
+		llama.WarmModelID = llama.ModelID
 	}
-	return BackendRuntimes{LlamaCPP: llama}
+	llama.Health = normalizeRuntimeHealth(llama)
+	return llama
+}
+
+func normalizeOtherBackendRuntimes(runtimes []BackendRuntimeStatus) []BackendRuntimeStatus {
+	if len(runtimes) == 0 {
+		return []BackendRuntimeStatus{}
+	}
+	out := make([]BackendRuntimeStatus, 0, min(len(runtimes), 8))
+	for _, runtime := range runtimes {
+		if len(out) >= 8 {
+			break
+		}
+		runtime = normalizeBackendRuntimeStatus(runtime, runtime.Backend)
+		if runtime.Backend == "" || runtime.Backend == BackendName ||
+			runtime.Backend == runtimeinventory.BackendCandidateTensorRTLLM ||
+			runtime.Backend == runtimeinventory.BackendCandidateVLLM ||
+			runtime.Backend == runtimeinventory.BackendCandidateSGLang {
+			continue
+		}
+		if !runtime.Available {
+			continue
+		}
+		out = append(out, runtime)
+	}
+	if out == nil {
+		return []BackendRuntimeStatus{}
+	}
+	return out
+}
+
+func runtimeFromBackendCandidate(candidate runtimeinventory.BackendCandidate, hardware v7hardware.CapacityInventory) BackendRuntimeStatus {
+	acceleration := []string{}
+	if candidate.Detected {
+		acceleration = accelerationFromBackend(candidate.Backend, hardware)
+	}
+	return BackendRuntimeStatus{
+		Enabled:                  candidate.Detected,
+		Available:                candidate.Detected,
+		Running:                  false,
+		Healthy:                  false,
+		Backend:                  candidate.Backend,
+		BaseURL:                  "",
+		Acceleration:             acceleration,
+		OpenAICompatible:         candidate.SupportsOpenAICompatibleServer,
+		SupportsTextGeneration:   candidate.SupportsTextGeneration,
+		SupportsStreaming:        candidate.SupportsStreaming,
+		SupportsStatefulSessions: false,
+		SupportsKVAccess:         false,
+		SupportsKVHooks:          false,
+		SupportsTensorHooks:      false,
+		SupportsDistributedKV:    false,
+		LastError:                "",
+	}
+}
+
+func mergeDetectedRuntime(active BackendRuntimeStatus, detected BackendRuntimeStatus) BackendRuntimeStatus {
+	if active.Backend == "" {
+		active.Backend = detected.Backend
+	}
+	active.Enabled = active.Enabled || detected.Enabled
+	active.Available = active.Available || detected.Available
+	active.Acceleration = mergeAcceleration(active.Acceleration, detected.Acceleration)
+	active.OpenAICompatible = active.OpenAICompatible || detected.OpenAICompatible
+	active.SupportsTextGeneration = active.SupportsTextGeneration || detected.SupportsTextGeneration
+	active.SupportsStreaming = active.SupportsStreaming || detected.SupportsStreaming
+	return active
+}
+
+func accelerationFromBackend(backend string, hardware v7hardware.CapacityInventory) []string {
+	switch backend {
+	case runtimeinventory.BackendCandidateTensorRTLLM, runtimeinventory.BackendCandidateVLLM, runtimeinventory.BackendCandidateSGLang:
+		acceleration := accelerationFromHardware(hardware)
+		if len(acceleration) > 0 {
+			return acceleration
+		}
+		return []string{"cpu"}
+	default:
+		return accelerationFromHardware(hardware)
+	}
+}
+
+func accelerationFromHardware(hardware v7hardware.CapacityInventory) []string {
+	hardware = v7hardware.NormalizeInventory(hardware)
+	if len(hardware.AccelerationHints) > 0 {
+		return hardware.AccelerationHints
+	}
+	acceleration := []string{}
+	if hardware.CPULogicalCores > 0 {
+		acceleration = append(acceleration, "cpu")
+	}
+	if hardware.CUDAAvailable {
+		acceleration = append(acceleration, "cuda")
+	}
+	if hardware.VulkanAvailable {
+		acceleration = append(acceleration, "vulkan")
+	}
+	if hardware.DirectMLAvailable {
+		acceleration = append(acceleration, "directml")
+	}
+	if hardware.MetalAvailable {
+		acceleration = append(acceleration, "metal")
+	}
+	if len(acceleration) == 0 {
+		return []string{}
+	}
+	return acceleration
+}
+
+func mergeAcceleration(left, right []string) []string {
+	return normalizeAcceleration(append(cloneStrings(left), right...))
+}
+
+func normalizeAcceleration(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, min(len(values), 8))
+	for _, value := range values {
+		if len(out) >= 8 {
+			break
+		}
+		value = cleanRuntimeCompactText(strings.ToLower(strings.TrimSpace(value)), 32)
+		switch value {
+		case "cpu", "cuda", "vulkan", "directml", "metal", "rocm", "other":
+		default:
+			value = "other"
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+func normalizeRuntimeHealth(runtime BackendRuntimeStatus) string {
+	switch {
+	case !runtime.Enabled:
+		return "disabled"
+	case runtime.Running && runtime.Healthy:
+		return "healthy"
+	case runtime.Running:
+		return "degraded"
+	case runtime.Available:
+		return "available"
+	default:
+		return "unavailable"
+	}
+}
+
+func cloneStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
 }
 
 func buildServerArgs(cfg LlamaCppSidecarConfig) []string {

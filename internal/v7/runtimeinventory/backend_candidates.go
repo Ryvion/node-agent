@@ -15,9 +15,14 @@ import (
 
 const (
 	BackendCandidateLlamaCPP           = "llama.cpp"
+	BackendCandidateOllama             = "ollama"
+	BackendCandidateTensorRTLLM        = "tensorrt_llm"
+	BackendCandidateVLLM               = "vllm"
+	BackendCandidateSGLang             = "sglang"
 	BackendCandidatePythonTransformers = "python_transformers"
 
 	ggufModelFamilyLlama   = "llama"
+	ggufModelFamilyPhi     = "phi"
 	ggufModelFamilyGemma   = "gemma"
 	ggufModelFamilyQwen    = "qwen"
 	ggufModelFamilyUnknown = "unknown"
@@ -66,25 +71,31 @@ func DetectLlamaCPPBackendCandidate(detector CandidateBackendDetector) BackendCa
 }
 
 func DetectGGUFModels(detector CandidateBackendDetector) []GGUFModelCandidate {
-	return detectBackendCandidateInventory(detector).GGUFModels
+	return normalizeGGUFModels(detectGGUFModels(normalizeCandidateBackendDetector(detector)))
 }
 
 func detectBackendCandidateInventory(detector CandidateBackendDetector) backendCandidateInventory {
 	detector = normalizeCandidateBackendDetector(detector)
 
 	llama := detectLlamaCPPCandidate(detector)
+	ollama := detectCommandBackendCandidate(detector, BackendCandidateOllama, []string{"ollama"}, "ollama binary")
+	tensorRTLLM := detectCommandBackendCandidate(detector, BackendCandidateTensorRTLLM, []string{"trtllm-serve", "trtllm-build"}, "TensorRT-LLM binary")
+	vllm := detectCommandBackendCandidate(detector, BackendCandidateVLLM, []string{"vllm"}, "vLLM binary")
+	sglang := detectCommandBackendCandidate(detector, BackendCandidateSGLang, []string{"sglang"}, "SGLang binary")
 	python := detectPythonTransformersCandidate(detector)
 	ggufModels := detectGGUFModels(detector)
 
 	return backendCandidateInventory{
 		CandidateBackends: CandidateBackends{
 			LlamaCPPDetected:           llama.Detected,
-			OllamaDetected:             commandDetected(detector, "ollama"),
-			VLLMDetected:               commandDetected(detector, "vllm"),
+			OllamaDetected:             ollama.Detected,
+			TensorRTLLMDetected:        tensorRTLLM.Detected,
+			VLLMDetected:               vllm.Detected,
+			SGLangDetected:             sglang.Detected,
 			PythonTransformersDetected: python.Detected,
 			GGUFModelsDetected:         len(ggufModels) > 0,
 		},
-		BackendCandidates: normalizeBackendCandidates([]BackendCandidate{llama, python}),
+		BackendCandidates: normalizeBackendCandidates([]BackendCandidate{llama, ollama, tensorRTLLM, vllm, sglang, python}),
 		GGUFModels:        normalizeGGUFModels(ggufModels),
 	}
 }
@@ -172,6 +183,44 @@ func detectPythonTransformersCandidate(detector CandidateBackendDetector) Backen
 		PythonTransformersImportAvailable:    importAvailable,
 		PythonTransformersImportProbeAttempt: importAttempted,
 		Reason:                               reason,
+	}
+}
+
+func detectCommandBackendCandidate(detector CandidateBackendDetector, backend string, binaryNames []string, label string) BackendCandidate {
+	binaryPath := ""
+	for _, name := range binaryNames {
+		if path := findExecutable(detector, name, true); path != "" {
+			binaryPath = path
+			break
+		}
+	}
+	detected := binaryPath != ""
+	version := unknownVersion
+	if detected && detector.VersionCommand != nil {
+		if probed, err := detector.VersionCommand(binaryPath, detector.VersionTimeout); err == nil && strings.TrimSpace(probed) != "" {
+			version = probed
+		}
+	}
+	reason := strings.TrimSpace(label) + " not detected"
+	if detected {
+		reason = strings.TrimSpace(label) + " detected; runtime health not probed"
+	}
+	supportsText := detected
+	supportsStreaming := detected && backend != BackendCandidateTensorRTLLM
+	return BackendCandidate{
+		Backend:                        backend,
+		Detected:                       detected,
+		BinaryPath:                     binaryPath,
+		Version:                        version,
+		SupportsTextGeneration:         supportsText,
+		SupportsStreaming:              supportsStreaming,
+		SupportsOpenAICompatibleServer: detected && (backend == BackendCandidateOllama || backend == BackendCandidateVLLM || backend == BackendCandidateSGLang),
+		SupportsKVAccess:               false,
+		SupportsTensorHooks:            false,
+		SupportsSpeculativeDecode:      false,
+		CandidateForRealTensorAccess:   detected && (backend == BackendCandidateVLLM || backend == BackendCandidateSGLang),
+		CandidateForFastTextRuntime:    supportsText,
+		Reason:                         reason,
 	}
 }
 
@@ -527,6 +576,8 @@ func inferGGUFModelFamily(filename string) string {
 	switch {
 	case strings.Contains(lower, "llama"):
 		return ggufModelFamilyLlama
+	case strings.Contains(lower, "phi"):
+		return ggufModelFamilyPhi
 	case strings.Contains(lower, "gemma"):
 		return ggufModelFamilyGemma
 	case strings.Contains(lower, "qwen"):
@@ -540,6 +591,8 @@ func normalizeGGUFModelFamily(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case ggufModelFamilyLlama:
 		return ggufModelFamilyLlama
+	case ggufModelFamilyPhi:
+		return ggufModelFamilyPhi
 	case ggufModelFamilyGemma:
 		return ggufModelFamilyGemma
 	case ggufModelFamilyQwen:

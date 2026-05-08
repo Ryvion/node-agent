@@ -63,7 +63,9 @@ type ModelResidencySnapshot struct {
 type CandidateBackends struct {
 	LlamaCPPDetected           bool `json:"llama_cpp_detected"`
 	OllamaDetected             bool `json:"ollama_detected"`
+	TensorRTLLMDetected        bool `json:"tensorrt_llm_detected"`
 	VLLMDetected               bool `json:"vllm_detected"`
+	SGLangDetected             bool `json:"sglang_detected"`
 	PythonTransformersDetected bool `json:"python_transformers_detected"`
 	GGUFModelsDetected         bool `json:"gguf_models_detected"`
 }

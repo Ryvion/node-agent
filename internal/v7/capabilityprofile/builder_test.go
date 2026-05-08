@@ -48,7 +48,7 @@ func TestBuildProfileFreshMacLlamaRunnablePhiResidentBlocked(t *testing.T) {
 		TensorAccess:    tensoraccess.NewNoopProvider(tensoraccess.NoopProviderConfig{}).Capability(nil),
 	})
 
-	if !profile.V7DashboardInference || !profile.TextOutput || !profile.Streaming || !profile.HashMetricsReceipts || !profile.BackendTextGeneration || !profile.BackendWarm || !profile.Ready {
+	if !profile.V7DashboardInference || !profile.TextOutput || !profile.Streaming || !profile.HashMetricsReceipts || !profile.BackendTextGeneration || !profile.BackendWarm || !profile.WarmBackend || !profile.Ready {
 		t.Fatalf("profile = %+v, want default inference capability on fresh Mac with llama.cpp and cached model", profile)
 	}
 	llama := modelByID(t, profile.Models, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
@@ -68,22 +68,27 @@ func TestBuildProfileFreshMacLlamaRunnablePhiResidentBlocked(t *testing.T) {
 func TestBuildProfileWindowsRTXIncludesHardwareBackendAndInventory(t *testing.T) {
 	t.Parallel()
 
+	hardware := v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		OS:                "windows",
+		Arch:              "amd64",
+		CPULogicalCores:   24,
+		SystemRAMBytes:    64 * gib,
+		AvailableRAMBytes: 48 * gib,
+		GPUDetected:       true,
+		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUName:           "NVIDIA GeForce RTX 4090",
+		GPUVRAMBytes:      24 * gib,
+		CUDAAvailable:     true,
+		VulkanAvailable:   true,
+	})
+	policy := modelpolicy.BuildDerivedPolicy(modelpolicy.DerivedPolicyInput{
+		BasePolicy: modelpolicy.FromConfigSource(modelpolicy.ConfigSource{Getenv: func(string) string { return "" }, UserHomeDir: func() (string, error) { return `C:\Users\operator`, nil }, GOOS: "windows"}),
+		Hardware:   hardware,
+	})
 	profile := BuildProfile(BuildInput{
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
-			OS:                "windows",
-			Arch:              "amd64",
-			CPULogicalCores:   24,
-			SystemRAMBytes:    64 * gib,
-			AvailableRAMBytes: 48 * gib,
-			GPUDetected:       true,
-			GPUVendor:         v7hardware.GPUVendorNVIDIA,
-			GPUName:           "NVIDIA GeForce RTX 4090",
-			GPUVRAMBytes:      24 * gib,
-			CUDAAvailable:     true,
-			VulkanAvailable:   true,
-		}),
-		Policy:          modelpolicy.FromConfigSource(modelpolicy.ConfigSource{Getenv: func(string) string { return "" }, UserHomeDir: func() (string, error) { return `C:\Users\operator`, nil }, GOOS: "windows"}),
-		ModelCache:      windowsModelCache(),
+		Hardware:        hardware,
+		Policy:          policy,
+		ModelCache:      windowsModelCacheWithPhi(),
 		BackendProbes:   llamaProbe(true),
 		BackendRuntimes: llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}),
 		TensorAccess:    tensoraccess.NewNoopProvider(tensoraccess.NoopProviderConfig{}).Capability(nil),
@@ -92,8 +97,13 @@ func TestBuildProfileWindowsRTXIncludesHardwareBackendAndInventory(t *testing.T)
 	if profile.Hardware.OS != "windows" || profile.Hardware.GPUVendor != "nvidia" || profile.Hardware.GPUVRAMBytes != 24*gib || !profile.Hardware.CUDAAvailable || !profile.Hardware.VulkanAvailable {
 		t.Fatalf("hardware = %+v, want Windows RTX CUDA/Vulkan inventory", profile.Hardware)
 	}
-	if !profile.BackendRuntime.SupportsTextGeneration || !profile.BackendRuntime.SupportsStreaming || len(profile.Models) != 1 || !profile.Models[0].Runnable {
+	if !profile.BackendRuntime.SupportsTextGeneration || !profile.BackendRuntime.SupportsStreaming || len(profile.Models) != 2 {
 		t.Fatalf("profile = %+v, want backend and runnable GGUF inventory", profile)
+	}
+	llama := modelByID(t, profile.Models, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	phi := modelByID(t, profile.Models, "phi-4-Q5_K_M.gguf")
+	if !llama.Runnable || !phi.Runnable || len(phi.BlockedReasons) != 0 {
+		t.Fatalf("windows model capabilities llama=%+v phi=%+v, want both runnable from derived RTX policy", llama, phi)
 	}
 	assertProfileJSONSafe(t, profile)
 }
@@ -205,6 +215,24 @@ func windowsModelCache() modelcache.Status {
 		CacheDir: `C:\Users\operator\.ryvion\models`,
 		Models:   []modelcache.Model{llamaModel(`C:\Users\operator\.ryvion\models\Llama-3.2-3B-Instruct-Q4_K_M.gguf`)},
 	})
+}
+
+func windowsModelCacheWithPhi() modelcache.Status {
+	cache := windowsModelCache()
+	cache.Models = append(cache.Models, modelcache.Model{
+		ModelID:                "phi-4-Q5_K_M.gguf",
+		Filename:               "phi-4-Q5_K_M.gguf",
+		Path:                   `C:\Users\operator\.ryvion\models\phi-4-Q5_K_M.gguf`,
+		SizeBytes:              int64(10 * gib),
+		FamilyHint:             "phi",
+		QuantizationHint:       "Q5_K_M",
+		ParameterCountBillions: 14,
+		Format:                 "gguf",
+		Installed:              true,
+		Resident:               true,
+		LastSeenAt:             time.Unix(100, 0),
+	})
+	return modelcache.NormalizeStatus(cache)
 }
 
 func llamaModel(path string) modelcache.Model {

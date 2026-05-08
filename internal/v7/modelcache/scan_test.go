@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 )
 
 func TestScanDetectsGGUFModels(t *testing.T) {
@@ -53,7 +55,7 @@ func TestScanDetectsGGUFModels(t *testing.T) {
 	if got := byName["Llama-3.2-3B-Instruct-Q4_K_M.gguf"]; got.FamilyHint != "llama" || got.QuantizationHint != "Q4_K_M" {
 		t.Fatalf("llama hints = %+v", got)
 	}
-	if got := byName["phi-4-Q5_K_M.gguf"]; got.FamilyHint != "phi" || got.QuantizationHint != "Q5_K_M" {
+	if got := byName["phi-4-Q5_K_M.gguf"]; got.FamilyHint != "phi" || got.QuantizationHint != "Q5_K_M" || got.ParameterCountBillions != 14 {
 		t.Fatalf("phi hints = %+v", got)
 	}
 }
@@ -155,6 +157,57 @@ func TestScanWindowsPathHandling(t *testing.T) {
 	model := status.Models[0]
 	if model.Path != modelPath || model.FamilyHint != "qwen" || model.QuantizationHint != "Q8_0" {
 		t.Fatalf("windows model = %+v", model)
+	}
+}
+
+func TestAnnotateRuntimeStatusSetsRunnableAndBlockedReasons(t *testing.T) {
+	t.Parallel()
+
+	status := NormalizeStatus(Status{
+		CacheDir: "/cache",
+		Models: []Model{
+			{
+				ModelID:                "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+				Filename:               "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+				Path:                   "/cache/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+				SizeBytes:              3 << 30,
+				FamilyHint:             "llama",
+				QuantizationHint:       "Q4_K_M",
+				ParameterCountBillions: 3,
+				Format:                 "gguf",
+				Installed:              true,
+			},
+			{
+				ModelID:                "phi-4-Q5_K_M.gguf",
+				Filename:               "phi-4-Q5_K_M.gguf",
+				Path:                   "/cache/phi-4-Q5_K_M.gguf",
+				SizeBytes:              10 << 30,
+				FamilyHint:             "phi",
+				QuantizationHint:       "Q5_K_M",
+				ParameterCountBillions: 14,
+				Format:                 "gguf",
+				Installed:              true,
+			},
+		},
+	})
+	policy := modelpolicy.FromConfigSource(modelpolicy.ConfigSource{
+		Getenv:      func(string) string { return "" },
+		UserHomeDir: func() (string, error) { return "/home/operator", nil },
+		GOOS:        "linux",
+	})
+	annotated := AnnotateRuntimeStatus(RuntimeAnnotationInput{
+		Status:                         status,
+		Policy:                         policy,
+		HardwareCapacityAvailable:      true,
+		BackendTextGenerationAvailable: true,
+		V7InferenceEnabled:             true,
+	})
+
+	if !annotated.Models[0].Runnable || len(annotated.Models[0].BlockedReasons) != 0 {
+		t.Fatalf("llama annotation = %+v, want runnable", annotated.Models[0])
+	}
+	if annotated.Models[1].Runnable || len(annotated.Models[1].BlockedReasons) == 0 {
+		t.Fatalf("phi annotation = %+v, want blocked reasons", annotated.Models[1])
 	}
 }
 

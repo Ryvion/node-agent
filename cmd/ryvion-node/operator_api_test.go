@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -193,6 +194,9 @@ func TestOperatorAPIStatusEndpointIncludesHardwareCapacity(t *testing.T) {
 	if status.HardwareCapacity.OS != runtime.GOOS || status.HardwareCapacity.Arch != runtime.GOARCH {
 		t.Fatalf("hardware_capacity identity = %+v, want %s/%s", status.HardwareCapacity, runtime.GOOS, runtime.GOARCH)
 	}
+	if status.NodeID != "abc123" || status.AgentVersion != "test" || status.OS != runtime.GOOS || status.Arch != runtime.GOARCH {
+		t.Fatalf("top-level identity = node_id:%q agent_version:%q os:%q arch:%q", status.NodeID, status.AgentVersion, status.OS, status.Arch)
+	}
 	if status.HardwareCapacity.GPUVendor == "" ||
 		status.HardwareCapacity.GPUName == "" ||
 		status.HardwareCapacity.PowerProfile == "" ||
@@ -202,7 +206,10 @@ func TestOperatorAPIStatusEndpointIncludesHardwareCapacity(t *testing.T) {
 	text := strings.ToLower(string(respBody))
 	for _, want := range []string{
 		`"hardware_capacity"`,
+		`"node_id"`,
+		`"agent_version"`,
 		`"cpu_logical_cores"`,
+		`"cpu_name"`,
 		`"system_ram_bytes"`,
 		`"available_ram_bytes"`,
 		`"gpu_detected"`,
@@ -213,6 +220,8 @@ func TestOperatorAPIStatusEndpointIncludesHardwareCapacity(t *testing.T) {
 		`"metal_available"`,
 		`"cuda_available"`,
 		`"vulkan_available"`,
+		`"directml_available"`,
+		`"acceleration_hints"`,
 		`"disk_free_bytes_model_cache"`,
 		`"power_profile"`,
 		`"thermal_risk"`,
@@ -457,12 +466,14 @@ func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
 		status.LlamaCPPSidecar.RestartBackoffSeconds != int(v7llamacpp.DefaultRestartBackoff/time.Second) {
 		t.Fatalf("llama_cpp_sidecar keepwarm fields = %+v, want disabled defaults", status.LlamaCPPSidecar)
 	}
-	if status.BackendRuntimes.LlamaCPP.Enabled ||
-		status.BackendRuntimes.LlamaCPP.Running ||
+	if status.BackendRuntimes.LlamaCPP.Running ||
 		status.BackendRuntimes.LlamaCPP.Healthy ||
 		status.BackendRuntimes.LlamaCPP.Loaded ||
 		status.BackendRuntimes.LlamaCPP.Warm {
-		t.Fatalf("backend_runtimes.llama_cpp = %+v, want disabled unloaded", status.BackendRuntimes.LlamaCPP)
+		t.Fatalf("backend_runtimes.llama_cpp = %+v, want no active loaded sidecar", status.BackendRuntimes.LlamaCPP)
+	}
+	if status.BackendRuntimes.LlamaCPP.Backend != v7llamacpp.BackendName || status.BackendRuntimes.LlamaCPP.Health == "" {
+		t.Fatalf("backend_runtimes.llama_cpp missing backend health metadata: %+v", status.BackendRuntimes.LlamaCPP)
 	}
 	if status.LlamaCPPSidecar.Backend != v7llamacpp.BackendName ||
 		!status.LlamaCPPSidecar.OpenAICompatible ||
@@ -552,7 +563,7 @@ func TestOperatorStatusAndHeartbeatPreviewUseSameBackendRuntimeBuilder(t *testin
 	if err != nil {
 		t.Fatalf("v7HeartbeatPreview() error = %v", err)
 	}
-	if status.BackendRuntimes != preview.HeartbeatPreview.V7.BackendRuntimes {
+	if !reflect.DeepEqual(status.BackendRuntimes, preview.HeartbeatPreview.V7.BackendRuntimes) {
 		t.Fatalf("operator backend_runtimes = %+v, heartbeat backend_runtimes = %+v", status.BackendRuntimes, preview.HeartbeatPreview.V7.BackendRuntimes)
 	}
 }

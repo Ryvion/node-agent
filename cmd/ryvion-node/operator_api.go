@@ -25,6 +25,7 @@ import (
 	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
+	v7inferenceconfig "github.com/Ryvion/node-agent/internal/v7/inferenceconfig"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
@@ -108,6 +109,10 @@ type operatorJob struct {
 
 type operatorStatusResponse struct {
 	Version              string                                         `json:"version"`
+	AgentVersion         string                                         `json:"agent_version"`
+	NodeID               string                                         `json:"node_id"`
+	OS                   string                                         `json:"os"`
+	Arch                 string                                         `json:"arch"`
 	HubURL               string                                         `json:"hub_url"`
 	PublicKeyHex         string                                         `json:"public_key_hex"`
 	DeviceType           string                                         `json:"device_type"`
@@ -556,7 +561,22 @@ func (s *operatorRuntime) startLlamaCppResidencyKeeper(ctx context.Context) {
 }
 
 func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) v7llamacpp.BackendRuntimes {
-	return v7llamacpp.BuildBackendRuntimes(s.llamaCppSidecarStatus(ctx))
+	baseModelPolicy := buildModelPolicyStatus()
+	hardwareCapacity := buildHardwareCapacityStatus(baseModelPolicy.CacheDir)
+	runtimeInfo := operatorRuntimeInfo{}
+	if s != nil {
+		s.mu.RLock()
+		infMgr := s.infMgr
+		s.mu.RUnlock()
+		if infMgr != nil {
+			runtimeInfo.NativeModel = infMgr.ModelName()
+			runtimeInfo.NativeInferenceReady = inference.NativeRuntimeAvailable() && infMgr.Healthy()
+		}
+		tensorAccess := buildRuntimeTensorAccessStatus(infMgr)
+		runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, tensorAccess, infMgr)
+		return buildBackendRuntimesStatus(s.llamaCppSidecarStatus(ctx), runtimeInventory, hardwareCapacity)
+	}
+	return buildBackendRuntimesStatus(v7llamacpp.LlamaCppSidecarStatus{}, v7runtimeinventory.Inventory{}, hardwareCapacity)
 }
 
 func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
@@ -929,16 +949,20 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	baseModelPolicy := buildModelPolicyStatus()
 	hardwareCapacity := buildHardwareCapacityStatus(baseModelPolicy.CacheDir)
 	modelPolicy := buildDerivedModelPolicyStatus(baseModelPolicy, hardwareCapacity)
-	modelCache := buildModelCacheStatus(modelPolicy)
 	backendProbes := buildBackendProbeStatus()
 	llamaCppSidecar := s.llamaCppSidecarStatusView(context.Background())
-	backendRuntimes := v7llamacpp.BuildBackendRuntimes(llamaCppSidecar.LlamaCppSidecarStatus)
+	backendRuntimes := buildBackendRuntimesStatus(llamaCppSidecar.LlamaCppSidecarStatus, runtimeInventory, hardwareCapacity)
+	modelCache := buildModelCacheRuntimeStatus(buildModelCacheStatus(modelPolicy), modelPolicy, hardwareCapacity, backendProbes, backendRuntimes)
 	kvCapability := buildNativeTensorAccessCapability(infMgr)
 	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, &kvCapability, runtimeInfo.TensorAccess)
 	llamaCppBenchmark := s.llamaCppBenchmarkSnapshot()
 
 	return operatorStatusResponse{
 		Version:          s.version,
+		AgentVersion:     s.version,
+		NodeID:           s.publicKeyHex,
+		OS:               runtime.GOOS,
+		Arch:             runtime.GOARCH,
 		HubURL:           s.hubURL,
 		PublicKeyHex:     s.publicKeyHex,
 		DeviceType:       s.deviceType,
@@ -1072,6 +1096,33 @@ func buildHardwareCapacityStatus(modelCacheDir string) v7hardware.CapacityInvent
 
 func buildModelCacheStatus(policy v7modelpolicy.Status) v7modelcache.Status {
 	return v7modelcache.BuildStatus(policy.CacheDir)
+}
+
+func buildModelCacheRuntimeStatus(modelCache v7modelcache.Status, policy v7modelpolicy.Status, hardware v7hardware.CapacityInventory, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes) v7modelcache.Status {
+	return v7modelcache.AnnotateRuntimeStatus(v7modelcache.RuntimeAnnotationInput{
+		Status:                         modelCache,
+		Policy:                         policy,
+		HardwareCapacityAvailable:      hardwareCapacityAvailable(hardware),
+		BackendTextGenerationAvailable: ggufBackendTextGenerationAvailable(backendProbes, backendRuntimes),
+		V7InferenceEnabled:             v7inferenceconfig.V7InferenceEnabled(os.Getenv),
+	})
+}
+
+func buildBackendRuntimesStatus(llamaStatus v7llamacpp.LlamaCppSidecarStatus, runtimeInventory v7runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) v7llamacpp.BackendRuntimes {
+	return v7llamacpp.BuildBackendRuntimesWithInventory(llamaStatus, runtimeInventory, hardware)
+}
+
+func hardwareCapacityAvailable(hardware v7hardware.CapacityInventory) bool {
+	hardware = v7hardware.NormalizeInventory(hardware)
+	return strings.TrimSpace(hardware.OS) != "" &&
+		strings.TrimSpace(hardware.Arch) != "" &&
+		hardware.CPULogicalCores > 0 &&
+		hardware.SystemRAMBytes > 0
+}
+
+func ggufBackendTextGenerationAvailable(backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes) bool {
+	return (backendRuntimes.LlamaCPP.Available && backendRuntimes.LlamaCPP.SupportsTextGeneration) ||
+		(backendProbes.LlamaCPP.Available && backendProbes.LlamaCPP.SupportsTextGeneration)
 }
 
 func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {

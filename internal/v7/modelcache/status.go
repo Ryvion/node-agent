@@ -1,6 +1,10 @@
 package modelcache
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+)
 
 func BuildStatus(cacheDir string) Status {
 	return Scan(cacheDir)
@@ -29,6 +33,12 @@ func NormalizeStatus(status Status) Status {
 		if model.QuantizationHint == "" {
 			model.QuantizationHint = "unknown"
 		}
+		if model.ParameterCountBillions < 0 {
+			model.ParameterCountBillions = 0
+		}
+		if model.ParameterCountBillions == 0 {
+			model.ParameterCountBillions = InferParameterCountBillions(firstNonEmptyString(model.Filename, model.ModelID, model.Path))
+		}
 		model.Format = cleanCacheText(strings.ToLower(model.Format), maxCacheCompactLen)
 		if model.Format == "" {
 			model.Format = DefaultFormat
@@ -43,13 +53,45 @@ func NormalizeStatus(status Status) Status {
 			continue
 		}
 		model.Installed = true
+		model.Resident = true
 		model.HashVerified = false
+		model.BlockedReasons = normalizeBlockedReasons(model.BlockedReasons)
 		total += model.SizeBytes
 		models = append(models, model)
 	}
 	status.Models = models
 	status.TotalBytes = total
 	return status
+}
+
+func AnnotateRuntimeStatus(input RuntimeAnnotationInput) Status {
+	status := NormalizeStatus(input.Status)
+	policy := modelpolicy.NormalizePolicy(input.Policy)
+	for i := range status.Models {
+		model := &status.Models[i]
+		decision := modelpolicy.EvaluateRuntimeRequest(policy, modelpolicy.RuntimeRequest{
+			ModelID:                model.ModelID,
+			ModelSizeBytes:         uint64NonNegative(model.SizeBytes),
+			ParameterCountBillions: model.ParameterCountBillions,
+			Family:                 model.FamilyHint,
+		})
+		reasons := make([]string, 0, 4)
+		if !input.V7InferenceEnabled {
+			reasons = append(reasons, "v7_inference_disabled")
+		}
+		if !input.HardwareCapacityAvailable {
+			reasons = append(reasons, "hardware_capacity_missing")
+		}
+		if !input.BackendTextGenerationAvailable {
+			reasons = append(reasons, "backend_text_generation_unavailable")
+		}
+		if !decision.Allowed {
+			reasons = append(reasons, decision.Reason)
+		}
+		model.Runnable = len(reasons) == 0
+		model.BlockedReasons = normalizeBlockedReasons(reasons)
+	}
+	return NormalizeStatus(status)
 }
 
 func normalizeFamily(value string) string {
@@ -65,4 +107,46 @@ func normalizeFamily(value string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func normalizeBlockedReasons(reasons []string) []string {
+	if len(reasons) == 0 {
+		return []string{}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, min(len(reasons), 8))
+	for _, reason := range reasons {
+		if len(out) >= 8 {
+			break
+		}
+		reason = cleanCacheText(strings.ToLower(reason), maxCacheCompactLen)
+		if reason == "" || reason == "allowed" {
+			continue
+		}
+		if _, ok := seen[reason]; ok {
+			continue
+		}
+		seen[reason] = struct{}{}
+		out = append(out, reason)
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+func uint64NonNegative(value int64) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	return uint64(value)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

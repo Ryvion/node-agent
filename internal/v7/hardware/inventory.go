@@ -86,6 +86,9 @@ func (detector Detector) withDefaults() Detector {
 	if detector.CPULogicalCores == nil {
 		detector.CPULogicalCores = runtime.NumCPU
 	}
+	if detector.Getenv == nil {
+		detector.Getenv = os.Getenv
+	}
 	return detector
 }
 
@@ -114,6 +117,9 @@ func readDirNames(path string) ([]string, error) {
 
 func applyDarwinInventory(inventory *CapacityInventory, detector Detector) {
 	inventory.CPULogicalCores = firstPositiveInt(int(parseUintCommand(detector, "sysctl", "-n", "hw.logicalcpu")), inventory.CPULogicalCores)
+	if data, err := detector.RunCommand("sysctl", []string{"-n", "machdep.cpu.brand_string"}, detector.CommandTimeout); err == nil {
+		inventory.CPUName = cleanName(string(data))
+	}
 	inventory.SystemRAMBytes = parseUintCommand(detector, "sysctl", "-n", "hw.memsize")
 	if data, err := detector.RunCommand("vm_stat", nil, detector.CommandTimeout); err == nil {
 		inventory.AvailableRAMBytes = parseDarwinVMStatAvailable(data)
@@ -130,6 +136,7 @@ func applyDarwinInventory(inventory *CapacityInventory, detector Detector) {
 }
 
 func applyWindowsInventory(inventory *CapacityInventory, detector Detector) {
+	inventory.CPUName = detectWindowsCPUName(detector)
 	total, available := detectWindowsMemory(detector)
 	inventory.SystemRAMBytes = total
 	inventory.AvailableRAMBytes = available
@@ -138,6 +145,7 @@ func applyWindowsInventory(inventory *CapacityInventory, detector Detector) {
 	} else if gpu := detectWindowsWMIGPU(detector); gpu.name != "" {
 		applyGPU(inventory, gpu)
 	}
+	inventory.DirectMLAvailable = detectWindowsDirectML(detector, inventory.GPUDetected)
 	inventory.PowerProfile = detectWindowsPowerProfile(detector)
 }
 
@@ -154,13 +162,14 @@ func applyLinuxInventory(inventory *CapacityInventory, detector Detector) {
 }
 
 type gpuInfo struct {
-	name        string
-	vendor      string
-	vramBytes   uint64
-	cuda        bool
-	metal       bool
-	unified     bool
-	thermalRisk string
+	name              string
+	vendor            string
+	vramBytes         uint64
+	cuda              bool
+	metal             bool
+	unified           bool
+	computeCapability string
+	thermalRisk       string
 }
 
 func applyGPU(inventory *CapacityInventory, gpu gpuInfo) {
@@ -171,6 +180,7 @@ func applyGPU(inventory *CapacityInventory, gpu gpuInfo) {
 	inventory.CUDAAvailable = gpu.cuda
 	inventory.MetalAvailable = gpu.metal
 	inventory.UnifiedMemory = gpu.unified
+	inventory.ComputeCapability = gpu.computeCapability
 	if gpu.thermalRisk != "" {
 		inventory.ThermalRisk = gpu.thermalRisk
 	}
@@ -254,6 +264,9 @@ func applyDarwinSystemProfiler(inventory *CapacityInventory, data []byte) {
 		inventory.GPUDetected = true
 		inventory.GPUName = gpuName
 		inventory.GPUVendor = inferGPUVendor(gpuName)
+		if inventory.CPUName == "" {
+			inventory.CPUName = gpuName
+		}
 		if inventory.GPUVendor == GPUVendorApple {
 			inventory.UnifiedMemory = true
 		}
@@ -299,7 +312,10 @@ func detectNVIDIAGPU(detector Detector) gpuInfo {
 	if err != nil || strings.TrimSpace(path) == "" {
 		return gpuInfo{}
 	}
-	data, err := detector.RunCommand(path, []string{"--query-gpu=name,memory.total,temperature.gpu", "--format=csv,noheader,nounits"}, detector.CommandTimeout)
+	data, err := detector.RunCommand(path, []string{"--query-gpu=name,memory.total,temperature.gpu,compute_cap", "--format=csv,noheader,nounits"}, detector.CommandTimeout)
+	if err != nil {
+		data, err = detector.RunCommand(path, []string{"--query-gpu=name,memory.total,temperature.gpu", "--format=csv,noheader,nounits"}, detector.CommandTimeout)
+	}
 	if err != nil {
 		return gpuInfo{}
 	}
@@ -323,12 +339,20 @@ func detectNVIDIAGPU(detector Detector) gpuInfo {
 			thermalRisk = thermalRiskFromCelsius(temp)
 		}
 	}
+	computeCapability := ""
+	if len(fields) > 3 {
+		computeCapability = normalizeComputeCapability(fields[3])
+	}
+	if computeCapability == "" {
+		computeCapability = detectNVIDIAComputeCapability(detector, path)
+	}
 	return gpuInfo{
-		name:        cleanName(fields[0]),
-		vendor:      GPUVendorNVIDIA,
-		vramBytes:   vramBytes,
-		cuda:        true,
-		thermalRisk: thermalRisk,
+		name:              cleanName(fields[0]),
+		vendor:            GPUVendorNVIDIA,
+		vramBytes:         vramBytes,
+		cuda:              true,
+		computeCapability: computeCapability,
+		thermalRisk:       thermalRisk,
 	}
 }
 
@@ -401,31 +425,98 @@ func detectLinuxPowerProfile(detector Detector) string {
 
 func detectWindowsMemory(detector Detector) (total, available uint64) {
 	data, err := detector.RunCommand("wmic", []string{"OS", "get", "TotalVisibleMemorySize,FreePhysicalMemory", "/format:csv"}, detector.CommandTimeout)
-	if err != nil {
-		return 0, 0
-	}
-	records := csvRecords(data)
-	header, rows := headerAndRows(records)
-	freeIdx := headerIndex(header, "freephysicalmemory")
-	totalIdx := headerIndex(header, "totalvisiblememorysize")
-	if freeIdx < 0 || totalIdx < 0 {
-		return 0, 0
-	}
-	for _, row := range rows {
-		if len(row) <= freeIdx || len(row) <= totalIdx {
-			continue
+	if err == nil {
+		records := csvRecords(data)
+		header, rows := headerAndRows(records)
+		freeIdx := headerIndex(header, "freephysicalmemory")
+		totalIdx := headerIndex(header, "totalvisiblememorysize")
+		if freeIdx >= 0 && totalIdx >= 0 {
+			for _, row := range rows {
+				if len(row) <= freeIdx || len(row) <= totalIdx {
+					continue
+				}
+				freeKB, _ := strconv.ParseUint(strings.TrimSpace(row[freeIdx]), 10, 64)
+				totalKB, _ := strconv.ParseUint(strings.TrimSpace(row[totalIdx]), 10, 64)
+				if totalKB > 0 {
+					return totalKB * 1024, freeKB * 1024
+				}
+			}
 		}
-		freeKB, _ := strconv.ParseUint(strings.TrimSpace(row[freeIdx]), 10, 64)
-		totalKB, _ := strconv.ParseUint(strings.TrimSpace(row[totalIdx]), 10, 64)
-		if totalKB > 0 {
-			return totalKB * 1024, freeKB * 1024
+	}
+
+	if data, err := runWindowsPowerShell(detector, "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory; (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"); err == nil {
+		lines := nonEmptyLines(data)
+		if len(lines) >= 2 {
+			totalBytes, _ := strconv.ParseUint(strings.TrimSpace(lines[0]), 10, 64)
+			freeKB, _ := strconv.ParseUint(strings.TrimSpace(lines[1]), 10, 64)
+			if totalBytes > 0 {
+				return totalBytes, freeKB * 1024
+			}
 		}
 	}
 	return 0, 0
 }
 
+func detectWindowsCPUName(detector Detector) string {
+	data, err := detector.RunCommand("wmic", []string{"CPU", "get", "Name", "/format:csv"}, detector.CommandTimeout)
+	if err == nil {
+		records := csvRecords(data)
+		header, rows := headerAndRows(records)
+		nameIdx := headerIndex(header, "name")
+		if nameIdx >= 0 {
+			for _, row := range rows {
+				if len(row) > nameIdx {
+					if name := cleanName(row[nameIdx]); name != "" {
+						return name
+					}
+				}
+			}
+		}
+	}
+	if data, err := runWindowsPowerShell(detector, "Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name"); err == nil {
+		return cleanName(firstNonEmpty(nonEmptyLines(data)...))
+	}
+	if detector.Getenv != nil {
+		return cleanName(detector.Getenv("PROCESSOR_IDENTIFIER"))
+	}
+	return ""
+}
+
 func detectWindowsWMIGPU(detector Detector) gpuInfo {
 	data, err := detector.RunCommand("wmic", []string{"path", "win32_VideoController", "get", "Name,AdapterRAM", "/format:csv"}, detector.CommandTimeout)
+	if err != nil {
+		return detectWindowsPowerShellGPU(detector)
+	}
+	records := csvRecords(data)
+	header, rows := headerAndRows(records)
+	nameIdx := headerIndex(header, "name")
+	ramIdx := headerIndex(header, "adapterram")
+	if nameIdx < 0 {
+		return gpuInfo{}
+	}
+	var best gpuInfo
+	for _, row := range rows {
+		if len(row) <= nameIdx {
+			continue
+		}
+		name := cleanName(row[nameIdx])
+		if name == "" || ignoredGPUName(name) {
+			continue
+		}
+		vramBytes := uint64(0)
+		if ramIdx >= 0 && len(row) > ramIdx {
+			vramBytes, _ = strconv.ParseUint(strings.TrimSpace(row[ramIdx]), 10, 64)
+		}
+		candidate := gpuInfo{name: name, vendor: inferGPUVendor(name), vramBytes: vramBytes}
+		if best.name == "" || candidate.vramBytes > best.vramBytes || gpuTier(candidate.name) > gpuTier(best.name) {
+			best = candidate
+		}
+	}
+	return best
+}
+
+func detectWindowsPowerShellGPU(detector Detector) gpuInfo {
+	data, err := runWindowsPowerShell(detector, "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Csv -NoTypeInformation")
 	if err != nil {
 		return gpuInfo{}
 	}
@@ -455,6 +546,88 @@ func detectWindowsWMIGPU(detector Detector) gpuInfo {
 		}
 	}
 	return best
+}
+
+func detectNVIDIAComputeCapability(detector Detector, nvidiaSmiPath string) string {
+	data, err := detector.RunCommand(nvidiaSmiPath, []string{"--query-gpu=compute_cap", "--format=csv,noheader,nounits"}, detector.CommandTimeout)
+	if err != nil {
+		return ""
+	}
+	return normalizeComputeCapability(firstNonEmpty(strings.Split(strings.TrimSpace(string(data)), "\n")...))
+}
+
+func normalizeComputeCapability(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(strings.ToLower(value), "compute")
+	value = strings.TrimSpace(strings.Trim(value, ":"))
+	if value == "" || value == "n/a" || value == "unknown" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || r == '.' {
+			b.WriteRune(r)
+		}
+	}
+	return cleanName(b.String())
+}
+
+func detectWindowsDirectML(detector Detector, gpuDetected bool) bool {
+	if !gpuDetected || detector.Stat == nil {
+		return false
+	}
+	windir := ""
+	if detector.Getenv != nil {
+		windir = strings.TrimSpace(detector.Getenv("WINDIR"))
+	}
+	if windir == "" {
+		windir = `C:\Windows`
+	}
+	path := joinHardwarePath(detector.GOOS, windir, "System32", "DirectML.dll")
+	info, err := detector.Stat(path)
+	return err == nil && info != nil && !info.IsDir()
+}
+
+func runWindowsPowerShell(detector Detector, script string) ([]byte, error) {
+	for _, name := range []string{"powershell.exe", "powershell"} {
+		data, err := detector.RunCommand(name, []string{"-NoProfile", "-NonInteractive", "-Command", script}, detector.CommandTimeout)
+		if err == nil {
+			return data, nil
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
+func nonEmptyLines(data []byte) []string {
+	raw := strings.Split(string(data), "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func joinHardwarePath(goos, dir string, elems ...string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(goos), "windows") || strings.Contains(dir, `\`) {
+		path := strings.TrimRight(dir, `\/`)
+		for _, elem := range elems {
+			elem = strings.Trim(strings.TrimSpace(elem), `\/`)
+			if elem == "" {
+				continue
+			}
+			path += `\` + elem
+		}
+		return path
+	}
+	parts := append([]string{dir}, elems...)
+	return filepath.Join(parts...)
 }
 
 func detectWindowsPowerProfile(detector Detector) string {

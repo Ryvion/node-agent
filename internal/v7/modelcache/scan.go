@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -21,6 +22,7 @@ const (
 )
 
 var ggufQuantizationPattern = regexp.MustCompile(`(?i)(?:^|[._\-\s])((?:IQ|Q)[0-9](?:_[A-Z0-9]+){0,3}|BF16|F16|F32)(?:[._\-\s]|$)`)
+var parameterCountPattern = regexp.MustCompile(`(?i)(?:^|[._\-\s])([0-9]+(?:\.[0-9]+)?)\s*b(?:[._\-\s]|$)`)
 
 func Scan(cacheDir string) Status {
 	return ScanWithOptions(ScanOptions{CacheDir: cacheDir})
@@ -139,16 +141,19 @@ func buildModel(path string, filename string, info FileInfo, now time.Time) Mode
 		lastSeen = now
 	}
 	return Model{
-		ModelID:          filename,
-		Filename:         filename,
-		Path:             path,
-		SizeBytes:        size,
-		FamilyHint:       inferFamily(filename),
-		QuantizationHint: inferQuantization(filename),
-		Format:           DefaultFormat,
-		Installed:        true,
-		HashVerified:     false,
-		LastSeenAt:       lastSeen.UTC(),
+		ModelID:                filename,
+		Filename:               filename,
+		Path:                   path,
+		SizeBytes:              size,
+		FamilyHint:             inferFamily(filename),
+		QuantizationHint:       inferQuantization(filename),
+		ParameterCountBillions: InferParameterCountBillions(filename),
+		Format:                 DefaultFormat,
+		Installed:              true,
+		Resident:               true,
+		BlockedReasons:         []string{},
+		HashVerified:           false,
+		LastSeenAt:             lastSeen.UTC(),
 	}
 }
 
@@ -201,6 +206,22 @@ func inferQuantization(filename string) string {
 		return "unknown"
 	}
 	return strings.ToUpper(matches[1])
+}
+
+func InferParameterCountBillions(filename string) float64 {
+	lower := strings.ToLower(strings.TrimSpace(filename))
+	if strings.Contains(lower, "phi-4") || strings.Contains(lower, "phi4") {
+		return 14
+	}
+	matches := parameterCountPattern.FindStringSubmatch(filename)
+	if len(matches) < 2 {
+		return 0
+	}
+	value, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
 }
 
 func cleanCachePath(goos, value string) string {
