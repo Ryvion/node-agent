@@ -37,6 +37,7 @@ func NormalizePolicy(policy Policy) Policy {
 	if policy.EvictionPolicy == "" {
 		policy.EvictionPolicy = DefaultEvictionPolicy
 	}
+	policy.RuntimePolicy = normalizeRuntimePolicy(policy.RuntimePolicy)
 	return policy
 }
 
@@ -51,7 +52,62 @@ func ValidatePolicy(policy Policy) error {
 	if len(policy.AllowedFamilies) == 0 || len(policy.AllowedFormats) == 0 {
 		return ErrInvalidPolicy
 	}
+	if policy.RuntimePolicy.MaxRuntimeModelBytes == 0 || policy.RuntimePolicy.MaxRuntimeParameterCountBillions <= 0 {
+		return ErrInvalidPolicy
+	}
 	return nil
+}
+
+func defaultRuntimePolicy() RuntimePolicy {
+	return RuntimePolicy{
+		AllowRuntimeExecution:              true,
+		MaxRuntimeModelBytes:               DefaultRuntimeMaxModelGB * bytesPerGiB,
+		MaxRuntimeParameterCountBillions:   DefaultRuntimeMaxParamsB,
+		AllowCPUOffload:                    true,
+		AllowLargeModels:                   false,
+		DenyModelIDs:                       []string{},
+		AllowModelIDs:                      []string{},
+		DenyFamilies:                       []string{},
+		AllowFamilies:                      cloneStrings(DefaultRuntimeAllowedFamilies),
+		RequireExplicitAllowForLargeModels: true,
+	}
+}
+
+func normalizeRuntimePolicy(policy RuntimePolicy) RuntimePolicy {
+	if runtimePolicyIsZero(policy) {
+		return defaultRuntimePolicy()
+	}
+	if policy.MaxRuntimeModelBytes == 0 {
+		policy.MaxRuntimeModelBytes = DefaultRuntimeMaxModelGB * bytesPerGiB
+	}
+	maxRuntimeCap := uint64(maxPolicySingleSizeGB) * bytesPerGiB
+	if policy.MaxRuntimeModelBytes > maxRuntimeCap {
+		policy.MaxRuntimeModelBytes = maxRuntimeCap
+	}
+	if policy.MaxRuntimeParameterCountBillions <= 0 {
+		policy.MaxRuntimeParameterCountBillions = DefaultRuntimeMaxParamsB
+	}
+	if policy.MaxRuntimeParameterCountBillions > maxPolicyParamsB {
+		policy.MaxRuntimeParameterCountBillions = maxPolicyParamsB
+	}
+	policy.DenyModelIDs = normalizeModelIDs(policy.DenyModelIDs)
+	policy.AllowModelIDs = normalizeModelIDs(policy.AllowModelIDs)
+	policy.DenyFamilies = normalizeList(policy.DenyFamilies, maxPolicyCompactLen, nil)
+	policy.AllowFamilies = normalizeList(policy.AllowFamilies, maxPolicyCompactLen, DefaultRuntimeAllowedFamilies)
+	return policy
+}
+
+func runtimePolicyIsZero(policy RuntimePolicy) bool {
+	return !policy.AllowRuntimeExecution &&
+		policy.MaxRuntimeModelBytes == 0 &&
+		policy.MaxRuntimeParameterCountBillions == 0 &&
+		!policy.AllowCPUOffload &&
+		!policy.AllowLargeModels &&
+		len(policy.DenyModelIDs) == 0 &&
+		len(policy.AllowModelIDs) == 0 &&
+		len(policy.DenyFamilies) == 0 &&
+		len(policy.AllowFamilies) == 0 &&
+		!policy.RequireExplicitAllowForLargeModels
 }
 
 func normalizeList(values []string, maxRunes int, fallback []string) []string {

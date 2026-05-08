@@ -304,6 +304,12 @@ func TestOperatorAPIStatusEndpointIncludesModelPolicyAndCache(t *testing.T) {
 	t.Setenv("RYV_MODEL_KEEP_WARM_IDS", "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
 	t.Setenv("RYV_MODEL_EVICTION_POLICY", "lru")
 	t.Setenv("RYV_MODEL_ALLOW_LICENSE_RESTRICTED", "0")
+	t.Setenv("RYV_MODEL_RUNTIME_MAX_SINGLE_GB", "4")
+	t.Setenv("RYV_MODEL_RUNTIME_MAX_PARAMS_B", "8")
+	t.Setenv("RYV_MODEL_DENY_IDS", "phi-4-Q4_K_M.gguf")
+	t.Setenv("RYV_MODEL_ALLOW_IDS", "")
+	t.Setenv("RYV_MODEL_RUNTIME_ALLOW_LARGE", "0")
+	t.Setenv("RYV_MODEL_REQUIRE_EXPLICIT_ALLOW_LARGE", "1")
 
 	port := freeOperatorAPITestPort(t)
 	state := &operatorRuntime{
@@ -331,6 +337,20 @@ func TestOperatorAPIStatusEndpointIncludesModelPolicyAndCache(t *testing.T) {
 	if len(status.ModelPolicy.KeepWarmModelIDs) != 1 || status.ModelPolicy.KeepWarmModelIDs[0] != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
 		t.Fatalf("keep_warm_model_ids = %+v", status.ModelPolicy.KeepWarmModelIDs)
 	}
+	if !status.ModelPolicy.RuntimePolicy.AllowRuntimeExecution ||
+		status.ModelPolicy.RuntimePolicy.MaxRuntimeModelBytes != 4*1024*1024*1024 ||
+		status.ModelPolicy.RuntimePolicy.MaxRuntimeParameterCountBillions != 8 ||
+		!status.ModelPolicy.RuntimePolicy.AllowCPUOffload ||
+		status.ModelPolicy.RuntimePolicy.AllowLargeModels ||
+		!status.ModelPolicy.RuntimePolicy.RequireExplicitAllowForLargeModels {
+		t.Fatalf("runtime_policy = %+v", status.ModelPolicy.RuntimePolicy)
+	}
+	if len(status.ModelPolicy.RuntimePolicy.DenyModelIDs) != 1 || status.ModelPolicy.RuntimePolicy.DenyModelIDs[0] != "phi-4-Q4_K_M.gguf" {
+		t.Fatalf("deny_model_ids = %+v", status.ModelPolicy.RuntimePolicy.DenyModelIDs)
+	}
+	if got, want := strings.Join(status.ModelPolicy.RuntimePolicy.AllowFamilies, ","), "llama"; got != want {
+		t.Fatalf("runtime allow_families = %q, want %q", got, want)
+	}
 	if status.ModelCache.CacheDir != cacheDir || len(status.ModelCache.Models) != 1 {
 		t.Fatalf("model_cache = %+v, want one model in configured cache dir", status.ModelCache)
 	}
@@ -344,7 +364,7 @@ func TestOperatorAPIStatusEndpointIncludesModelPolicyAndCache(t *testing.T) {
 		t.Fatalf("model cache row = %+v", model)
 	}
 	text := strings.ToLower(string(respBody))
-	for _, want := range []string{`"model_policy"`, `"model_cache"`, `"auto_download"`, `"max_cache_bytes"`, `"keep_warm_model_ids"`, `"hash_verified"`} {
+	for _, want := range []string{`"model_policy"`, `"runtime_policy"`, `"max_runtime_model_bytes"`, `"deny_model_ids"`, `"model_cache"`, `"auto_download"`, `"max_cache_bytes"`, `"keep_warm_model_ids"`, `"hash_verified"`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("operator status missing %s: %s", want, respBody)
 		}
@@ -679,6 +699,10 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	}
 	if preview.HeartbeatPreview.V7.ModelPolicy.CacheDir != filepath.Join(dataDir, "models") {
 		t.Fatalf("heartbeat_preview.v7.model_policy = %+v", preview.HeartbeatPreview.V7.ModelPolicy)
+	}
+	if preview.HeartbeatPreview.V7.ModelPolicy.RuntimePolicy.MaxRuntimeModelBytes == 0 ||
+		!preview.HeartbeatPreview.V7.ModelPolicy.RuntimePolicy.AllowRuntimeExecution {
+		t.Fatalf("heartbeat_preview.v7.model_policy.runtime_policy = %+v", preview.HeartbeatPreview.V7.ModelPolicy.RuntimePolicy)
 	}
 	if len(preview.HeartbeatPreview.V7.ModelCache.Models) != 2 {
 		t.Fatalf("heartbeat_preview.v7.model_cache = %+v", preview.HeartbeatPreview.V7.ModelCache)

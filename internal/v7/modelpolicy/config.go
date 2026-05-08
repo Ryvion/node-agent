@@ -16,6 +16,7 @@ const (
 	maxPolicyCompactLen   = 32
 	maxPolicyCacheSizeGB  = 4096
 	maxPolicySingleSizeGB = 1024
+	maxPolicyParamsB      = 1024
 )
 
 func FromEnv() Policy {
@@ -55,6 +56,24 @@ func FromConfigSource(source ConfigSource) Policy {
 	if raw := strings.TrimSpace(source.Getenv(EnvModelAllowLicenseRestricted)); raw != "" {
 		policy.AllowLicenseRestricted = parseBool(raw)
 	}
+	if raw := strings.TrimSpace(source.Getenv(EnvModelRuntimeMaxSingleGB)); raw != "" {
+		policy.RuntimePolicy.MaxRuntimeModelBytes = parseGiB(raw, DefaultRuntimeMaxModelGB, maxPolicySingleSizeGB)
+	}
+	if raw := strings.TrimSpace(source.Getenv(EnvModelRuntimeMaxParamsB)); raw != "" {
+		policy.RuntimePolicy.MaxRuntimeParameterCountBillions = parseBillions(raw, DefaultRuntimeMaxParamsB, maxPolicyParamsB)
+	}
+	if raw := strings.TrimSpace(source.Getenv(EnvModelDenyIDs)); raw != "" {
+		policy.RuntimePolicy.DenyModelIDs = parseList(raw, maxPolicyItemLen, false)
+	}
+	if raw := strings.TrimSpace(source.Getenv(EnvModelAllowIDs)); raw != "" {
+		policy.RuntimePolicy.AllowModelIDs = parseList(raw, maxPolicyItemLen, false)
+	}
+	if raw := strings.TrimSpace(source.Getenv(EnvModelRuntimeAllowLarge)); raw != "" {
+		policy.RuntimePolicy.AllowLargeModels = parseBool(raw)
+	}
+	if raw := strings.TrimSpace(source.Getenv(EnvModelRequireExplicitLarge)); raw != "" {
+		policy.RuntimePolicy.RequireExplicitAllowForLargeModels = parseBool(raw)
+	}
 
 	return NormalizePolicy(policy)
 }
@@ -77,6 +96,7 @@ func defaultPolicy(source ConfigSource) Policy {
 		KeepWarmModelIDs:       []string{},
 		EvictionPolicy:         DefaultEvictionPolicy,
 		AllowLicenseRestricted: false,
+		RuntimePolicy:          defaultRuntimePolicy(),
 	}
 }
 
@@ -115,6 +135,17 @@ func parseGiB(raw string, fallbackGB uint64, maxGB uint64) uint64 {
 		gb = maxGB
 	}
 	return gb * bytesPerGiB
+}
+
+func parseBillions(raw string, fallback float64, maxValue float64) float64 {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	if maxValue > 0 && value > maxValue {
+		value = maxValue
+	}
+	return value
 }
 
 func parseList(raw string, maxRunes int, lower bool) []string {

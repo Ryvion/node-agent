@@ -19,6 +19,12 @@ func TestFromConfigSourceParsesEnvPolicy(t *testing.T) {
 		EnvModelKeepWarmIDs:            "Llama-3.2-3B-Instruct-Q4_K_M.gguf,phi-4.Q5_K_M.gguf",
 		EnvModelEvictionPolicy:         "LRU",
 		EnvModelAllowLicenseRestricted: "true",
+		EnvModelRuntimeMaxSingleGB:     "4",
+		EnvModelRuntimeMaxParamsB:      "8",
+		EnvModelDenyIDs:                "phi-4-Q4_K_M.gguf, phi-4-Q4_K_M.gguf",
+		EnvModelAllowIDs:               "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		EnvModelRuntimeAllowLarge:      "0",
+		EnvModelRequireExplicitLarge:   "1",
 	}
 	policy := FromConfigSource(ConfigSource{
 		Getenv: func(name string) string {
@@ -50,6 +56,27 @@ func TestFromConfigSourceParsesEnvPolicy(t *testing.T) {
 	}
 	if policy.EvictionPolicy != DefaultEvictionPolicy {
 		t.Fatalf("eviction_policy = %q, want lru", policy.EvictionPolicy)
+	}
+	if !policy.RuntimePolicy.AllowRuntimeExecution || !policy.RuntimePolicy.AllowCPUOffload {
+		t.Fatalf("runtime policy allow flags = %+v, want runtime/cpu allowed", policy.RuntimePolicy)
+	}
+	if policy.RuntimePolicy.MaxRuntimeModelBytes != 4*bytesPerGiB {
+		t.Fatalf("max_runtime_model_bytes = %d, want 4GiB", policy.RuntimePolicy.MaxRuntimeModelBytes)
+	}
+	if policy.RuntimePolicy.MaxRuntimeParameterCountBillions != 8 {
+		t.Fatalf("max_runtime_parameter_count_billions = %v, want 8", policy.RuntimePolicy.MaxRuntimeParameterCountBillions)
+	}
+	if got, want := strings.Join(policy.RuntimePolicy.DenyModelIDs, ","), "phi-4-Q4_K_M.gguf"; got != want {
+		t.Fatalf("deny_model_ids = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(policy.RuntimePolicy.AllowModelIDs, ","), "Llama-3.2-3B-Instruct-Q4_K_M.gguf"; got != want {
+		t.Fatalf("allow_model_ids = %q, want %q", got, want)
+	}
+	if policy.RuntimePolicy.AllowLargeModels || !policy.RuntimePolicy.RequireExplicitAllowForLargeModels {
+		t.Fatalf("runtime policy large-model flags = %+v, want allow_large=false require_explicit=true", policy.RuntimePolicy)
+	}
+	if got, want := strings.Join(policy.RuntimePolicy.AllowFamilies, ","), "llama"; got != want {
+		t.Fatalf("runtime allow_families = %q, want %q", got, want)
 	}
 	if err := ValidatePolicy(policy); err != nil {
 		t.Fatalf("ValidatePolicy() error = %v", err)
@@ -93,6 +120,21 @@ func TestDefaultPolicyValues(t *testing.T) {
 	if policy.AllowLicenseRestricted {
 		t.Fatalf("allow_license_restricted = true, want false")
 	}
+	if !policy.RuntimePolicy.AllowRuntimeExecution || policy.RuntimePolicy.MaxRuntimeModelBytes != DefaultRuntimeMaxModelGB*bytesPerGiB {
+		t.Fatalf("runtime_policy default = %+v", policy.RuntimePolicy)
+	}
+	if policy.RuntimePolicy.MaxRuntimeParameterCountBillions != DefaultRuntimeMaxParamsB {
+		t.Fatalf("runtime max params default = %v", policy.RuntimePolicy.MaxRuntimeParameterCountBillions)
+	}
+	if !policy.RuntimePolicy.AllowCPUOffload || policy.RuntimePolicy.AllowLargeModels || !policy.RuntimePolicy.RequireExplicitAllowForLargeModels {
+		t.Fatalf("runtime policy default flags = %+v", policy.RuntimePolicy)
+	}
+	if len(policy.RuntimePolicy.DenyModelIDs) != 0 || len(policy.RuntimePolicy.AllowModelIDs) != 0 || len(policy.RuntimePolicy.DenyFamilies) != 0 {
+		t.Fatalf("runtime policy default id/family lists = %+v", policy.RuntimePolicy)
+	}
+	if got, want := strings.Join(policy.RuntimePolicy.AllowFamilies, ","), "llama"; got != want {
+		t.Fatalf("runtime allow_families default = %q, want %q", got, want)
+	}
 }
 
 func TestNormalizePolicyAppliesCaps(t *testing.T) {
@@ -110,6 +152,16 @@ func TestNormalizePolicyAppliesCaps(t *testing.T) {
 		AllowedFormats:      []string{"gguf", "gguf"},
 		KeepWarmModelIDs:    ids,
 		EvictionPolicy:      strings.Repeat("e", 80),
+		RuntimePolicy: RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             uint64(maxPolicySingleSizeGB+100) * bytesPerGiB,
+			MaxRuntimeParameterCountBillions: maxPolicyParamsB + 100,
+			AllowCPUOffload:                  true,
+			DenyModelIDs:                     ids,
+			AllowModelIDs:                    ids,
+			DenyFamilies:                     []string{"llama", "llama", strings.Repeat("q", 80)},
+			AllowFamilies:                    []string{"llama", "llama", strings.Repeat("q", 80)},
+		},
 	})
 
 	if policy.MaxSingleModelBytes != uint64(maxPolicySingleSizeGB)*bytesPerGiB {
@@ -131,6 +183,18 @@ func TestNormalizePolicyAppliesCaps(t *testing.T) {
 	}
 	if len(policy.EvictionPolicy) != maxPolicyCompactLen {
 		t.Fatalf("eviction_policy len = %d, want %d", len(policy.EvictionPolicy), maxPolicyCompactLen)
+	}
+	if policy.RuntimePolicy.MaxRuntimeModelBytes != uint64(maxPolicySingleSizeGB)*bytesPerGiB {
+		t.Fatalf("max_runtime_model_bytes = %d, cap not applied", policy.RuntimePolicy.MaxRuntimeModelBytes)
+	}
+	if policy.RuntimePolicy.MaxRuntimeParameterCountBillions != maxPolicyParamsB {
+		t.Fatalf("max_runtime_parameter_count_billions = %v, cap not applied", policy.RuntimePolicy.MaxRuntimeParameterCountBillions)
+	}
+	if len(policy.RuntimePolicy.DenyModelIDs) != maxPolicyListItems || len(policy.RuntimePolicy.AllowModelIDs) != maxPolicyListItems {
+		t.Fatalf("runtime model id list lengths = %d/%d, want cap %d", len(policy.RuntimePolicy.DenyModelIDs), len(policy.RuntimePolicy.AllowModelIDs), maxPolicyListItems)
+	}
+	if len(policy.RuntimePolicy.DenyFamilies) != 2 || len(policy.RuntimePolicy.AllowFamilies) != 2 {
+		t.Fatalf("runtime family lists = %+v/%+v, want normalized unique entries", policy.RuntimePolicy.DenyFamilies, policy.RuntimePolicy.AllowFamilies)
 	}
 }
 
@@ -182,6 +246,11 @@ func TestPolicyJSONHasNoRawTensorPromptOutputOrSecrets(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 	body := strings.ToLower(string(raw))
+	for _, want := range []string{"runtime_policy", "allow_runtime_execution", "max_runtime_model_bytes", "deny_model_ids", "allow_families"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("policy JSON missing %q: %s", want, raw)
+		}
+	}
 	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret", "token"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("policy JSON contains forbidden marker %q: %s", forbidden, raw)

@@ -91,6 +91,16 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	if payload.ModelPolicy.CacheDir != "/tmp/ryvion-models" || payload.ModelPolicy.MaxSingleModelBytes != 8*1024*1024*1024 {
 		t.Fatalf("model_policy = %+v, want mocked cache policy", payload.ModelPolicy)
 	}
+	if !payload.ModelPolicy.RuntimePolicy.AllowRuntimeExecution ||
+		payload.ModelPolicy.RuntimePolicy.MaxRuntimeModelBytes != 4*1024*1024*1024 ||
+		payload.ModelPolicy.RuntimePolicy.MaxRuntimeParameterCountBillions != 8 ||
+		payload.ModelPolicy.RuntimePolicy.AllowLargeModels {
+		t.Fatalf("model_policy.runtime_policy = %+v, want mocked runtime policy", payload.ModelPolicy.RuntimePolicy)
+	}
+	if len(payload.ModelPolicy.RuntimePolicy.DenyModelIDs) != 1 ||
+		payload.ModelPolicy.RuntimePolicy.DenyModelIDs[0] != "phi-4-Q4_K_M.gguf" {
+		t.Fatalf("runtime_policy.deny_model_ids = %+v", payload.ModelPolicy.RuntimePolicy.DenyModelIDs)
+	}
 	if payload.ModelCache.CacheDir != "/tmp/ryvion-models" || len(payload.ModelCache.Models) != 1 {
 		t.Fatalf("model_cache = %+v, want mocked cache status", payload.ModelCache)
 	}
@@ -174,7 +184,10 @@ func TestBuildV7HeartbeatPayloadJSONMarshalWorks(t *testing.T) {
 	if !strings.Contains(string(raw), `"hardware_capacity"`) {
 		t.Fatalf("payload JSON missing hardware_capacity: %s", string(raw))
 	}
-	if !strings.Contains(string(raw), `"model_policy"`) || !strings.Contains(string(raw), `"model_cache"`) {
+	if !strings.Contains(string(raw), `"model_policy"`) ||
+		!strings.Contains(string(raw), `"runtime_policy"`) ||
+		!strings.Contains(string(raw), `"deny_model_ids"`) ||
+		!strings.Contains(string(raw), `"model_cache"`) {
 		t.Fatalf("payload JSON missing model policy/cache: %s", string(raw))
 	}
 	if !strings.Contains(string(raw), `"loaded_models"`) ||
@@ -603,6 +616,18 @@ func validInput() BuildV7HeartbeatPayloadInput {
 			KeepWarmModelIDs:       []string{"Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
 			EvictionPolicy:         "lru",
 			AllowLicenseRestricted: false,
+			RuntimePolicy: modelpolicy.RuntimePolicy{
+				AllowRuntimeExecution:              true,
+				MaxRuntimeModelBytes:               4 * 1024 * 1024 * 1024,
+				MaxRuntimeParameterCountBillions:   8,
+				AllowCPUOffload:                    true,
+				AllowLargeModels:                   false,
+				DenyModelIDs:                       []string{"phi-4-Q4_K_M.gguf"},
+				AllowModelIDs:                      []string{},
+				DenyFamilies:                       []string{},
+				AllowFamilies:                      []string{"llama"},
+				RequireExplicitAllowForLargeModels: true,
+			},
 		}),
 		ModelCache: ptr(modelcache.Status{
 			CacheDir:   "/tmp/ryvion-models",
