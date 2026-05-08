@@ -156,13 +156,14 @@ type operatorStatusResponse struct {
 }
 
 type operatorHeartbeatStatus struct {
-	LastStartedAt      string                          `json:"last_started_at"`
-	LastCompletedAt    string                          `json:"last_completed_at"`
-	LastDurationMs     int64                           `json:"last_duration_ms"`
-	LastError          string                          `json:"last_error"`
-	SuccessCount       uint64                          `json:"success_count"`
-	FailedCount        uint64                          `json:"failed_count"`
-	LastPayloadSummary operatorHeartbeatPayloadSummary `json:"last_payload_summary"`
+	LastStartedAt       string                           `json:"last_started_at"`
+	LastCompletedAt     string                           `json:"last_completed_at"`
+	LastDurationMs      int64                            `json:"last_duration_ms"`
+	LastError           string                           `json:"last_error"`
+	SuccessCount        uint64                           `json:"success_count"`
+	FailedCount         uint64                           `json:"failed_count"`
+	LastPayloadSummary  operatorHeartbeatPayloadSummary  `json:"last_payload_summary"`
+	LastResponseSummary operatorHeartbeatResponseSummary `json:"last_response_summary"`
 }
 
 type operatorHeartbeatPayloadSummary struct {
@@ -172,6 +173,15 @@ type operatorHeartbeatPayloadSummary struct {
 	TextOutput           bool   `json:"text_output"`
 	Streaming            bool   `json:"streaming"`
 	WarmModelID          string `json:"warm_model_id"`
+}
+
+type operatorHeartbeatResponseSummary struct {
+	V7SnapshotUpserted   *bool  `json:"v7_snapshot_upserted"`
+	SnapshotModelCount   int    `json:"snapshot_model_count"`
+	SnapshotBackendCount int    `json:"snapshot_backend_count"`
+	HasCapabilityProfile bool   `json:"has_capability_profile"`
+	HubInstanceID        string `json:"hub_instance_id"`
+	Warning              string `json:"warning,omitempty"`
 }
 
 type operatorMachine struct {
@@ -744,7 +754,7 @@ func (s *operatorRuntime) recordHeartbeat(metrics hw.Metrics, heartbeat hub.Hear
 	s.trustReason = strings.TrimSpace(heartbeat.TrustReason)
 }
 
-func (s *operatorRuntime) recordCapabilityHeartbeat(started time.Time, completed time.Time, summary operatorHeartbeatPayloadSummary, err error) {
+func (s *operatorRuntime) recordCapabilityHeartbeat(started time.Time, completed time.Time, payloadSummary operatorHeartbeatPayloadSummary, responseSummary operatorHeartbeatResponseSummary, err error) {
 	if s == nil {
 		return
 	}
@@ -755,10 +765,11 @@ func (s *operatorRuntime) recordCapabilityHeartbeat(started time.Time, completed
 		completed = started
 	}
 	status := operatorHeartbeatStatus{
-		LastStartedAt:      formatHeartbeatStatusTime(started),
-		LastCompletedAt:    formatHeartbeatStatusTime(completed),
-		LastDurationMs:     completed.Sub(started).Milliseconds(),
-		LastPayloadSummary: summary,
+		LastStartedAt:       formatHeartbeatStatusTime(started),
+		LastCompletedAt:     formatHeartbeatStatusTime(completed),
+		LastDurationMs:      completed.Sub(started).Milliseconds(),
+		LastPayloadSummary:  payloadSummary,
+		LastResponseSummary: responseSummary,
 	}
 
 	s.mu.Lock()

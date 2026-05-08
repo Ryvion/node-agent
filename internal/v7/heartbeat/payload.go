@@ -26,12 +26,14 @@ import (
 )
 
 const (
-	SchemaVersionV1 = "v7.heartbeat-payload.v1"
-	EnvV7Caps       = "RYV_NODE_V7_CAPS"
+	SchemaVersionV1                  = "v7.heartbeat-payload.v1"
+	EnvV7Caps                        = "RYV_NODE_V7_CAPS"
+	EnvExperimentalSpeculativeFields = "RYV_NODE_ENABLE_EXPERIMENTAL_SPEC_HEARTBEAT"
 )
 
 type V7HeartbeatPayload struct {
 	SchemaVersion             string                                `json:"schema_version"`
+	NodeID                    string                                `json:"node_id"`
 	CapabilityPassport        capability.CapabilityPassport         `json:"capability_passport"`
 	NetworkProfile            *netprofile.NetworkProfile            `json:"network_profile,omitempty"`
 	ModelLeaseSummary         *ModelLeaseSummary                    `json:"model_lease_summary,omitempty"`
@@ -44,7 +46,7 @@ type V7HeartbeatPayload struct {
 	BackendProbes             backendprobe.Probes                   `json:"backend_probes"`
 	BackendRuntimes           llamacpp.BackendRuntimes              `json:"backend_runtimes"`
 	CapabilityProfile         capabilityprofile.Profile             `json:"capability_profile"`
-	SpeculativeProfiles       []speculative.Profile                 `json:"speculative_profiles"`
+	SpeculativeProfiles       []speculative.Profile                 `json:"-"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
@@ -54,6 +56,7 @@ type V7HeartbeatPayload struct {
 type BuildV7HeartbeatPayloadInput struct {
 	SchemaVersion   string
 	AgentVersion    string
+	NodeID          string
 	NodePublicKey   string
 	OS              string
 	Arch            string
@@ -133,6 +136,15 @@ func V7HeartbeatEnabledFromEnv() bool {
 	}
 }
 
+func ExperimentalSpeculativeHeartbeatEnabledFromEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvExperimentalSpeculativeFields))) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
+}
+
 func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPayload, error) {
 	createdAtUnixMs := input.CreatedAtUnixMs
 	if createdAtUnixMs == 0 {
@@ -173,19 +185,24 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 	modelCache := cloneModelCache(input.ModelCache)
 	backendProbes := cloneBackendProbes(input.BackendProbes)
 	backendRuntimes := cloneBackendRuntimes(input.BackendRuntimes)
-	speculativeProfiles := cloneSpeculativeProfiles(input.SpeculativeProfiles)
-	if input.SpeculativeProfiles == nil {
-		speculativeReport := speculative.BuildReport(speculative.BuildInput{
-			Hardware:         hardwareCapacity,
-			Policy:           modelPolicy,
-			ModelCache:       modelCache,
-			BackendProbes:    backendProbes,
-			BackendRuntimes:  backendRuntimes,
-			RuntimeInventory: runtimeInventory,
-		})
-		speculativeProfiles = speculativeReport.SpeculativeProfiles
+	includeSpeculative := ExperimentalSpeculativeHeartbeatEnabledFromEnv()
+	var speculativeDecoding *speculative.DecodingCapability
+	if includeSpeculative {
+		speculativeProfiles := cloneSpeculativeProfiles(input.SpeculativeProfiles)
+		if input.SpeculativeProfiles == nil {
+			speculativeReport := speculative.BuildReport(speculative.BuildInput{
+				Hardware:         hardwareCapacity,
+				Policy:           modelPolicy,
+				ModelCache:       modelCache,
+				BackendProbes:    backendProbes,
+				BackendRuntimes:  backendRuntimes,
+				RuntimeInventory: runtimeInventory,
+			})
+			speculativeProfiles = speculativeReport.SpeculativeProfiles
+		}
+		decoding := speculative.BuildCapabilityFromProfiles(speculativeProfiles)
+		speculativeDecoding = &decoding
 	}
-	speculativeDecoding := speculative.BuildCapabilityFromProfiles(speculativeProfiles)
 	capabilityProfile := cloneCapabilityProfile(input.CapabilityProfile, capabilityprofile.BuildInput{
 		Hardware:            hardwareCapacity,
 		Policy:              modelPolicy,
@@ -193,10 +210,13 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		BackendProbes:       backendProbes,
 		BackendRuntimes:     backendRuntimes,
 		RuntimeInventory:    runtimeInventory,
-		SpeculativeDecoding: &speculativeDecoding,
+		SpeculativeDecoding: speculativeDecoding,
 		KVCapability:        kvCapability,
 		TensorAccess:        tensorAccess,
 	})
+	if !includeSpeculative {
+		capabilityProfile.SpeculativeDecoding = nil
+	}
 
 	casSummary := cloneCASSummary(input.CASSummary)
 	if casSummary == nil && input.CASCapabilitySummary.Enabled {
@@ -239,6 +259,7 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 
 	payload := V7HeartbeatPayload{
 		SchemaVersion:        schemaVersion,
+		NodeID:               firstNonEmpty(input.NodeID, input.NodePublicKey),
 		CapabilityPassport:   passport,
 		NetworkProfile:       networkProfile,
 		ModelLeaseSummary:    modelLeaseSummary,
@@ -251,7 +272,6 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		BackendProbes:        backendProbes,
 		BackendRuntimes:      backendRuntimes,
 		CapabilityProfile:    capabilityProfile,
-		SpeculativeProfiles:  speculativeProfiles,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,

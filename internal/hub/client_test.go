@@ -251,12 +251,18 @@ func TestHeartbeatParsesVerifiedLocation(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"latest_version":      "v1.2.48",
-			"country_code":        "CA",
-			"location_approved":   true,
-			"sovereign_verified":  true,
-			"verification_source": "geoip_country_fallback",
-			"trust_reason":        "declared country matches observed network country",
+			"latest_version":         "v1.2.48",
+			"node_id":                "node-123",
+			"country_code":           "CA",
+			"location_approved":      true,
+			"sovereign_verified":     true,
+			"verification_source":    "geoip_country_fallback",
+			"trust_reason":           "declared country matches observed network country",
+			"v7_snapshot_upserted":   true,
+			"snapshot_model_count":   2,
+			"snapshot_backend_count": 1,
+			"has_capability_profile": true,
+			"hub_instance_id":        "hub-test",
 		})
 	}))
 	defer ts.Close()
@@ -271,6 +277,15 @@ func TestHeartbeatParsesVerifiedLocation(t *testing.T) {
 	}
 	if resp.CountryCode != "CA" || !resp.LocationApproved || !resp.SovereignVerified {
 		t.Fatalf("unexpected heartbeat response: %+v", resp)
+	}
+	if resp.NodeID != "node-123" ||
+		resp.V7SnapshotUpserted == nil ||
+		!*resp.V7SnapshotUpserted ||
+		resp.SnapshotModelCount != 2 ||
+		resp.SnapshotBackendCount != 1 ||
+		!resp.HasCapabilityProfile ||
+		resp.HubInstanceID != "hub-test" {
+		t.Fatalf("unexpected V7 heartbeat response summary: %+v", resp)
 	}
 }
 

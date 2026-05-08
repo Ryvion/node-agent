@@ -889,7 +889,7 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 		if err != nil {
 			slog.Warn("failed to build V7 heartbeat payload; sending legacy heartbeat", "error", err)
 			if operatorRuntimeState != nil {
-				operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, err)
+				operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, operatorHeartbeatResponseSummary{}, err)
 			}
 		} else {
 			v7Payload = payload
@@ -910,7 +910,7 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 	heartbeat, err := client.Heartbeat(ctx, heartbeatMetrics)
 	if err != nil && heartbeatMetrics.V7Heartbeat != nil {
 		if operatorRuntimeState != nil {
-			operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, err)
+			operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, operatorHeartbeatResponseSummary{}, err)
 		}
 		heartbeatMetrics.V7Heartbeat = nil
 		if retryHeartbeat, retryErr := client.Heartbeat(ctx, heartbeatMetrics); retryErr == nil {
@@ -929,7 +929,12 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.recordHeartbeat(metrics, heartbeat, nil)
 		if v7Payload != nil && heartbeatMetrics.V7Heartbeat != nil {
-			operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, nil)
+			responseSummary := summarizeHeartbeatResponse(heartbeat)
+			snapshotErr := heartbeatV7SnapshotConfirmationError(responseSummary)
+			if snapshotErr != nil {
+				responseSummary.Warning = snapshotErr.Error()
+			}
+			operatorRuntimeState.recordCapabilityHeartbeat(started, time.Now(), payloadSummary, responseSummary, snapshotErr)
 		}
 	}
 	// Store latest version for work loop update checks.
@@ -938,7 +943,7 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 	}
 	return heartbeatSendResult{
 		hubOK:               true,
-		capabilitySubmitted: v7Payload != nil && heartbeatMetrics.V7Heartbeat != nil,
+		capabilitySubmitted: v7Payload != nil && heartbeatMetrics.V7Heartbeat != nil && heartbeat.V7SnapshotUpserted != nil && *heartbeat.V7SnapshotUpserted,
 		payloadSummary:      payloadSummary,
 	}
 }
@@ -984,17 +989,9 @@ func summarizeV7HeartbeatPayload(payload *v7heartbeat.V7HeartbeatPayload) operat
 	for _, model := range payload.ModelCache.Models {
 		addModel(model.ModelID, model.Filename)
 	}
-	for _, model := range payload.RuntimeInventory.LoadedModels {
-		addModel(model.ModelID)
-	}
-	for _, model := range payload.RuntimeInventory.GGUFModels {
-		addModel(model.Filename)
-	}
 	for _, model := range payload.CapabilityProfile.Models {
 		addModel(model.ModelID)
 	}
-	addModel(payload.BackendRuntimes.LlamaCPP.ModelID, payload.BackendRuntimes.LlamaCPP.ModelFilename)
-	addModel(payload.CapabilityProfile.WarmModel.ModelID)
 
 	backends := make(map[string]struct{})
 	addBackend := func(name string, available bool) {
@@ -1041,6 +1038,26 @@ func summarizeV7HeartbeatPayload(payload *v7heartbeat.V7HeartbeatPayload) operat
 		Streaming:            payload.CapabilityProfile.Streaming,
 		WarmModelID:          firstNonEmptyString(payload.BackendRuntimes.LlamaCPP.WarmModelID, payload.CapabilityProfile.WarmModel.ModelID),
 	}
+}
+
+func summarizeHeartbeatResponse(heartbeat hub.HeartbeatResponse) operatorHeartbeatResponseSummary {
+	return operatorHeartbeatResponseSummary{
+		V7SnapshotUpserted:   heartbeat.V7SnapshotUpserted,
+		SnapshotModelCount:   heartbeat.SnapshotModelCount,
+		SnapshotBackendCount: heartbeat.SnapshotBackendCount,
+		HasCapabilityProfile: heartbeat.HasCapabilityProfile,
+		HubInstanceID:        strings.TrimSpace(heartbeat.HubInstanceID),
+	}
+}
+
+func heartbeatV7SnapshotConfirmationError(summary operatorHeartbeatResponseSummary) error {
+	if summary.V7SnapshotUpserted == nil {
+		return fmt.Errorf("v7_snapshot_upserted_missing")
+	}
+	if !*summary.V7SnapshotUpserted {
+		return fmt.Errorf("v7_snapshot_upserted_false")
+	}
+	return nil
 }
 
 func heartbeatRuntimeAvailable(runtime v7llamacpp.BackendRuntimeStatus) bool {

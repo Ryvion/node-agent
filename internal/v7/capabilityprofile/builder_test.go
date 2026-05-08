@@ -51,7 +51,10 @@ func TestBuildProfileFreshMacLlamaRunnablePhiResidentBlocked(t *testing.T) {
 	if !profile.V7DashboardInference || !profile.TextOutput || !profile.Streaming || !profile.HashMetricsReceipts || !profile.BackendTextGeneration || !profile.BackendWarm || !profile.WarmBackend || !profile.Ready {
 		t.Fatalf("profile = %+v, want default inference capability on fresh Mac with llama.cpp and cached model", profile)
 	}
-	if !profile.SpeculativeDecoding.Supported || !profile.SpeculativeDecoding.Enabled || profile.SpeculativeDecoding.DefaultMethod != "ngram" {
+	if profile.SpeculativeDecoding == nil ||
+		!profile.SpeculativeDecoding.Supported ||
+		!profile.SpeculativeDecoding.Enabled ||
+		profile.SpeculativeDecoding.DefaultMethod != "ngram" {
 		t.Fatalf("speculative_decoding = %+v, want enabled ngram support for Mac llama.cpp", profile.SpeculativeDecoding)
 	}
 	llama := modelByID(t, profile.Models, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")

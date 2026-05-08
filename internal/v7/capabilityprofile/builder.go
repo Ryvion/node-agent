@@ -82,7 +82,7 @@ func BuildProfile(input BuildInput) Profile {
 		ModelPrepare:          modelPrepare,
 		BackendTextGeneration: hardwareOK && backend.SupportsTextGeneration && inferenceEnabled,
 		BackendWarm:           backendWarm,
-		SpeculativeDecoding:   speculativeDecoding,
+		SpeculativeDecoding:   &speculativeDecoding,
 		StatefulSession:       false,
 		KVAccess:              input.KVCapability != nil && input.KVCapability.KVAccessSupported,
 		TensorHooks:           tensor.KVAccessSupported || tensor.KVSnapshotSupported || tensor.HiddenStateAccessSupported || tensor.LogitsAccessSupported || tensor.AttentionHookSupported,
@@ -119,7 +119,10 @@ func NormalizeProfile(profile Profile) Profile {
 	profile.BackendRuntime.Backend = cleanProfileText(profile.BackendRuntime.Backend, maxProfileTextRunes)
 	profile.BackendRuntime.Reason = cleanProfileText(profile.BackendRuntime.Reason, maxProfileReasonRunes)
 	profile.BackendRuntime.Acceleration = cleanProfileList(profile.BackendRuntime.Acceleration)
-	profile.SpeculativeDecoding = speculative.NormalizeCapability(profile.SpeculativeDecoding)
+	if profile.SpeculativeDecoding != nil {
+		speculativeDecoding := speculative.NormalizeCapability(*profile.SpeculativeDecoding)
+		profile.SpeculativeDecoding = &speculativeDecoding
+	}
 	profile.WarmModel.Backend = cleanProfileText(profile.WarmModel.Backend, maxProfileTextRunes)
 	profile.WarmModel.ModelID = cleanProfileText(profile.WarmModel.ModelID, maxProfileTextRunes)
 	profile.Models = normalizeModels(profile.Models)

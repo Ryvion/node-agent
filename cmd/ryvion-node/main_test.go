@@ -22,12 +22,15 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7capabilityprofile "github.com/Ryvion/node-agent/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
+	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
+	v7modelcache "github.com/Ryvion/node-agent/internal/v7/modelcache"
 	v7tensorplane "github.com/Ryvion/node-agent/internal/v7/tensorplane"
 )
 
@@ -278,10 +281,13 @@ func TestBuildOptionalV7HeartbeatPayloadDefaultsOnAndHonorsExplicitOff(t *testin
 	if !strings.Contains(string(raw), `"tensor_access"`) {
 		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
 	}
-	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"hardware_capacity"`, `"cpu_logical_cores"`, `"gpu_vram_bytes"`, `"model_policy"`, `"runtime_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"capability_profile"`, `"speculative_decoding"`, `"speculative_profiles"`, `"llama_cpp"`} {
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"hardware_capacity"`, `"cpu_logical_cores"`, `"gpu_vram_bytes"`, `"model_policy"`, `"runtime_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"capability_profile"`, `"llama_cpp"`} {
 		if !strings.Contains(string(raw), want) {
 			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
 		}
+	}
+	if strings.Contains(string(raw), `"speculative_decoding"`) || strings.Contains(string(raw), `"speculative_profiles"`) {
+		t.Fatalf("V7 heartbeat payload should omit speculative fields by default: %s", raw)
 	}
 	lower := strings.ToLower(string(raw))
 	for _, forbidden := range []string{"raw_prompt", "prompt_text", "generated_text", "model_output", "output_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "weighted_value"} {
@@ -330,13 +336,53 @@ func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
 	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
 		t.Fatalf("backend runtime should remain reporting-only without KV/tensor hooks: %+v", runtime)
 	}
-	if !payload.CapabilityProfile.SpeculativeDecoding.Supported ||
-		!payload.CapabilityProfile.SpeculativeDecoding.Enabled ||
-		payload.CapabilityProfile.SpeculativeDecoding.DefaultMethod != "ngram" {
-		t.Fatalf("speculative_decoding = %+v, want enabled ngram profile for warm llama.cpp runtime", payload.CapabilityProfile.SpeculativeDecoding)
+	if payload.CapabilityProfile.SpeculativeDecoding != nil {
+		t.Fatalf("speculative_decoding = %+v, want omitted from heartbeat by default", payload.CapabilityProfile.SpeculativeDecoding)
 	}
-	if len(payload.SpeculativeProfiles) == 0 {
-		t.Fatalf("speculative_profiles empty, want compact heartbeat summary for warm llama.cpp runtime")
+	if len(payload.SpeculativeProfiles) != 0 {
+		t.Fatalf("speculative_profiles = %+v, want omitted from heartbeat", payload.SpeculativeProfiles)
+	}
+}
+
+func TestSummarizeV7HeartbeatPayloadCountsOnlyRealInventoryModels(t *testing.T) {
+	payload := &v7heartbeat.V7HeartbeatPayload{
+		ModelCache: v7modelcache.Status{
+			Models: []v7modelcache.Model{
+				{ModelID: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", Filename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
+				{ModelID: "phi-4-Q5_K_M.gguf", Filename: "phi-4-Q5_K_M.gguf"},
+			},
+		},
+		CapabilityProfile: v7capabilityprofile.Profile{
+			SchemaVersion: "v7.capability-profile.v1",
+			TextOutput:    true,
+			Streaming:     true,
+			WarmModel: v7capabilityprofile.WarmModelSummary{
+				ModelID: "draft-profile-placeholder",
+				Warm:    true,
+			},
+			Models: []v7capabilityprofile.ModelCapability{
+				{ModelID: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", Resident: true, Warm: true, Runnable: true},
+				{ModelID: "phi-4-Q5_K_M.gguf", Resident: true, Runnable: false, BlockedReasons: []string{"family_denied"}},
+			},
+		},
+		BackendRuntimes: v7llamacpp.BackendRuntimes{
+			LlamaCPP: v7llamacpp.BackendRuntimeStatus{
+				Backend:       v7llamacpp.BackendName,
+				Available:     true,
+				ModelID:       "draft-profile-placeholder",
+				ModelFilename: "draft-profile-placeholder.gguf",
+				WarmModelID:   "mtp-head-placeholder",
+				Warm:          true,
+			},
+		},
+	}
+
+	summary := summarizeV7HeartbeatPayload(payload)
+	if summary.ModelCount != 2 {
+		t.Fatalf("model_count = %d, want only real model_cache/capability_profile models", summary.ModelCount)
+	}
+	if !summary.HasCapabilityProfile || !summary.TextOutput || !summary.Streaming {
+		t.Fatalf("payload summary lost base capability fields: %+v", summary)
 	}
 }
 
@@ -389,10 +435,11 @@ func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *
 		!strings.Contains(string(raw), `"runtime_policy"`) ||
 		!strings.Contains(string(raw), `"model_cache"`) ||
 		!strings.Contains(string(raw), `"backend_probes"`) ||
-		!strings.Contains(string(raw), `"speculative_decoding"`) ||
-		!strings.Contains(string(raw), `"speculative_profiles"`) ||
 		!strings.Contains(string(raw), `"llama_cpp"`) {
 		t.Fatalf("V7 heartbeat payload missing runtime inventory fields: %s", raw)
+	}
+	if strings.Contains(string(raw), `"speculative_decoding"`) || strings.Contains(string(raw), `"speculative_profiles"`) {
+		t.Fatalf("V7 heartbeat payload should omit speculative fields by default: %s", raw)
 	}
 }
 
@@ -508,6 +555,16 @@ func TestSendHeartbeatRecordsCapabilityHeartbeatStatus(t *testing.T) {
 		summary.WarmModelID != "tinyllama.Q4_K_M.gguf" {
 		t.Fatalf("payload summary = %+v, want compact active llama.cpp capability summary", summary)
 	}
+	responseSummary := status.LastResponseSummary
+	if responseSummary.V7SnapshotUpserted == nil ||
+		!*responseSummary.V7SnapshotUpserted ||
+		responseSummary.SnapshotModelCount != 1 ||
+		responseSummary.SnapshotBackendCount != 1 ||
+		!responseSummary.HasCapabilityProfile ||
+		responseSummary.HubInstanceID != "test-hub" ||
+		responseSummary.Warning != "" {
+		t.Fatalf("response summary = %+v, want confirmed V7 snapshot", responseSummary)
+	}
 	raw, err := json.Marshal(status)
 	if err != nil {
 		t.Fatalf("json.Marshal(status) error = %v", err)
@@ -517,6 +574,66 @@ func TestSendHeartbeatRecordsCapabilityHeartbeatStatus(t *testing.T) {
 		if strings.Contains(lower, forbidden) {
 			t.Fatalf("heartbeat status contains forbidden marker %q: %s", forbidden, raw)
 		}
+	}
+}
+
+func TestSendHeartbeatWarnsWhenV7SnapshotNotConfirmed(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			V7 json.RawMessage `json:"v7"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.V7) == 0 {
+			t.Error("heartbeat missing V7 payload")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+	defer ts.Close()
+	client := hub.New(ts.URL, pub, priv)
+	prevState := operatorRuntimeState
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       ts.URL,
+		deviceType:   "cpu",
+		publicKeyHex: client.PublicKeyHex(),
+		caps:         validHeartbeatCaps(),
+	}
+	operatorRuntimeState = state
+	t.Cleanup(func() { operatorRuntimeState = prevState })
+
+	result := sendHeartbeatDetailed(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
+	if !result.hubOK {
+		t.Fatal("hubOK = false, want HTTP heartbeat liveness success")
+	}
+	if result.capabilitySubmitted {
+		t.Fatal("capabilitySubmitted = true, want unconfirmed V7 snapshot treated as not confirmed")
+	}
+	status := state.statusSnapshot(defaultOperatorAPIPort).Heartbeat
+	if status.SuccessCount != 0 || status.FailedCount != 1 || status.LastError != "v7_snapshot_upserted_missing" {
+		t.Fatalf("heartbeat status = %+v, want V7 snapshot warning", status)
+	}
+	if status.LastResponseSummary.V7SnapshotUpserted != nil ||
+		status.LastResponseSummary.Warning != "v7_snapshot_upserted_missing" {
+		t.Fatalf("response summary = %+v, want missing snapshot warning", status.LastResponseSummary)
+	}
+	if state.statusSnapshot(defaultOperatorAPIPort).LastHeartbeatAt.IsZero() {
+		t.Fatal("heartbeat liveness should still be recorded after HTTP 200")
 	}
 }
 
@@ -634,6 +751,16 @@ func heartbeatTestClient(t *testing.T) (*hub.Client, *atomic.Bool, *atomic.Int32
 			return
 		}
 		gotV7.Store(len(req.V7) > 0)
+		if len(req.V7) > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"v7_snapshot_upserted":   true,
+				"snapshot_model_count":   1,
+				"snapshot_backend_count": 1,
+				"has_capability_profile": true,
+				"hub_instance_id":        "test-hub",
+			})
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(ts.Close)

@@ -783,12 +783,18 @@ type AgentHealthResponse struct {
 }
 
 type HeartbeatResponse struct {
-	LatestVersion      string `json:"latest_version,omitempty"`
-	CountryCode        string `json:"country_code,omitempty"`
-	LocationApproved   bool   `json:"location_approved,omitempty"`
-	SovereignVerified  bool   `json:"sovereign_verified,omitempty"`
-	VerificationSource string `json:"verification_source,omitempty"`
-	TrustReason        string `json:"trust_reason,omitempty"`
+	LatestVersion        string `json:"latest_version,omitempty"`
+	NodeID               string `json:"node_id,omitempty"`
+	CountryCode          string `json:"country_code,omitempty"`
+	LocationApproved     bool   `json:"location_approved,omitempty"`
+	SovereignVerified    bool   `json:"sovereign_verified,omitempty"`
+	VerificationSource   string `json:"verification_source,omitempty"`
+	TrustReason          string `json:"trust_reason,omitempty"`
+	V7SnapshotUpserted   *bool  `json:"v7_snapshot_upserted"`
+	SnapshotModelCount   int    `json:"snapshot_model_count"`
+	SnapshotBackendCount int    `json:"snapshot_backend_count"`
+	HasCapabilityProfile bool   `json:"has_capability_profile"`
+	HubInstanceID        string `json:"hub_instance_id,omitempty"`
 }
 
 type UploadToken struct {
