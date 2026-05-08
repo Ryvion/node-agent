@@ -389,6 +389,7 @@ func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 			SupportsTextGeneration: status.SupportsTextGeneration,
 			SupportsStreaming:      status.SupportsStreaming,
 			Acceleration:           []string{"cpu"},
+			GPUArchitecture:        gpuArchitectureFromHardware(v7hardware.CapacityInventory{}),
 			SupportsKVAccess:       status.SupportsKVAccess,
 			SupportsTensorHooks:    status.SupportsTensorHooks,
 			LastHealthAtUnixMs:     unixMilliOrZero(status.LastHealthAt),
@@ -406,6 +407,8 @@ func EnrichBackendRuntimes(runtimes BackendRuntimes, inventory runtimeinventory.
 	hardware = v7hardware.NormalizeInventory(hardware)
 	runtimes = NormalizeBackendRuntimes(runtimes)
 	runtimes.LlamaCPP.Acceleration = mergeAcceleration(runtimes.LlamaCPP.Acceleration, accelerationFromHardware(hardware))
+	runtimes.LlamaCPP.GPUArchitecture = firstNonEmptyRuntimeText(runtimes.LlamaCPP.GPUArchitecture, gpuArchitectureFromHardware(hardware))
+	runtimes.LlamaCPP.GPUComputeCapability = firstNonEmptyRuntimeText(runtimes.LlamaCPP.GPUComputeCapability, hardware.ComputeCapability)
 	for _, candidate := range inventory.BackendCandidates {
 		runtime := runtimeFromBackendCandidate(candidate, hardware)
 		switch candidate.Backend {
@@ -452,6 +455,9 @@ func normalizeBackendRuntimeStatus(llama BackendRuntimeStatus, defaultBackend st
 	llama.WarmModelID = cleanRuntimePath(llama.WarmModelID)
 	llama.ModelFamilyHint = cleanRuntimeCompactText(llama.ModelFamilyHint, 64)
 	llama.QuantizationHint = cleanRuntimeCompactText(llama.QuantizationHint, 64)
+	llama.GPUArchitecture = cleanRuntimeCompactText(llama.GPUArchitecture, 64)
+	llama.GPUComputeCapability = cleanRuntimeCompactText(llama.GPUComputeCapability, 64)
+	llama.OptimizationCapabilities = normalizeOptimizationCapabilities(llama.OptimizationCapabilities, llama.Backend, llama.GPUArchitecture)
 	llama.LastError = cleanStatusText(llama.LastError, maxStatusReasonLen)
 	llama.Acceleration = normalizeAcceleration(llama.Acceleration)
 	if llama.MaxContextTokens < 0 {
@@ -531,6 +537,9 @@ func runtimeFromBackendCandidate(candidate runtimeinventory.BackendCandidate, ha
 		Backend:                  candidate.Backend,
 		BaseURL:                  "",
 		Acceleration:             acceleration,
+		GPUArchitecture:          gpuArchitectureFromHardware(hardware),
+		GPUComputeCapability:     hardware.ComputeCapability,
+		OptimizationCapabilities: optimizationCapabilitiesForBackend(candidate.Backend, hardware),
 		OpenAICompatible:         candidate.SupportsOpenAICompatibleServer,
 		SupportsTextGeneration:   candidate.SupportsTextGeneration,
 		SupportsStreaming:        candidate.SupportsStreaming,
@@ -550,6 +559,9 @@ func mergeDetectedRuntime(active BackendRuntimeStatus, detected BackendRuntimeSt
 	active.Enabled = active.Enabled || detected.Enabled
 	active.Available = active.Available || detected.Available
 	active.Acceleration = mergeAcceleration(active.Acceleration, detected.Acceleration)
+	active.GPUArchitecture = firstNonEmptyRuntimeText(active.GPUArchitecture, detected.GPUArchitecture)
+	active.GPUComputeCapability = firstNonEmptyRuntimeText(active.GPUComputeCapability, detected.GPUComputeCapability)
+	active.OptimizationCapabilities = normalizeOptimizationCapabilities(append(active.OptimizationCapabilities, detected.OptimizationCapabilities...), active.Backend, active.GPUArchitecture)
 	active.OpenAICompatible = active.OpenAICompatible || detected.OpenAICompatible
 	active.SupportsTextGeneration = active.SupportsTextGeneration || detected.SupportsTextGeneration
 	active.SupportsStreaming = active.SupportsStreaming || detected.SupportsStreaming
@@ -626,6 +638,146 @@ func normalizeAcceleration(values []string) []string {
 		return []string{}
 	}
 	return out
+}
+
+func normalizeOptimizationCapabilities(capabilities []OptimizationCapability, backend string, gpuArchitecture string) []OptimizationCapability {
+	if len(capabilities) == 0 {
+		return []OptimizationCapability{}
+	}
+	backend = cleanRuntimeCompactText(firstNonEmptyRuntimeText(backend, BackendName), 64)
+	gpuArchitecture = cleanRuntimeCompactText(gpuArchitecture, 64)
+	seen := map[string]struct{}{}
+	out := make([]OptimizationCapability, 0, min(len(capabilities), 16))
+	for _, capability := range capabilities {
+		capability.Name = normalizeOptimizationName(capability.Name)
+		if capability.Name == "" {
+			continue
+		}
+		capability.Backend = cleanRuntimeCompactText(firstNonEmptyRuntimeText(capability.Backend, backend), 64)
+		capability.RequiresAttention = cleanRuntimeCompactText(capability.RequiresAttention, 64)
+		capability.RequiresGPUArch = cleanRuntimeCompactText(capability.RequiresGPUArch, 64)
+		capability.Notes = cleanRuntimeCompactText(capability.Notes, 256)
+		if capability.ContextMinTokens < 0 {
+			capability.ContextMinTokens = 0
+		}
+		if capability.Name == "gvr_topk" && !gpuArchitectureSatisfiesRequirement(gpuArchitecture, capability.RequiresGPUArch) {
+			capability.Supported = false
+			capability.Enabled = false
+		}
+		key := capability.Name + "\x00" + capability.Backend + "\x00" + capability.RequiresAttention + "\x00" + capability.RequiresGPUArch
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, capability)
+		if len(out) >= 16 {
+			break
+		}
+	}
+	if out == nil {
+		return []OptimizationCapability{}
+	}
+	return out
+}
+
+func optimizationCapabilitiesForBackend(backend string, hardware v7hardware.CapacityInventory) []OptimizationCapability {
+	hardware = v7hardware.NormalizeInventory(hardware)
+	gpuArchitecture := gpuArchitectureFromHardware(hardware)
+	switch backend {
+	case runtimeinventory.BackendCandidateTensorRTLLM:
+		supported := gpuArchitectureSatisfiesRequirement(gpuArchitecture, "blackwell_sm100_plus")
+		return normalizeOptimizationCapabilities([]OptimizationCapability{{
+			Name:              "gvr_topk",
+			Supported:         supported,
+			Enabled:           supported,
+			Backend:           runtimeinventory.BackendCandidateTensorRTLLM,
+			RequiresAttention: "deepseek_sparse_attention",
+			RequiresGPUArch:   "blackwell_sm100_plus",
+			ContextMinTokens:  16384,
+			Notes:             "Optional optimization; not required for general inference.",
+		}}, backend, gpuArchitecture)
+	default:
+		return []OptimizationCapability{}
+	}
+}
+
+func normalizeOptimizationName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	switch value {
+	case "gvr_topk",
+		"speculative_decode",
+		"flash_attention",
+		"paged_attention",
+		"sparse_attention",
+		"kv_cache_quantization":
+		return value
+	default:
+		return ""
+	}
+}
+
+func gpuArchitectureFromHardware(hardware v7hardware.CapacityInventory) string {
+	hardware = v7hardware.NormalizeInventory(hardware)
+	switch hardware.GPUVendor {
+	case v7hardware.GPUVendorApple:
+		if hardware.MetalAvailable {
+			return "apple_metal"
+		}
+	case v7hardware.GPUVendorNVIDIA:
+		return nvidiaArchitectureFromComputeCapability(hardware.ComputeCapability)
+	case v7hardware.GPUVendorAMD:
+		if hardware.VulkanAvailable {
+			return "amd_vulkan"
+		}
+	}
+	return ""
+}
+
+func nvidiaArchitectureFromComputeCapability(computeCapability string) string {
+	computeCapability = strings.TrimSpace(computeCapability)
+	major, minor := parseComputeCapability(computeCapability)
+	switch {
+	case major >= 10:
+		return "blackwell_sm100_plus"
+	case major == 9:
+		return "hopper_sm90"
+	case major == 8 && minor >= 9:
+		return "ada_sm89"
+	case major == 8:
+		return "ampere_sm80"
+	case major == 7:
+		return "turing_sm75"
+	default:
+		return ""
+	}
+}
+
+func gpuArchitectureSatisfiesRequirement(gpuArchitecture string, required string) bool {
+	gpuArchitecture = strings.ToLower(strings.TrimSpace(gpuArchitecture))
+	required = strings.ToLower(strings.TrimSpace(required))
+	if required == "" {
+		return true
+	}
+	if gpuArchitecture == required {
+		return true
+	}
+	return required == "blackwell_sm100_plus" && gpuArchitecture == "blackwell_sm100_plus"
+}
+
+func parseComputeCapability(computeCapability string) (int, int) {
+	computeCapability = strings.TrimSpace(computeCapability)
+	if computeCapability == "" {
+		return 0, 0
+	}
+	parts := strings.SplitN(computeCapability, ".", 3)
+	major, _ := strconv.Atoi(parts[0])
+	minor := 0
+	if len(parts) > 1 {
+		minor, _ = strconv.Atoi(parts[1])
+	}
+	return major, minor
 }
 
 func normalizeRuntimeHealth(runtime BackendRuntimeStatus) string {

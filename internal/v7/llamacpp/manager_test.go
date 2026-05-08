@@ -15,6 +15,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
+	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 )
 
 func TestConfigFromEnv(t *testing.T) {
@@ -380,6 +383,69 @@ func TestNormalizeBackendRuntimesSanitizesUnsafeFields(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("backend runtime JSON contains forbidden marker %q: %s", forbidden, raw)
 		}
+	}
+}
+
+func TestEnrichBackendRuntimesRepresentsBlackwellGVRCapability(t *testing.T) {
+	t.Parallel()
+
+	runtimes := EnrichBackendRuntimes(BackendRuntimes{}, runtimeinventory.Inventory{
+		BackendCandidates: []runtimeinventory.BackendCandidate{{
+			Backend:                        runtimeinventory.BackendCandidateTensorRTLLM,
+			Detected:                       true,
+			SupportsTextGeneration:         true,
+			SupportsOpenAICompatibleServer: true,
+			SupportsStreaming:              true,
+		}},
+	}, v7hardware.CapacityInventory{
+		GPUDetected:       true,
+		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUName:           "NVIDIA B200",
+		CUDAAvailable:     true,
+		ComputeCapability: "10.0",
+	})
+
+	runtime := runtimes.TensorRTLLM
+	if runtime.GPUArchitecture != "blackwell_sm100_plus" || runtime.GPUComputeCapability != "10.0" {
+		t.Fatalf("gpu metadata = %q/%q, want blackwell_sm100_plus/10.0", runtime.GPUArchitecture, runtime.GPUComputeCapability)
+	}
+	if len(runtime.OptimizationCapabilities) != 1 ||
+		runtime.OptimizationCapabilities[0].Name != "gvr_topk" ||
+		!runtime.OptimizationCapabilities[0].Supported ||
+		!runtime.OptimizationCapabilities[0].Enabled ||
+		runtime.OptimizationCapabilities[0].RequiresAttention != "deepseek_sparse_attention" ||
+		runtime.OptimizationCapabilities[0].RequiresGPUArch != "blackwell_sm100_plus" ||
+		runtime.OptimizationCapabilities[0].ContextMinTokens != 16384 {
+		t.Fatalf("optimization_capabilities = %#v, want enabled gvr_topk", runtime.OptimizationCapabilities)
+	}
+}
+
+func TestEnrichBackendRuntimesDoesNotFalselyClaimGVRForNonBlackwellRTX(t *testing.T) {
+	t.Parallel()
+
+	runtimes := EnrichBackendRuntimes(BackendRuntimes{}, runtimeinventory.Inventory{
+		BackendCandidates: []runtimeinventory.BackendCandidate{{
+			Backend:                runtimeinventory.BackendCandidateTensorRTLLM,
+			Detected:               true,
+			SupportsTextGeneration: true,
+		}},
+	}, v7hardware.CapacityInventory{
+		GPUDetected:       true,
+		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUName:           "NVIDIA GeForce RTX 4090",
+		CUDAAvailable:     true,
+		ComputeCapability: "8.9",
+	})
+
+	caps := runtimes.TensorRTLLM.OptimizationCapabilities
+	if len(caps) != 1 || caps[0].Name != "gvr_topk" {
+		t.Fatalf("optimization_capabilities = %#v, want represented gvr_topk capability row", caps)
+	}
+	if caps[0].Supported || caps[0].Enabled {
+		t.Fatalf("non-Blackwell RTX should not claim enabled GVR: %#v", caps[0])
+	}
+	if runtimes.LlamaCPP.OptimizationCapabilities != nil && len(runtimes.LlamaCPP.OptimizationCapabilities) != 0 {
+		t.Fatalf("llama.cpp should not inherit TensorRT-only GVR capability: %#v", runtimes.LlamaCPP.OptimizationCapabilities)
 	}
 }
 
