@@ -19,6 +19,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hub"
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
@@ -1120,6 +1121,47 @@ func TestOperatorStatusSnapshotIncludesV7InferenceBenchmarkStatus(t *testing.T) 
 	}
 	if !strings.Contains(string(encoded), `"v7_inference_benchmark"`) {
 		t.Fatalf("status JSON missing v7_inference_benchmark: %s", encoded)
+	}
+}
+
+func TestOperatorStatusSnapshotIncludesV7DashboardInferenceStatus(t *testing.T) {
+	t.Parallel()
+
+	dashboardStatus := v7dashboardinference.NewLocalStatus()
+	dashboardStatus.RecordSeen("run-dashboard-1", "job-dashboard-1")
+	dashboardStatus.RecordExecuted("run-dashboard-1", "job-dashboard-1")
+	dashboardStatus.RecordReceiptSubmitted("run-dashboard-1", "job-dashboard-1")
+
+	state := &operatorRuntime{
+		version:              "dev",
+		hubURL:               "https://api.ryvion.ai",
+		deviceType:           "gpu",
+		publicKeyHex:         "abc123",
+		v7DashboardInference: dashboardStatus,
+	}
+
+	status := state.statusSnapshot("45890")
+	if status.V7DashboardInference.LastRunID != "run-dashboard-1" || status.V7DashboardInference.LastJobID != "job-dashboard-1" {
+		t.Fatalf("v7 dashboard inference status = %+v", status.V7DashboardInference)
+	}
+	if status.V7DashboardInference.LastError != "" {
+		t.Fatalf("v7 dashboard inference last_error = %q, want empty", status.V7DashboardInference.LastError)
+	}
+	if status.V7DashboardInference.Counters.Seen != 1 || status.V7DashboardInference.Counters.Executed != 1 || status.V7DashboardInference.Counters.ReceiptSubmitted != 1 {
+		t.Fatalf("unexpected v7 dashboard inference counters: %+v", status.V7DashboardInference.Counters)
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal(status) error = %v", err)
+	}
+	text := string(encoded)
+	if !strings.Contains(text, `"v7_dashboard_inference"`) {
+		t.Fatalf("status JSON missing v7_dashboard_inference: %s", encoded)
+	}
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "output_text", "generated_text", "raw_output", "completion"} {
+		if strings.Contains(strings.ToLower(text), forbidden) {
+			t.Fatalf("status JSON leaked forbidden dashboard inference field %q: %s", forbidden, encoded)
+		}
 	}
 }
 

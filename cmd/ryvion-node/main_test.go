@@ -1980,6 +1980,129 @@ func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T)
 	}
 }
 
+func TestProcessOptionalV7DashboardInferenceRecordsRejectedCounter(t *testing.T) {
+	t.Setenv(v7dashboardinference.FlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := v7dashboardinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(v7dashboardinference.ProofStatusRejected)}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceSpecJSON(t),
+	}, nil, true)
+	if err == nil {
+		t.Fatal("processOptionalV7DashboardInference() error = nil, want safe rejection error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ExitCode != 1 {
+		t.Fatalf("result = %+v, want rejected dashboard inference receipt snapshot", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.LastRunID != "dashboardinfer_run" || snapshot.LastJobID != "v7dashboardinfer_job" {
+		t.Fatalf("unexpected dashboard inference status: %+v", snapshot)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 0 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 || snapshot.Counters.Rejected != 1 {
+		t.Fatalf("unexpected dashboard inference counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7DashboardInferenceRecordsReceiptFailureCounter(t *testing.T) {
+	t.Setenv(v7dashboardinference.FlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := v7dashboardinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(v7dashboardinference.ProofStatusMeasured)}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceSpecJSON(t),
+	}, nil, true)
+	if err == nil {
+		t.Fatal("processOptionalV7DashboardInference() error = nil, want submit error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want measured dashboard inference receipt snapshot despite submit error", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.LastRunID != "dashboardinfer_run" || snapshot.LastJobID != "v7dashboardinfer_job" {
+		t.Fatalf("unexpected dashboard inference status: %+v", snapshot)
+	}
+	if snapshot.LastError == "" {
+		t.Fatalf("last_error not recorded: %+v", snapshot)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 0 || snapshot.Counters.ReceiptFailed != 1 || snapshot.Counters.Rejected != 0 {
+		t.Fatalf("unexpected dashboard inference counters: %+v", snapshot.Counters)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.ReceiptSubmittedCount != 0 || workSnapshot.ReceiptFailedCount != 1 {
+		t.Fatalf("unexpected work-loop receipt counters: %+v", workSnapshot)
+	}
+}
+
 func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
 	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "1")
 	oldStatus := v7BackendBenchmarkStatus
