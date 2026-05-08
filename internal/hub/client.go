@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/hw"
+	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 )
 
@@ -550,6 +551,28 @@ func (c *Client) StreamInference(ctx context.Context, jobID string, body io.Read
 	return nil
 }
 
+func (c *Client) SendDashboardInferenceProgress(ctx context.Context, batch v7dashboardinference.ProgressBatch) error {
+	if len(batch.Chunks) == 0 {
+		return nil
+	}
+	pubHex := c.pubHex()
+	nodeID := strings.TrimSpace(batch.NodeID)
+	if nodeID == "" {
+		nodeID = pubHex
+	}
+	body := dashboardInferenceProgressRequest{
+		RunID:        strings.TrimSpace(batch.RunID),
+		JobID:        strings.TrimSpace(batch.JobID),
+		NodeID:       nodeID,
+		PublicKeyHex: pubHex,
+		SeqStart:     batch.SeqStart,
+		Chunks:       append([]v7dashboardinference.ProgressChunk(nil), batch.Chunks...),
+	}
+	return c.postWithHeaders(ctx, "/api/v1/node/inference/chunks", body, nil, map[string]string{
+		"X-Node-Pubkey": pubHex,
+	})
+}
+
 func (c *Client) SignDigest(digest []byte) []byte {
 	if len(digest) == 0 {
 		return nil
@@ -829,6 +852,15 @@ type receiptRequest struct {
 	MeteringUnits uint64         `json:"metering_units"`
 	Signature     []byte         `json:"signature"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
+}
+
+type dashboardInferenceProgressRequest struct {
+	RunID        string                               `json:"run_id,omitempty"`
+	JobID        string                               `json:"job_id,omitempty"`
+	NodeID       string                               `json:"node_id,omitempty"`
+	PublicKeyHex string                               `json:"public_key_hex,omitempty"`
+	SeqStart     int64                                `json:"seq_start"`
+	Chunks       []v7dashboardinference.ProgressChunk `json:"chunks"`
 }
 
 type payoutRequest struct {

@@ -36,6 +36,7 @@ func TestOpenAIClientStreamingChunksComputeTimings(t *testing.T) {
 	}))
 	defer server.Close()
 
+	var deltas []string
 	result, err := (OpenAIClient{HTTPClient: server.Client(), Now: clock.Now}).Complete(context.Background(), CompletionRequest{
 		BaseURL:     server.URL,
 		ModelID:     "tinyllama.Q4_K_M.gguf",
@@ -43,12 +44,19 @@ func TestOpenAIClientStreamingChunksComputeTimings(t *testing.T) {
 		MaxTokens:   8,
 		Temperature: 0,
 		Stream:      true,
+		OnDelta: func(delta CompletionDelta) error {
+			deltas = append(deltas, delta.Text)
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
 	if string(result.Output) != "hello world" {
 		t.Fatalf("output = %q, want hello world", result.Output)
+	}
+	if strings.Join(deltas, "") != "hello world" || len(deltas) != 2 {
+		t.Fatalf("deltas = %+v, want streamed text fragments", deltas)
 	}
 	if result.TTFTMs != 125 || result.TotalTimeMs != 925 {
 		t.Fatalf("timings = ttft %d total %d, want 125/925", result.TTFTMs, result.TotalTimeMs)

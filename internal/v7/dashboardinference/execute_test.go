@@ -30,6 +30,7 @@ func (f *fakeSidecar) Status(context.Context) llamacpp.LlamaCppSidecarStatus {
 type fakeCompletionClient struct {
 	result llamacpp.CompletionResult
 	err    error
+	deltas []string
 	reqs   []llamacpp.CompletionRequest
 }
 
@@ -38,7 +39,28 @@ func (f *fakeCompletionClient) Complete(_ context.Context, req llamacpp.Completi
 	if f.err != nil {
 		return llamacpp.CompletionResult{}, f.err
 	}
+	for _, delta := range f.deltas {
+		if req.OnDelta == nil {
+			continue
+		}
+		if err := req.OnDelta(llamacpp.CompletionDelta{Text: delta}); err != nil {
+			return llamacpp.CompletionResult{}, err
+		}
+	}
 	return f.result, nil
+}
+
+type fakeProgressSender struct {
+	err     error
+	batches []ProgressBatch
+}
+
+func (f *fakeProgressSender) SendDashboardInferenceProgress(_ context.Context, batch ProgressBatch) error {
+	f.batches = append(f.batches, batch)
+	if f.err != nil {
+		return f.err
+	}
+	return nil
 }
 
 func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T) {
@@ -70,8 +92,8 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	if len(client.reqs) != 1 {
 		t.Fatalf("client calls = %d, want 1", len(client.reqs))
 	}
-	if !client.reqs[0].Stream {
-		t.Fatal("completion request stream = false, want true")
+	if client.reqs[0].Stream {
+		t.Fatal("completion request stream = true without return_text/text/stream flags, want false")
 	}
 	if client.reqs[0].ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
 		t.Fatalf("completion model = %q", client.reqs[0].ModelID)
@@ -226,6 +248,161 @@ func TestExecuteAssignmentReturnTextFlagEnabledIncludesGeneratedText(t *testing.
 	}
 }
 
+func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
+	output := "Ryvion routes tokens"
+	client := &fakeCompletionClient{
+		result: llamacpp.CompletionResult{
+			Output:          []byte(output),
+			OutputBytes:     int64(len(output)),
+			TokensGenerated: 3,
+			TTFTMs:          90,
+			TotalTimeMs:     390,
+		},
+		deltas: []string{"Ryvion", " routes", " tokens"},
+	}
+	progress := &fakeProgressSender{}
+	spec := validSpec(t)
+	spec.Prompt = "Write a short dashboard sentence."
+	spec.ReturnText = true
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+		Client:  client,
+		Getenv:  getenvTextAndStreamingEnabled,
+	}
+	result, err := runner.RunDashboardInferenceWithProgress(context.Background(), spec, progress)
+	if err != nil {
+		t.Fatalf("RunDashboardInferenceWithProgress() error = %v", err)
+	}
+	if len(client.reqs) != 1 || !client.reqs[0].Stream {
+		t.Fatalf("stream requests = %+v, want one streaming request", client.reqs)
+	}
+	if result.ProofStatus != ProofStatusMeasured || result.GeneratedText != output {
+		t.Fatalf("result = %+v, want measured generated text", result)
+	}
+	if len(progress.batches) != 1 {
+		t.Fatalf("progress batches = %d, want 1", len(progress.batches))
+	}
+	batch := progress.batches[0]
+	if batch.RunID != spec.RunID || batch.JobID != spec.JobID || batch.NodeID != spec.TargetNodeID || batch.SeqStart != 1 {
+		t.Fatalf("batch identity = %+v", batch)
+	}
+	if len(batch.Chunks) != 3 {
+		t.Fatalf("batch chunks = %+v, want 3", batch.Chunks)
+	}
+	for idx, chunk := range batch.Chunks {
+		wantSeq := int64(idx + 1)
+		if chunk.Seq != wantSeq || chunk.Type != "delta" {
+			t.Fatalf("chunk[%d] = %+v, want seq %d delta", idx, chunk, wantSeq)
+		}
+	}
+	if got := batch.Chunks[0].Text + batch.Chunks[1].Text + batch.Chunks[2].Text; got != output {
+		t.Fatalf("concatenated chunks = %q, want %q", got, output)
+	}
+}
+
+func TestLlamaCppRunnerDoesNotPostChunksWhenStreamingFlagDisabled(t *testing.T) {
+	client := &fakeCompletionClient{
+		result: llamacpp.CompletionResult{
+			Output:          []byte("non streaming output"),
+			OutputBytes:     int64(len("non streaming output")),
+			TokensGenerated: 3,
+			TTFTMs:          300,
+			TotalTimeMs:     300,
+		},
+		deltas: []string{"should not post"},
+	}
+	progress := &fakeProgressSender{}
+	spec := validSpec(t)
+	spec.Prompt = "Write a short dashboard sentence."
+	spec.ReturnText = true
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+		Client:  client,
+		Getenv:  getenvTextOutputEnabled,
+	}
+	result, err := runner.RunDashboardInferenceWithProgress(context.Background(), spec, progress)
+	if err != nil {
+		t.Fatalf("RunDashboardInferenceWithProgress() error = %v", err)
+	}
+	if len(client.reqs) != 1 || client.reqs[0].Stream {
+		t.Fatalf("stream requests = %+v, want one non-streaming request", client.reqs)
+	}
+	if len(progress.batches) != 0 {
+		t.Fatalf("progress batches = %+v, want none", progress.batches)
+	}
+	if result.ProofStatus != ProofStatusMeasured {
+		t.Fatalf("result = %+v, want measured result", result)
+	}
+}
+
+func TestLlamaCppRunnerDoesNotPostChunksWhenSpecStreamFalse(t *testing.T) {
+	client := &fakeCompletionClient{
+		result: llamacpp.CompletionResult{
+			Output:          []byte("non streaming output"),
+			OutputBytes:     int64(len("non streaming output")),
+			TokensGenerated: 3,
+			TTFTMs:          300,
+			TotalTimeMs:     300,
+		},
+		deltas: []string{"should not post"},
+	}
+	progress := &fakeProgressSender{}
+	spec := validSpec(t)
+	spec.Prompt = "Write a short dashboard sentence."
+	spec.ReturnText = true
+	spec.Stream = false
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+		Client:  client,
+		Getenv:  getenvTextAndStreamingEnabled,
+	}
+	result, err := runner.RunDashboardInferenceWithProgress(context.Background(), spec, progress)
+	if err != nil {
+		t.Fatalf("RunDashboardInferenceWithProgress() error = %v", err)
+	}
+	if len(client.reqs) != 1 || client.reqs[0].Stream {
+		t.Fatalf("stream requests = %+v, want one non-streaming request", client.reqs)
+	}
+	if len(progress.batches) != 0 {
+		t.Fatalf("progress batches = %+v, want none", progress.batches)
+	}
+	if result.ProofStatus != ProofStatusMeasured {
+		t.Fatalf("result = %+v, want measured result", result)
+	}
+}
+
+func TestLlamaCppRunnerProgressFailureReturnsSafeRejection(t *testing.T) {
+	client := &fakeCompletionClient{
+		result: llamacpp.CompletionResult{
+			Output:          []byte("private streamed output"),
+			OutputBytes:     int64(len("private streamed output")),
+			TokensGenerated: 3,
+			TTFTMs:          40,
+			TotalTimeMs:     240,
+		},
+		deltas: []string{"private", " streamed", " output"},
+	}
+	progress := &fakeProgressSender{err: errors.New("secret private streamed output")}
+	spec := validSpec(t)
+	spec.Prompt = "private prompt"
+	spec.ReturnText = true
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+		Client:  client,
+		Getenv:  getenvTextAndStreamingEnabled,
+	}
+	result, err := runner.RunDashboardInferenceWithProgress(context.Background(), spec, progress)
+	if err != nil {
+		t.Fatalf("RunDashboardInferenceWithProgress() error = %v", err)
+	}
+	if result.ProofStatus != ProofStatusRejected || result.ErrorCode != "dashboard_inference_stream_progress_failed" {
+		t.Fatalf("result = %+v, want safe progress rejection", result)
+	}
+	if strings.Contains(result.ErrorCode, "private") || strings.Contains(result.GeneratedText, "private") {
+		t.Fatalf("result leaked private text: %+v", result)
+	}
+}
+
 func TestExecuteAssignmentReturnTextTruncatesDeterministically(t *testing.T) {
 	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
 		Output:          []byte("abcdef"),
@@ -325,9 +502,13 @@ func TestLlamaCppRunnerRejectsPhi4WhenRuntimePolicyBlocksFamily(t *testing.T) {
 	client := &fakeCompletionClient{result: llamacpp.CompletionResult{Output: []byte("should not run")}}
 	spec := validSpec(t)
 	spec.ModelID = "phi-4-Q4_K_M.gguf"
+	spec.Prompt = "Write a short dashboard sentence."
+	spec.ReturnText = true
+	progress := &fakeProgressSender{}
 	runner := LlamaCppRunner{
 		Sidecar: &fakeSidecar{status: status},
 		Client:  client,
+		Getenv:  getenvTextAndStreamingEnabled,
 		Policy: modelpolicy.Policy{
 			CacheDir:            "/models",
 			MaxSingleModelBytes: 8 * 1024 * 1024 * 1024,
@@ -343,7 +524,7 @@ func TestLlamaCppRunnerRejectsPhi4WhenRuntimePolicyBlocksFamily(t *testing.T) {
 			},
 		},
 	}
-	result, err := runner.RunDashboardInference(context.Background(), spec)
+	result, err := runner.RunDashboardInferenceWithProgress(context.Background(), spec, progress)
 	if err != nil {
 		t.Fatalf("RunDashboardInference() error = %v", err)
 	}
@@ -352,6 +533,9 @@ func TestLlamaCppRunnerRejectsPhi4WhenRuntimePolicyBlocksFamily(t *testing.T) {
 	}
 	if len(client.reqs) != 0 {
 		t.Fatalf("client calls = %d, want 0", len(client.reqs))
+	}
+	if len(progress.batches) != 0 {
+		t.Fatalf("progress batches = %+v, want none", progress.batches)
 	}
 }
 
@@ -396,8 +580,11 @@ func TestLlamaCppRunnerFallsBackWhenStreamingUnsupported(t *testing.T) {
 	runner := LlamaCppRunner{
 		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
 		Client:  client,
+		Getenv:  getenvTextAndStreamingEnabled,
 	}
 	spec := validSpec(t)
+	spec.Prompt = "Write a short dashboard sentence."
+	spec.ReturnText = true
 	result, err := runner.RunDashboardInference(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("RunDashboardInference() error = %v", err)
@@ -472,6 +659,15 @@ func getenvEnabled(key string) string {
 func getenvTextOutputEnabled(key string) string {
 	switch key {
 	case FlagEnv, TextOutputFlagEnv:
+		return "1"
+	default:
+		return ""
+	}
+}
+
+func getenvTextAndStreamingEnabled(key string) string {
+	switch key {
+	case FlagEnv, TextOutputFlagEnv, StreamingFlagEnv:
 		return "1"
 	default:
 		return ""

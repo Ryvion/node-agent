@@ -13,6 +13,7 @@ const (
 	Task              = "v7_dashboard_inference"
 	FlagEnv           = "RYV_NODE_V7_DASHBOARD_INFERENCE"
 	TextOutputFlagEnv = "RYV_NODE_V7_INFERENCE_TEXT_OUTPUT"
+	StreamingFlagEnv  = "RYV_NODE_V7_INFERENCE_STREAMING"
 
 	defaultTimeoutMs = int64(2 * 60 * 1000)
 
@@ -76,6 +77,13 @@ func TextOutputEnabledFromEnv(getenv func(string) string) bool {
 		return false
 	}
 	return strings.TrimSpace(getenv(TextOutputFlagEnv)) == "1"
+}
+
+func StreamingEnabledFromEnv(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	return strings.TrimSpace(getenv(StreamingFlagEnv)) == "1"
 }
 
 func AssignmentIdentityFromJSON(specJSON string) (AssignmentIdentity, bool) {

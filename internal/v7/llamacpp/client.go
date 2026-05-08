@@ -21,6 +21,11 @@ type CompletionRequest struct {
 	MaxTokens   int
 	Temperature float64
 	Stream      bool
+	OnDelta     func(CompletionDelta) error
+}
+
+type CompletionDelta struct {
+	Text string
 }
 
 type CompletionResult struct {
@@ -129,7 +134,7 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 	}
 
 	if req.Stream {
-		return c.readStreamingCompletion(resp.Body, started)
+		return c.readStreamingCompletion(resp.Body, started, req.OnDelta)
 	}
 	return c.readNonStreamingCompletion(resp.Body, started)
 }
@@ -156,7 +161,7 @@ func streamUnsupportedStatus(status int) bool {
 	}
 }
 
-func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time) (CompletionResult, error) {
+func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time, onDelta func(CompletionDelta) error) (CompletionResult, error) {
 	var output bytes.Buffer
 	var firstTokenAt time.Time
 	var promptTokens int64
@@ -203,6 +208,11 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time)
 				firstTokenAt = c.now()
 				if firstTokenAt.Before(started) {
 					firstTokenAt = started
+				}
+			}
+			if onDelta != nil {
+				if err := onDelta(CompletionDelta{Text: content}); err != nil {
+					return CompletionResult{}, ClientError{Code: "llamacpp_stream_delta_failed"}
 				}
 			}
 			chunkTokens++

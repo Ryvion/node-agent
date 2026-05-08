@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2073,6 +2074,110 @@ func TestProcessOptionalV7DashboardInferenceSubmitsOptInGeneratedText(t *testing
 	}
 }
 
+func TestProcessOptionalV7DashboardInferenceSendsProgressBeforeReceipt(t *testing.T) {
+	t.Setenv(v7dashboardinference.FlagEnv, "1")
+	t.Setenv(v7dashboardinference.TextOutputFlagEnv, "1")
+	t.Setenv(v7dashboardinference.StreamingFlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := v7dashboardinference.NewLocalStatus()
+	generated := "Ryvion streams"
+	fakeRunner := &fakeDashboardInferenceProgressRunner{generated: generated}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		events = append(events, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/v1/node/inference/chunks":
+			var req struct {
+				RunID    string `json:"run_id"`
+				JobID    string `json:"job_id"`
+				NodeID   string `json:"node_id"`
+				SeqStart int64  `json:"seq_start"`
+				Chunks   []struct {
+					Seq  int64  `json:"seq"`
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"chunks"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode chunks: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if req.RunID != "dashboardinfer_run" || req.JobID != "v7dashboardinfer_job" || req.NodeID != "node-dashboard-local" || req.SeqStart != 1 {
+				t.Errorf("chunk identity = %+v", req)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(req.Chunks) != 2 || req.Chunks[0].Seq != 1 || req.Chunks[0].Text != "Ryvion" || req.Chunks[1].Seq != 2 || req.Chunks[1].Text != " streams" {
+				t.Errorf("chunks = %+v", req.Chunks)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"accepted":true}`))
+		case "/api/v1/node/receipt":
+			var req struct {
+				Metadata map[string]any `json:"metadata"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode receipt: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			metadata := req.Metadata[v7dashboardinference.Task].(map[string]any)
+			if metadata["generated_text"] != generated {
+				t.Errorf("receipt generated_text = %#v, want %q", metadata["generated_text"], generated)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	handled, processResult, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceTextSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7DashboardInference() error = %v", err)
+	}
+	if !handled || processResult == nil || processResult.ExitCode != 0 {
+		t.Fatalf("handled=%v result=%+v, want successful process result", handled, processResult)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 2 || events[0] != "/api/v1/node/inference/chunks" || events[1] != "/api/v1/node/receipt" {
+		t.Fatalf("events = %+v, want chunks before receipt", events)
+	}
+}
+
 func TestProcessOptionalV7DashboardInferenceRecordsRejectedCounter(t *testing.T) {
 	t.Setenv(v7dashboardinference.FlagEnv, "1")
 	oldFactory := newV7DashboardInferenceRunner
@@ -2887,6 +2992,48 @@ func (f *fakeDashboardInferenceRunner) RunDashboardInference(_ context.Context, 
 		result.Spec = spec
 	}
 	return result, nil
+}
+
+type fakeDashboardInferenceProgressRunner struct {
+	generated string
+	calls     int
+}
+
+func (f *fakeDashboardInferenceProgressRunner) RunDashboardInference(ctx context.Context, spec v7dashboardinference.Spec) (v7dashboardinference.ExecutionResult, error) {
+	return f.RunDashboardInferenceWithProgress(ctx, spec, nil)
+}
+
+func (f *fakeDashboardInferenceProgressRunner) RunDashboardInferenceWithProgress(ctx context.Context, spec v7dashboardinference.Spec, progress v7dashboardinference.ProgressSender) (v7dashboardinference.ExecutionResult, error) {
+	f.calls++
+	if progress != nil {
+		if err := progress.SendDashboardInferenceProgress(ctx, v7dashboardinference.ProgressBatch{
+			RunID:    spec.RunID,
+			JobID:    spec.JobID,
+			NodeID:   spec.TargetNodeID,
+			SeqStart: 1,
+			Chunks: []v7dashboardinference.ProgressChunk{
+				{Seq: 1, Type: "delta", Text: "Ryvion"},
+				{Seq: 2, Type: "delta", Text: " streams"},
+			},
+		}); err != nil {
+			return v7dashboardinference.ExecutionResult{}, err
+		}
+	}
+	output := []byte(f.generated)
+	return v7dashboardinference.ExecutionResult{
+		Spec:            spec,
+		Backend:         spec.Backend,
+		ModelID:         spec.ModelID,
+		OutputHash:      v7dashboardinference.HashOutput(spec.JobID, output),
+		OutputBytes:     int64(len(output)),
+		TokensGenerated: 2,
+		TTFTMs:          100,
+		TotalTimeMs:     300,
+		DecodeTPS:       10,
+		EndToEndTPS:     6.667,
+		ProofStatus:     v7dashboardinference.ProofStatusMeasured,
+		GeneratedText:   f.generated,
+	}, nil
 }
 
 func testDashboardInferenceSpecJSON(t *testing.T) string {

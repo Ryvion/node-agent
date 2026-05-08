@@ -2078,14 +2078,19 @@ func processOptionalV7DashboardInference(ctx context.Context, client *hub.Client
 	}
 
 	runner := newV7DashboardInferenceRunner()
+	var progress v7dashboardinference.ProgressSender
+	if client != nil {
+		progress = client
+	}
 	executionStarted := time.Now()
 	if isDashboardInference {
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
 		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7DashboardInferenceWorkLoopEventContextFromSpec(work.SpecJSON))
 	}
 	receipt, handled, err := v7dashboardinference.ExecuteAssignment(ctx, work.SpecJSON, v7dashboardinference.ExecuteOptions{
-		Getenv: os.Getenv,
-		Runner: runner,
+		Getenv:   os.Getenv,
+		Runner:   runner,
+		Progress: progress,
 	})
 	if !handled {
 		return false, nil, nil

@@ -30,10 +30,15 @@ type Runner interface {
 	RunDashboardInference(context.Context, Spec) (ExecutionResult, error)
 }
 
+type ProgressRunner interface {
+	RunDashboardInferenceWithProgress(context.Context, Spec, ProgressSender) (ExecutionResult, error)
+}
+
 type ExecuteOptions struct {
-	Getenv func(string) string
-	Runner Runner
-	Policy modelpolicy.Policy
+	Getenv   func(string) string
+	Runner   Runner
+	Policy   modelpolicy.Policy
+	Progress ProgressSender
 }
 
 type LlamaCppSidecar interface {
@@ -137,7 +142,13 @@ func ExecuteSpec(ctx context.Context, spec Spec, opts ExecuteOptions) (Receipt, 
 			Policy:  opts.policy(),
 		}
 	}
-	result, err := runner.RunDashboardInference(ctx, spec)
+	var result ExecutionResult
+	var err error
+	if progressRunner, ok := runner.(ProgressRunner); ok {
+		result, err = progressRunner.RunDashboardInferenceWithProgress(ctx, spec, opts.Progress)
+	} else {
+		result, err = runner.RunDashboardInference(ctx, spec)
+	}
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -145,6 +156,10 @@ func ExecuteSpec(ctx context.Context, spec Spec, opts ExecuteOptions) (Receipt, 
 }
 
 func (r LlamaCppRunner) RunDashboardInference(ctx context.Context, spec Spec) (ExecutionResult, error) {
+	return r.RunDashboardInferenceWithProgress(ctx, spec, nil)
+}
+
+func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, spec Spec, progress ProgressSender) (ExecutionResult, error) {
 	spec = normalizeSpec(spec)
 	if err := ValidateSpec(spec); err != nil {
 		return ExecutionResult{}, err
@@ -173,19 +188,43 @@ func (r LlamaCppRunner) RunDashboardInference(ctx context.Context, spec Spec) (E
 	if prompt == "" {
 		prompt = internalDashboardPrompt
 	}
+	streaming := shouldStreamDashboardInference(spec, status, r.getenv())
+	var batcher *progressBatcher
+	if streaming && progress != nil {
+		batcher = newProgressBatcher(runCtx, spec, progress)
+	}
 	req := llamacpp.CompletionRequest{
 		BaseURL:     status.BaseURL,
 		ModelID:     spec.ModelID,
 		Prompt:      prompt,
 		MaxTokens:   spec.MaxTokens,
 		Temperature: 0,
-		Stream:      spec.Stream && status.SupportsStreaming,
+		Stream:      streaming,
+	}
+	if batcher != nil {
+		req.OnDelta = func(delta llamacpp.CompletionDelta) error {
+			return batcher.addDelta(delta.Text)
+		}
 	}
 	completion, err := completeWithFallback(runCtx, r.client(), req)
+	if batcher != nil {
+		if flushErr := batcher.close(runCtx); flushErr != nil {
+			err = flushErr
+		}
+	}
 	if err != nil {
 		return failedExecutionResult(spec, safeErrorCode(err)), nil
 	}
 	return measuredExecutionResult(spec, completion), nil
+}
+
+func shouldStreamDashboardInference(spec Spec, status llamacpp.LlamaCppSidecarStatus, getenv func(string) string) bool {
+	spec = normalizeSpec(spec)
+	return spec.Stream &&
+		spec.ReturnText &&
+		TextOutputEnabledFromEnv(getenv) &&
+		StreamingEnabledFromEnv(getenv) &&
+		status.SupportsStreaming
 }
 
 func (r LlamaCppRunner) ensureSidecar(ctx context.Context) llamacpp.LlamaCppSidecarStatus {

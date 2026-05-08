@@ -16,6 +16,7 @@ import (
 
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
+	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 )
 
@@ -452,6 +453,78 @@ func TestSubmitReceiptSignsExpectedMessage(t *testing.T) {
 	err := c.SubmitReceipt(context.Background(), Receipt{JobID: "job_1", ResultHashHex: "abcd", MeteringUnits: 3})
 	if err != nil {
 		t.Fatalf("submit receipt failed: %v", err)
+	}
+	if handlerErr != nil {
+		t.Fatalf("handler failed: %v", handlerErr)
+	}
+}
+
+func TestSendDashboardInferenceProgressPostsChunkBatch(t *testing.T) {
+	pub, priv := testKeyPair()
+	pubHex := hex.EncodeToString(pub)
+	var (
+		mu         sync.Mutex
+		handlerErr error
+	)
+	setHandlerErr := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if handlerErr == nil {
+			handlerErr = err
+		}
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/inference/chunks" {
+			setHandlerErr(fmt.Errorf("unexpected path: %s", r.URL.Path))
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.Header.Get("X-Node-Pubkey"); got != pubHex {
+			setHandlerErr(fmt.Errorf("node pubkey header = %q, want %q", got, pubHex))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			RunID        string                               `json:"run_id"`
+			JobID        string                               `json:"job_id"`
+			NodeID       string                               `json:"node_id"`
+			PublicKeyHex string                               `json:"public_key_hex"`
+			SeqStart     int64                                `json:"seq_start"`
+			Chunks       []v7dashboardinference.ProgressChunk `json:"chunks"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			setHandlerErr(fmt.Errorf("decode request: %w", err))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.RunID != "run_1" || req.JobID != "job_1" || req.NodeID != pubHex || req.PublicKeyHex != pubHex || req.SeqStart != 1 {
+			setHandlerErr(fmt.Errorf("progress identity = %+v", req))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.Chunks) != 2 || req.Chunks[0].Seq != 1 || req.Chunks[0].Text != "Ryvion" || req.Chunks[1].Seq != 2 || req.Chunks[1].Text != " streams" {
+			setHandlerErr(fmt.Errorf("chunks = %+v", req.Chunks))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"accepted":true}`))
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	err := c.SendDashboardInferenceProgress(context.Background(), v7dashboardinference.ProgressBatch{
+		RunID:    "run_1",
+		JobID:    "job_1",
+		SeqStart: 1,
+		Chunks: []v7dashboardinference.ProgressChunk{
+			{Seq: 1, Type: "delta", Text: "Ryvion"},
+			{Seq: 2, Type: "delta", Text: " streams"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendDashboardInferenceProgress() error = %v", err)
 	}
 	if handlerErr != nil {
 		t.Fatalf("handler failed: %v", handlerErr)
