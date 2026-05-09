@@ -134,8 +134,39 @@ func (m *Manager) SetModelPath(modelPath string) LlamaCppSidecarConfig {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cfg.ModelPath = cleanConfigText(modelPath, maxConfigTextLen)
+	// V8 Phase 1.6: re-derive the speculative drafter when the target
+	// model changes at runtime. The sidecar restarts on RestartWithModel
+	// so the next process will pick up the right --model-draft path
+	// without operator intervention. Operator-supplied env vars
+	// (EnvDraftModel) still win when set explicitly.
+	m.cfg.DraftModelPath = redriveDraftModelPath(m.cfg.DraftModelPath, m.cfg.ModelPath)
 	m.cfg = normalizeConfig(m.cfg)
 	return m.cfg
+}
+
+// redriveDraftModelPath returns the draft companion for a freshly
+// switched target model. If the operator has pinned a draft via env
+// var (current value matches the pinned env var) the pin is honored.
+// Otherwise the discoverer scans the runtime inventory for a
+// tokenizer-compatible smaller model.
+func redriveDraftModelPath(currentDraft, newTarget string) string {
+	envDraft := strings.TrimSpace(os.Getenv(EnvDraftModel))
+	if envDraft != "" {
+		// Operator pin wins.
+		return envDraft
+	}
+	if newTarget == "" {
+		return ""
+	}
+	source := normalizeConfigSource(ConfigSource{})
+	discovered := discoverDraftModelPath(source, newTarget)
+	if discovered != "" {
+		return discovered
+	}
+	// Auto-discovery turned up nothing for the new target. Drop the
+	// stale draft path rather than running the previous target's
+	// drafter against a different model.
+	return ""
 }
 
 func (m *Manager) Status(ctx context.Context) LlamaCppSidecarStatus {
