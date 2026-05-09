@@ -53,6 +53,11 @@ type ReceiptMetadata struct {
 	PromptMode               string  `json:"prompt_mode,omitempty"`
 	SystemPromptHash         string  `json:"system_prompt_hash,omitempty"`
 	MaxReturnChars           int     `json:"max_return_chars"`
+
+	// V8 Phase 1.2: backend-local speculative-decoding block.
+	// Empty for legacy non-speculative receipts so existing hashes are
+	// unchanged.
+	Speculative SpeculativeMetadata `json:"speculative,omitempty"`
 }
 
 func BuildReceipt(result ExecutionResult) (Receipt, error) {
@@ -234,6 +239,9 @@ func (m ReceiptMetadata) Map() map[string]any {
 	if m.SystemPromptHash != "" {
 		out["system_prompt_hash"] = m.SystemPromptHash
 	}
+	if specMap := m.Speculative.Map(); specMap != nil {
+		out["speculative"] = specMap
+	}
 	return out
 }
 
@@ -373,6 +381,7 @@ func receiptMetadataFromResult(result ExecutionResult) ReceiptMetadata {
 		PromptMode:               result.PromptMode,
 		SystemPromptHash:         result.SystemPromptHash,
 		MaxReturnChars:           result.MaxReturnChars,
+		Speculative:              result.Speculative,
 	}.clone()
 }
 

@@ -90,6 +90,11 @@ type ExecutionResult struct {
 	PromptMode               string
 	SystemPromptHash         string
 	MaxReturnChars           int
+
+	// V8 Phase 1.2: backend-local speculative decoding metadata.
+	// Set by the runner when the sidecar status reports speculative
+	// readiness. Consumed by BuildReceipt to surface acceleration.
+	Speculative SpeculativeMetadata
 }
 
 type LocalStatusCounters struct {
@@ -242,7 +247,10 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	if err != nil {
 		return failedExecutionResult(spec, safeErrorCode(err)), nil
 	}
-	return measuredExecutionResult(spec, completion), nil
+	result := measuredExecutionResult(spec, completion)
+	result.Speculative = SpeculativeMetadataFromStatus(status).
+		MergeRuntimeCounts(completion.SpeculativeTokensDrafted, completion.SpeculativeTokensAccepted, result.TokensGenerated)
+	return result, nil
 }
 
 func shouldStreamDashboardInference(spec Spec, status llamacpp.LlamaCppSidecarStatus, getenv func(string) string) bool {

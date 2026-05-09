@@ -72,6 +72,12 @@ type CompletionResult struct {
 	TTFTMs                   int64  `json:"ttft_ms"`
 	TotalTimeMs              int64  `json:"total_time_ms"`
 	Streamed                 bool   `json:"streamed"`
+
+	// V8 Phase 1.2: speculative-decoding runtime counts.
+	// Populated when llama-server reports them via the timings block;
+	// zero on llama-server builds that don't surface the values.
+	SpeculativeTokensDrafted  int64 `json:"speculative_tokens_drafted,omitempty"`
+	SpeculativeTokensAccepted int64 `json:"speculative_tokens_accepted,omitempty"`
 }
 
 type CompletionClient interface {
@@ -397,6 +403,9 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 	var usageCompletionTokens int64
 	var chunkTokens int64
 	var finish completionFinishCapture
+	// V8 Phase 1.2: capture speculative-decoding counts from any chunk
+	// that carries a Timings block (typically the terminal one).
+	var specDrafted, specAccepted int64
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -427,6 +436,9 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 			if chunk.Usage.CompletionTokens >= 0 {
 				usageCompletionTokens = chunk.Usage.CompletionTokens
 			}
+		}
+		if d, a := chunk.Timings.speculativeCounts(); d > 0 || a > 0 {
+			specDrafted, specAccepted = d, a
 		}
 		content := generatedTextFromStreamChunk(chunk)
 		if content != "" {
@@ -459,7 +471,10 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 		GeneratedText:         output.String(),
 	})
 	finished := c.now()
-	return buildCompletionResult(output.Bytes(), promptTokens, measurement, firstTokenAt, started, finished, true, finish.metadata(requestedMaxTokens, measurement.TokensGenerated)), nil
+	result := buildCompletionResult(output.Bytes(), promptTokens, measurement, firstTokenAt, started, finished, true, finish.metadata(requestedMaxTokens, measurement.TokensGenerated))
+	result.SpeculativeTokensDrafted = specDrafted
+	result.SpeculativeTokensAccepted = specAccepted
+	return result, nil
 }
 
 func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Time, requestedMaxTokens int) (CompletionResult, error) {
@@ -495,7 +510,9 @@ func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Ti
 		GeneratedText:         output.String(),
 	})
 	finished := c.now()
-	return buildCompletionResult(output.Bytes(), promptTokens, measurement, finished, started, finished, false, finishMetadataFromChatResponse(payload, requestedMaxTokens, measurement.TokensGenerated)), nil
+	result := buildCompletionResult(output.Bytes(), promptTokens, measurement, finished, started, finished, false, finishMetadataFromChatResponse(payload, requestedMaxTokens, measurement.TokensGenerated))
+	result.SpeculativeTokensDrafted, result.SpeculativeTokensAccepted = payload.Timings.speculativeCounts()
+	return result, nil
 }
 
 func buildCompletionResult(output []byte, promptTokens int64, measurement completionTokenMeasurement, firstTokenAt time.Time, started time.Time, finished time.Time, streamed bool, finish FinishMetadata) CompletionResult {
@@ -694,6 +711,37 @@ type openAIChatChoice struct {
 type llamaTimings struct {
 	PredictedN int64 `json:"predicted_n,omitempty"`
 	NPredicted int64 `json:"n_predicted,omitempty"`
+
+	// V8 Phase 1.2: speculative-decoding counts emitted by llama-server
+	// when running with --model-draft. Older builds may emit only one
+	// of these; we read whichever is present.
+	NDrafted        int64 `json:"n_drafted,omitempty"`
+	NAccepted       int64 `json:"n_accepted,omitempty"`
+	DraftN          int64 `json:"draft_n,omitempty"`
+	DraftNAccepted  int64 `json:"draft_n_accepted,omitempty"`
+}
+
+// speculativeCounts returns (drafted, accepted) from any name variant
+// llama-server may use across versions.
+func (t *llamaTimings) speculativeCounts() (int64, int64) {
+	if t == nil {
+		return 0, 0
+	}
+	drafted := t.NDrafted
+	if drafted == 0 {
+		drafted = t.DraftN
+	}
+	accepted := t.NAccepted
+	if accepted == 0 {
+		accepted = t.DraftNAccepted
+	}
+	if drafted < 0 {
+		drafted = 0
+	}
+	if accepted < 0 {
+		accepted = 0
+	}
+	return drafted, accepted
 }
 
 func generatedTextFromStreamChoice(choice openAIChatStreamChoice) string {
