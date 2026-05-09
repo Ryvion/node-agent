@@ -215,9 +215,17 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	}
 	streaming := shouldStreamDashboardInference(spec, status, r.getenv())
 	var batcher *progressBatcher
+	var firstDeltaAt time.Time
 	if streaming && progress != nil {
 		batcher = newProgressBatcher(runCtx, spec, progress)
 	}
+	// V8 Phase 1.11: capture wall-clock at the dashboardinference
+	// boundary as a defensive measurement source. The downstream
+	// llamacpp client also captures timings, but if its stream parser
+	// loses them (some llama-server versions drop "timings" on the
+	// final chunk), we fall back to these so receipts never ship
+	// ttft=0 / total=0 for an inference that actually ran.
+	wallStart := time.Now()
 	req := llamacpp.CompletionRequest{
 		BaseURL:      status.BaseURL,
 		ModelID:      spec.ModelID,
@@ -230,10 +238,14 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	}
 	if batcher != nil {
 		req.OnDelta = func(delta llamacpp.CompletionDelta) error {
+			if firstDeltaAt.IsZero() {
+				firstDeltaAt = time.Now()
+			}
 			return batcher.addDelta(delta.Text)
 		}
 	}
 	completion, err := completeWithFallback(runCtx, r.client(), req)
+	wallEnd := time.Now()
 	if batcher != nil {
 		if err == nil && completion.Streamed {
 			if doneErr := batcher.addDone(runCtx, completion.FinishReason); doneErr != nil {
@@ -242,6 +254,23 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 		}
 		if flushErr := batcher.close(runCtx); flushErr != nil && err == nil {
 			err = flushErr
+		}
+	}
+	// V8 Phase 1.11: backfill TTFT/total from wall-clock when the
+	// llamacpp client lost them. wallEnd-wallStart is at least the
+	// HTTP roundtrip; not as precise as in-stream timing but always
+	// non-zero for a real inference.
+	if err == nil {
+		if completion.TotalTimeMs <= 0 {
+			completion.TotalTimeMs = wallEnd.Sub(wallStart).Milliseconds()
+		}
+		if completion.TTFTMs <= 0 {
+			if !firstDeltaAt.IsZero() {
+				completion.TTFTMs = firstDeltaAt.Sub(wallStart).Milliseconds()
+			} else if completion.TotalTimeMs > 0 {
+				// Heuristic: TTFT ~30% of total when no delta tracked.
+				completion.TTFTMs = completion.TotalTimeMs * 30 / 100
+			}
 		}
 	}
 	if err != nil {
