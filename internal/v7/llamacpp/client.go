@@ -15,6 +15,15 @@ import (
 
 const defaultClientErrorCode = "llamacpp_request_failed"
 
+const (
+	RuntimeMeasurementStatusMeasured = "measured"
+	RuntimeMeasurementStatusPartial  = "partial"
+	RuntimeMeasurementStatusUnknown  = "unknown"
+
+	MetadataParseStatusOK      = "ok"
+	MetadataParseStatusPartial = "partial"
+)
+
 type CompletionRequest struct {
 	BaseURL     string
 	ModelID     string
@@ -30,19 +39,22 @@ type CompletionDelta struct {
 }
 
 type CompletionResult struct {
-	Output              []byte `json:"-"`
-	OutputBytes         int64  `json:"output_bytes"`
-	PromptTokens        int64  `json:"prompt_tokens,omitempty"`
-	CompletionTokens    int64  `json:"completion_tokens,omitempty"`
-	RequestedMaxTokens  int    `json:"requested_max_tokens"`
-	TokensGenerated     int64  `json:"tokens_generated"`
-	FinishReason        string `json:"finish_reason"`
-	BackendFinishReason string `json:"backend_finish_reason"`
-	BackendStopReason   string `json:"backend_stop_reason"`
-	MaxTokensReached    bool   `json:"max_tokens_reached"`
-	TTFTMs              int64  `json:"ttft_ms"`
-	TotalTimeMs         int64  `json:"total_time_ms"`
-	Streamed            bool   `json:"streamed"`
+	Output                   []byte `json:"-"`
+	OutputBytes              int64  `json:"output_bytes"`
+	PromptTokens             int64  `json:"prompt_tokens,omitempty"`
+	CompletionTokens         int64  `json:"completion_tokens,omitempty"`
+	RequestedMaxTokens       int    `json:"requested_max_tokens"`
+	TokensGenerated          int64  `json:"tokens_generated"`
+	FinishReason             string `json:"finish_reason"`
+	BackendFinishReason      string `json:"backend_finish_reason"`
+	BackendStopReason        string `json:"backend_stop_reason"`
+	MaxTokensReached         bool   `json:"max_tokens_reached"`
+	RuntimeMeasurementStatus string `json:"runtime_measurement_status"`
+	MetadataParseStatus      string `json:"metadata_parse_status"`
+	TokenCountEstimated      bool   `json:"token_count_estimated,omitempty"`
+	TTFTMs                   int64  `json:"ttft_ms"`
+	TotalTimeMs              int64  `json:"total_time_ms"`
+	Streamed                 bool   `json:"streamed"`
 }
 
 type CompletionClient interface {
@@ -175,8 +187,7 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 	var output bytes.Buffer
 	var firstTokenAt time.Time
 	var promptTokens int64
-	var completionTokens int64
-	var usageSeen bool
+	var usageCompletionTokens int64
 	var chunkTokens int64
 	var finish completionFinishCapture
 
@@ -203,12 +214,11 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 		}
 		finish.observeStreamChunk(chunk)
 		if chunk.Usage != nil {
-			usageSeen = true
 			if chunk.Usage.PromptTokens >= 0 {
 				promptTokens = chunk.Usage.PromptTokens
 			}
 			if chunk.Usage.CompletionTokens >= 0 {
-				completionTokens = chunk.Usage.CompletionTokens
+				usageCompletionTokens = chunk.Usage.CompletionTokens
 			}
 		}
 		for _, choice := range chunk.Choices {
@@ -237,18 +247,15 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 	if output.Len() == 0 {
 		return CompletionResult{}, ClientError{Code: "llamacpp_empty_output"}
 	}
-	if completionTokens <= 0 && finish.tokensGenerated > 0 {
-		completionTokens = finish.tokensGenerated
-		usageSeen = true
-	}
-	if completionTokens <= 0 {
-		completionTokens = chunkTokens
-	}
-	if completionTokens <= 0 {
-		completionTokens = approximateGeneratedTokens(output.String())
-	}
+	measurement := normalizeCompletionTokenMeasurement(completionTokenSources{
+		UsageCompletionTokens: usageCompletionTokens,
+		TimingTokens:          finish.timingTokens,
+		StreamedDeltaTokens:   chunkTokens,
+		BackendTokenCount:     finish.backendTokenCount,
+		GeneratedText:         output.String(),
+	})
 	finished := c.now()
-	return buildCompletionResult(output.Bytes(), promptTokens, completionTokens, usageSeen, firstTokenAt, started, finished, true, finish.metadata(requestedMaxTokens, completionTokens)), nil
+	return buildCompletionResult(output.Bytes(), promptTokens, measurement, firstTokenAt, started, finished, true, finish.metadata(requestedMaxTokens, measurement.TokensGenerated)), nil
 }
 
 func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Time, requestedMaxTokens int) (CompletionResult, error) {
@@ -265,35 +272,29 @@ func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Ti
 		return CompletionResult{}, ClientError{Code: "llamacpp_empty_output"}
 	}
 	var promptTokens int64
-	var completionTokens int64
-	var usageSeen bool
+	var usageCompletionTokens int64
 	if payload.Usage != nil {
-		usageSeen = true
 		if payload.Usage.PromptTokens >= 0 {
 			promptTokens = payload.Usage.PromptTokens
 		}
 		if payload.Usage.CompletionTokens >= 0 {
-			completionTokens = payload.Usage.CompletionTokens
+			usageCompletionTokens = payload.Usage.CompletionTokens
 		}
 	}
 	if promptTokens <= 0 && payload.TokensEvaluated > 0 {
 		promptTokens = payload.TokensEvaluated
-		usageSeen = true
 	}
-	if completionTokens <= 0 {
-		if generated := backendGeneratedTokens(payload.TokensGenerated, payload.TokensPredicted, payload.Timings); generated > 0 {
-			completionTokens = generated
-			usageSeen = true
-		}
-	}
-	if completionTokens <= 0 {
-		completionTokens = approximateGeneratedTokens(output.String())
-	}
+	measurement := normalizeCompletionTokenMeasurement(completionTokenSources{
+		UsageCompletionTokens: usageCompletionTokens,
+		TimingTokens:          timingGeneratedTokens(payload.Timings, payload.PredictedN, payload.NPredicted),
+		BackendTokenCount:     backendReturnedTokenCount(payload.TokensGenerated, payload.TokensPredicted, payload.CompletionTokens),
+		GeneratedText:         output.String(),
+	})
 	finished := c.now()
-	return buildCompletionResult(output.Bytes(), promptTokens, completionTokens, usageSeen, finished, started, finished, false, finishMetadataFromChatResponse(payload, requestedMaxTokens, completionTokens)), nil
+	return buildCompletionResult(output.Bytes(), promptTokens, measurement, finished, started, finished, false, finishMetadataFromChatResponse(payload, requestedMaxTokens, measurement.TokensGenerated)), nil
 }
 
-func buildCompletionResult(output []byte, promptTokens int64, completionTokens int64, usageSeen bool, firstTokenAt time.Time, started time.Time, finished time.Time, streamed bool, finish FinishMetadata) CompletionResult {
+func buildCompletionResult(output []byte, promptTokens int64, measurement completionTokenMeasurement, firstTokenAt time.Time, started time.Time, finished time.Time, streamed bool, finish FinishMetadata) CompletionResult {
 	if finished.Before(started) {
 		finished = started
 	}
@@ -303,24 +304,80 @@ func buildCompletionResult(output []byte, promptTokens int64, completionTokens i
 	if firstTokenAt.After(finished) {
 		firstTokenAt = finished
 	}
+	completionTokens := measurement.TokensGenerated
 	result := CompletionResult{
-		Output:              append([]byte(nil), output...),
-		OutputBytes:         int64(len(output)),
-		RequestedMaxTokens:  finish.RequestedMaxTokens,
-		TokensGenerated:     completionTokens,
-		FinishReason:        finish.FinishReason,
-		BackendFinishReason: finish.BackendFinishReason,
-		BackendStopReason:   finish.BackendStopReason,
-		MaxTokensReached:    finish.MaxTokensReached,
-		TTFTMs:              firstTokenAt.Sub(started).Milliseconds(),
-		TotalTimeMs:         finished.Sub(started).Milliseconds(),
-		Streamed:            streamed,
+		Output:                   append([]byte(nil), output...),
+		OutputBytes:              int64(len(output)),
+		RequestedMaxTokens:       finish.RequestedMaxTokens,
+		TokensGenerated:          completionTokens,
+		FinishReason:             finish.FinishReason,
+		BackendFinishReason:      finish.BackendFinishReason,
+		BackendStopReason:        finish.BackendStopReason,
+		MaxTokensReached:         finish.MaxTokensReached,
+		RuntimeMeasurementStatus: measurement.RuntimeMeasurementStatus,
+		MetadataParseStatus:      measurement.MetadataParseStatus,
+		TokenCountEstimated:      measurement.TokenCountEstimated,
+		TTFTMs:                   firstTokenAt.Sub(started).Milliseconds(),
+		TotalTimeMs:              finished.Sub(started).Milliseconds(),
+		Streamed:                 streamed,
 	}
-	if usageSeen {
+	if promptTokens > 0 {
 		result.PromptTokens = promptTokens
+	}
+	if measurement.ReportCompletionTokens {
 		result.CompletionTokens = completionTokens
 	}
 	return result
+}
+
+type completionTokenSources struct {
+	UsageCompletionTokens int64
+	TimingTokens          int64
+	StreamedDeltaTokens   int64
+	BackendTokenCount     int64
+	GeneratedText         string
+}
+
+type completionTokenMeasurement struct {
+	TokensGenerated          int64
+	RuntimeMeasurementStatus string
+	MetadataParseStatus      string
+	TokenCountEstimated      bool
+	ReportCompletionTokens   bool
+}
+
+func normalizeCompletionTokenMeasurement(src completionTokenSources) completionTokenMeasurement {
+	switch {
+	case src.UsageCompletionTokens > 0:
+		return measuredCompletionTokens(src.UsageCompletionTokens, true)
+	case src.TimingTokens > 0:
+		return measuredCompletionTokens(src.TimingTokens, true)
+	case src.StreamedDeltaTokens > 0:
+		return measuredCompletionTokens(src.StreamedDeltaTokens, true)
+	case src.BackendTokenCount > 0:
+		return measuredCompletionTokens(src.BackendTokenCount, true)
+	}
+	if estimated := approximateGeneratedTokens(src.GeneratedText); estimated > 0 {
+		return completionTokenMeasurement{
+			TokensGenerated:          estimated,
+			RuntimeMeasurementStatus: RuntimeMeasurementStatusPartial,
+			MetadataParseStatus:      MetadataParseStatusOK,
+			TokenCountEstimated:      true,
+		}
+	}
+	return completionTokenMeasurement{
+		RuntimeMeasurementStatus: RuntimeMeasurementStatusUnknown,
+		MetadataParseStatus:      MetadataParseStatusPartial,
+	}
+}
+
+func measuredCompletionTokens(tokens int64, report bool) completionTokenMeasurement {
+	return completionTokenMeasurement{
+		TokensGenerated:          tokens,
+		RuntimeMeasurementStatus: RuntimeMeasurementStatusMeasured,
+		MetadataParseStatus:      MetadataParseStatusOK,
+		ReportCompletionTokens:   report,
+	}
 }
 
 func approximateGeneratedTokens(output string) int64 {
@@ -362,19 +419,22 @@ type openAIError struct {
 }
 
 type openAIChatStreamChunk struct {
-	Choices         []openAIChatStreamChoice `json:"choices"`
-	Usage           *openAIUsage             `json:"usage,omitempty"`
-	Error           openAIError              `json:"error,omitempty"`
-	FinishReason    string                   `json:"finish_reason,omitempty"`
-	Stop            json.RawMessage          `json:"stop,omitempty"`
-	StoppedEOS      bool                     `json:"stopped_eos,omitempty"`
-	StoppedLimit    bool                     `json:"stopped_limit,omitempty"`
-	TimedOut        bool                     `json:"timed_out,omitempty"`
-	Timeout         bool                     `json:"timeout,omitempty"`
-	TokensEvaluated int64                    `json:"tokens_evaluated,omitempty"`
-	TokensGenerated int64                    `json:"tokens_generated,omitempty"`
-	TokensPredicted int64                    `json:"tokens_predicted,omitempty"`
-	Timings         *llamaTimings            `json:"timings,omitempty"`
+	Choices          []openAIChatStreamChoice `json:"choices"`
+	Usage            *openAIUsage             `json:"usage,omitempty"`
+	Error            openAIError              `json:"error,omitempty"`
+	FinishReason     string                   `json:"finish_reason,omitempty"`
+	Stop             json.RawMessage          `json:"stop,omitempty"`
+	StoppedEOS       bool                     `json:"stopped_eos,omitempty"`
+	StoppedLimit     bool                     `json:"stopped_limit,omitempty"`
+	TimedOut         bool                     `json:"timed_out,omitempty"`
+	Timeout          bool                     `json:"timeout,omitempty"`
+	TokensEvaluated  int64                    `json:"tokens_evaluated,omitempty"`
+	CompletionTokens int64                    `json:"completion_tokens,omitempty"`
+	TokensGenerated  int64                    `json:"tokens_generated,omitempty"`
+	TokensPredicted  int64                    `json:"tokens_predicted,omitempty"`
+	PredictedN       int64                    `json:"predicted_n,omitempty"`
+	NPredicted       int64                    `json:"n_predicted,omitempty"`
+	Timings          *llamaTimings            `json:"timings,omitempty"`
 }
 
 type openAIChatStreamChoice struct {
@@ -387,22 +447,25 @@ type openAIChatStreamChoice struct {
 }
 
 type openAIChatResponse struct {
-	Choices         []openAIChatChoice `json:"choices"`
-	Content         string             `json:"content"`
-	Response        string             `json:"response"`
-	Text            string             `json:"text"`
-	Usage           *openAIUsage       `json:"usage,omitempty"`
-	Error           openAIError        `json:"error,omitempty"`
-	FinishReason    string             `json:"finish_reason,omitempty"`
-	Stop            json.RawMessage    `json:"stop,omitempty"`
-	StoppedEOS      bool               `json:"stopped_eos,omitempty"`
-	StoppedLimit    bool               `json:"stopped_limit,omitempty"`
-	TimedOut        bool               `json:"timed_out,omitempty"`
-	Timeout         bool               `json:"timeout,omitempty"`
-	TokensEvaluated int64              `json:"tokens_evaluated,omitempty"`
-	TokensGenerated int64              `json:"tokens_generated,omitempty"`
-	TokensPredicted int64              `json:"tokens_predicted,omitempty"`
-	Timings         *llamaTimings      `json:"timings,omitempty"`
+	Choices          []openAIChatChoice `json:"choices"`
+	Content          string             `json:"content"`
+	Response         string             `json:"response"`
+	Text             string             `json:"text"`
+	Usage            *openAIUsage       `json:"usage,omitempty"`
+	Error            openAIError        `json:"error,omitempty"`
+	FinishReason     string             `json:"finish_reason,omitempty"`
+	Stop             json.RawMessage    `json:"stop,omitempty"`
+	StoppedEOS       bool               `json:"stopped_eos,omitempty"`
+	StoppedLimit     bool               `json:"stopped_limit,omitempty"`
+	TimedOut         bool               `json:"timed_out,omitempty"`
+	Timeout          bool               `json:"timeout,omitempty"`
+	TokensEvaluated  int64              `json:"tokens_evaluated,omitempty"`
+	CompletionTokens int64              `json:"completion_tokens,omitempty"`
+	TokensGenerated  int64              `json:"tokens_generated,omitempty"`
+	TokensPredicted  int64              `json:"tokens_predicted,omitempty"`
+	PredictedN       int64              `json:"predicted_n,omitempty"`
+	NPredicted       int64              `json:"n_predicted,omitempty"`
+	Timings          *llamaTimings      `json:"timings,omitempty"`
 }
 
 type openAIChatChoice struct {
@@ -416,6 +479,7 @@ type openAIChatChoice struct {
 
 type llamaTimings struct {
 	PredictedN int64 `json:"predicted_n,omitempty"`
+	NPredicted int64 `json:"n_predicted,omitempty"`
 }
 
 func generatedTextFromStreamChoice(choice openAIChatStreamChoice) string {

@@ -119,6 +119,9 @@ func TestOpenAIClientNonStreamingCompletion(t *testing.T) {
 	if result.FinishReason != FinishReasonStop || result.MaxTokensReached {
 		t.Fatalf("finish metadata = %+v, want stop without max cap", result)
 	}
+	if result.TokensGenerated != 2 || result.RuntimeMeasurementStatus != RuntimeMeasurementStatusMeasured || result.MetadataParseStatus != MetadataParseStatusOK {
+		t.Fatalf("normalized token metadata = %+v, want OpenAI usage token count", result)
+	}
 }
 
 func TestOpenAIClientExtractsLlamaStoppedLimitFinishMetadata(t *testing.T) {
@@ -146,6 +149,9 @@ func TestOpenAIClientExtractsLlamaStoppedLimitFinishMetadata(t *testing.T) {
 	if result.RequestedMaxTokens != 8 || result.FinishReason != FinishReasonLength || result.BackendStopReason != "stopped_limit" || !result.MaxTokensReached {
 		t.Fatalf("finish metadata = %+v, want stopped_limit length cap", result)
 	}
+	if result.RuntimeMeasurementStatus != RuntimeMeasurementStatusMeasured || result.MetadataParseStatus != MetadataParseStatusOK || result.TokenCountEstimated {
+		t.Fatalf("measurement metadata = %+v, want precise llama.cpp timing count", result)
+	}
 }
 
 func TestOpenAIClientInfersMaxTokensReachedWhenBackendReasonMissing(t *testing.T) {
@@ -167,8 +173,96 @@ func TestOpenAIClientInfersMaxTokensReachedWhenBackendReasonMissing(t *testing.T
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
-	if result.FinishReason != FinishReasonUnknown || !result.MaxTokensReached {
-		t.Fatalf("finish metadata = %+v, want unknown reason with inferred max cap", result)
+	if result.FinishReason != FinishReasonLength || !result.MaxTokensReached {
+		t.Fatalf("finish metadata = %+v, want length reason with inferred max cap", result)
+	}
+}
+
+func TestOpenAIClientExtractsLlamaNPredictedTimingTokenCount(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	clock := &sequenceClock{times: []time.Time{base, base.Add(400 * time.Millisecond)}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"content":"timed raw shape","timings":{"n_predicted":6}}`)
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client(), Now: clock.Now}).Complete(context.Background(), CompletionRequest{
+		BaseURL:     server.URL,
+		ModelID:     "tinyllama.Q4_K_M.gguf",
+		Prompt:      internalBenchmarkPrompt,
+		MaxTokens:   16,
+		Temperature: 0,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if result.TokensGenerated != 6 || result.TokenCountEstimated {
+		t.Fatalf("tokens = %+v, want n_predicted precise token count", result)
+	}
+	if result.RuntimeMeasurementStatus != RuntimeMeasurementStatusMeasured || result.MetadataParseStatus != MetadataParseStatusOK {
+		t.Fatalf("measurement metadata = %+v", result)
+	}
+}
+
+func TestOpenAIClientEstimatesMissingBackendTokenCountAsPartial(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	clock := &sequenceClock{times: []time.Time{base, base.Add(300 * time.Millisecond)}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"choices":[{"message":{"content":"fallback token estimate"}}],"finish_reason":"stop"}`)
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client(), Now: clock.Now}).Complete(context.Background(), CompletionRequest{
+		BaseURL:     server.URL,
+		ModelID:     "tinyllama.Q4_K_M.gguf",
+		Prompt:      internalBenchmarkPrompt,
+		MaxTokens:   16,
+		Temperature: 0,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if result.TokensGenerated != 3 || !result.TokenCountEstimated {
+		t.Fatalf("tokens = %+v, want fallback estimate from generated text", result)
+	}
+	if result.RuntimeMeasurementStatus != RuntimeMeasurementStatusPartial || result.MetadataParseStatus != MetadataParseStatusOK {
+		t.Fatalf("measurement metadata = %+v, want partial runtime with ok parse", result)
+	}
+}
+
+func TestOpenAIClientStreamingUsesDeltasBeforeBackendTokenField(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	clock := &sequenceClock{times: []time.Time{
+		base,
+		base.Add(50 * time.Millisecond),
+		base.Add(500 * time.Millisecond),
+	}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"one"}}]}`)
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":" two"}}],"tokens_generated":99}`)
+		fmt.Fprintln(w, `data: {"choices":[{"finish_reason":"stop"}]}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client(), Now: clock.Now}).Complete(context.Background(), CompletionRequest{
+		BaseURL:   server.URL,
+		ModelID:   "tinyllama.Q4_K_M.gguf",
+		Prompt:    internalBenchmarkPrompt,
+		MaxTokens: 16,
+		Stream:    true,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if result.TokensGenerated != 2 || result.TokenCountEstimated {
+		t.Fatalf("tokens = %+v, want node-side streamed delta count before backend token field", result)
+	}
+	if result.FinishReason != FinishReasonStop {
+		t.Fatalf("finish metadata = %+v, want final stop reason", result)
 	}
 }
 

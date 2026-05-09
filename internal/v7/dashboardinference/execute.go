@@ -63,26 +63,30 @@ type LlamaCppRunner struct {
 }
 
 type ExecutionResult struct {
-	Spec                   Spec
-	Backend                string
-	ModelID                string
-	OutputHash             string
-	OutputBytes            int64
-	RequestedMaxTokens     int
-	TokensGenerated        int64
-	FinishReason           string
-	BackendFinishReason    string
-	BackendStopReason      string
-	MaxTokensReached       bool
-	TTFTMs                 int64
-	TotalTimeMs            int64
-	DecodeTPS              float64
-	EndToEndTPS            float64
-	ProofStatus            string
-	ErrorCode              string
-	GeneratedText          string
-	GeneratedTextTruncated bool
-	MaxReturnChars         int
+	Spec                     Spec
+	Backend                  string
+	ModelID                  string
+	OutputHash               string
+	OutputBytes              int64
+	RequestedMaxTokens       int
+	TokensGenerated          int64
+	FinishReason             string
+	BackendFinishReason      string
+	BackendStopReason        string
+	MaxTokensReached         bool
+	TTFTMs                   int64
+	TotalTimeMs              int64
+	DecodeTPS                float64
+	TPOTMs                   float64
+	EndToEndTPS              float64
+	ProofStatus              string
+	RuntimeMeasurementStatus string
+	MetadataParseStatus      string
+	TokenCountEstimated      bool
+	ErrorCode                string
+	GeneratedText            string
+	GeneratedTextTruncated   bool
+	MaxReturnChars           int
 }
 
 type LocalStatusCounters struct {
@@ -379,8 +383,29 @@ func inferRuntimeModelFamily(value string) string {
 
 func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) ExecutionResult {
 	tokens := completion.TokensGenerated
+	tokenCountEstimated := completion.TokenCountEstimated
+	runtimeStatus := normalizeRuntimeMeasurementStatus(completion.RuntimeMeasurementStatus)
+	parseStatus := normalizeMetadataParseStatus(completion.MetadataParseStatus)
 	if tokens <= 0 {
 		tokens = approximateGeneratedTokens(completion.Output)
+		if tokens > 0 {
+			tokenCountEstimated = true
+			runtimeStatus = llamacpp.RuntimeMeasurementStatusPartial
+			if parseStatus == "" {
+				parseStatus = llamacpp.MetadataParseStatusOK
+			}
+		}
+	}
+	if tokens <= 0 {
+		runtimeStatus = llamacpp.RuntimeMeasurementStatusUnknown
+		parseStatus = llamacpp.MetadataParseStatusPartial
+	} else {
+		if runtimeStatus == "" {
+			runtimeStatus = llamacpp.RuntimeMeasurementStatusMeasured
+		}
+		if parseStatus == "" {
+			parseStatus = llamacpp.MetadataParseStatusOK
+		}
 	}
 	finish := llamacpp.NormalizeCompletionFinishMetadata(completion, spec.MaxTokens, tokens)
 	outputBytes := completion.OutputBytes
@@ -406,28 +431,42 @@ func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) Ex
 	if tokens > 0 && decodeWindowMs > 0 {
 		decodeTPS = float64(tokens) / (float64(decodeWindowMs) / 1000)
 	}
+	var tpotMs float64
+	if tokens > 0 && decodeWindowMs > 0 {
+		tpotMs = float64(decodeWindowMs) / float64(tokens)
+	}
 	var endToEndTPS float64
 	if tokens > 0 && total > 0 {
 		endToEndTPS = float64(tokens) / (float64(total) / 1000)
 	}
+	if tokens <= 0 {
+		runtimeStatus = llamacpp.RuntimeMeasurementStatusUnknown
+		parseStatus = llamacpp.MetadataParseStatusPartial
+	} else if decodeTPS <= 0 || total <= 0 {
+		runtimeStatus = llamacpp.RuntimeMeasurementStatusPartial
+	}
 	result := ExecutionResult{
-		Spec:                spec,
-		Backend:             spec.Backend,
-		ModelID:             spec.ModelID,
-		OutputHash:          HashOutput(spec.JobID, completion.Output),
-		OutputBytes:         outputBytes,
-		RequestedMaxTokens:  finish.RequestedMaxTokens,
-		TokensGenerated:     tokens,
-		FinishReason:        finish.FinishReason,
-		BackendFinishReason: finish.BackendFinishReason,
-		BackendStopReason:   finish.BackendStopReason,
-		MaxTokensReached:    finish.MaxTokensReached,
-		TTFTMs:              ttft,
-		TotalTimeMs:         total,
-		DecodeTPS:           roundTPS(decodeTPS),
-		EndToEndTPS:         roundTPS(endToEndTPS),
-		ProofStatus:         ProofStatusMeasured,
-		MaxReturnChars:      spec.MaxReturnChars,
+		Spec:                     spec,
+		Backend:                  spec.Backend,
+		ModelID:                  spec.ModelID,
+		OutputHash:               HashOutput(spec.JobID, completion.Output),
+		OutputBytes:              outputBytes,
+		RequestedMaxTokens:       finish.RequestedMaxTokens,
+		TokensGenerated:          tokens,
+		FinishReason:             finish.FinishReason,
+		BackendFinishReason:      finish.BackendFinishReason,
+		BackendStopReason:        finish.BackendStopReason,
+		MaxTokensReached:         finish.MaxTokensReached,
+		TTFTMs:                   ttft,
+		TotalTimeMs:              total,
+		DecodeTPS:                roundTPS(decodeTPS),
+		TPOTMs:                   roundTPS(tpotMs),
+		EndToEndTPS:              roundTPS(endToEndTPS),
+		ProofStatus:              ProofStatusMeasured,
+		RuntimeMeasurementStatus: runtimeStatus,
+		MetadataParseStatus:      parseStatus,
+		TokenCountEstimated:      tokenCountEstimated,
+		MaxReturnChars:           spec.MaxReturnChars,
 	}
 	if spec.ReturnText {
 		result.GeneratedText, result.GeneratedTextTruncated = truncateGeneratedText(completion.Output, spec.MaxReturnChars)
@@ -452,17 +491,19 @@ func failedExecutionResult(spec Spec, code string) ExecutionResult {
 		code = "dashboard_inference_failed"
 	}
 	return ExecutionResult{
-		Spec:                spec,
-		Backend:             spec.Backend,
-		ModelID:             spec.ModelID,
-		OutputHash:          HashOutput(spec.JobID, nil),
-		RequestedMaxTokens:  spec.MaxTokens,
-		FinishReason:        finishReasonFromErrorCode(code),
-		BackendFinishReason: llamacpp.FinishReasonUnknown,
-		BackendStopReason:   llamacpp.FinishReasonUnknown,
-		ProofStatus:         ProofStatusRejected,
-		ErrorCode:           code,
-		MaxReturnChars:      spec.MaxReturnChars,
+		Spec:                     spec,
+		Backend:                  spec.Backend,
+		ModelID:                  spec.ModelID,
+		OutputHash:               HashOutput(spec.JobID, nil),
+		RequestedMaxTokens:       spec.MaxTokens,
+		FinishReason:             finishReasonFromErrorCode(code),
+		BackendFinishReason:      llamacpp.FinishReasonUnknown,
+		BackendStopReason:        llamacpp.FinishReasonUnknown,
+		ProofStatus:              ProofStatusRejected,
+		RuntimeMeasurementStatus: llamacpp.RuntimeMeasurementStatusUnknown,
+		MetadataParseStatus:      llamacpp.MetadataParseStatusOK,
+		ErrorCode:                code,
+		MaxReturnChars:           spec.MaxReturnChars,
 	}
 }
 
@@ -520,6 +561,30 @@ func roundTPS(value float64) float64 {
 
 func finiteTPS(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+}
+
+func normalizeRuntimeMeasurementStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case llamacpp.RuntimeMeasurementStatusMeasured:
+		return llamacpp.RuntimeMeasurementStatusMeasured
+	case llamacpp.RuntimeMeasurementStatusPartial:
+		return llamacpp.RuntimeMeasurementStatusPartial
+	case llamacpp.RuntimeMeasurementStatusUnknown:
+		return llamacpp.RuntimeMeasurementStatusUnknown
+	default:
+		return ""
+	}
+}
+
+func normalizeMetadataParseStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case llamacpp.MetadataParseStatusOK:
+		return llamacpp.MetadataParseStatusOK
+	case llamacpp.MetadataParseStatusPartial:
+		return llamacpp.MetadataParseStatusPartial
+	default:
+		return ""
+	}
 }
 
 func (s *LocalStatus) RecordSeen(runID, jobID string) {

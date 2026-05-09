@@ -41,7 +41,8 @@ type completionFinishCapture struct {
 	stoppedLimit        bool
 	timedOut            bool
 	stopSeen            bool
-	tokensGenerated     int64
+	timingTokens        int64
+	backendTokenCount   int64
 }
 
 func NormalizeCompletionFinishMetadata(result CompletionResult, requestedMaxTokens int, tokensGenerated int64) FinishMetadata {
@@ -103,15 +104,15 @@ func (c *completionFinishCapture) observeStreamChunk(chunk openAIChatStreamChunk
 	c.stoppedEOS = c.stoppedEOS || chunk.StoppedEOS
 	c.stoppedLimit = c.stoppedLimit || chunk.StoppedLimit
 	c.timedOut = c.timedOut || chunk.TimedOut || chunk.Timeout
-	if generated := backendGeneratedTokens(chunk.TokensGenerated, chunk.TokensPredicted, chunk.Timings); generated > 0 {
-		c.tokensGenerated = generated
+	if generated := timingGeneratedTokens(chunk.Timings, chunk.PredictedN, chunk.NPredicted); generated > 0 {
+		c.timingTokens = generated
+	}
+	if generated := backendReturnedTokenCount(chunk.TokensGenerated, chunk.TokensPredicted, chunk.CompletionTokens); generated > 0 {
+		c.backendTokenCount = generated
 	}
 }
 
 func (c completionFinishCapture) metadata(requestedMaxTokens int, tokensGenerated int64) FinishMetadata {
-	if tokensGenerated <= 0 && c.tokensGenerated > 0 {
-		tokensGenerated = c.tokensGenerated
-	}
 	return normalizeFinishMetadata(finishMetadataInput{
 		RequestedMaxTokens:  requestedMaxTokens,
 		TokensGenerated:     tokensGenerated,
@@ -158,6 +159,7 @@ func normalizeFinishMetadata(input finishMetadataInput) FinishMetadata {
 	}
 	maxTokensReached := finish == FinishReasonLength || finish == FinishReasonMaxTokens || input.StoppedLimit
 	if !hasBackendSignal && requested > 0 && tokens >= int64(requested) {
+		finish = FinishReasonLength
 		maxTokensReached = true
 	}
 	if backendFinish == "" {
@@ -264,15 +266,28 @@ func cleanFinishText(value string) string {
 	return value
 }
 
-func backendGeneratedTokens(tokensGenerated int64, tokensPredicted int64, timings *llamaTimings) int64 {
-	if tokensGenerated > 0 {
-		return tokensGenerated
+func timingGeneratedTokens(timings *llamaTimings, topLevelValues ...int64) int64 {
+	if timings != nil {
+		if timings.PredictedN > 0 {
+			return timings.PredictedN
+		}
+		if timings.NPredicted > 0 {
+			return timings.NPredicted
+		}
 	}
-	if tokensPredicted > 0 {
-		return tokensPredicted
+	for _, value := range topLevelValues {
+		if value > 0 {
+			return value
+		}
 	}
-	if timings != nil && timings.PredictedN > 0 {
-		return timings.PredictedN
+	return 0
+}
+
+func backendReturnedTokenCount(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
 	}
 	return 0
 }

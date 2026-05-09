@@ -22,30 +22,34 @@ type Receipt struct {
 }
 
 type ReceiptMetadata struct {
-	RequestID              string  `json:"request_id"`
-	RunID                  string  `json:"run_id"`
-	JobID                  string  `json:"job_id"`
-	Backend                string  `json:"backend"`
-	ModelID                string  `json:"model_id"`
-	OutputHash             string  `json:"output_hash"`
-	OutputBytes            int64   `json:"output_bytes"`
-	RequestedMaxTokens     int     `json:"requested_max_tokens"`
-	TokensGenerated        int64   `json:"tokens_generated"`
-	FinishReason           string  `json:"finish_reason"`
-	BackendFinishReason    string  `json:"backend_finish_reason"`
-	BackendStopReason      string  `json:"backend_stop_reason"`
-	MaxTokensReached       bool    `json:"max_tokens_reached"`
-	TTFTMs                 int64   `json:"ttft_ms"`
-	TotalTimeMs            int64   `json:"total_time_ms"`
-	DecodeTPS              float64 `json:"decode_tps"`
-	EndToEndTPS            float64 `json:"end_to_end_tps"`
-	ProofStatus            string  `json:"proof_status"`
-	PromptHash             string  `json:"prompt_hash,omitempty"`
-	PromptProfileID        string  `json:"prompt_profile_id,omitempty"`
-	ErrorCode              string  `json:"error_code,omitempty"`
-	GeneratedText          string  `json:"generated_text,omitempty"`
-	GeneratedTextTruncated bool    `json:"generated_text_truncated,omitempty"`
-	MaxReturnChars         int     `json:"max_return_chars"`
+	RequestID                string  `json:"request_id"`
+	RunID                    string  `json:"run_id"`
+	JobID                    string  `json:"job_id"`
+	Backend                  string  `json:"backend"`
+	ModelID                  string  `json:"model_id"`
+	OutputHash               string  `json:"output_hash"`
+	OutputBytes              int64   `json:"output_bytes"`
+	RequestedMaxTokens       int     `json:"requested_max_tokens"`
+	TokensGenerated          int64   `json:"tokens_generated"`
+	FinishReason             string  `json:"finish_reason"`
+	BackendFinishReason      string  `json:"backend_finish_reason"`
+	BackendStopReason        string  `json:"backend_stop_reason"`
+	MaxTokensReached         bool    `json:"max_tokens_reached"`
+	TTFTMs                   int64   `json:"ttft_ms"`
+	TotalTimeMs              int64   `json:"total_time_ms"`
+	DecodeTPS                float64 `json:"decode_tps"`
+	TPOTMs                   float64 `json:"tpot_ms"`
+	EndToEndTPS              float64 `json:"end_to_end_tps"`
+	ProofStatus              string  `json:"proof_status"`
+	RuntimeMeasurementStatus string  `json:"runtime_measurement_status"`
+	MetadataParseStatus      string  `json:"metadata_parse_status"`
+	TokenCountEstimated      bool    `json:"token_count_estimated,omitempty"`
+	PromptHash               string  `json:"prompt_hash,omitempty"`
+	PromptProfileID          string  `json:"prompt_profile_id,omitempty"`
+	ErrorCode                string  `json:"error_code,omitempty"`
+	GeneratedText            string  `json:"generated_text,omitempty"`
+	GeneratedTextTruncated   bool    `json:"generated_text_truncated,omitempty"`
+	MaxReturnChars           int     `json:"max_return_chars"`
 }
 
 func BuildReceipt(result ExecutionResult) (Receipt, error) {
@@ -70,7 +74,7 @@ func BuildReceipt(result ExecutionResult) (Receipt, error) {
 		ResultHashHex: hashHex,
 		MeteringUnits: meteringUnits,
 		Metadata: map[string]any{
-			Task: metadata.Map(),
+			Task: metadata.MapWithResultHash(hashHex),
 		},
 	}, nil
 }
@@ -99,27 +103,30 @@ func BuildRejectionReceiptFromIdentity(identity AssignmentIdentity, runErr error
 		backend = llamacpp.BackendName
 	}
 	metadata := ReceiptMetadata{
-		RequestID:           firstNonEmpty(cleanText(identity.RequestID, maxIDLen), "unknown_request"),
-		RunID:               firstNonEmpty(cleanText(identity.RunID, maxIDLen), "unknown_run"),
-		JobID:               jobID,
-		Backend:             backend,
-		ModelID:             firstNonEmpty(cleanText(identity.ModelID, maxModelIDLen), "unknown_model"),
-		OutputHash:          HashOutput(jobID, nil),
-		OutputBytes:         0,
-		RequestedMaxTokens:  0,
-		TokensGenerated:     0,
-		FinishReason:        llamacpp.FinishReasonError,
-		BackendFinishReason: llamacpp.FinishReasonUnknown,
-		BackendStopReason:   llamacpp.FinishReasonUnknown,
-		TTFTMs:              0,
-		TotalTimeMs:         0,
-		DecodeTPS:           0,
-		EndToEndTPS:         0,
-		ProofStatus:         ProofStatusRejected,
-		PromptHash:          cleanHash(identity.PromptHash),
-		PromptProfileID:     cleanText(identity.PromptProfileID, maxIDLen),
-		ErrorCode:           ErrorCode(runErr),
-		MaxReturnChars:      defaultMaxReturnChars,
+		RequestID:                firstNonEmpty(cleanText(identity.RequestID, maxIDLen), "unknown_request"),
+		RunID:                    firstNonEmpty(cleanText(identity.RunID, maxIDLen), "unknown_run"),
+		JobID:                    jobID,
+		Backend:                  backend,
+		ModelID:                  firstNonEmpty(cleanText(identity.ModelID, maxModelIDLen), "unknown_model"),
+		OutputHash:               HashOutput(jobID, nil),
+		OutputBytes:              0,
+		RequestedMaxTokens:       0,
+		TokensGenerated:          0,
+		FinishReason:             llamacpp.FinishReasonError,
+		BackendFinishReason:      llamacpp.FinishReasonUnknown,
+		BackendStopReason:        llamacpp.FinishReasonUnknown,
+		TTFTMs:                   0,
+		TotalTimeMs:              0,
+		DecodeTPS:                0,
+		TPOTMs:                   0,
+		EndToEndTPS:              0,
+		ProofStatus:              ProofStatusRejected,
+		RuntimeMeasurementStatus: llamacpp.RuntimeMeasurementStatusUnknown,
+		MetadataParseStatus:      llamacpp.MetadataParseStatusOK,
+		PromptHash:               cleanHash(identity.PromptHash),
+		PromptProfileID:          cleanText(identity.PromptProfileID, maxIDLen),
+		ErrorCode:                ErrorCode(runErr),
+		MaxReturnChars:           defaultMaxReturnChars,
 	}
 	if metadata.ErrorCode == "" {
 		metadata.ErrorCode = "dashboard_inference_rejected"
@@ -130,7 +137,7 @@ func BuildRejectionReceiptFromIdentity(identity AssignmentIdentity, runErr error
 		ResultHashHex: hashHex,
 		MeteringUnits: 0,
 		Metadata: map[string]any{
-			Task: metadata.Map(),
+			Task: metadata.MapWithResultHash(hashHex),
 		},
 	}
 }
@@ -174,26 +181,35 @@ func HashOutput(jobID string, output []byte) string {
 func (m ReceiptMetadata) Map() map[string]any {
 	m = m.clone()
 	out := map[string]any{
-		"request_id":               m.RequestID,
-		"run_id":                   m.RunID,
-		"job_id":                   m.JobID,
-		"backend":                  m.Backend,
-		"model_id":                 m.ModelID,
-		"output_hash":              m.OutputHash,
-		"output_bytes":             m.OutputBytes,
-		"requested_max_tokens":     m.RequestedMaxTokens,
-		"tokens_generated":         m.TokensGenerated,
-		"finish_reason":            m.FinishReason,
-		"backend_finish_reason":    m.BackendFinishReason,
-		"backend_stop_reason":      m.BackendStopReason,
-		"max_tokens_reached":       m.MaxTokensReached,
-		"ttft_ms":                  m.TTFTMs,
-		"total_time_ms":            m.TotalTimeMs,
-		"decode_tps":               m.DecodeTPS,
-		"end_to_end_tps":           m.EndToEndTPS,
-		"proof_status":             m.ProofStatus,
-		"generated_text_truncated": m.GeneratedTextTruncated,
-		"max_return_chars":         m.MaxReturnChars,
+		"request_id":                 m.RequestID,
+		"run_id":                     m.RunID,
+		"job_id":                     m.JobID,
+		"backend":                    m.Backend,
+		"model_id":                   m.ModelID,
+		"output_hash":                m.OutputHash,
+		"output_bytes":               m.OutputBytes,
+		"requested_max_tokens":       m.RequestedMaxTokens,
+		"tokens_generated":           m.TokensGenerated,
+		"finish_reason":              m.FinishReason,
+		"backend_finish_reason":      m.BackendFinishReason,
+		"backend_stop_reason":        m.BackendStopReason,
+		"max_tokens_reached":         m.MaxTokensReached,
+		"ttft_ms":                    m.TTFTMs,
+		"total_time_ms":              m.TotalTimeMs,
+		"decode_tps":                 m.DecodeTPS,
+		"tpot_ms":                    m.TPOTMs,
+		"end_to_end_tps":             m.EndToEndTPS,
+		"p50_ttft_ms":                m.TTFTMs,
+		"p50_decode_tps":             m.DecodeTPS,
+		"p50_end_to_end_tps":         m.EndToEndTPS,
+		"proof_status":               m.ProofStatus,
+		"runtime_measurement_status": m.RuntimeMeasurementStatus,
+		"metadata_parse_status":      m.MetadataParseStatus,
+		"generated_text_truncated":   m.GeneratedTextTruncated,
+		"max_return_chars":           m.MaxReturnChars,
+	}
+	if m.TokenCountEstimated {
+		out["token_count_estimated"] = true
 	}
 	if m.PromptHash != "" {
 		out["prompt_hash"] = m.PromptHash
@@ -207,6 +223,14 @@ func (m ReceiptMetadata) Map() map[string]any {
 	if m.GeneratedText != "" {
 		out["generated_text"] = m.GeneratedText
 		out["generated_text_truncated"] = m.GeneratedTextTruncated
+	}
+	return out
+}
+
+func (m ReceiptMetadata) MapWithResultHash(resultHashHex string) map[string]any {
+	out := m.Map()
+	if hashHex64(resultHashHex) {
+		out["result_hash_hex"] = strings.TrimSpace(resultHashHex)
 	}
 	return out
 }
@@ -266,9 +290,23 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 		m.TotalTimeMs = 0
 	}
 	m.DecodeTPS = roundTPS(m.DecodeTPS)
+	m.TPOTMs = roundTPS(m.TPOTMs)
 	m.EndToEndTPS = roundTPS(m.EndToEndTPS)
 	if m.ProofStatus == "" {
 		m.ProofStatus = ProofStatusRejected
+	}
+	m.RuntimeMeasurementStatus = normalizeRuntimeMeasurementStatus(m.RuntimeMeasurementStatus)
+	m.MetadataParseStatus = normalizeMetadataParseStatus(m.MetadataParseStatus)
+	if m.TokensGenerated <= 0 {
+		m.RuntimeMeasurementStatus = llamacpp.RuntimeMeasurementStatusUnknown
+		if m.MetadataParseStatus == "" {
+			m.MetadataParseStatus = llamacpp.MetadataParseStatusPartial
+		}
+	} else if m.RuntimeMeasurementStatus == "" {
+		m.RuntimeMeasurementStatus = llamacpp.RuntimeMeasurementStatusMeasured
+	}
+	if m.MetadataParseStatus == "" {
+		m.MetadataParseStatus = llamacpp.MetadataParseStatusOK
 	}
 	if m.MaxReturnChars <= 0 || m.MaxReturnChars > defaultMaxReturnChars {
 		m.MaxReturnChars = defaultMaxReturnChars
@@ -276,6 +314,8 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 	if m.ProofStatus == ProofStatusRejected {
 		m.GeneratedText = ""
 		m.GeneratedTextTruncated = false
+		m.TokenCountEstimated = false
+		m.RuntimeMeasurementStatus = llamacpp.RuntimeMeasurementStatusUnknown
 		if m.FinishReason == llamacpp.FinishReasonUnknown {
 			m.FinishReason = llamacpp.FinishReasonError
 		}
@@ -290,30 +330,34 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 func receiptMetadataFromResult(result ExecutionResult) ReceiptMetadata {
 	result = normalizeExecutionResult(result)
 	return ReceiptMetadata{
-		RequestID:              result.Spec.RequestID,
-		RunID:                  result.Spec.RunID,
-		JobID:                  result.Spec.JobID,
-		Backend:                firstNonEmpty(result.Backend, result.Spec.Backend),
-		ModelID:                firstNonEmpty(result.ModelID, result.Spec.ModelID),
-		OutputHash:             firstNonEmpty(result.OutputHash, HashOutput(result.Spec.JobID, nil)),
-		OutputBytes:            result.OutputBytes,
-		RequestedMaxTokens:     result.RequestedMaxTokens,
-		TokensGenerated:        result.TokensGenerated,
-		FinishReason:           result.FinishReason,
-		BackendFinishReason:    result.BackendFinishReason,
-		BackendStopReason:      result.BackendStopReason,
-		MaxTokensReached:       result.MaxTokensReached,
-		TTFTMs:                 result.TTFTMs,
-		TotalTimeMs:            result.TotalTimeMs,
-		DecodeTPS:              result.DecodeTPS,
-		EndToEndTPS:            result.EndToEndTPS,
-		ProofStatus:            result.ProofStatus,
-		PromptHash:             result.Spec.PromptHash,
-		PromptProfileID:        result.Spec.PromptProfileID,
-		ErrorCode:              result.ErrorCode,
-		GeneratedText:          result.GeneratedText,
-		GeneratedTextTruncated: result.GeneratedTextTruncated,
-		MaxReturnChars:         result.MaxReturnChars,
+		RequestID:                result.Spec.RequestID,
+		RunID:                    result.Spec.RunID,
+		JobID:                    result.Spec.JobID,
+		Backend:                  firstNonEmpty(result.Backend, result.Spec.Backend),
+		ModelID:                  firstNonEmpty(result.ModelID, result.Spec.ModelID),
+		OutputHash:               firstNonEmpty(result.OutputHash, HashOutput(result.Spec.JobID, nil)),
+		OutputBytes:              result.OutputBytes,
+		RequestedMaxTokens:       result.RequestedMaxTokens,
+		TokensGenerated:          result.TokensGenerated,
+		FinishReason:             result.FinishReason,
+		BackendFinishReason:      result.BackendFinishReason,
+		BackendStopReason:        result.BackendStopReason,
+		MaxTokensReached:         result.MaxTokensReached,
+		TTFTMs:                   result.TTFTMs,
+		TotalTimeMs:              result.TotalTimeMs,
+		DecodeTPS:                result.DecodeTPS,
+		TPOTMs:                   result.TPOTMs,
+		EndToEndTPS:              result.EndToEndTPS,
+		ProofStatus:              result.ProofStatus,
+		RuntimeMeasurementStatus: result.RuntimeMeasurementStatus,
+		MetadataParseStatus:      result.MetadataParseStatus,
+		TokenCountEstimated:      result.TokenCountEstimated,
+		PromptHash:               result.Spec.PromptHash,
+		PromptProfileID:          result.Spec.PromptProfileID,
+		ErrorCode:                result.ErrorCode,
+		GeneratedText:            result.GeneratedText,
+		GeneratedTextTruncated:   result.GeneratedTextTruncated,
+		MaxReturnChars:           result.MaxReturnChars,
 	}.clone()
 }
 
@@ -367,7 +411,22 @@ func normalizeExecutionResult(result ExecutionResult) ExecutionResult {
 		result.TotalTimeMs = 0
 	}
 	result.DecodeTPS = roundTPS(result.DecodeTPS)
+	result.TPOTMs = roundTPS(result.TPOTMs)
 	result.EndToEndTPS = roundTPS(result.EndToEndTPS)
+	result.RuntimeMeasurementStatus = normalizeRuntimeMeasurementStatus(result.RuntimeMeasurementStatus)
+	result.MetadataParseStatus = normalizeMetadataParseStatus(result.MetadataParseStatus)
+	if result.TokensGenerated <= 0 {
+		result.RuntimeMeasurementStatus = llamacpp.RuntimeMeasurementStatusUnknown
+		if result.MetadataParseStatus == "" {
+			result.MetadataParseStatus = llamacpp.MetadataParseStatusPartial
+		}
+		result.TokenCountEstimated = false
+	} else if result.RuntimeMeasurementStatus == "" {
+		result.RuntimeMeasurementStatus = llamacpp.RuntimeMeasurementStatusMeasured
+	}
+	if result.MetadataParseStatus == "" {
+		result.MetadataParseStatus = llamacpp.MetadataParseStatusOK
+	}
 	return result
 }
 
@@ -432,8 +491,14 @@ func validateReceiptMetadataForHash(metadata ReceiptMetadata) error {
 	if cleanFinishReason(metadata.FinishReason) == "" {
 		errs = append(errs, fmt.Errorf("%w: receipt finish_reason unknown %q", ErrInvalidReceipt, metadata.FinishReason))
 	}
-	if !finiteTPS(metadata.DecodeTPS) || !finiteTPS(metadata.EndToEndTPS) {
+	if !finiteTPS(metadata.DecodeTPS) || !finiteTPS(metadata.TPOTMs) || !finiteTPS(metadata.EndToEndTPS) {
 		errs = append(errs, fmt.Errorf("%w: receipt tps metrics must be finite", ErrInvalidReceipt))
+	}
+	if normalizeRuntimeMeasurementStatus(metadata.RuntimeMeasurementStatus) == "" {
+		errs = append(errs, fmt.Errorf("%w: receipt runtime_measurement_status unknown %q", ErrInvalidReceipt, metadata.RuntimeMeasurementStatus))
+	}
+	if normalizeMetadataParseStatus(metadata.MetadataParseStatus) == "" {
+		errs = append(errs, fmt.Errorf("%w: receipt metadata_parse_status unknown %q", ErrInvalidReceipt, metadata.MetadataParseStatus))
 	}
 	if metadata.PromptHash != "" {
 		if err := validateSHA256ID(metadata.PromptHash, "receipt prompt_hash", ErrInvalidReceipt); err != nil {
@@ -552,6 +617,19 @@ func cleanHash(value string) string {
 		return ""
 	}
 	return value
+}
+
+func hashHex64(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func firstNonEmpty(values ...string) string {

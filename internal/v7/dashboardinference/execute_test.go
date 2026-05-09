@@ -111,6 +111,9 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	if metadata["output_hash"] == "" || metadata["tokens_generated"] != int64(7) {
 		t.Fatalf("metadata missing hash/metrics: %+v", metadata)
 	}
+	if metadata["result_hash_hex"] != receipt.ResultHashHex {
+		t.Fatalf("result_hash_hex = %#v, want receipt result hash %q", metadata["result_hash_hex"], receipt.ResultHashHex)
+	}
 	if metadata["requested_max_tokens"] != int(32) || metadata["finish_reason"] != llamacpp.FinishReasonUnknown || metadata["max_tokens_reached"] != false {
 		t.Fatalf("finish metadata = %+v", metadata)
 	}
@@ -122,6 +125,12 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	}
 	if metadata["decode_tps"] != float64(20) || metadata["end_to_end_tps"] != float64(16.279) {
 		t.Fatalf("tps metadata = %+v", metadata)
+	}
+	if metadata["p50_ttft_ms"] != int64(80) || metadata["p50_decode_tps"] != float64(20) || metadata["tpot_ms"] != float64(50) || metadata["p50_end_to_end_tps"] != float64(16.279) {
+		t.Fatalf("normalized runtime metrics = %+v", metadata)
+	}
+	if metadata["runtime_measurement_status"] != llamacpp.RuntimeMeasurementStatusMeasured || metadata["metadata_parse_status"] != llamacpp.MetadataParseStatusOK {
+		t.Fatalf("measurement statuses = %+v", metadata)
 	}
 	if !ReceiptJSONContainsNoRawText(receipt) {
 		raw, _ := json.Marshal(receipt.Metadata)
@@ -246,6 +255,9 @@ func TestExecuteAssignmentReturnTextFlagEnabledIncludesGeneratedText(t *testing.
 	if metadata["output_hash"] == "" || metadata["tokens_generated"] != int64(8) || metadata["ttft_ms"] != int64(123) {
 		t.Fatalf("metadata missing hash/timing metrics: %+v", metadata)
 	}
+	if metadata["p50_ttft_ms"] != int64(123) || metadata["p50_decode_tps"] == nil || metadata["proof_status"] != ProofStatusMeasured {
+		t.Fatalf("normalized schema missing from text receipt: %+v", metadata)
+	}
 	if len(receipt.ResultHashHex) != 64 {
 		t.Fatalf("result hash = %q, want 64 hex chars", receipt.ResultHashHex)
 	}
@@ -283,6 +295,14 @@ func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
 	}
 	if result.ProofStatus != ProofStatusMeasured || result.GeneratedText != output {
 		t.Fatalf("result = %+v, want measured generated text", result)
+	}
+	receipt, err := BuildReceipt(result)
+	if err != nil {
+		t.Fatalf("BuildReceipt() error = %v", err)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["tokens_generated"] != int64(3) || metadata["finish_reason"] != llamacpp.FinishReasonStop || metadata["generated_text"] != output {
+		t.Fatalf("streaming final receipt metadata = %+v", metadata)
 	}
 	if len(progress.batches) != 1 {
 		t.Fatalf("progress batches = %d, want 1", len(progress.batches))
@@ -477,8 +497,8 @@ func TestExecuteAssignmentMaxTokenCapMetadataDoesNotMeanDisplayTruncated(t *test
 	if metadata["requested_max_tokens"] != int(8) || metadata["tokens_generated"] != int64(8) || metadata["max_tokens_reached"] != true {
 		t.Fatalf("max token metadata = %+v", metadata)
 	}
-	if metadata["finish_reason"] != llamacpp.FinishReasonUnknown {
-		t.Fatalf("finish_reason = %#v, want unknown when backend did not expose reason", metadata["finish_reason"])
+	if metadata["finish_reason"] != llamacpp.FinishReasonLength {
+		t.Fatalf("finish_reason = %#v, want length when max token cap is reached", metadata["finish_reason"])
 	}
 	if metadata["generated_text"] != "partial wor" || metadata["generated_text_truncated"] != false {
 		t.Fatalf("display truncation metadata = %+v", metadata)
@@ -518,6 +538,77 @@ func TestExecuteAssignmentBackendNaturalStopMetadata(t *testing.T) {
 	metadata := receipt.Metadata[Task].(map[string]any)
 	if metadata["finish_reason"] != llamacpp.FinishReasonStop || metadata["backend_finish_reason"] != llamacpp.FinishReasonStop || metadata["max_tokens_reached"] != false {
 		t.Fatalf("natural stop metadata = %+v", metadata)
+	}
+}
+
+func TestExecuteAssignmentMissingBackendTokenCountUsesPartialEstimate(t *testing.T) {
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:      []byte("fallback token estimate"),
+		OutputBytes: int64(len("fallback token estimate")),
+		TTFTMs:      40,
+		TotalTimeMs: 340,
+	}}
+	spec := validSpec(t)
+	spec.Prompt = "Write a short dashboard sentence."
+	spec.ReturnText = true
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvTextOutputEnabled,
+		Runner: LlamaCppRunner{
+			Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+			Client:  client,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteAssignment() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["proof_status"] != ProofStatusMeasured || metadata["tokens_generated"] != int64(3) {
+		t.Fatalf("fallback token metadata = %+v", metadata)
+	}
+	if metadata["runtime_measurement_status"] != llamacpp.RuntimeMeasurementStatusPartial || metadata["metadata_parse_status"] != llamacpp.MetadataParseStatusOK || metadata["token_count_estimated"] != true {
+		t.Fatalf("fallback measurement status = %+v", metadata)
+	}
+	if metadata["p50_ttft_ms"] != int64(40) || metadata["p50_decode_tps"] != float64(10) {
+		t.Fatalf("fallback runtime metrics = %+v", metadata)
+	}
+	if metadata["generated_text"] != "fallback token estimate" {
+		t.Fatalf("generated_text = %#v", metadata["generated_text"])
+	}
+}
+
+func TestBuildReceiptNoTokenCountMarksUnknownWithoutFailing(t *testing.T) {
+	spec := validSpec(t)
+	spec.ReturnText = false
+	receipt, err := BuildReceipt(ExecutionResult{
+		Spec:               spec,
+		Backend:            spec.Backend,
+		ModelID:            spec.ModelID,
+		OutputHash:         HashOutput(spec.JobID, nil),
+		RequestedMaxTokens: spec.MaxTokens,
+		TokensGenerated:    0,
+		FinishReason:       llamacpp.FinishReasonUnknown,
+		ProofStatus:        ProofStatusMeasured,
+		MaxReturnChars:     spec.MaxReturnChars,
+	})
+	if err != nil {
+		t.Fatalf("BuildReceipt() error = %v", err)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["tokens_generated"] != int64(0) {
+		t.Fatalf("tokens_generated = %#v, want explicit zero", metadata["tokens_generated"])
+	}
+	if metadata["runtime_measurement_status"] != llamacpp.RuntimeMeasurementStatusUnknown || metadata["metadata_parse_status"] != llamacpp.MetadataParseStatusPartial {
+		t.Fatalf("unknown measurement metadata = %+v", metadata)
+	}
+	if metadata["proof_status"] != ProofStatusMeasured || metadata["result_hash_hex"] != receipt.ResultHashHex {
+		t.Fatalf("stable receipt metadata = %+v", metadata)
 	}
 }
 
