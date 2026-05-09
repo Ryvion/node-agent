@@ -111,6 +111,9 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	if metadata["output_hash"] == "" || metadata["tokens_generated"] != int64(7) {
 		t.Fatalf("metadata missing hash/metrics: %+v", metadata)
 	}
+	if metadata["requested_max_tokens"] != int(32) || metadata["finish_reason"] != llamacpp.FinishReasonUnknown || metadata["max_tokens_reached"] != false {
+		t.Fatalf("finish metadata = %+v", metadata)
+	}
 	if _, ok := metadata["generated_text"]; ok {
 		t.Fatalf("metadata included generated_text without opt-in: %+v", metadata)
 	}
@@ -163,7 +166,7 @@ func TestExecuteAssignmentUsesPromptWithoutReturningText(t *testing.T) {
 		t.Fatalf("metadata included generated_text without return_text: %+v", metadata)
 	}
 	encoded, _ := json.Marshal(receipt.Metadata)
-	for _, forbidden := range []string{"private dashboard prompt", "private completion text", "generated_text"} {
+	for _, forbidden := range []string{"private dashboard prompt", "private completion text", `"generated_text":`} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("metadata leaked %q: %s", forbidden, encoded)
 		}
@@ -200,7 +203,7 @@ func TestExecuteAssignmentReturnTextFlagDisabledRejects(t *testing.T) {
 		t.Fatalf("disabled text metadata = %+v", metadata)
 	}
 	encoded, _ := json.Marshal(receipt.Metadata)
-	if strings.Contains(string(encoded), "private dashboard prompt") || strings.Contains(string(encoded), "generated_text") {
+	if strings.Contains(string(encoded), "private dashboard prompt") || strings.Contains(string(encoded), `"generated_text":`) {
 		t.Fatalf("disabled text receipt leaked prompt/text field: %s", encoded)
 	}
 }
@@ -255,8 +258,10 @@ func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
 			Output:          []byte(output),
 			OutputBytes:     int64(len(output)),
 			TokensGenerated: 3,
+			FinishReason:    llamacpp.FinishReasonStop,
 			TTFTMs:          90,
 			TotalTimeMs:     390,
+			Streamed:        true,
 		},
 		deltas: []string{"Ryvion", " routes", " tokens"},
 	}
@@ -286,10 +291,10 @@ func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
 	if batch.RunID != spec.RunID || batch.JobID != spec.JobID || batch.NodeID != spec.TargetNodeID || batch.SeqStart != 1 {
 		t.Fatalf("batch identity = %+v", batch)
 	}
-	if len(batch.Chunks) != 3 {
-		t.Fatalf("batch chunks = %+v, want 3", batch.Chunks)
+	if len(batch.Chunks) != 4 {
+		t.Fatalf("batch chunks = %+v, want 4 including final done", batch.Chunks)
 	}
-	for idx, chunk := range batch.Chunks {
+	for idx, chunk := range batch.Chunks[:3] {
 		wantSeq := int64(idx + 1)
 		if chunk.Seq != wantSeq || chunk.Type != "delta" {
 			t.Fatalf("chunk[%d] = %+v, want seq %d delta", idx, chunk, wantSeq)
@@ -297,6 +302,9 @@ func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
 	}
 	if got := batch.Chunks[0].Text + batch.Chunks[1].Text + batch.Chunks[2].Text; got != output {
 		t.Fatalf("concatenated chunks = %q, want %q", got, output)
+	}
+	if done := batch.Chunks[3]; done.Seq != 4 || done.Type != "done" || done.FinishReason != llamacpp.FinishReasonStop || done.Text != "" {
+		t.Fatalf("done chunk = %+v, want final stop reason", done)
 	}
 }
 
@@ -435,6 +443,81 @@ func TestExecuteAssignmentReturnTextTruncatesDeterministically(t *testing.T) {
 	}
 	if metadata["output_hash"] != HashOutput(spec.JobID, []byte("abcdef")) {
 		t.Fatalf("output_hash = %v, want hash over full output", metadata["output_hash"])
+	}
+}
+
+func TestExecuteAssignmentMaxTokenCapMetadataDoesNotMeanDisplayTruncated(t *testing.T) {
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("partial wor"),
+		OutputBytes:     int64(len("partial wor")),
+		TokensGenerated: 8,
+		TTFTMs:          12,
+		TotalTimeMs:     112,
+	}}
+	spec := validSpec(t)
+	spec.MaxTokens = 8
+	spec.Prompt = "Write a short dashboard sentence."
+	spec.ReturnText = true
+	spec.MaxReturnChars = defaultMaxReturnChars
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	receipt, _, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvTextOutputEnabled,
+		Runner: LlamaCppRunner{
+			Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+			Client:  client,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteAssignment() error = %v", err)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["requested_max_tokens"] != int(8) || metadata["tokens_generated"] != int64(8) || metadata["max_tokens_reached"] != true {
+		t.Fatalf("max token metadata = %+v", metadata)
+	}
+	if metadata["finish_reason"] != llamacpp.FinishReasonUnknown {
+		t.Fatalf("finish_reason = %#v, want unknown when backend did not expose reason", metadata["finish_reason"])
+	}
+	if metadata["generated_text"] != "partial wor" || metadata["generated_text_truncated"] != false {
+		t.Fatalf("display truncation metadata = %+v", metadata)
+	}
+	if metadata["max_return_chars"] != int(defaultMaxReturnChars) {
+		t.Fatalf("max_return_chars = %#v", metadata["max_return_chars"])
+	}
+}
+
+func TestExecuteAssignmentBackendNaturalStopMetadata(t *testing.T) {
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:              []byte("Ryvion is ready."),
+		OutputBytes:         int64(len("Ryvion is ready.")),
+		TokensGenerated:     3,
+		FinishReason:        llamacpp.FinishReasonStop,
+		BackendFinishReason: llamacpp.FinishReasonStop,
+		TTFTMs:              15,
+		TotalTimeMs:         115,
+	}}
+	spec := validSpec(t)
+	spec.Prompt = "Write a short dashboard sentence."
+	spec.ReturnText = true
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	receipt, _, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvTextOutputEnabled,
+		Runner: LlamaCppRunner{
+			Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+			Client:  client,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteAssignment() error = %v", err)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["finish_reason"] != llamacpp.FinishReasonStop || metadata["backend_finish_reason"] != llamacpp.FinishReasonStop || metadata["max_tokens_reached"] != false {
+		t.Fatalf("natural stop metadata = %+v", metadata)
 	}
 }
 

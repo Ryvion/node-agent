@@ -2212,7 +2212,7 @@ func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T)
 			return
 		}
 		encoded, _ := json.Marshal(req.Metadata)
-		for _, forbidden := range []string{"dashboard measured output", "raw_prompt", "prompt_text", "messages", "input_text", "output_text", "generated_text", "raw_output", "completion", "token_logprobs", "key_data", "value_data", "query_vector", "tensor_bytes", "secret"} {
+		for _, forbidden := range []string{"dashboard measured output", "raw_prompt", "prompt_text", "messages", "input_text", "output_text", `"generated_text":`, "raw_output", "completion", "token_logprobs", "key_data", "value_data", "query_vector", "tensor_bytes", "secret"} {
 			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
 				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
 				w.WriteHeader(http.StatusBadRequest)

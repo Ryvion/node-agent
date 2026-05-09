@@ -29,7 +29,12 @@ type ReceiptMetadata struct {
 	ModelID                string  `json:"model_id"`
 	OutputHash             string  `json:"output_hash"`
 	OutputBytes            int64   `json:"output_bytes"`
+	RequestedMaxTokens     int     `json:"requested_max_tokens"`
 	TokensGenerated        int64   `json:"tokens_generated"`
+	FinishReason           string  `json:"finish_reason"`
+	BackendFinishReason    string  `json:"backend_finish_reason"`
+	BackendStopReason      string  `json:"backend_stop_reason"`
+	MaxTokensReached       bool    `json:"max_tokens_reached"`
 	TTFTMs                 int64   `json:"ttft_ms"`
 	TotalTimeMs            int64   `json:"total_time_ms"`
 	DecodeTPS              float64 `json:"decode_tps"`
@@ -40,6 +45,7 @@ type ReceiptMetadata struct {
 	ErrorCode              string  `json:"error_code,omitempty"`
 	GeneratedText          string  `json:"generated_text,omitempty"`
 	GeneratedTextTruncated bool    `json:"generated_text_truncated,omitempty"`
+	MaxReturnChars         int     `json:"max_return_chars"`
 }
 
 func BuildReceipt(result ExecutionResult) (Receipt, error) {
@@ -93,22 +99,27 @@ func BuildRejectionReceiptFromIdentity(identity AssignmentIdentity, runErr error
 		backend = llamacpp.BackendName
 	}
 	metadata := ReceiptMetadata{
-		RequestID:       firstNonEmpty(cleanText(identity.RequestID, maxIDLen), "unknown_request"),
-		RunID:           firstNonEmpty(cleanText(identity.RunID, maxIDLen), "unknown_run"),
-		JobID:           jobID,
-		Backend:         backend,
-		ModelID:         firstNonEmpty(cleanText(identity.ModelID, maxModelIDLen), "unknown_model"),
-		OutputHash:      HashOutput(jobID, nil),
-		OutputBytes:     0,
-		TokensGenerated: 0,
-		TTFTMs:          0,
-		TotalTimeMs:     0,
-		DecodeTPS:       0,
-		EndToEndTPS:     0,
-		ProofStatus:     ProofStatusRejected,
-		PromptHash:      cleanHash(identity.PromptHash),
-		PromptProfileID: cleanText(identity.PromptProfileID, maxIDLen),
-		ErrorCode:       ErrorCode(runErr),
+		RequestID:           firstNonEmpty(cleanText(identity.RequestID, maxIDLen), "unknown_request"),
+		RunID:               firstNonEmpty(cleanText(identity.RunID, maxIDLen), "unknown_run"),
+		JobID:               jobID,
+		Backend:             backend,
+		ModelID:             firstNonEmpty(cleanText(identity.ModelID, maxModelIDLen), "unknown_model"),
+		OutputHash:          HashOutput(jobID, nil),
+		OutputBytes:         0,
+		RequestedMaxTokens:  0,
+		TokensGenerated:     0,
+		FinishReason:        llamacpp.FinishReasonError,
+		BackendFinishReason: llamacpp.FinishReasonUnknown,
+		BackendStopReason:   llamacpp.FinishReasonUnknown,
+		TTFTMs:              0,
+		TotalTimeMs:         0,
+		DecodeTPS:           0,
+		EndToEndTPS:         0,
+		ProofStatus:         ProofStatusRejected,
+		PromptHash:          cleanHash(identity.PromptHash),
+		PromptProfileID:     cleanText(identity.PromptProfileID, maxIDLen),
+		ErrorCode:           ErrorCode(runErr),
+		MaxReturnChars:      defaultMaxReturnChars,
 	}
 	if metadata.ErrorCode == "" {
 		metadata.ErrorCode = "dashboard_inference_rejected"
@@ -163,19 +174,26 @@ func HashOutput(jobID string, output []byte) string {
 func (m ReceiptMetadata) Map() map[string]any {
 	m = m.clone()
 	out := map[string]any{
-		"request_id":       m.RequestID,
-		"run_id":           m.RunID,
-		"job_id":           m.JobID,
-		"backend":          m.Backend,
-		"model_id":         m.ModelID,
-		"output_hash":      m.OutputHash,
-		"output_bytes":     m.OutputBytes,
-		"tokens_generated": m.TokensGenerated,
-		"ttft_ms":          m.TTFTMs,
-		"total_time_ms":    m.TotalTimeMs,
-		"decode_tps":       m.DecodeTPS,
-		"end_to_end_tps":   m.EndToEndTPS,
-		"proof_status":     m.ProofStatus,
+		"request_id":               m.RequestID,
+		"run_id":                   m.RunID,
+		"job_id":                   m.JobID,
+		"backend":                  m.Backend,
+		"model_id":                 m.ModelID,
+		"output_hash":              m.OutputHash,
+		"output_bytes":             m.OutputBytes,
+		"requested_max_tokens":     m.RequestedMaxTokens,
+		"tokens_generated":         m.TokensGenerated,
+		"finish_reason":            m.FinishReason,
+		"backend_finish_reason":    m.BackendFinishReason,
+		"backend_stop_reason":      m.BackendStopReason,
+		"max_tokens_reached":       m.MaxTokensReached,
+		"ttft_ms":                  m.TTFTMs,
+		"total_time_ms":            m.TotalTimeMs,
+		"decode_tps":               m.DecodeTPS,
+		"end_to_end_tps":           m.EndToEndTPS,
+		"proof_status":             m.ProofStatus,
+		"generated_text_truncated": m.GeneratedTextTruncated,
+		"max_return_chars":         m.MaxReturnChars,
 	}
 	if m.PromptHash != "" {
 		out["prompt_hash"] = m.PromptHash
@@ -219,8 +237,27 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 	if m.OutputBytes < 0 {
 		m.OutputBytes = 0
 	}
+	if m.RequestedMaxTokens < 0 {
+		m.RequestedMaxTokens = 0
+	}
 	if m.TokensGenerated < 0 {
 		m.TokensGenerated = 0
+	}
+	m.FinishReason = cleanFinishReason(m.FinishReason)
+	m.BackendFinishReason = cleanFinishDetail(m.BackendFinishReason)
+	m.BackendStopReason = cleanFinishDetail(m.BackendStopReason)
+	if m.FinishReason == "" {
+		if m.ProofStatus == ProofStatusRejected {
+			m.FinishReason = finishReasonFromErrorCode(m.ErrorCode)
+		} else {
+			m.FinishReason = llamacpp.FinishReasonUnknown
+		}
+	}
+	if m.BackendFinishReason == "" {
+		m.BackendFinishReason = llamacpp.FinishReasonUnknown
+	}
+	if m.BackendStopReason == "" {
+		m.BackendStopReason = llamacpp.FinishReasonUnknown
 	}
 	if m.TTFTMs < 0 {
 		m.TTFTMs = 0
@@ -233,9 +270,15 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 	if m.ProofStatus == "" {
 		m.ProofStatus = ProofStatusRejected
 	}
+	if m.MaxReturnChars <= 0 || m.MaxReturnChars > defaultMaxReturnChars {
+		m.MaxReturnChars = defaultMaxReturnChars
+	}
 	if m.ProofStatus == ProofStatusRejected {
 		m.GeneratedText = ""
 		m.GeneratedTextTruncated = false
+		if m.FinishReason == llamacpp.FinishReasonUnknown {
+			m.FinishReason = llamacpp.FinishReasonError
+		}
 	} else if m.GeneratedText != "" {
 		text, truncated := truncateGeneratedText([]byte(m.GeneratedText), defaultMaxReturnChars)
 		m.GeneratedText = text
@@ -254,7 +297,12 @@ func receiptMetadataFromResult(result ExecutionResult) ReceiptMetadata {
 		ModelID:                firstNonEmpty(result.ModelID, result.Spec.ModelID),
 		OutputHash:             firstNonEmpty(result.OutputHash, HashOutput(result.Spec.JobID, nil)),
 		OutputBytes:            result.OutputBytes,
+		RequestedMaxTokens:     result.RequestedMaxTokens,
 		TokensGenerated:        result.TokensGenerated,
+		FinishReason:           result.FinishReason,
+		BackendFinishReason:    result.BackendFinishReason,
+		BackendStopReason:      result.BackendStopReason,
+		MaxTokensReached:       result.MaxTokensReached,
 		TTFTMs:                 result.TTFTMs,
 		TotalTimeMs:            result.TotalTimeMs,
 		DecodeTPS:              result.DecodeTPS,
@@ -265,6 +313,7 @@ func receiptMetadataFromResult(result ExecutionResult) ReceiptMetadata {
 		ErrorCode:              result.ErrorCode,
 		GeneratedText:          result.GeneratedText,
 		GeneratedTextTruncated: result.GeneratedTextTruncated,
+		MaxReturnChars:         result.MaxReturnChars,
 	}.clone()
 }
 
@@ -278,6 +327,25 @@ func normalizeExecutionResult(result ExecutionResult) ExecutionResult {
 		result.ProofStatus = ProofStatusRejected
 	}
 	result.ErrorCode = cleanErrorCode(result.ErrorCode)
+	finish := llamacpp.NormalizeCompletionFinishMetadata(llamacpp.CompletionResult{
+		RequestedMaxTokens:  result.RequestedMaxTokens,
+		TokensGenerated:     result.TokensGenerated,
+		FinishReason:        result.FinishReason,
+		BackendFinishReason: result.BackendFinishReason,
+		BackendStopReason:   result.BackendStopReason,
+		MaxTokensReached:    result.MaxTokensReached,
+	}, result.Spec.MaxTokens, result.TokensGenerated)
+	result.RequestedMaxTokens = finish.RequestedMaxTokens
+	result.FinishReason = finish.FinishReason
+	result.BackendFinishReason = finish.BackendFinishReason
+	result.BackendStopReason = finish.BackendStopReason
+	result.MaxTokensReached = finish.MaxTokensReached
+	if result.ProofStatus == ProofStatusRejected {
+		result.FinishReason = finishReasonFromErrorCode(result.ErrorCode)
+	}
+	if result.MaxReturnChars <= 0 || result.MaxReturnChars > defaultMaxReturnChars {
+		result.MaxReturnChars = result.Spec.MaxReturnChars
+	}
 	if !result.Spec.ReturnText || result.ProofStatus != ProofStatusMeasured {
 		result.GeneratedText = ""
 		result.GeneratedTextTruncated = false
@@ -358,6 +426,12 @@ func validateReceiptMetadataForHash(metadata ReceiptMetadata) error {
 	if metadata.OutputBytes < 0 || metadata.TokensGenerated < 0 || metadata.TTFTMs < 0 || metadata.TotalTimeMs < 0 {
 		errs = append(errs, fmt.Errorf("%w: receipt metrics must be non-negative", ErrInvalidReceipt))
 	}
+	if metadata.RequestedMaxTokens < 0 || metadata.MaxReturnChars <= 0 {
+		errs = append(errs, fmt.Errorf("%w: receipt token/display caps must be valid", ErrInvalidReceipt))
+	}
+	if cleanFinishReason(metadata.FinishReason) == "" {
+		errs = append(errs, fmt.Errorf("%w: receipt finish_reason unknown %q", ErrInvalidReceipt, metadata.FinishReason))
+	}
 	if !finiteTPS(metadata.DecodeTPS) || !finiteTPS(metadata.EndToEndTPS) {
 		errs = append(errs, fmt.Errorf("%w: receipt tps metrics must be finite", ErrInvalidReceipt))
 	}
@@ -390,12 +464,22 @@ func ReceiptJSONContainsNoRawText(receipt Receipt) bool {
 		return false
 	}
 	lower := bytes.ToLower(raw)
-	for _, marker := range forbiddenTextMarkers() {
+	for _, marker := range forbiddenReceiptJSONMarkers() {
 		if bytes.Contains(lower, bytes.ToLower([]byte(marker))) {
 			return false
 		}
 	}
 	return true
+}
+
+func forbiddenReceiptJSONMarkers() []string {
+	markers := forbiddenTextMarkers()
+	for idx, marker := range markers {
+		if marker == "generated_text" {
+			markers[idx] = `"generated_text":`
+		}
+	}
+	return markers
 }
 
 func forbiddenTextMarkers() []string {
@@ -419,6 +503,47 @@ func forbiddenTextMarkers() []string {
 		"tensor_bytes",
 		"secret",
 	}
+}
+
+func cleanFinishReason(value string) string {
+	switch cleanFinishDetail(value) {
+	case llamacpp.FinishReasonStop:
+		return llamacpp.FinishReasonStop
+	case llamacpp.FinishReasonLength:
+		return llamacpp.FinishReasonLength
+	case llamacpp.FinishReasonMaxTokens:
+		return llamacpp.FinishReasonMaxTokens
+	case llamacpp.FinishReasonTimeout:
+		return llamacpp.FinishReasonTimeout
+	case llamacpp.FinishReasonError:
+		return llamacpp.FinishReasonError
+	case llamacpp.FinishReasonUnknown:
+		return llamacpp.FinishReasonUnknown
+	default:
+		return ""
+	}
+}
+
+func cleanFinishDetail(value string) string {
+	value = strings.ToLower(cleanText(value, maxIDLen))
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range forbiddenTextMarkers() {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return ""
+		}
+	}
+	value = strings.NewReplacer(" ", "_", "-", "_").Replace(value)
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == ':' {
+			continue
+		}
+		return ""
+	}
+	return value
 }
 
 func cleanHash(value string) string {

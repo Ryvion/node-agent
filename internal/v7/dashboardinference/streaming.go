@@ -16,9 +16,10 @@ const (
 var ErrStreamProgressFailed = errors.New("dashboardinference: stream progress failed")
 
 type ProgressChunk struct {
-	Seq  int64  `json:"seq,omitempty"`
-	Type string `json:"type,omitempty"`
-	Text string `json:"text,omitempty"`
+	Seq          int64  `json:"seq,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Text         string `json:"text,omitempty"`
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 type ProgressBatch struct {
@@ -93,6 +94,28 @@ func (b *progressBatcher) addDelta(text string) error {
 		return b.flush(b.ctx)
 	}
 	return nil
+}
+
+func (b *progressBatcher) addDone(ctx context.Context, finishReason string) error {
+	if b == nil || b.sender == nil {
+		return nil
+	}
+	finishReason = cleanFinishReason(finishReason)
+	if finishReason == "" {
+		finishReason = "unknown"
+	}
+	if err := b.currentErr(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	b.nextSeq++
+	b.pending = append(b.pending, ProgressChunk{
+		Seq:          b.nextSeq,
+		Type:         "done",
+		FinishReason: finishReason,
+	})
+	b.mu.Unlock()
+	return b.flush(ctx)
 }
 
 func (b *progressBatcher) close(ctx context.Context) error {

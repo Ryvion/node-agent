@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,14 +30,19 @@ type CompletionDelta struct {
 }
 
 type CompletionResult struct {
-	Output           []byte `json:"-"`
-	OutputBytes      int64  `json:"output_bytes"`
-	PromptTokens     int64  `json:"prompt_tokens,omitempty"`
-	CompletionTokens int64  `json:"completion_tokens,omitempty"`
-	TokensGenerated  int64  `json:"tokens_generated"`
-	TTFTMs           int64  `json:"ttft_ms"`
-	TotalTimeMs      int64  `json:"total_time_ms"`
-	Streamed         bool   `json:"streamed"`
+	Output              []byte `json:"-"`
+	OutputBytes         int64  `json:"output_bytes"`
+	PromptTokens        int64  `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int64  `json:"completion_tokens,omitempty"`
+	RequestedMaxTokens  int    `json:"requested_max_tokens"`
+	TokensGenerated     int64  `json:"tokens_generated"`
+	FinishReason        string `json:"finish_reason"`
+	BackendFinishReason string `json:"backend_finish_reason"`
+	BackendStopReason   string `json:"backend_stop_reason"`
+	MaxTokensReached    bool   `json:"max_tokens_reached"`
+	TTFTMs              int64  `json:"ttft_ms"`
+	TotalTimeMs         int64  `json:"total_time_ms"`
+	Streamed            bool   `json:"streamed"`
 }
 
 type CompletionClient interface {
@@ -115,7 +121,11 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return CompletionResult{}, ClientError{Code: defaultClientErrorCode}
+		code := defaultClientErrorCode
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			code = "llamacpp_timeout"
+		}
+		return CompletionResult{}, ClientError{Code: code}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -134,9 +144,9 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 	}
 
 	if req.Stream {
-		return c.readStreamingCompletion(resp.Body, started, req.OnDelta)
+		return c.readStreamingCompletion(resp.Body, started, req.MaxTokens, req.OnDelta)
 	}
-	return c.readNonStreamingCompletion(resp.Body, started)
+	return c.readNonStreamingCompletion(resp.Body, started, req.MaxTokens)
 }
 
 func normalizeCompletionRequest(req CompletionRequest) CompletionRequest {
@@ -161,13 +171,14 @@ func streamUnsupportedStatus(status int) bool {
 	}
 }
 
-func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time, onDelta func(CompletionDelta) error) (CompletionResult, error) {
+func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time, requestedMaxTokens int, onDelta func(CompletionDelta) error) (CompletionResult, error) {
 	var output bytes.Buffer
 	var firstTokenAt time.Time
 	var promptTokens int64
 	var completionTokens int64
 	var usageSeen bool
 	var chunkTokens int64
+	var finish completionFinishCapture
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -190,6 +201,7 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 		if chunk.Error.Message != "" {
 			return CompletionResult{}, ClientError{Code: "llamacpp_stream_error"}
 		}
+		finish.observeStreamChunk(chunk)
 		if chunk.Usage != nil {
 			usageSeen = true
 			if chunk.Usage.PromptTokens >= 0 {
@@ -225,6 +237,10 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 	if output.Len() == 0 {
 		return CompletionResult{}, ClientError{Code: "llamacpp_empty_output"}
 	}
+	if completionTokens <= 0 && finish.tokensGenerated > 0 {
+		completionTokens = finish.tokensGenerated
+		usageSeen = true
+	}
 	if completionTokens <= 0 {
 		completionTokens = chunkTokens
 	}
@@ -232,10 +248,10 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 		completionTokens = approximateGeneratedTokens(output.String())
 	}
 	finished := c.now()
-	return buildCompletionResult(output.Bytes(), promptTokens, completionTokens, usageSeen, firstTokenAt, started, finished, true), nil
+	return buildCompletionResult(output.Bytes(), promptTokens, completionTokens, usageSeen, firstTokenAt, started, finished, true, finish.metadata(requestedMaxTokens, completionTokens)), nil
 }
 
-func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Time) (CompletionResult, error) {
+func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Time, requestedMaxTokens int) (CompletionResult, error) {
 	var payload openAIChatResponse
 	if err := json.NewDecoder(io.LimitReader(body, 4*1024*1024)).Decode(&payload); err != nil {
 		return CompletionResult{}, ClientError{Code: "llamacpp_response_decode_failed"}
@@ -260,14 +276,24 @@ func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Ti
 			completionTokens = payload.Usage.CompletionTokens
 		}
 	}
+	if promptTokens <= 0 && payload.TokensEvaluated > 0 {
+		promptTokens = payload.TokensEvaluated
+		usageSeen = true
+	}
+	if completionTokens <= 0 {
+		if generated := backendGeneratedTokens(payload.TokensGenerated, payload.TokensPredicted, payload.Timings); generated > 0 {
+			completionTokens = generated
+			usageSeen = true
+		}
+	}
 	if completionTokens <= 0 {
 		completionTokens = approximateGeneratedTokens(output.String())
 	}
 	finished := c.now()
-	return buildCompletionResult(output.Bytes(), promptTokens, completionTokens, usageSeen, finished, started, finished, false), nil
+	return buildCompletionResult(output.Bytes(), promptTokens, completionTokens, usageSeen, finished, started, finished, false, finishMetadataFromChatResponse(payload, requestedMaxTokens, completionTokens)), nil
 }
 
-func buildCompletionResult(output []byte, promptTokens int64, completionTokens int64, usageSeen bool, firstTokenAt time.Time, started time.Time, finished time.Time, streamed bool) CompletionResult {
+func buildCompletionResult(output []byte, promptTokens int64, completionTokens int64, usageSeen bool, firstTokenAt time.Time, started time.Time, finished time.Time, streamed bool, finish FinishMetadata) CompletionResult {
 	if finished.Before(started) {
 		finished = started
 	}
@@ -278,12 +304,17 @@ func buildCompletionResult(output []byte, promptTokens int64, completionTokens i
 		firstTokenAt = finished
 	}
 	result := CompletionResult{
-		Output:          append([]byte(nil), output...),
-		OutputBytes:     int64(len(output)),
-		TokensGenerated: completionTokens,
-		TTFTMs:          firstTokenAt.Sub(started).Milliseconds(),
-		TotalTimeMs:     finished.Sub(started).Milliseconds(),
-		Streamed:        streamed,
+		Output:              append([]byte(nil), output...),
+		OutputBytes:         int64(len(output)),
+		RequestedMaxTokens:  finish.RequestedMaxTokens,
+		TokensGenerated:     completionTokens,
+		FinishReason:        finish.FinishReason,
+		BackendFinishReason: finish.BackendFinishReason,
+		BackendStopReason:   finish.BackendStopReason,
+		MaxTokensReached:    finish.MaxTokensReached,
+		TTFTMs:              firstTokenAt.Sub(started).Milliseconds(),
+		TotalTimeMs:         finished.Sub(started).Milliseconds(),
+		Streamed:            streamed,
 	}
 	if usageSeen {
 		result.PromptTokens = promptTokens
@@ -331,34 +362,60 @@ type openAIError struct {
 }
 
 type openAIChatStreamChunk struct {
-	Choices []openAIChatStreamChoice `json:"choices"`
-	Usage   *openAIUsage             `json:"usage,omitempty"`
-	Error   openAIError              `json:"error,omitempty"`
+	Choices         []openAIChatStreamChoice `json:"choices"`
+	Usage           *openAIUsage             `json:"usage,omitempty"`
+	Error           openAIError              `json:"error,omitempty"`
+	FinishReason    string                   `json:"finish_reason,omitempty"`
+	Stop            json.RawMessage          `json:"stop,omitempty"`
+	StoppedEOS      bool                     `json:"stopped_eos,omitempty"`
+	StoppedLimit    bool                     `json:"stopped_limit,omitempty"`
+	TimedOut        bool                     `json:"timed_out,omitempty"`
+	Timeout         bool                     `json:"timeout,omitempty"`
+	TokensEvaluated int64                    `json:"tokens_evaluated,omitempty"`
+	TokensGenerated int64                    `json:"tokens_generated,omitempty"`
+	TokensPredicted int64                    `json:"tokens_predicted,omitempty"`
+	Timings         *llamaTimings            `json:"timings,omitempty"`
 }
 
 type openAIChatStreamChoice struct {
 	Delta struct {
 		Content string `json:"content"`
 	} `json:"delta"`
-	Content string `json:"content"`
-	Text    string `json:"text"`
+	Content      string `json:"content"`
+	Text         string `json:"text"`
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 type openAIChatResponse struct {
-	Choices  []openAIChatChoice `json:"choices"`
-	Content  string             `json:"content"`
-	Response string             `json:"response"`
-	Text     string             `json:"text"`
-	Usage    *openAIUsage       `json:"usage,omitempty"`
-	Error    openAIError        `json:"error,omitempty"`
+	Choices         []openAIChatChoice `json:"choices"`
+	Content         string             `json:"content"`
+	Response        string             `json:"response"`
+	Text            string             `json:"text"`
+	Usage           *openAIUsage       `json:"usage,omitempty"`
+	Error           openAIError        `json:"error,omitempty"`
+	FinishReason    string             `json:"finish_reason,omitempty"`
+	Stop            json.RawMessage    `json:"stop,omitempty"`
+	StoppedEOS      bool               `json:"stopped_eos,omitempty"`
+	StoppedLimit    bool               `json:"stopped_limit,omitempty"`
+	TimedOut        bool               `json:"timed_out,omitempty"`
+	Timeout         bool               `json:"timeout,omitempty"`
+	TokensEvaluated int64              `json:"tokens_evaluated,omitempty"`
+	TokensGenerated int64              `json:"tokens_generated,omitempty"`
+	TokensPredicted int64              `json:"tokens_predicted,omitempty"`
+	Timings         *llamaTimings      `json:"timings,omitempty"`
 }
 
 type openAIChatChoice struct {
 	Message struct {
 		Content string `json:"content"`
 	} `json:"message"`
-	Content string `json:"content"`
-	Text    string `json:"text"`
+	Content      string `json:"content"`
+	Text         string `json:"text"`
+	FinishReason string `json:"finish_reason,omitempty"`
+}
+
+type llamaTimings struct {
+	PredictedN int64 `json:"predicted_n,omitempty"`
 }
 
 func generatedTextFromStreamChoice(choice openAIChatStreamChoice) string {

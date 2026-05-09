@@ -32,6 +32,7 @@ func TestOpenAIClientStreamingChunksComputeTimings(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"hello"}}]}`)
 		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":" world"}}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`)
+		fmt.Fprintln(w, `data: {"choices":[{"finish_reason":"stop"}]}`)
 		fmt.Fprintln(w, `data: [DONE]`)
 	}))
 	defer server.Close()
@@ -64,6 +65,9 @@ func TestOpenAIClientStreamingChunksComputeTimings(t *testing.T) {
 	if result.TokensGenerated != 2 || result.PromptTokens != 7 || result.CompletionTokens != 2 {
 		t.Fatalf("tokens = %+v, want usage token counts", result)
 	}
+	if result.FinishReason != FinishReasonStop || result.BackendFinishReason != FinishReasonStop || result.MaxTokensReached {
+		t.Fatalf("finish metadata = %+v, want natural stop", result)
+	}
 	raw, err := json.Marshal(result)
 	if err != nil {
 		t.Fatalf("json.Marshal(result) error = %v", err)
@@ -88,7 +92,7 @@ func TestOpenAIClientNonStreamingCompletion(t *testing.T) {
 			t.Fatalf("stream = true, want false")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"choices":[{"message":{"content":"ready now"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+		fmt.Fprintln(w, `{"choices":[{"message":{"content":"ready now"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
 	}))
 	defer server.Close()
 
@@ -111,6 +115,60 @@ func TestOpenAIClientNonStreamingCompletion(t *testing.T) {
 	}
 	if result.Streamed {
 		t.Fatalf("streamed = true, want false")
+	}
+	if result.FinishReason != FinishReasonStop || result.MaxTokensReached {
+		t.Fatalf("finish metadata = %+v, want stop without max cap", result)
+	}
+}
+
+func TestOpenAIClientExtractsLlamaStoppedLimitFinishMetadata(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	clock := &sequenceClock{times: []time.Time{base, base.Add(600 * time.Millisecond)}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"content":"partial wor","stopped_limit":true,"tokens_evaluated":5,"timings":{"predicted_n":8}}`)
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client(), Now: clock.Now}).Complete(context.Background(), CompletionRequest{
+		BaseURL:     server.URL,
+		ModelID:     "tinyllama.Q4_K_M.gguf",
+		Prompt:      internalBenchmarkPrompt,
+		MaxTokens:   8,
+		Temperature: 0,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if result.TokensGenerated != 8 || result.PromptTokens != 5 || result.CompletionTokens != 8 {
+		t.Fatalf("tokens = %+v, want llama.cpp backend token counts", result)
+	}
+	if result.RequestedMaxTokens != 8 || result.FinishReason != FinishReasonLength || result.BackendStopReason != "stopped_limit" || !result.MaxTokensReached {
+		t.Fatalf("finish metadata = %+v, want stopped_limit length cap", result)
+	}
+}
+
+func TestOpenAIClientInfersMaxTokensReachedWhenBackendReasonMissing(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	clock := &sequenceClock{times: []time.Time{base, base.Add(600 * time.Millisecond)}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"choices":[{"message":{"content":"partial wor"}}],"usage":{"completion_tokens":8}}`)
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client(), Now: clock.Now}).Complete(context.Background(), CompletionRequest{
+		BaseURL:     server.URL,
+		ModelID:     "tinyllama.Q4_K_M.gguf",
+		Prompt:      internalBenchmarkPrompt,
+		MaxTokens:   8,
+		Temperature: 0,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if result.FinishReason != FinishReasonUnknown || !result.MaxTokensReached {
+		t.Fatalf("finish metadata = %+v, want unknown reason with inferred max cap", result)
 	}
 }
 

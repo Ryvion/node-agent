@@ -68,7 +68,12 @@ type ExecutionResult struct {
 	ModelID                string
 	OutputHash             string
 	OutputBytes            int64
+	RequestedMaxTokens     int
 	TokensGenerated        int64
+	FinishReason           string
+	BackendFinishReason    string
+	BackendStopReason      string
+	MaxTokensReached       bool
 	TTFTMs                 int64
 	TotalTimeMs            int64
 	DecodeTPS              float64
@@ -77,6 +82,7 @@ type ExecutionResult struct {
 	ErrorCode              string
 	GeneratedText          string
 	GeneratedTextTruncated bool
+	MaxReturnChars         int
 }
 
 type LocalStatusCounters struct {
@@ -212,7 +218,12 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	}
 	completion, err := completeWithFallback(runCtx, r.client(), req)
 	if batcher != nil {
-		if flushErr := batcher.close(runCtx); flushErr != nil {
+		if err == nil && completion.Streamed {
+			if doneErr := batcher.addDone(runCtx, completion.FinishReason); doneErr != nil {
+				err = doneErr
+			}
+		}
+		if flushErr := batcher.close(runCtx); flushErr != nil && err == nil {
 			err = flushErr
 		}
 	}
@@ -371,6 +382,7 @@ func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) Ex
 	if tokens <= 0 {
 		tokens = approximateGeneratedTokens(completion.Output)
 	}
+	finish := llamacpp.NormalizeCompletionFinishMetadata(completion, spec.MaxTokens, tokens)
 	outputBytes := completion.OutputBytes
 	if outputBytes <= 0 {
 		outputBytes = int64(len(completion.Output))
@@ -399,17 +411,23 @@ func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) Ex
 		endToEndTPS = float64(tokens) / (float64(total) / 1000)
 	}
 	result := ExecutionResult{
-		Spec:            spec,
-		Backend:         spec.Backend,
-		ModelID:         spec.ModelID,
-		OutputHash:      HashOutput(spec.JobID, completion.Output),
-		OutputBytes:     outputBytes,
-		TokensGenerated: tokens,
-		TTFTMs:          ttft,
-		TotalTimeMs:     total,
-		DecodeTPS:       roundTPS(decodeTPS),
-		EndToEndTPS:     roundTPS(endToEndTPS),
-		ProofStatus:     ProofStatusMeasured,
+		Spec:                spec,
+		Backend:             spec.Backend,
+		ModelID:             spec.ModelID,
+		OutputHash:          HashOutput(spec.JobID, completion.Output),
+		OutputBytes:         outputBytes,
+		RequestedMaxTokens:  finish.RequestedMaxTokens,
+		TokensGenerated:     tokens,
+		FinishReason:        finish.FinishReason,
+		BackendFinishReason: finish.BackendFinishReason,
+		BackendStopReason:   finish.BackendStopReason,
+		MaxTokensReached:    finish.MaxTokensReached,
+		TTFTMs:              ttft,
+		TotalTimeMs:         total,
+		DecodeTPS:           roundTPS(decodeTPS),
+		EndToEndTPS:         roundTPS(endToEndTPS),
+		ProofStatus:         ProofStatusMeasured,
+		MaxReturnChars:      spec.MaxReturnChars,
 	}
 	if spec.ReturnText {
 		result.GeneratedText, result.GeneratedTextTruncated = truncateGeneratedText(completion.Output, spec.MaxReturnChars)
@@ -434,13 +452,29 @@ func failedExecutionResult(spec Spec, code string) ExecutionResult {
 		code = "dashboard_inference_failed"
 	}
 	return ExecutionResult{
-		Spec:        spec,
-		Backend:     spec.Backend,
-		ModelID:     spec.ModelID,
-		OutputHash:  HashOutput(spec.JobID, nil),
-		ProofStatus: ProofStatusRejected,
-		ErrorCode:   code,
+		Spec:                spec,
+		Backend:             spec.Backend,
+		ModelID:             spec.ModelID,
+		OutputHash:          HashOutput(spec.JobID, nil),
+		RequestedMaxTokens:  spec.MaxTokens,
+		FinishReason:        finishReasonFromErrorCode(code),
+		BackendFinishReason: llamacpp.FinishReasonUnknown,
+		BackendStopReason:   llamacpp.FinishReasonUnknown,
+		ProofStatus:         ProofStatusRejected,
+		ErrorCode:           code,
+		MaxReturnChars:      spec.MaxReturnChars,
 	}
+}
+
+func finishReasonFromErrorCode(code string) string {
+	code = strings.ToLower(strings.TrimSpace(code))
+	if code == "" {
+		return llamacpp.FinishReasonError
+	}
+	if strings.Contains(code, "timeout") || strings.Contains(code, "deadline") {
+		return llamacpp.FinishReasonTimeout
+	}
+	return llamacpp.FinishReasonError
 }
 
 func safeSidecarFailure(status llamacpp.LlamaCppSidecarStatus) string {
