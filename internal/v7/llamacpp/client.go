@@ -37,10 +37,16 @@ type CompletionRequest struct {
 	ModelID      string
 	Prompt       string
 	SystemPrompt string
+	Messages     []CompletionMessage
 	MaxTokens    int
 	Temperature  float64
 	Stream       bool
 	OnDelta      func(CompletionDelta) error
+}
+
+type CompletionMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 type CompletionDelta struct {
@@ -110,19 +116,25 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 	if req.BaseURL == "" || !isLocalBaseURL(req.BaseURL) {
 		return CompletionResult{}, ClientError{Code: "llamacpp_invalid_base_url"}
 	}
-	if strings.TrimSpace(req.Prompt) == "" {
+	if strings.TrimSpace(req.Prompt) == "" && len(req.Messages) == 0 {
 		return CompletionResult{}, ClientError{Code: "llamacpp_prompt_required"}
 	}
 
+	result, err := c.completeChat(ctx, req)
+	if err == nil {
+		return result, nil
+	}
+	if !isChatCompletionUnavailable(err) {
+		return CompletionResult{}, err
+	}
+	return c.completeRaw(ctx, req)
+}
+
+func (c OpenAIClient) completeChat(ctx context.Context, req CompletionRequest) (CompletionResult, error) {
 	started := c.now()
-	promptMode := PromptModeChatMessages
-	systemPromptHash := HashSystemPrompt(req.SystemPrompt)
 	body, err := json.Marshal(openAIChatRequest{
-		Model: strings.TrimSpace(req.ModelID),
-		Messages: []openAIChatMessage{
-			{Role: "system", Content: req.SystemPrompt},
-			{Role: "user", Content: req.Prompt},
-		},
+		Model:       strings.TrimSpace(req.ModelID),
+		Messages:    openAIChatMessages(req.Messages),
 		Stream:      req.Stream,
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
@@ -155,10 +167,78 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		if req.Stream && streamUnsupportedStatus(resp.StatusCode) {
-			return CompletionResult{}, ClientError{Code: "llamacpp_stream_unavailable", StatusCode: resp.StatusCode}
+		if endpointUnsupportedStatus(resp.StatusCode) {
+			return CompletionResult{}, ClientError{Code: "llamacpp_chat_completion_unavailable", StatusCode: resp.StatusCode}
 		}
 		return CompletionResult{}, ClientError{Code: "llamacpp_response_status_failed", StatusCode: resp.StatusCode}
+	}
+	if req.Stream {
+		contentType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+		if contentType != "" && !strings.Contains(contentType, "text/event-stream") {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			return CompletionResult{}, ClientError{Code: "llamacpp_chat_completion_unavailable", StatusCode: resp.StatusCode}
+		}
+	}
+
+	if req.Stream {
+		result, err := c.readStreamingCompletion(resp.Body, started, req.MaxTokens, req.OnDelta)
+		if err != nil {
+			return CompletionResult{}, err
+		}
+		result.PromptMode = PromptModeChatMessages
+		result.SystemPromptHash = effectiveSystemPromptHash(req)
+		return result, nil
+	}
+	result, err := c.readNonStreamingCompletion(resp.Body, started, req.MaxTokens)
+	if err != nil {
+		return CompletionResult{}, err
+	}
+	result.PromptMode = PromptModeChatMessages
+	result.SystemPromptHash = effectiveSystemPromptHash(req)
+	return result, nil
+}
+
+func (c OpenAIClient) completeRaw(ctx context.Context, req CompletionRequest) (CompletionResult, error) {
+	started := c.now()
+	prompt, promptMode := rawCompletionPrompt(req)
+	body, err := json.Marshal(rawCompletionRequest{
+		Prompt:      prompt,
+		NPredict:    req.MaxTokens,
+		Temperature: req.Temperature,
+		Stream:      req.Stream,
+	})
+	if err != nil {
+		return CompletionResult{}, ClientError{Code: "llamacpp_request_marshal_failed"}
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(req.BaseURL, "/")+"/completion", bytes.NewReader(body))
+	if err != nil {
+		return CompletionResult{}, ClientError{Code: "llamacpp_request_build_failed"}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if req.Stream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+	}
+
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		code := defaultClientErrorCode
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			code = "llamacpp_timeout"
+		}
+		return CompletionResult{}, ClientError{Code: code}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if req.Stream && endpointUnsupportedStatus(resp.StatusCode) {
+			return CompletionResult{}, ClientError{Code: "llamacpp_stream_unavailable", StatusCode: resp.StatusCode}
+		}
+		return CompletionResult{}, ClientError{Code: "llamacpp_completion_response_status_failed", StatusCode: resp.StatusCode}
 	}
 	if req.Stream {
 		contentType := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
@@ -174,7 +254,7 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 			return CompletionResult{}, err
 		}
 		result.PromptMode = promptMode
-		result.SystemPromptHash = systemPromptHash
+		result.SystemPromptHash = effectiveSystemPromptHash(req)
 		return result, nil
 	}
 	result, err := c.readNonStreamingCompletion(resp.Body, started, req.MaxTokens)
@@ -182,7 +262,7 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 		return CompletionResult{}, err
 	}
 	result.PromptMode = promptMode
-	result.SystemPromptHash = systemPromptHash
+	result.SystemPromptHash = effectiveSystemPromptHash(req)
 	return result, nil
 }
 
@@ -191,8 +271,14 @@ func normalizeCompletionRequest(req CompletionRequest) CompletionRequest {
 	req.ModelID = cleanStatusText(req.ModelID, maxStatusReasonLen)
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	req.SystemPrompt = strings.TrimSpace(req.SystemPrompt)
-	if req.SystemPrompt == "" {
+	req.Messages = normalizeCompletionMessages(req.Messages)
+	if len(req.Messages) == 0 && req.SystemPrompt == "" {
 		req.SystemPrompt = defaultCompletionSystemPrompt
+	}
+	if len(req.Messages) == 0 {
+		req.Messages = buildCompletionMessages(req.SystemPrompt, req.Prompt)
+	} else if req.SystemPrompt != "" {
+		req.Messages = withLeadingSystemPrompt(req.SystemPrompt, req.Messages)
 	}
 	if req.MaxTokens <= 0 {
 		req.MaxTokens = DefaultBenchmarkMaxTokens
@@ -201,6 +287,78 @@ func normalizeCompletionRequest(req CompletionRequest) CompletionRequest {
 		req.Temperature = 0
 	}
 	return req
+}
+
+func normalizeCompletionMessages(messages []CompletionMessage) []CompletionMessage {
+	if len(messages) == 0 {
+		return nil
+	}
+	normalized := make([]CompletionMessage, 0, len(messages))
+	for _, message := range messages {
+		role := normalizeChatRole(message.Role)
+		content := strings.TrimSpace(message.Content)
+		if role == "" || content == "" {
+			continue
+		}
+		normalized = append(normalized, CompletionMessage{Role: role, Content: content})
+	}
+	return normalized
+}
+
+func normalizeChatRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "system", "user", "assistant":
+		return strings.ToLower(strings.TrimSpace(role))
+	default:
+		return ""
+	}
+}
+
+func buildCompletionMessages(systemPrompt, prompt string) []CompletionMessage {
+	messages := make([]CompletionMessage, 0, 2)
+	if systemPrompt = strings.TrimSpace(systemPrompt); systemPrompt != "" {
+		messages = append(messages, CompletionMessage{Role: "system", Content: systemPrompt})
+	}
+	if prompt = strings.TrimSpace(prompt); prompt != "" {
+		messages = append(messages, CompletionMessage{Role: "user", Content: prompt})
+	}
+	return messages
+}
+
+func withLeadingSystemPrompt(systemPrompt string, messages []CompletionMessage) []CompletionMessage {
+	systemPrompt = strings.TrimSpace(systemPrompt)
+	if systemPrompt == "" {
+		return messages
+	}
+	out := make([]CompletionMessage, 0, len(messages)+1)
+	out = append(out, CompletionMessage{Role: "system", Content: systemPrompt})
+	for _, message := range messages {
+		if message.Role == "system" {
+			continue
+		}
+		out = append(out, message)
+	}
+	return out
+}
+
+func openAIChatMessages(messages []CompletionMessage) []openAIChatMessage {
+	out := make([]openAIChatMessage, 0, len(messages))
+	for _, message := range messages {
+		out = append(out, openAIChatMessage{Role: message.Role, Content: message.Content})
+	}
+	return out
+}
+
+func effectiveSystemPromptHash(req CompletionRequest) string {
+	if hash := HashSystemPrompt(req.SystemPrompt); hash != "" {
+		return hash
+	}
+	for _, message := range req.Messages {
+		if message.Role == "system" {
+			return HashSystemPrompt(message.Content)
+		}
+	}
+	return ""
 }
 
 func HashSystemPrompt(systemPrompt string) string {
@@ -212,13 +370,24 @@ func HashSystemPrompt(systemPrompt string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func streamUnsupportedStatus(status int) bool {
+func endpointUnsupportedStatus(status int) bool {
 	switch status {
 	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotAcceptable, http.StatusUnsupportedMediaType, http.StatusNotImplemented:
 		return true
 	default:
 		return false
 	}
+}
+
+func isChatCompletionUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var clientErr ClientError
+	if errorAs(err, &clientErr) {
+		return clientErr.Code == "llamacpp_chat_completion_unavailable"
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "llamacpp_chat_completion_unavailable")
 }
 
 func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time, requestedMaxTokens int, onDelta func(CompletionDelta) error) (CompletionResult, error) {
@@ -259,11 +428,8 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 				usageCompletionTokens = chunk.Usage.CompletionTokens
 			}
 		}
-		for _, choice := range chunk.Choices {
-			content := generatedTextFromStreamChoice(choice)
-			if content == "" {
-				continue
-			}
+		content := generatedTextFromStreamChunk(chunk)
+		if content != "" {
 			if firstTokenAt.IsZero() {
 				firstTokenAt = c.now()
 				if firstTokenAt.Before(started) {
@@ -441,6 +607,13 @@ type openAIChatRequest struct {
 	Temperature float64             `json:"temperature"`
 }
 
+type rawCompletionRequest struct {
+	Prompt      string  `json:"prompt"`
+	NPredict    int     `json:"n_predict"`
+	Temperature float64 `json:"temperature"`
+	Stream      bool    `json:"stream"`
+}
+
 type openAIChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -458,6 +631,9 @@ type openAIError struct {
 
 type openAIChatStreamChunk struct {
 	Choices          []openAIChatStreamChoice `json:"choices"`
+	Content          string                   `json:"content"`
+	Response         string                   `json:"response"`
+	Text             string                   `json:"text"`
 	Usage            *openAIUsage             `json:"usage,omitempty"`
 	Error            openAIError              `json:"error,omitempty"`
 	FinishReason     string                   `json:"finish_reason,omitempty"`
@@ -531,6 +707,24 @@ func generatedTextFromStreamChoice(choice openAIChatStreamChoice) string {
 	}
 }
 
+func generatedTextFromStreamChunk(chunk openAIChatStreamChunk) string {
+	var output strings.Builder
+	for _, choice := range chunk.Choices {
+		output.WriteString(generatedTextFromStreamChoice(choice))
+	}
+	if output.Len() > 0 {
+		return output.String()
+	}
+	switch {
+	case chunk.Content != "":
+		return chunk.Content
+	case chunk.Response != "":
+		return chunk.Response
+	default:
+		return chunk.Text
+	}
+}
+
 func generatedTextFromChatResponse(payload openAIChatResponse) string {
 	var output strings.Builder
 	for _, choice := range payload.Choices {
@@ -558,4 +752,57 @@ func generatedTextFromChatChoice(choice openAIChatChoice) string {
 	default:
 		return choice.Text
 	}
+}
+
+func rawCompletionPrompt(req CompletionRequest) (string, string) {
+	if isLlama3InstructModel(req.ModelID) {
+		return llama3InstructPrompt(req.Messages), PromptModeTemplate
+	}
+	return genericRawCompletionPrompt(req.Messages), PromptModeRawCompletion
+}
+
+func isLlama3InstructModel(modelID string) bool {
+	value := strings.ToLower(strings.TrimSpace(modelID))
+	value = strings.NewReplacer("_", "-", " ", "-").Replace(value)
+	if !strings.Contains(value, "instruct") {
+		return false
+	}
+	return strings.Contains(value, "llama-3") || strings.Contains(value, "llama3")
+}
+
+func llama3InstructPrompt(messages []CompletionMessage) string {
+	var out strings.Builder
+	out.WriteString("<|begin_of_text|>")
+	for _, message := range messages {
+		role := normalizeChatRole(message.Role)
+		content := strings.TrimSpace(message.Content)
+		if role == "" || content == "" {
+			continue
+		}
+		out.WriteString("<|start_header_id|>")
+		out.WriteString(role)
+		out.WriteString("<|end_header_id|>\n\n")
+		out.WriteString(content)
+		out.WriteString("<|eot_id|>")
+	}
+	out.WriteString("<|start_header_id|>assistant<|end_header_id|>\n\n")
+	return out.String()
+}
+
+func genericRawCompletionPrompt(messages []CompletionMessage) string {
+	var out strings.Builder
+	for _, message := range messages {
+		role := normalizeChatRole(message.Role)
+		content := strings.TrimSpace(message.Content)
+		if role == "" || content == "" {
+			continue
+		}
+		out.WriteString(strings.ToUpper(role[:1]))
+		out.WriteString(role[1:])
+		out.WriteString(": ")
+		out.WriteString(content)
+		out.WriteString("\n\n")
+	}
+	out.WriteString("Assistant:")
+	return out.String()
 }

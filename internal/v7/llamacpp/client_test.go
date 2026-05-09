@@ -168,6 +168,164 @@ func TestOpenAIClientSendsResolvedSystemPromptAsChatMessage(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientSendsProvidedMessagesWithLeadingSystemPrompt(t *testing.T) {
+	const systemPrompt = "Use Ryvion runtime facts."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req openAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		want := []openAIChatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: "What is ready?"},
+			{Role: "assistant", Content: "The local model is warm."},
+			{Role: "user", Content: "Summarize it."},
+		}
+		if len(req.Messages) != len(want) {
+			t.Fatalf("messages = %+v, want %+v", req.Messages, want)
+		}
+		for i := range want {
+			if req.Messages[i] != want[i] {
+				t.Fatalf("message[%d] = %+v, want %+v", i, req.Messages[i], want[i])
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"choices":[{"message":{"content":"Warm and ready."},"finish_reason":"stop"}],"usage":{"completion_tokens":3}}`)
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client()}).Complete(context.Background(), CompletionRequest{
+		BaseURL:      server.URL,
+		ModelID:      "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		SystemPrompt: systemPrompt,
+		Messages: []CompletionMessage{
+			{Role: "system", Content: "Discard this stale system message."},
+			{Role: "user", Content: "What is ready?"},
+			{Role: "assistant", Content: "The local model is warm."},
+			{Role: "user", Content: "Summarize it."},
+		},
+		MaxTokens: 8,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if result.PromptMode != PromptModeChatMessages || result.SystemPromptHash != HashSystemPrompt(systemPrompt) {
+		t.Fatalf("prompt metadata = %+v, want chat messages with system hash", result)
+	}
+}
+
+func TestOpenAIClientFallsBackToRawLlama3TemplateWhenChatUnavailable(t *testing.T) {
+	const systemPrompt = "Ground the answer in Ryvion local runtime facts."
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			http.NotFound(w, r)
+		case "/completion":
+			var req rawCompletionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode raw request: %v", err)
+			}
+			for _, want := range []string{
+				"<|begin_of_text|><|start_header_id|>system<|end_header_id|>",
+				systemPrompt,
+				"<|start_header_id|>user<|end_header_id|>",
+				"Explain Ryvion.",
+				"<|start_header_id|>assistant<|end_header_id|>",
+			} {
+				if !strings.Contains(req.Prompt, want) {
+					t.Fatalf("raw prompt missing %q: %q", want, req.Prompt)
+				}
+			}
+			if req.Stream {
+				t.Fatalf("raw stream = true, want false")
+			}
+			if req.NPredict != 8 {
+				t.Fatalf("n_predict = %d, want 8", req.NPredict)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"content":"Ryvion routes warm local runtime requests.","tokens_evaluated":9,"timings":{"predicted_n":6},"stopped_eos":true}`)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client()}).Complete(context.Background(), CompletionRequest{
+		BaseURL:      server.URL,
+		ModelID:      "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		Prompt:       "Explain Ryvion.",
+		SystemPrompt: systemPrompt,
+		MaxTokens:    8,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if got := strings.Join(paths, ","); got != "/v1/chat/completions,/completion" {
+		t.Fatalf("paths = %s, want chat then raw completion", got)
+	}
+	if result.PromptMode != PromptModeTemplate || result.SystemPromptHash != HashSystemPrompt(systemPrompt) {
+		t.Fatalf("prompt metadata = %+v, want template/hash", result)
+	}
+	if string(result.Output) != "Ryvion routes warm local runtime requests." || result.TokensGenerated != 6 || result.PromptTokens != 9 {
+		t.Fatalf("result = %+v, want raw completion output and metrics", result)
+	}
+}
+
+func TestOpenAIClientFallsBackToStreamingRawCompletion(t *testing.T) {
+	var rawPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			http.NotFound(w, r)
+		case "/completion":
+			var req rawCompletionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode raw request: %v", err)
+			}
+			rawPrompt = req.Prompt
+			if !req.Stream {
+				t.Fatal("raw stream = false, want true")
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintln(w, `data: {"content":"Ryvion"}`)
+			fmt.Fprintln(w, `data: {"content":" streams","completion_tokens":2}`)
+			fmt.Fprintln(w, `data: {"stop":true}`)
+			fmt.Fprintln(w, `data: [DONE]`)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var deltas []string
+	result, err := (OpenAIClient{HTTPClient: server.Client()}).Complete(context.Background(), CompletionRequest{
+		BaseURL:      server.URL,
+		ModelID:      "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		Prompt:       "Say two words.",
+		SystemPrompt: "Use Ryvion facts.",
+		MaxTokens:    8,
+		Stream:       true,
+		OnDelta: func(delta CompletionDelta) error {
+			deltas = append(deltas, delta.Text)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if result.PromptMode != PromptModeTemplate || !result.Streamed {
+		t.Fatalf("result metadata = %+v, want streamed template result", result)
+	}
+	if string(result.Output) != "Ryvion streams" || strings.Join(deltas, "") != "Ryvion streams" {
+		t.Fatalf("output = %q deltas = %+v, want streamed raw content", result.Output, deltas)
+	}
+	if !strings.Contains(rawPrompt, "<|start_header_id|>assistant<|end_header_id|>") {
+		t.Fatalf("raw prompt missing assistant header: %q", rawPrompt)
+	}
+}
+
 func TestOpenAIClientExtractsLlamaStoppedLimitFinishMetadata(t *testing.T) {
 	base := time.Unix(1_800_000_000, 0)
 	clock := &sequenceClock{times: []time.Time{base, base.Add(600 * time.Millisecond)}}

@@ -312,6 +312,59 @@ func TestLlamaCppRunnerPassesResolvedSystemPromptAndReportsSafeDebugMetadata(t *
 	}
 }
 
+func TestLlamaCppRunnerAppliesDefaultGroundingAndPassesMessages(t *testing.T) {
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("Ryvion reports warm local runtime readiness."),
+		OutputBytes:     int64(len("Ryvion reports warm local runtime readiness.")),
+		TokensGenerated: 6,
+		TTFTMs:          40,
+		TotalTimeMs:     240,
+	}}
+	spec := validSpec(t)
+	spec.Prompt = ""
+	spec.Messages = []llamacpp.CompletionMessage{
+		{Role: "user", Content: "What is Ryvion?"},
+		{Role: "assistant", Content: "Ryvion runs local AI workloads."},
+		{Role: "user", Content: "Mention warm readiness."},
+	}
+	spec.UseDefaultRyvionGrounding = true
+	spec.ReturnText = true
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+		Client:  client,
+		Getenv:  getenvTextOutputEnabled,
+	}
+	result, err := runner.RunDashboardInference(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("RunDashboardInference() error = %v", err)
+	}
+	if len(client.reqs) != 1 {
+		t.Fatalf("client calls = %d, want 1", len(client.reqs))
+	}
+	req := client.reqs[0]
+	if req.Prompt != "" || req.SystemPrompt != defaultRyvionGroundingSystemPrompt || len(req.Messages) != 3 {
+		t.Fatalf("completion request = %+v, want default system prompt plus provided messages", req)
+	}
+	wantHash := llamacpp.HashSystemPrompt(defaultRyvionGroundingSystemPrompt)
+	if !result.GroundingApplied || result.SystemPromptHash != wantHash || result.PromptMode != llamacpp.PromptModeChatMessages {
+		t.Fatalf("prompt metadata = %+v, want default grounding metadata", result)
+	}
+	receipt, err := BuildReceipt(result)
+	if err != nil {
+		t.Fatalf("BuildReceipt() error = %v", err)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["grounding_applied"] != true || metadata["system_prompt_hash"] != wantHash || metadata["tokens_generated"] != int64(6) || metadata["proof_status"] != ProofStatusMeasured {
+		t.Fatalf("receipt metadata = %+v, want safe grounding and finish metrics", metadata)
+	}
+	encoded, _ := json.Marshal(receipt.Metadata)
+	for _, forbidden := range []string{"What is Ryvion?", "Mention warm readiness.", defaultRyvionGroundingSystemPrompt} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("receipt metadata leaked request text %q: %s", forbidden, encoded)
+		}
+	}
+}
+
 func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
 	output := "Ryvion routes tokens"
 	client := &fakeCompletionClient{

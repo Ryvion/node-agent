@@ -26,30 +26,34 @@ const (
 	maxModelIDLen         = 256
 	maxPromptChars        = 32768
 	maxSystemPromptChars  = 4096
+	maxMessages           = 32
 	maxMaxTokens          = 8192
 	maxStatusErrLen       = 512
 )
 
 var ErrInvalidSpec = errors.New("dashboardinference: invalid spec")
 
+const defaultRyvionGroundingSystemPrompt = "You are Ryvion's local dashboard inference backend. Ground answers in these facts: Ryvion runs AI workloads on operator-controlled nodes, reports local runtime capability and warm model readiness, and returns privacy-safe hashes, metrics, receipts, and status metadata. Do not describe Ryvion as generic cloud hosting or claim unsupported managed-cloud features."
+
 type Spec struct {
-	Task                      string `json:"task"`
-	RequestID                 string `json:"request_id"`
-	RunID                     string `json:"run_id"`
-	JobID                     string `json:"job_id"`
-	Backend                   string `json:"backend"`
-	ModelID                   string `json:"model_id"`
-	TargetNodeID              string `json:"target_node_id"`
-	Prompt                    string `json:"prompt,omitempty"`
-	SystemPrompt              string `json:"system_prompt,omitempty"`
-	UseDefaultRyvionGrounding bool   `json:"use_default_ryvion_grounding,omitempty"`
-	ReturnText                bool   `json:"return_text,omitempty"`
-	MaxReturnChars            int    `json:"max_return_chars,omitempty"`
-	MaxTokens                 int    `json:"max_tokens"`
-	Stream                    bool   `json:"stream"`
-	CreatedAtUnixMs           int64  `json:"created_at_unix_ms"`
-	PromptHash                string `json:"prompt_hash,omitempty"`
-	PromptProfileID           string `json:"prompt_profile_id,omitempty"`
+	Task                      string                       `json:"task"`
+	RequestID                 string                       `json:"request_id"`
+	RunID                     string                       `json:"run_id"`
+	JobID                     string                       `json:"job_id"`
+	Backend                   string                       `json:"backend"`
+	ModelID                   string                       `json:"model_id"`
+	TargetNodeID              string                       `json:"target_node_id"`
+	Prompt                    string                       `json:"prompt,omitempty"`
+	SystemPrompt              string                       `json:"system_prompt,omitempty"`
+	Messages                  []llamacpp.CompletionMessage `json:"messages,omitempty"`
+	UseDefaultRyvionGrounding bool                         `json:"use_default_ryvion_grounding,omitempty"`
+	ReturnText                bool                         `json:"return_text,omitempty"`
+	MaxReturnChars            int                          `json:"max_return_chars,omitempty"`
+	MaxTokens                 int                          `json:"max_tokens"`
+	Stream                    bool                         `json:"stream"`
+	CreatedAtUnixMs           int64                        `json:"created_at_unix_ms"`
+	PromptHash                string                       `json:"prompt_hash,omitempty"`
+	PromptProfileID           string                       `json:"prompt_profile_id,omitempty"`
 }
 
 type AssignmentIdentity struct {
@@ -156,8 +160,8 @@ func ValidateSpec(spec Spec) error {
 	if spec.TargetNodeID == "" {
 		errs = append(errs, fmt.Errorf("%w: target_node_id required", ErrInvalidSpec))
 	}
-	if spec.ReturnText && spec.Prompt == "" {
-		errs = append(errs, fmt.Errorf("%w: prompt required when return_text is true", ErrInvalidSpec))
+	if spec.ReturnText && spec.Prompt == "" && len(spec.Messages) == 0 {
+		errs = append(errs, fmt.Errorf("%w: prompt or messages required when return_text is true", ErrInvalidSpec))
 	}
 	if spec.MaxTokens <= 0 {
 		errs = append(errs, fmt.Errorf("%w: max_tokens must be greater than zero", ErrInvalidSpec))
@@ -185,9 +189,9 @@ func normalizeSpec(spec Spec) Spec {
 	spec.TargetNodeID = cleanText(spec.TargetNodeID, maxIDLen)
 	spec.Prompt = cleanPrompt(spec.Prompt, maxPromptChars)
 	spec.SystemPrompt = cleanPrompt(spec.SystemPrompt, maxSystemPromptChars)
-	if !spec.ReturnText {
-		spec.SystemPrompt = ""
-		spec.UseDefaultRyvionGrounding = false
+	spec.Messages = normalizeSpecMessages(spec.Messages)
+	if spec.UseDefaultRyvionGrounding && spec.SystemPrompt == "" {
+		spec.SystemPrompt = defaultRyvionGroundingSystemPrompt
 	}
 	if spec.MaxReturnChars <= 0 || spec.MaxReturnChars > defaultMaxReturnChars {
 		spec.MaxReturnChars = defaultMaxReturnChars
@@ -195,6 +199,30 @@ func normalizeSpec(spec Spec) Spec {
 	spec.PromptHash = strings.TrimSpace(spec.PromptHash)
 	spec.PromptProfileID = cleanText(spec.PromptProfileID, maxIDLen)
 	return spec
+}
+
+func normalizeSpecMessages(messages []llamacpp.CompletionMessage) []llamacpp.CompletionMessage {
+	if len(messages) == 0 {
+		return nil
+	}
+	if len(messages) > maxMessages {
+		messages = messages[:maxMessages]
+	}
+	normalized := make([]llamacpp.CompletionMessage, 0, len(messages))
+	for _, message := range messages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		switch role {
+		case "system", "user", "assistant":
+		default:
+			continue
+		}
+		content := cleanPrompt(message.Content, maxPromptChars)
+		if content == "" {
+			continue
+		}
+		normalized = append(normalized, llamacpp.CompletionMessage{Role: role, Content: content})
+	}
+	return normalized
 }
 
 func normalizeBackendName(value string) string {

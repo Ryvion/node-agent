@@ -202,8 +202,11 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	}
 
 	prompt := spec.Prompt
-	if prompt == "" {
+	messages := spec.Messages
+	if len(messages) == 0 && prompt == "" {
 		prompt = internalDashboardPrompt
+	} else if len(messages) > 0 {
+		prompt = ""
 	}
 	streaming := shouldStreamDashboardInference(spec, status, r.getenv())
 	var batcher *progressBatcher
@@ -215,6 +218,7 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 		ModelID:      spec.ModelID,
 		Prompt:       prompt,
 		SystemPrompt: spec.SystemPrompt,
+		Messages:     messages,
 		MaxTokens:    spec.MaxTokens,
 		Temperature:  0,
 		Stream:       streaming,
@@ -470,15 +474,41 @@ func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) Ex
 		RuntimeMeasurementStatus: runtimeStatus,
 		MetadataParseStatus:      parseStatus,
 		TokenCountEstimated:      tokenCountEstimated,
-		GroundingApplied:         spec.ReturnText && spec.UseDefaultRyvionGrounding && strings.TrimSpace(spec.SystemPrompt) != "",
+		GroundingApplied:         groundingApplied(spec),
 		PromptMode:               firstNonEmpty(completion.PromptMode, llamacpp.PromptModeChatMessages),
-		SystemPromptHash:         firstNonEmpty(cleanHash(completion.SystemPromptHash), llamacpp.HashSystemPrompt(spec.SystemPrompt)),
+		SystemPromptHash:         firstNonEmpty(cleanHash(completion.SystemPromptHash), specSystemPromptHash(spec)),
 		MaxReturnChars:           spec.MaxReturnChars,
 	}
 	if spec.ReturnText {
 		result.GeneratedText, result.GeneratedTextTruncated = truncateGeneratedText(completion.Output, spec.MaxReturnChars)
 	}
 	return result
+}
+
+func groundingApplied(spec Spec) bool {
+	spec = normalizeSpec(spec)
+	if strings.TrimSpace(spec.SystemPrompt) != "" {
+		return true
+	}
+	for _, message := range spec.Messages {
+		if message.Role == "system" && strings.TrimSpace(message.Content) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func specSystemPromptHash(spec Spec) string {
+	spec = normalizeSpec(spec)
+	if hash := llamacpp.HashSystemPrompt(spec.SystemPrompt); hash != "" {
+		return hash
+	}
+	for _, message := range spec.Messages {
+		if message.Role == "system" {
+			return llamacpp.HashSystemPrompt(message.Content)
+		}
+	}
+	return ""
 }
 
 func truncateGeneratedText(output []byte, maxChars int) (string, bool) {
