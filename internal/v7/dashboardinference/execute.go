@@ -248,8 +248,21 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 		return failedExecutionResult(spec, safeErrorCode(err)), nil
 	}
 	result := measuredExecutionResult(spec, completion)
-	result.Speculative = SpeculativeMetadataFromStatus(status).
-		MergeRuntimeCounts(completion.SpeculativeTokensDrafted, completion.SpeculativeTokensAccepted, result.TokensGenerated)
+	// V8 Phase 1.7 (live trace fix): only enrich speculative metadata
+	// when the sidecar declared speculative-decoding readiness.
+	// Calling MergeRuntimeCounts on a zero-value SpeculativeMetadata
+	// would set EstimatedSpeedupRatio=1.0 (tokens/tokens), surfacing a
+	// misleading "speculative: {enabled:false, ratio:1}" block in
+	// non-speculative receipts.
+	specMeta := SpeculativeMetadataFromStatus(status)
+	if !specMeta.IsZero() {
+		specMeta = specMeta.MergeRuntimeCounts(
+			completion.SpeculativeTokensDrafted,
+			completion.SpeculativeTokensAccepted,
+			result.TokensGenerated,
+		)
+	}
+	result.Speculative = specMeta
 	return result, nil
 }
 
