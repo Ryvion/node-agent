@@ -66,21 +66,29 @@ func ResidencyKeeperConfigFromEnvWith(source ConfigSource) ResidencyKeeperConfig
 func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	source = normalizeConfigSource(source)
 	cfg := LlamaCppSidecarConfig{
-		Enabled:     envBool(source.Getenv(EnvEnabled)),
-		ServerPath:  cleanConfigText(source.Getenv(EnvServer), maxConfigTextLen),
-		ModelPath:   cleanConfigText(source.Getenv(EnvModel), maxConfigTextLen),
-		Host:        normalizeHost(source.Getenv(EnvHost)),
-		Port:        envInt(source.Getenv(EnvPort), DefaultPort),
-		ContextSize: envInt(source.Getenv(EnvCtxSize), DefaultContextSize),
-		Threads:     envInt(source.Getenv(EnvThreads), 0),
-		GPULayers:   envInt(source.Getenv(EnvGPULayers), 0),
-		ExtraArgs:   sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
+		Enabled:        envBool(source.Getenv(EnvEnabled)),
+		ServerPath:     cleanConfigText(source.Getenv(EnvServer), maxConfigTextLen),
+		ModelPath:      cleanConfigText(source.Getenv(EnvModel), maxConfigTextLen),
+		Host:           normalizeHost(source.Getenv(EnvHost)),
+		Port:           envInt(source.Getenv(EnvPort), DefaultPort),
+		ContextSize:    envInt(source.Getenv(EnvCtxSize), DefaultContextSize),
+		Threads:        envInt(source.Getenv(EnvThreads), 0),
+		GPULayers:      envInt(source.Getenv(EnvGPULayers), 0),
+		ExtraArgs:      sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
+		DraftModelPath: cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
+		DraftMaxTokens: envInt(source.Getenv(EnvDraftMaxTokens), 0),
+		DraftMinTokens: envInt(source.Getenv(EnvDraftMinTokens), 0),
+		DraftPMin:      envFloat(source.Getenv(EnvDraftPMin), 0),
+		DraftGPULayers: envInt(source.Getenv(EnvDraftGPULayers), 0),
 	}
 	if cfg.ServerPath == "" {
 		cfg.ServerPath = discoverServerPath(source)
 	}
 	if cfg.ModelPath == "" {
 		cfg.ModelPath = discoverModelPath(source)
+	}
+	if cfg.DraftModelPath == "" {
+		cfg.DraftModelPath = discoverDraftModelPath(source, cfg.ModelPath)
 	}
 	return normalizeConfig(cfg)
 }
@@ -102,6 +110,29 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 		cfg.GPULayers = 0
 	}
 	cfg.ExtraArgs = sanitizeExtraArgs(strings.Join(cfg.ExtraArgs, " "))
+
+	// V8 speculative decoding (Level 0): clamp draft parameters.
+	cfg.DraftModelPath = cleanConfigText(cfg.DraftModelPath, maxConfigTextLen)
+	if cfg.DraftMaxTokens < 0 || cfg.DraftMaxTokens > 256 {
+		cfg.DraftMaxTokens = 0
+	}
+	if cfg.DraftMinTokens < 0 || cfg.DraftMinTokens > 256 {
+		cfg.DraftMinTokens = 0
+	}
+	if cfg.DraftMinTokens > cfg.DraftMaxTokens && cfg.DraftMaxTokens > 0 {
+		cfg.DraftMinTokens = cfg.DraftMaxTokens
+	}
+	if cfg.DraftPMin < 0 || cfg.DraftPMin >= 1 {
+		cfg.DraftPMin = 0
+	}
+	if cfg.DraftGPULayers < 0 {
+		cfg.DraftGPULayers = 0
+	}
+	// If draft model is set without explicit max tokens, default to 16
+	// (the llama.cpp default and a safe consumer-hardware setting).
+	if cfg.DraftModelPath != "" && cfg.DraftMaxTokens == 0 {
+		cfg.DraftMaxTokens = DefaultDraftMaxTokens
+	}
 	return cfg
 }
 
@@ -210,6 +241,42 @@ func envInt(value string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envFloat(value string, fallback float64) float64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
+// discoverDraftModelPath looks for a known-pairing draft model on disk.
+// On Ryvion native nodes, tinyllama (1.1B) is paired with llama-3.2-3B as
+// the canonical drafter+target pair. The discovery walks the model
+// inventory and prefers a same-family, smaller-quantization GGUF.
+func discoverDraftModelPath(source ConfigSource, targetModelPath string) string {
+	target := strings.ToLower(filepath.Base(targetModelPath))
+	if target == "" || !strings.Contains(target, "llama") {
+		return ""
+	}
+	candidates := source.candidateDetector()
+	models := runtimeinventory.DetectGGUFModels(candidates)
+	for _, m := range models {
+		name := strings.ToLower(filepath.Base(m.Path))
+		if name == target {
+			continue
+		}
+		// Tokenizer-compatible draft heuristic: same family, smaller size.
+		if strings.Contains(name, "tinyllama") || strings.Contains(name, "llama-3.2-1b") {
+			return cleanConfigText(m.Path, maxConfigTextLen)
+		}
+	}
+	return ""
 }
 
 func envDurationSeconds(value string, fallback time.Duration) time.Duration {

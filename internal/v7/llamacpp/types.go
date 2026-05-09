@@ -15,9 +15,24 @@ const (
 	EnvGPULayers = "RYV_LLAMA_CPP_GPU_LAYERS"
 	EnvExtraArgs = "RYV_LLAMA_CPP_EXTRA_ARGS"
 
-	DefaultHost        = "127.0.0.1"
-	DefaultPort        = 45910
-	DefaultContextSize = 4096
+	// V8 speculative decoding (Level 0 - backend-local).
+	// When DraftModelPath is set, llama-server runs the target+draft pair
+	// and produces speculative-accelerated tokens via llama.cpp's built-in
+	// draft/target loop. Typical pairing on Ryvion native models:
+	// target=ryvion-llama-3.2-3b, draft=tinyllama-1.1b (Llama family,
+	// tokenizer-compatible).
+	EnvDraftModel     = "RYV_LLAMA_CPP_DRAFT_MODEL_PATH"
+	EnvDraftMaxTokens = "RYV_LLAMA_CPP_DRAFT_MAX_TOKENS"
+	EnvDraftMinTokens = "RYV_LLAMA_CPP_DRAFT_MIN_TOKENS"
+	EnvDraftPMin      = "RYV_LLAMA_CPP_DRAFT_P_MIN"
+	EnvDraftGPULayers = "RYV_LLAMA_CPP_DRAFT_GPU_LAYERS"
+
+	DefaultHost            = "127.0.0.1"
+	DefaultPort            = 45910
+	DefaultContextSize     = 4096
+	DefaultDraftMaxTokens  = 16
+	DefaultDraftMinTokens  = 0
+	DefaultDraftPMinMillis = 0 // 0 = use llama.cpp default (0.75)
 )
 
 type LlamaCppSidecarConfig struct {
@@ -30,6 +45,15 @@ type LlamaCppSidecarConfig struct {
 	Threads     int
 	GPULayers   int
 	ExtraArgs   []string
+
+	// V8 speculative decoding (Level 0).
+	// DraftModelPath, when non-empty, enables backend-local speculative
+	// decoding by passing --model-draft to llama-server.
+	DraftModelPath  string
+	DraftMaxTokens  int     // --spec-draft-n-max (default 16 when DraftModelPath set)
+	DraftMinTokens  int     // --spec-draft-n-min
+	DraftPMin       float64 // --draft-p-min (0 = llama.cpp default 0.75)
+	DraftGPULayers  int     // --n-gpu-layers-draft (0 = auto)
 }
 
 type LlamaCppSidecarStatus struct {
@@ -57,6 +81,15 @@ type LlamaCppSidecarStatus struct {
 	SupportsKVAccess       bool      `json:"supports_kv_access"`
 	SupportsTensorHooks    bool      `json:"supports_tensor_hooks"`
 	Reason                 string    `json:"reason"`
+
+	// V8 speculative decoding (Level 0 - backend-local).
+	SpeculativeEnabled       bool   `json:"speculative_enabled"`
+	DraftModelPath           string `json:"draft_model_path,omitempty"`
+	DraftModelFilename       string `json:"draft_model_filename,omitempty"`
+	DraftModelSizeBytes      int64  `json:"draft_model_size_bytes,omitempty"`
+	DraftModelFamilyHint     string `json:"draft_model_family_hint,omitempty"`
+	DraftMaxTokens           int    `json:"draft_max_tokens,omitempty"`
+	DraftMinTokens           int    `json:"draft_min_tokens,omitempty"`
 }
 
 type BackendRuntimes struct {

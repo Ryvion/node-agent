@@ -341,6 +341,9 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		reason = m.lastError
 	}
 
+	draftMeta := modelMetadata(cfg.DraftModelPath)
+	speculativeReady := cfg.DraftModelPath != "" && draftMeta.readable && running && healthy
+
 	return LlamaCppSidecarStatus{
 		Enabled:                cfg.Enabled,
 		Available:              serverOK && modelOK,
@@ -366,6 +369,15 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		SupportsKVAccess:       false,
 		SupportsTensorHooks:    false,
 		Reason:                 cleanStatusText(reason, maxStatusReasonLen),
+
+		// V8 speculative decoding (Level 0).
+		SpeculativeEnabled:   speculativeReady,
+		DraftModelPath:       cfg.DraftModelPath,
+		DraftModelFilename:   draftMeta.filename,
+		DraftModelSizeBytes:  draftMeta.sizeBytes,
+		DraftModelFamilyHint: draftMeta.familyHint,
+		DraftMaxTokens:       cfg.DraftMaxTokens,
+		DraftMinTokens:       cfg.DraftMinTokens,
 	}
 }
 
@@ -826,8 +838,42 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	if cfg.GPULayers > 0 {
 		args = append(args, "--n-gpu-layers", strconv.Itoa(cfg.GPULayers))
 	}
+	// V8 speculative decoding (Level 0).
+	// llama-server runs target+draft as a single process and produces
+	// speculative-accelerated tokens via its built-in draft/target loop.
+	// The drafter must be tokenizer-compatible with the target model;
+	// we enforce family compatibility at config-discovery time.
+	if cfg.DraftModelPath != "" && draftModelReadable(cfg.DraftModelPath) {
+		args = append(args, "--model-draft", cfg.DraftModelPath)
+		if cfg.DraftMaxTokens > 0 {
+			args = append(args, "--spec-draft-n-max", strconv.Itoa(cfg.DraftMaxTokens))
+		}
+		if cfg.DraftMinTokens > 0 {
+			args = append(args, "--spec-draft-n-min", strconv.Itoa(cfg.DraftMinTokens))
+		}
+		if cfg.DraftPMin > 0 {
+			args = append(args, "--draft-p-min", strconv.FormatFloat(cfg.DraftPMin, 'f', 3, 64))
+		}
+		if cfg.DraftGPULayers > 0 {
+			args = append(args, "--n-gpu-layers-draft", strconv.Itoa(cfg.DraftGPULayers))
+		}
+	}
 	args = append(args, cfg.ExtraArgs...)
 	return args
+}
+
+// draftModelReadable verifies the draft GGUF exists before we hand the
+// path to llama-server. A missing draft file would crash the whole
+// sidecar instead of degrading to non-speculative mode.
+func draftModelReadable(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return info.Size() > 0
 }
 
 func serverPathAvailable(path string) bool {
