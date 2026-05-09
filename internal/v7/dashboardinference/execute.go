@@ -86,6 +86,9 @@ type ExecutionResult struct {
 	ErrorCode                string
 	GeneratedText            string
 	GeneratedTextTruncated   bool
+	GroundingApplied         bool
+	PromptMode               string
+	SystemPromptHash         string
 	MaxReturnChars           int
 }
 
@@ -208,12 +211,13 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 		batcher = newProgressBatcher(runCtx, spec, progress)
 	}
 	req := llamacpp.CompletionRequest{
-		BaseURL:     status.BaseURL,
-		ModelID:     spec.ModelID,
-		Prompt:      prompt,
-		MaxTokens:   spec.MaxTokens,
-		Temperature: 0,
-		Stream:      streaming,
+		BaseURL:      status.BaseURL,
+		ModelID:      spec.ModelID,
+		Prompt:       prompt,
+		SystemPrompt: spec.SystemPrompt,
+		MaxTokens:    spec.MaxTokens,
+		Temperature:  0,
+		Stream:       streaming,
 	}
 	if batcher != nil {
 		req.OnDelta = func(delta llamacpp.CompletionDelta) error {
@@ -466,6 +470,9 @@ func measuredExecutionResult(spec Spec, completion llamacpp.CompletionResult) Ex
 		RuntimeMeasurementStatus: runtimeStatus,
 		MetadataParseStatus:      parseStatus,
 		TokenCountEstimated:      tokenCountEstimated,
+		GroundingApplied:         spec.ReturnText && spec.UseDefaultRyvionGrounding && strings.TrimSpace(spec.SystemPrompt) != "",
+		PromptMode:               firstNonEmpty(completion.PromptMode, llamacpp.PromptModeChatMessages),
+		SystemPromptHash:         firstNonEmpty(cleanHash(completion.SystemPromptHash), llamacpp.HashSystemPrompt(spec.SystemPrompt)),
 		MaxReturnChars:           spec.MaxReturnChars,
 	}
 	if spec.ReturnText {

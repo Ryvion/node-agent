@@ -124,6 +124,50 @@ func TestOpenAIClientNonStreamingCompletion(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientSendsResolvedSystemPromptAsChatMessage(t *testing.T) {
+	const systemPrompt = "Answer as a concise Ryvion product demo."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		var req openAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Messages) != 2 ||
+			req.Messages[0].Role != "system" ||
+			req.Messages[0].Content != systemPrompt ||
+			req.Messages[1].Role != "user" ||
+			req.Messages[1].Content != "Explain Ryvion." {
+			t.Fatalf("messages = %+v, want system and user chat messages", req.Messages)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"choices":[{"message":{"content":"Ryvion routes warm backends."},"finish_reason":"stop"}],"usage":{"completion_tokens":4}}`)
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client()}).Complete(context.Background(), CompletionRequest{
+		BaseURL:      server.URL,
+		ModelID:      "tinyllama.Q4_K_M.gguf",
+		Prompt:       "Explain Ryvion.",
+		SystemPrompt: systemPrompt,
+		MaxTokens:    8,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if result.PromptMode != PromptModeChatMessages || result.SystemPromptHash != HashSystemPrompt(systemPrompt) {
+		t.Fatalf("prompt metadata = %+v, want chat mode and system prompt hash", result)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal(result) error = %v", err)
+	}
+	if strings.Contains(string(raw), systemPrompt) || strings.Contains(string(raw), "Explain Ryvion.") {
+		t.Fatalf("completion result JSON leaked prompt text: %s", raw)
+	}
+}
+
 func TestOpenAIClientExtractsLlamaStoppedLimitFinishMetadata(t *testing.T) {
 	base := time.Unix(1_800_000_000, 0)
 	clock := &sequenceClock{times: []time.Time{base, base.Add(600 * time.Millisecond)}}

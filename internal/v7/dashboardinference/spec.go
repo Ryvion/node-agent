@@ -25,6 +25,7 @@ const (
 	maxIDLen              = 256
 	maxModelIDLen         = 256
 	maxPromptChars        = 32768
+	maxSystemPromptChars  = 4096
 	maxMaxTokens          = 8192
 	maxStatusErrLen       = 512
 )
@@ -32,21 +33,23 @@ const (
 var ErrInvalidSpec = errors.New("dashboardinference: invalid spec")
 
 type Spec struct {
-	Task            string `json:"task"`
-	RequestID       string `json:"request_id"`
-	RunID           string `json:"run_id"`
-	JobID           string `json:"job_id"`
-	Backend         string `json:"backend"`
-	ModelID         string `json:"model_id"`
-	TargetNodeID    string `json:"target_node_id"`
-	Prompt          string `json:"prompt,omitempty"`
-	ReturnText      bool   `json:"return_text,omitempty"`
-	MaxReturnChars  int    `json:"max_return_chars,omitempty"`
-	MaxTokens       int    `json:"max_tokens"`
-	Stream          bool   `json:"stream"`
-	CreatedAtUnixMs int64  `json:"created_at_unix_ms"`
-	PromptHash      string `json:"prompt_hash,omitempty"`
-	PromptProfileID string `json:"prompt_profile_id,omitempty"`
+	Task                      string `json:"task"`
+	RequestID                 string `json:"request_id"`
+	RunID                     string `json:"run_id"`
+	JobID                     string `json:"job_id"`
+	Backend                   string `json:"backend"`
+	ModelID                   string `json:"model_id"`
+	TargetNodeID              string `json:"target_node_id"`
+	Prompt                    string `json:"prompt,omitempty"`
+	SystemPrompt              string `json:"system_prompt,omitempty"`
+	UseDefaultRyvionGrounding bool   `json:"use_default_ryvion_grounding,omitempty"`
+	ReturnText                bool   `json:"return_text,omitempty"`
+	MaxReturnChars            int    `json:"max_return_chars,omitempty"`
+	MaxTokens                 int    `json:"max_tokens"`
+	Stream                    bool   `json:"stream"`
+	CreatedAtUnixMs           int64  `json:"created_at_unix_ms"`
+	PromptHash                string `json:"prompt_hash,omitempty"`
+	PromptProfileID           string `json:"prompt_profile_id,omitempty"`
 }
 
 type AssignmentIdentity struct {
@@ -181,6 +184,11 @@ func normalizeSpec(spec Spec) Spec {
 	spec.ModelID = cleanText(spec.ModelID, maxModelIDLen)
 	spec.TargetNodeID = cleanText(spec.TargetNodeID, maxIDLen)
 	spec.Prompt = cleanPrompt(spec.Prompt, maxPromptChars)
+	spec.SystemPrompt = cleanPrompt(spec.SystemPrompt, maxSystemPromptChars)
+	if !spec.ReturnText {
+		spec.SystemPrompt = ""
+		spec.UseDefaultRyvionGrounding = false
+	}
 	if spec.MaxReturnChars <= 0 || spec.MaxReturnChars > defaultMaxReturnChars {
 		spec.MaxReturnChars = defaultMaxReturnChars
 	}

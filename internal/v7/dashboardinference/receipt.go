@@ -49,6 +49,9 @@ type ReceiptMetadata struct {
 	ErrorCode                string  `json:"error_code,omitempty"`
 	GeneratedText            string  `json:"generated_text,omitempty"`
 	GeneratedTextTruncated   bool    `json:"generated_text_truncated,omitempty"`
+	GroundingApplied         bool    `json:"grounding_applied"`
+	PromptMode               string  `json:"prompt_mode,omitempty"`
+	SystemPromptHash         string  `json:"system_prompt_hash,omitempty"`
 	MaxReturnChars           int     `json:"max_return_chars"`
 }
 
@@ -206,6 +209,7 @@ func (m ReceiptMetadata) Map() map[string]any {
 		"runtime_measurement_status": m.RuntimeMeasurementStatus,
 		"metadata_parse_status":      m.MetadataParseStatus,
 		"generated_text_truncated":   m.GeneratedTextTruncated,
+		"grounding_applied":          m.GroundingApplied,
 		"max_return_chars":           m.MaxReturnChars,
 	}
 	if m.TokenCountEstimated {
@@ -223,6 +227,12 @@ func (m ReceiptMetadata) Map() map[string]any {
 	if m.GeneratedText != "" {
 		out["generated_text"] = m.GeneratedText
 		out["generated_text_truncated"] = m.GeneratedTextTruncated
+	}
+	if m.PromptMode != "" {
+		out["prompt_mode"] = m.PromptMode
+	}
+	if m.SystemPromptHash != "" {
+		out["system_prompt_hash"] = m.SystemPromptHash
 	}
 	return out
 }
@@ -258,6 +268,8 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 	m.PromptHash = cleanHash(m.PromptHash)
 	m.PromptProfileID = cleanText(m.PromptProfileID, maxIDLen)
 	m.ErrorCode = cleanErrorCode(m.ErrorCode)
+	m.PromptMode = cleanPromptMode(m.PromptMode)
+	m.SystemPromptHash = cleanHash(m.SystemPromptHash)
 	if m.OutputBytes < 0 {
 		m.OutputBytes = 0
 	}
@@ -357,6 +369,9 @@ func receiptMetadataFromResult(result ExecutionResult) ReceiptMetadata {
 		ErrorCode:                result.ErrorCode,
 		GeneratedText:            result.GeneratedText,
 		GeneratedTextTruncated:   result.GeneratedTextTruncated,
+		GroundingApplied:         result.GroundingApplied,
+		PromptMode:               result.PromptMode,
+		SystemPromptHash:         result.SystemPromptHash,
 		MaxReturnChars:           result.MaxReturnChars,
 	}.clone()
 }
@@ -371,6 +386,8 @@ func normalizeExecutionResult(result ExecutionResult) ExecutionResult {
 		result.ProofStatus = ProofStatusRejected
 	}
 	result.ErrorCode = cleanErrorCode(result.ErrorCode)
+	result.PromptMode = cleanPromptMode(result.PromptMode)
+	result.SystemPromptHash = cleanHash(result.SystemPromptHash)
 	finish := llamacpp.NormalizeCompletionFinishMetadata(llamacpp.CompletionResult{
 		RequestedMaxTokens:  result.RequestedMaxTokens,
 		TokensGenerated:     result.TokensGenerated,
@@ -505,6 +522,14 @@ func validateReceiptMetadataForHash(metadata ReceiptMetadata) error {
 			errs = append(errs, err)
 		}
 	}
+	if metadata.PromptMode != "" && cleanPromptMode(metadata.PromptMode) == "" {
+		errs = append(errs, fmt.Errorf("%w: receipt prompt_mode unknown %q", ErrInvalidReceipt, metadata.PromptMode))
+	}
+	if metadata.SystemPromptHash != "" {
+		if err := validateSHA256ID(metadata.SystemPromptHash, "receipt system_prompt_hash", ErrInvalidReceipt); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	switch metadata.ProofStatus {
 	case ProofStatusMeasured:
 		if metadata.ErrorCode != "" {
@@ -542,6 +567,8 @@ func forbiddenReceiptJSONMarkers() []string {
 	for idx, marker := range markers {
 		if marker == "generated_text" {
 			markers[idx] = `"generated_text":`
+		} else if marker == "messages" {
+			markers[idx] = `"messages"`
 		}
 	}
 	return markers
@@ -584,6 +611,21 @@ func cleanFinishReason(value string) string {
 		return llamacpp.FinishReasonError
 	case llamacpp.FinishReasonUnknown:
 		return llamacpp.FinishReasonUnknown
+	default:
+		return ""
+	}
+}
+
+func cleanPromptMode(value string) string {
+	value = strings.ToLower(cleanText(value, maxIDLen))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	switch value {
+	case "",
+		llamacpp.PromptModeChatMessages,
+		llamacpp.PromptModeTemplate,
+		llamacpp.PromptModeRawCompletion:
+		return value
 	default:
 		return ""
 	}

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,16 +24,23 @@ const (
 
 	MetadataParseStatusOK      = "ok"
 	MetadataParseStatusPartial = "partial"
+
+	PromptModeChatMessages  = "chat_messages"
+	PromptModeTemplate      = "template"
+	PromptModeRawCompletion = "raw_completion"
 )
 
+const defaultCompletionSystemPrompt = "You are running a local llama.cpp readiness benchmark. Answer concisely."
+
 type CompletionRequest struct {
-	BaseURL     string
-	ModelID     string
-	Prompt      string
-	MaxTokens   int
-	Temperature float64
-	Stream      bool
-	OnDelta     func(CompletionDelta) error
+	BaseURL      string
+	ModelID      string
+	Prompt       string
+	SystemPrompt string
+	MaxTokens    int
+	Temperature  float64
+	Stream       bool
+	OnDelta      func(CompletionDelta) error
 }
 
 type CompletionDelta struct {
@@ -52,6 +61,8 @@ type CompletionResult struct {
 	RuntimeMeasurementStatus string `json:"runtime_measurement_status"`
 	MetadataParseStatus      string `json:"metadata_parse_status"`
 	TokenCountEstimated      bool   `json:"token_count_estimated,omitempty"`
+	PromptMode               string `json:"prompt_mode,omitempty"`
+	SystemPromptHash         string `json:"system_prompt_hash,omitempty"`
 	TTFTMs                   int64  `json:"ttft_ms"`
 	TotalTimeMs              int64  `json:"total_time_ms"`
 	Streamed                 bool   `json:"streamed"`
@@ -104,10 +115,12 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 	}
 
 	started := c.now()
+	promptMode := PromptModeChatMessages
+	systemPromptHash := HashSystemPrompt(req.SystemPrompt)
 	body, err := json.Marshal(openAIChatRequest{
 		Model: strings.TrimSpace(req.ModelID),
 		Messages: []openAIChatMessage{
-			{Role: "system", Content: "You are running a local llama.cpp readiness benchmark. Answer concisely."},
+			{Role: "system", Content: req.SystemPrompt},
 			{Role: "user", Content: req.Prompt},
 		},
 		Stream:      req.Stream,
@@ -156,15 +169,31 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 	}
 
 	if req.Stream {
-		return c.readStreamingCompletion(resp.Body, started, req.MaxTokens, req.OnDelta)
+		result, err := c.readStreamingCompletion(resp.Body, started, req.MaxTokens, req.OnDelta)
+		if err != nil {
+			return CompletionResult{}, err
+		}
+		result.PromptMode = promptMode
+		result.SystemPromptHash = systemPromptHash
+		return result, nil
 	}
-	return c.readNonStreamingCompletion(resp.Body, started, req.MaxTokens)
+	result, err := c.readNonStreamingCompletion(resp.Body, started, req.MaxTokens)
+	if err != nil {
+		return CompletionResult{}, err
+	}
+	result.PromptMode = promptMode
+	result.SystemPromptHash = systemPromptHash
+	return result, nil
 }
 
 func normalizeCompletionRequest(req CompletionRequest) CompletionRequest {
 	req.BaseURL = strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
 	req.ModelID = cleanStatusText(req.ModelID, maxStatusReasonLen)
 	req.Prompt = strings.TrimSpace(req.Prompt)
+	req.SystemPrompt = strings.TrimSpace(req.SystemPrompt)
+	if req.SystemPrompt == "" {
+		req.SystemPrompt = defaultCompletionSystemPrompt
+	}
 	if req.MaxTokens <= 0 {
 		req.MaxTokens = DefaultBenchmarkMaxTokens
 	}
@@ -172,6 +201,15 @@ func normalizeCompletionRequest(req CompletionRequest) CompletionRequest {
 		req.Temperature = 0
 	}
 	return req
+}
+
+func HashSystemPrompt(systemPrompt string) string {
+	systemPrompt = strings.TrimSpace(systemPrompt)
+	if systemPrompt == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("ryvion:v7:llamacpp_system_prompt:v1\n" + systemPrompt))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func streamUnsupportedStatus(status int) bool {

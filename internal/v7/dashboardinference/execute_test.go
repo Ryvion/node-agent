@@ -263,6 +263,55 @@ func TestExecuteAssignmentReturnTextFlagEnabledIncludesGeneratedText(t *testing.
 	}
 }
 
+func TestLlamaCppRunnerPassesResolvedSystemPromptAndReportsSafeDebugMetadata(t *testing.T) {
+	const systemPrompt = "Ryvion is a warm backend-aware distributed AI execution fabric for DePIN AI execution."
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("Ryvion routes warm local Llama requests."),
+		OutputBytes:     int64(len("Ryvion routes warm local Llama requests.")),
+		TokensGenerated: 6,
+		TTFTMs:          50,
+		TotalTimeMs:     250,
+	}}
+	spec := validSpec(t)
+	spec.Prompt = "Explain Ryvion."
+	spec.SystemPrompt = systemPrompt
+	spec.UseDefaultRyvionGrounding = true
+	spec.ReturnText = true
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+		Client:  client,
+		Getenv:  getenvTextOutputEnabled,
+	}
+	result, err := runner.RunDashboardInference(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("RunDashboardInference() error = %v", err)
+	}
+	if len(client.reqs) != 1 {
+		t.Fatalf("client calls = %d, want 1", len(client.reqs))
+	}
+	if client.reqs[0].SystemPrompt != systemPrompt || client.reqs[0].Prompt != spec.Prompt {
+		t.Fatalf("completion request = %+v, want resolved system and user prompts", client.reqs[0])
+	}
+	wantHash := llamacpp.HashSystemPrompt(systemPrompt)
+	if !result.GroundingApplied || result.PromptMode != llamacpp.PromptModeChatMessages || result.SystemPromptHash != wantHash {
+		t.Fatalf("result prompt metadata = %+v, want grounding/chat/hash", result)
+	}
+	receipt, err := BuildReceipt(result)
+	if err != nil {
+		t.Fatalf("BuildReceipt() error = %v", err)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["grounding_applied"] != true ||
+		metadata["prompt_mode"] != llamacpp.PromptModeChatMessages ||
+		metadata["system_prompt_hash"] != wantHash {
+		t.Fatalf("receipt prompt metadata = %+v", metadata)
+	}
+	encoded, _ := json.Marshal(receipt.Metadata)
+	if strings.Contains(string(encoded), systemPrompt) || strings.Contains(string(encoded), spec.Prompt) {
+		t.Fatalf("receipt metadata leaked prompt text: %s", encoded)
+	}
+}
+
 func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
 	output := "Ryvion routes tokens"
 	client := &fakeCompletionClient{
