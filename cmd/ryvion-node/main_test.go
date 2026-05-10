@@ -24,6 +24,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
 	v7capabilityprofile "github.com/Ryvion/node-agent/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
+	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/node-agent/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/node-agent/internal/v7/kvprobe"
@@ -31,6 +32,7 @@ import (
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7modelcache "github.com/Ryvion/node-agent/internal/v7/modelcache"
+	v7modelpolicy "github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 	v7tensorplane "github.com/Ryvion/node-agent/internal/v7/tensorplane"
 )
 
@@ -48,6 +50,43 @@ func (f *fakeClient) SubmitReceipt(_ context.Context, receipt hub.Receipt) error
 		return fmt.Errorf("simulated failure %d", n)
 	}
 	return nil
+}
+
+func TestBuildDashboardInferencePolicyUsesDerivedHardwarePolicy(t *testing.T) {
+	cacheDir := t.TempDir()
+	const gib = uint64(1024 * 1024 * 1024)
+	policy := buildDashboardInferencePolicy(func(key string) string {
+		if key == v7modelpolicy.EnvModelCacheDir {
+			return cacheDir
+		}
+		return ""
+	}, func(gotCacheDir string) v7hardware.CapacityInventory {
+		if gotCacheDir != cacheDir {
+			t.Fatalf("hardware cache dir = %q, want %q", gotCacheDir, cacheDir)
+		}
+		return v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+			OS:              "windows",
+			Arch:            "amd64",
+			CPULogicalCores: 16,
+			SystemRAMBytes:  31 * gib,
+			GPUDetected:     true,
+			GPUVendor:       v7hardware.GPUVendorNVIDIA,
+			GPUName:         "NVIDIA GeForce RTX 4070 Ti SUPER",
+			GPUVRAMBytes:    16 * gib,
+			CUDAAvailable:   true,
+			VulkanAvailable: true,
+		})
+	})
+
+	decision := v7modelpolicy.EvaluateRuntimeRequest(policy, v7modelpolicy.RuntimeRequest{
+		ModelID:                "phi-4-Q4_K_M.gguf",
+		Family:                 "phi",
+		ModelSizeBytes:         9 * gib,
+		ParameterCountBillions: 14,
+	})
+	if !decision.Allowed {
+		t.Fatalf("runtime decision = %+v, want derived RTX policy to allow Phi", decision)
+	}
 }
 
 func TestSubmitReceiptWithRetry_SucceedsAfterFailures(t *testing.T) {

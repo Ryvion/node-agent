@@ -146,10 +146,21 @@ var (
 			KeepWarm: keepWarm,
 			Client:   v7llamacpp.OpenAIClient{},
 			Getenv:   os.Getenv,
-			Policy:   v7modelpolicy.FromEnv(),
+			Policy:   buildDashboardInferencePolicy(os.Getenv, buildHardwareCapacityStatus),
 		}
 	}
 )
+
+func buildDashboardInferencePolicy(getenv func(string) string, detectHardware func(string) v7hardware.CapacityInventory) v7modelpolicy.Policy {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	basePolicy := v7modelpolicy.FromConfigSource(v7modelpolicy.ConfigSource{Getenv: getenv})
+	if detectHardware == nil {
+		detectHardware = buildHardwareCapacityStatus
+	}
+	return buildDerivedModelPolicyStatus(basePolicy, detectHardware(basePolicy.CacheDir))
+}
 
 func main() {
 	// Subcommand: ryvion-node claim <CODE>
