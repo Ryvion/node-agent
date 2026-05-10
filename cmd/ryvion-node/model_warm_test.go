@@ -18,7 +18,7 @@ import (
 	v7modelwarm "github.com/Ryvion/node-agent/internal/v7/modelwarm"
 )
 
-func TestProcessOptionalV7ModelWarmSubmitsReceiptAndSwitchesWarmRuntime(t *testing.T) {
+func TestProcessOptionalV7ModelWarmSubmitsReceiptForWarmRuntime(t *testing.T) {
 	t.Setenv(v7modelwarm.WarmFlagEnv, "1")
 	cacheDir := t.TempDir()
 	t.Setenv("RYV_MODEL_CACHE_DIR", cacheDir)
@@ -46,7 +46,7 @@ func TestProcessOptionalV7ModelWarmSubmitsReceiptAndSwitchesWarmRuntime(t *testi
 		deviceType:        "gpu",
 		publicKeyHex:      "abc123",
 		v7ModelWarm:       status,
-		llamaCppSidecar:   testLlamaCppManagerForServer(t, llamaServer.URL),
+		llamaCppSidecar:   testLlamaCppManagerForServerModel(t, llamaServer.URL, modelPath),
 		llamaCppKeeper:    nil,
 		llamaCppBenchmark: v7llamacpp.NewBenchmarkLocalStatus(),
 	}

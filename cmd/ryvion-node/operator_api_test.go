@@ -810,6 +810,11 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 
 func testLlamaCppManagerForServer(t *testing.T, serverURL string) *v7llamacpp.Manager {
 	t.Helper()
+	return testLlamaCppManagerForServerModel(t, serverURL, "")
+}
+
+func testLlamaCppManagerForServerModel(t *testing.T, serverURL string, modelPath string) *v7llamacpp.Manager {
+	t.Helper()
 	parsed, err := url.Parse(serverURL)
 	if err != nil {
 		t.Fatalf("parse test server URL: %v", err)
@@ -824,12 +829,14 @@ func testLlamaCppManagerForServer(t *testing.T, serverURL string) *v7llamacpp.Ma
 	}
 	dir := t.TempDir()
 	serverPath := filepath.Join(dir, "llama-server")
-	modelPath := filepath.Join(dir, "tinyllama.Q4_K_M.gguf")
 	if err := os.WriteFile(serverPath, []byte("test llama-server"), 0o755); err != nil {
 		t.Fatalf("write server fixture: %v", err)
 	}
-	if err := os.WriteFile(modelPath, []byte("test gguf"), 0o644); err != nil {
-		t.Fatalf("write model fixture: %v", err)
+	if strings.TrimSpace(modelPath) == "" {
+		modelPath = filepath.Join(dir, "tinyllama.Q4_K_M.gguf")
+		if err := os.WriteFile(modelPath, []byte("test gguf"), 0o644); err != nil {
+			t.Fatalf("write model fixture: %v", err)
+		}
 	}
 	return v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
 		Enabled:    true,

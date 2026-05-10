@@ -280,6 +280,75 @@ func TestStopOnlyTerminatesManagedProcess(t *testing.T) {
 	}
 }
 
+func TestRestartWithModelRehomesAttachedServerBeforeManagedStart(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	nextModelPath := filepath.Join(t.TempDir(), "Phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(nextModelPath, []byte("phi-gguf"), 0o644); err != nil {
+		t.Fatalf("write next model fixture: %v", err)
+	}
+
+	attachedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(attachedServer.Close)
+	host, oldPort := hostPortFromURL(t, attachedServer.URL)
+
+	proc := newFakeProcess(6543)
+	starts := 0
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  serverPath,
+		ModelPath:   modelPath,
+		Host:        host,
+		Port:        oldPort,
+		ContextSize: DefaultContextSize,
+		GPULayers:   DefaultGPULayers,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		starts++
+		if binary != serverPath {
+			t.Fatalf("binary = %q, want %q", binary, serverPath)
+		}
+		if got := argValue(args, "--model"); got != nextModelPath {
+			t.Fatalf("--model = %q, want %q; args=%v", got, nextModelPath, args)
+		}
+		if got := argValue(args, "--n-gpu-layers"); got != strconv.Itoa(DefaultGPULayers) {
+			t.Fatalf("--n-gpu-layers = %q, want %d; args=%v", got, DefaultGPULayers, args)
+		}
+		newPort, err := strconv.Atoi(argValue(args, "--port"))
+		if err != nil {
+			t.Fatalf("--port parse error: %v; args=%v", err, args)
+		}
+		if newPort == oldPort {
+			t.Fatalf("--port = %d, want a fresh managed sidecar port distinct from attached port", newPort)
+		}
+		return proc, nil
+	}), WithHealthTimeout(25*time.Millisecond))
+	t.Cleanup(func() {
+		_ = manager.Stop(context.Background())
+	})
+
+	status := manager.Start(context.Background())
+	if !status.Running || !status.Healthy || !status.Attached || status.PID != 0 {
+		t.Fatalf("attached status = %+v, want healthy attached external server", status)
+	}
+
+	status = manager.RestartWithModel(context.Background(), nextModelPath)
+	if starts != 1 {
+		t.Fatalf("managed starts = %d, want 1", starts)
+	}
+	if !status.Running || status.Attached || status.PID != 6543 {
+		t.Fatalf("restart status = %+v, want managed process running without attached server", status)
+	}
+	if status.ModelPath != nextModelPath || status.ModelFilename != "Phi-4-Q4_K_M.gguf" {
+		t.Fatalf("restart model metadata = %q/%q, want next model", status.ModelPath, status.ModelFilename)
+	}
+	if status.BaseURL == attachedServer.URL {
+		t.Fatalf("restart base_url = %q, want fresh managed sidecar URL", status.BaseURL)
+	}
+}
+
 func TestStatusJSONExcludesPromptOutputAuthAndTensorData(t *testing.T) {
 	t.Parallel()
 
@@ -524,6 +593,15 @@ func hostPortFromURL(t *testing.T, raw string) (string, int) {
 		t.Fatalf("parse port %q: %v", parsed.Port(), err)
 	}
 	return parsed.Hostname(), port
+}
+
+func argValue(args []string, name string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == name {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 type errorHealthClient struct {

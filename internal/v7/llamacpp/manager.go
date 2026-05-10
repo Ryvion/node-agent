@@ -299,7 +299,24 @@ func (m *Manager) RestartWithModel(ctx context.Context, modelPath string) LlamaC
 		return NewManager(LlamaCppSidecarConfig{}).RestartWithModel(ctx, modelPath)
 	}
 	_ = m.SetModelPath(modelPath)
+	m.rehomeAttachedServerForManagedRestart()
 	return m.Restart(ctx)
+}
+
+func (m *Manager) rehomeAttachedServerForManagedRestart() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.attached || m.process != nil {
+		return
+	}
+	port, ok := freeLocalPort(m.cfg.Host)
+	if !ok {
+		return
+	}
+	m.cfg.Port = port
+	m.cfg = normalizeConfig(m.cfg)
+	m.attached = false
+	m.lastError = ""
 }
 
 func (m *Manager) waitForManagedProcess(process managedProcess) {
@@ -914,6 +931,20 @@ func serverPathAvailable(path string) bool {
 	}
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func freeLocalPort(host string) (int, bool) {
+	host = normalizeHost(host)
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		return 0, false
+	}
+	defer listener.Close()
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || addr.Port <= 0 || addr.Port > 65535 {
+		return 0, false
+	}
+	return addr.Port, true
 }
 
 type modelMeta struct {
