@@ -161,7 +161,7 @@ func TestBuildDerivedPolicyAllowsPhiOnCapableWindowsRTX(t *testing.T) {
 		t.Fatalf("runtime allow_families = %q, want phi derived from capable Windows hardware", got)
 	}
 	if policy.RuntimePolicy.MaxRuntimeModelBytes != 18*bytesPerGiB ||
-		policy.RuntimePolicy.MaxRuntimeParameterCountBillions < 14 ||
+		policy.RuntimePolicy.MaxRuntimeParameterCountBillions < 16 ||
 		!policy.RuntimePolicy.AllowLargeModels {
 		t.Fatalf("runtime policy = %+v, want Windows RTX large-model policy derived from capacity", policy.RuntimePolicy)
 	}
@@ -173,6 +173,45 @@ func TestBuildDerivedPolicyAllowsPhiOnCapableWindowsRTX(t *testing.T) {
 	})
 	if !decision.Allowed {
 		t.Fatalf("decision = %+v, want Phi runnable on capable Windows RTX policy", decision)
+	}
+}
+
+func TestBuildDerivedPolicyAllowsPhiOnMidrangeAcceleratedGPU(t *testing.T) {
+	t.Parallel()
+
+	policy := BuildDerivedPolicy(DerivedPolicyInput{
+		BasePolicy: FromConfigSource(ConfigSource{
+			Getenv: func(string) string { return "" },
+			UserHomeDir: func() (string, error) {
+				return `C:\Users\operator`, nil
+			},
+			GOOS: "windows",
+		}),
+		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+			OS:                "windows",
+			Arch:              "amd64",
+			CPULogicalCores:   16,
+			SystemRAMBytes:    34 * bytesPerGiB,
+			AvailableRAMBytes: 20 * bytesPerGiB,
+			GPUDetected:       true,
+			GPUVendor:         v7hardware.GPUVendorAMD,
+			GPUName:           "AMD Radeon RX 7900 XTX",
+			GPUVRAMBytes:      16 * bytesPerGiB,
+			VulkanAvailable:   true,
+		}),
+	})
+
+	if got := strings.Join(policy.RuntimePolicy.AllowFamilies, ","); !strings.Contains(got, "phi") {
+		t.Fatalf("runtime allow_families = %q, want Phi auto-allowed on accelerated GPU", got)
+	}
+	decision := EvaluateRuntimeRequest(policy, RuntimeRequest{
+		ModelID:                "phi-4-Q4_K_M.gguf",
+		ModelSizeBytes:         9 * bytesPerGiB,
+		ParameterCountBillions: 15,
+		Family:                 "phi",
+	})
+	if !decision.Allowed {
+		t.Fatalf("decision = %+v, want resident Phi runnable on midrange accelerated GPU policy", decision)
 	}
 }
 

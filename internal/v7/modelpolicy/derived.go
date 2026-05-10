@@ -45,8 +45,9 @@ func deriveAcceleratedRuntimePolicy(policy Policy, hardware v7hardware.CapacityI
 
 	if capBytes >= 10*bytesPerGiB && hardware.SystemRAMBytes >= 32*bytesPerGiB {
 		policy.RuntimePolicy.AllowFamilies = mergeFamilies(policy.RuntimePolicy.AllowFamilies, policy.AllowedFamilies)
-		if policy.RuntimePolicy.MaxRuntimeParameterCountBillions < 14 {
-			policy.RuntimePolicy.MaxRuntimeParameterCountBillions = 14
+		policy.RuntimePolicy.AllowFamilies = appendIfMissing(policy.RuntimePolicy.AllowFamilies, "phi")
+		if policy.RuntimePolicy.MaxRuntimeParameterCountBillions < 16 {
+			policy.RuntimePolicy.MaxRuntimeParameterCountBillions = 16
 		}
 		policy.RuntimePolicy.AllowLargeModels = true
 		policy.RuntimePolicy.RequireExplicitAllowForLargeModels = false
