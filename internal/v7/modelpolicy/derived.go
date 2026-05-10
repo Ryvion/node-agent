@@ -43,7 +43,7 @@ func deriveAcceleratedRuntimePolicy(policy Policy, hardware v7hardware.CapacityI
 		policy.RuntimePolicy.MaxRuntimeModelBytes = capBytes
 	}
 
-	if capBytes >= 10*bytesPerGiB && hardware.SystemRAMBytes >= 32*bytesPerGiB {
+	if capBytes >= 10*bytesPerGiB && hardware.SystemRAMBytes >= 30*bytesPerGiB {
 		policy.RuntimePolicy.AllowFamilies = mergeFamilies(policy.RuntimePolicy.AllowFamilies, policy.AllowedFamilies)
 		policy.RuntimePolicy.AllowFamilies = appendIfMissing(policy.RuntimePolicy.AllowFamilies, "phi")
 		if policy.RuntimePolicy.MaxRuntimeParameterCountBillions < 16 {
@@ -90,7 +90,7 @@ func isConstrainedAppleUnifiedMemory(hardware v7hardware.CapacityInventory) bool
 	if !isDarwinApple(hardware) {
 		return false
 	}
-	return runtimeHardwareByteCap(hardware) < 10*bytesPerGiB || hardware.SystemRAMBytes < 32*bytesPerGiB
+	return runtimeHardwareByteCap(hardware) < 10*bytesPerGiB || hardware.SystemRAMBytes < 30*bytesPerGiB
 }
 
 func hasUsableAcceleratedRuntime(hardware v7hardware.CapacityInventory) bool {

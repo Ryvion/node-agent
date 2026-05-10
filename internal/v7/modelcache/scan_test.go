@@ -60,6 +60,29 @@ func TestScanDetectsGGUFModels(t *testing.T) {
 	}
 }
 
+func TestScanCanonicalizesTinyLlamaDrafterAlias(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	modelPath := filepath.Join(cacheDir, "my-hf-tinyllama-1.1b-02068df18631a0c0.gguf")
+	if err := os.WriteFile(modelPath, []byte("tiny"), 0o644); err != nil {
+		t.Fatalf("write tinyllama model: %v", err)
+	}
+
+	status := Scan(cacheDir)
+	if len(status.Models) != 1 {
+		t.Fatalf("models = %+v, want one TinyLlama model", status.Models)
+	}
+	model := status.Models[0]
+	if model.ModelID != canonicalTinyLlamaDrafterModelID ||
+		model.Filename != "my-hf-tinyllama-1.1b-02068df18631a0c0.gguf" ||
+		model.Path != modelPath ||
+		model.FamilyHint != "llama" ||
+		model.ParameterCountBillions != 1.1 {
+		t.Fatalf("model = %+v, want canonical TinyLlama drafter ID with original file path", model)
+	}
+}
+
 func TestScanAppliesModelCapAndDoesNotLeaveConfiguredDir(t *testing.T) {
 	t.Parallel()
 

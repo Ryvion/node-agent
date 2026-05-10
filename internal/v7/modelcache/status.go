@@ -6,6 +6,8 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 )
 
+const canonicalTinyLlamaDrafterModelID = "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+
 func BuildStatus(cacheDir string) Status {
 	return Scan(cacheDir)
 }
@@ -49,6 +51,7 @@ func NormalizeStatus(status Status) Status {
 		if model.ModelID == "" {
 			model.ModelID = model.Filename
 		}
+		model.ModelID = canonicalModelID(model)
 		if model.Filename == "" || model.Path == "" {
 			continue
 		}
@@ -62,6 +65,18 @@ func NormalizeStatus(status Status) Status {
 	status.Models = models
 	status.TotalBytes = total
 	return status
+}
+
+func canonicalModelID(model Model) string {
+	modelID := strings.TrimSpace(model.ModelID)
+	name := strings.ToLower(firstNonEmptyString(model.Filename, model.ModelID, model.Path))
+	if strings.Contains(name, "tinyllama") &&
+		strings.EqualFold(model.FamilyHint, "llama") &&
+		strings.EqualFold(model.Format, DefaultFormat) &&
+		(model.ParameterCountBillions == 0 || model.ParameterCountBillions <= 1.2) {
+		return canonicalTinyLlamaDrafterModelID
+	}
+	return modelID
 }
 
 func AnnotateRuntimeStatus(input RuntimeAnnotationInput) Status {

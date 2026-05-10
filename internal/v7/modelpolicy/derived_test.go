@@ -215,6 +215,42 @@ func TestBuildDerivedPolicyAllowsPhiOnMidrangeAcceleratedGPU(t *testing.T) {
 	}
 }
 
+func TestBuildDerivedPolicyAllowsPhiOnWindowsThirtyTwoGBClassRTX(t *testing.T) {
+	t.Parallel()
+
+	policy := BuildDerivedPolicy(DerivedPolicyInput{
+		BasePolicy: FromConfigSource(ConfigSource{
+			Getenv: func(string) string { return "" },
+			UserHomeDir: func() (string, error) {
+				return `C:\Users\operator`, nil
+			},
+			GOOS: "windows",
+		}),
+		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+			OS:                "windows",
+			Arch:              "amd64",
+			CPULogicalCores:   16,
+			SystemRAMBytes:    33934004224,
+			AvailableRAMBytes: 19450638336,
+			GPUDetected:       true,
+			GPUVendor:         v7hardware.GPUVendorNVIDIA,
+			GPUName:           "NVIDIA GeForce RTX 4070 Ti SUPER",
+			GPUVRAMBytes:      17171480576,
+			CUDAAvailable:     true,
+		}),
+	})
+
+	decision := EvaluateRuntimeRequest(policy, RuntimeRequest{
+		ModelID:                "phi-4-Q4_K_M.gguf",
+		ModelSizeBytes:         9053114816,
+		ParameterCountBillions: 15,
+		Family:                 "phi",
+	})
+	if !decision.Allowed {
+		t.Fatalf("decision = %+v policy = %+v, want live RTX 4070 Ti SUPER node to allow Phi", decision, policy.RuntimePolicy)
+	}
+}
+
 func TestBuildDerivedPolicyAllowsPhiOnCapableLinuxGPU(t *testing.T) {
 	t.Parallel()
 
