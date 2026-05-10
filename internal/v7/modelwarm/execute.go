@@ -127,6 +127,9 @@ func ExecuteWarmSpec(ctx context.Context, spec WarmSpec, opts ExecuteOptions) (W
 	status := manager.Status(runCtx)
 	if !modelStatusWarm(status, cachedModel.Path) {
 		status = manager.RestartWithModel(runCtx, cachedModel.Path)
+		if !modelStatusWarm(status, cachedModel.Path) {
+			status = waitForWarmModel(runCtx, manager, cachedModel.Path, status)
+		}
 	}
 	warm := modelStatusWarm(status, cachedModel.Path)
 	if !warm {
@@ -246,6 +249,25 @@ func modelStatusWarm(status llamacpp.LlamaCppSidecarStatus, modelPath string) bo
 		status.Running &&
 		status.Healthy &&
 		sameWarmPath(status.ModelPath, modelPath)
+}
+
+func waitForWarmModel(ctx context.Context, manager LlamaCppManager, modelPath string, last llamacpp.LlamaCppSidecarStatus) llamacpp.LlamaCppSidecarStatus {
+	if modelStatusWarm(last, modelPath) {
+		return last
+	}
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return last
+		case <-ticker.C:
+			last = manager.Status(ctx)
+			if modelStatusWarm(last, modelPath) {
+				return last
+			}
+		}
+	}
 }
 
 func sameWarmPath(a, b string) bool {

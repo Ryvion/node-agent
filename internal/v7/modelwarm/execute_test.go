@@ -75,6 +75,47 @@ func TestExecuteWarmAssignmentSwitchesLlamaCppModelAndBuildsReceipt(t *testing.T
 	}
 }
 
+func TestExecuteWarmAssignmentWaitsForAsyncWarmSidecar(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write cached model: %v", err)
+	}
+	manager := &asyncWarmManager{
+		status: llamacpp.LlamaCppSidecarStatus{
+			Enabled:       true,
+			Available:     true,
+			Running:       true,
+			Healthy:       true,
+			ModelPath:     filepath.Join(cacheDir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
+			ModelFilename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+			Backend:       llamacpp.BackendName,
+		},
+	}
+
+	receipt, handled, err := ExecuteWarmAssignment(context.Background(), testWarmSpecJSON(t, testWarmSpec()), ExecuteOptions{
+		Getenv:          testWarmGetenv,
+		Policy:          testWarmPolicy(cacheDir),
+		LlamaCppManager: manager,
+		BenchmarkRunner: &fakeWarmBenchmarkRunner{snapshot: testWarmBenchmarkSnapshot()},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteWarmAssignment() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if manager.restartCalls != 1 || manager.statusCalls != 1 {
+		t.Fatalf("manager calls restart/status-after-restart = %d/%d, want 1/1", manager.restartCalls, manager.statusCalls)
+	}
+	metadata := warmMetadata(t, receipt)
+	if metadata["warm"] != true || metadata["proof_status"] != ProofStatusModelWarmed {
+		t.Fatalf("receipt metadata = %+v, want warmed receipt", metadata)
+	}
+}
+
 func TestExecuteWarmAssignmentMissingModelReturnsSafeReceipt(t *testing.T) {
 	t.Parallel()
 
@@ -232,6 +273,52 @@ func (f *fakeWarmManager) RestartWithModel(_ context.Context, modelPath string) 
 		Available:     true,
 		Running:       true,
 		Healthy:       true,
+		ModelPath:     modelPath,
+		ModelFilename: filepath.Base(modelPath),
+		Backend:       llamacpp.BackendName,
+	}
+	return f.status
+}
+
+type asyncWarmManager struct {
+	status       llamacpp.LlamaCppSidecarStatus
+	enabled      bool
+	restartCalls int
+	statusCalls  int
+	pendingPath  string
+}
+
+func (f *asyncWarmManager) SetEnabled(enabled bool) llamacpp.LlamaCppSidecarConfig {
+	f.enabled = enabled
+	f.status.Enabled = enabled
+	return llamacpp.LlamaCppSidecarConfig{Enabled: enabled, ModelPath: f.status.ModelPath}
+}
+
+func (f *asyncWarmManager) Status(context.Context) llamacpp.LlamaCppSidecarStatus {
+	if f.pendingPath != "" {
+		f.statusCalls++
+		f.status = llamacpp.LlamaCppSidecarStatus{
+			Enabled:       true,
+			Available:     true,
+			Running:       true,
+			Healthy:       true,
+			ModelPath:     f.pendingPath,
+			ModelFilename: filepath.Base(f.pendingPath),
+			Backend:       llamacpp.BackendName,
+		}
+		f.pendingPath = ""
+	}
+	return f.status
+}
+
+func (f *asyncWarmManager) RestartWithModel(_ context.Context, modelPath string) llamacpp.LlamaCppSidecarStatus {
+	f.restartCalls++
+	f.pendingPath = modelPath
+	f.status = llamacpp.LlamaCppSidecarStatus{
+		Enabled:       true,
+		Available:     true,
+		Running:       true,
+		Healthy:       false,
 		ModelPath:     modelPath,
 		ModelFilename: filepath.Base(modelPath),
 		Backend:       llamacpp.BackendName,
