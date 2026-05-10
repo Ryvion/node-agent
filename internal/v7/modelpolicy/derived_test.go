@@ -7,7 +7,7 @@ import (
 	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 )
 
-func TestBuildDerivedPolicyBlocksPhiOnAppleMac(t *testing.T) {
+func TestBuildDerivedPolicyBlocksPhiOnConstrainedAppleMac(t *testing.T) {
 	t.Parallel()
 
 	policy := BuildDerivedPolicy(DerivedPolicyInput{
@@ -28,11 +28,11 @@ func TestBuildDerivedPolicyBlocksPhiOnAppleMac(t *testing.T) {
 		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
 			OS:              "darwin",
 			Arch:            "arm64",
-			CPULogicalCores: 10,
-			SystemRAMBytes:  32 * bytesPerGiB,
+			CPULogicalCores: 8,
+			SystemRAMBytes:  16 * bytesPerGiB,
 			GPUDetected:     true,
 			GPUVendor:       v7hardware.GPUVendorApple,
-			GPUName:         "Apple M4 Pro",
+			GPUName:         "Apple M4",
 			UnifiedMemory:   true,
 			MetalAvailable:  true,
 		}),
@@ -48,6 +48,48 @@ func TestBuildDerivedPolicyBlocksPhiOnAppleMac(t *testing.T) {
 	})
 	if decision.Allowed || decision.Reason != RuntimeDecisionFamilyDenied {
 		t.Fatalf("decision = %+v, want Mac Phi blocked by derived policy", decision)
+	}
+}
+
+func TestBuildDerivedPolicyAllowsPhiOnLargeAppleUnifiedMemory(t *testing.T) {
+	t.Parallel()
+
+	policy := BuildDerivedPolicy(DerivedPolicyInput{
+		BasePolicy: FromConfigSource(ConfigSource{
+			Getenv: func(string) string { return "" },
+			UserHomeDir: func() (string, error) {
+				return "/Users/operator", nil
+			},
+			GOOS: "darwin",
+		}),
+		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+			OS:                "darwin",
+			Arch:              "arm64",
+			CPULogicalCores:   14,
+			SystemRAMBytes:    48 * bytesPerGiB,
+			AvailableRAMBytes: 36 * bytesPerGiB,
+			GPUDetected:       true,
+			GPUVendor:         v7hardware.GPUVendorApple,
+			GPUName:           "Apple M4 Max",
+			UnifiedMemory:     true,
+			MetalAvailable:    true,
+		}),
+	})
+
+	if got := strings.Join(policy.RuntimePolicy.DenyFamilies, ","); strings.Contains(got, "phi") {
+		t.Fatalf("deny_families = %q, want phi allowed on large Apple unified memory", got)
+	}
+	if got := strings.Join(policy.RuntimePolicy.AllowFamilies, ","); !strings.Contains(got, "phi") {
+		t.Fatalf("runtime allow_families = %q, want phi derived from large Apple unified memory", got)
+	}
+	decision := EvaluateRuntimeRequest(policy, RuntimeRequest{
+		ModelID:                "phi-4-Q4_K_M.gguf",
+		ModelSizeBytes:         10 * bytesPerGiB,
+		ParameterCountBillions: 14,
+		Family:                 "phi",
+	})
+	if !decision.Allowed {
+		t.Fatalf("decision = %+v, want Phi runnable on large Apple unified memory", decision)
 	}
 }
 
@@ -131,6 +173,50 @@ func TestBuildDerivedPolicyAllowsPhiOnCapableWindowsRTX(t *testing.T) {
 	})
 	if !decision.Allowed {
 		t.Fatalf("decision = %+v, want Phi runnable on capable Windows RTX policy", decision)
+	}
+}
+
+func TestBuildDerivedPolicyAllowsPhiOnCapableLinuxGPU(t *testing.T) {
+	t.Parallel()
+
+	policy := BuildDerivedPolicy(DerivedPolicyInput{
+		BasePolicy: FromConfigSource(ConfigSource{
+			Getenv: func(string) string { return "" },
+			UserHomeDir: func() (string, error) {
+				return "/home/operator", nil
+			},
+			GOOS: "linux",
+		}),
+		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+			OS:                "linux",
+			Arch:              "amd64",
+			CPULogicalCores:   24,
+			SystemRAMBytes:    64 * bytesPerGiB,
+			AvailableRAMBytes: 48 * bytesPerGiB,
+			GPUDetected:       true,
+			GPUVendor:         v7hardware.GPUVendorNVIDIA,
+			GPUName:           "NVIDIA GeForce RTX 4090",
+			GPUVRAMBytes:      24 * bytesPerGiB,
+			CUDAAvailable:     true,
+		}),
+	})
+
+	if got := strings.Join(policy.RuntimePolicy.AllowFamilies, ","); !strings.Contains(got, "phi") || !strings.Contains(got, "gemma") {
+		t.Fatalf("runtime allow_families = %q, want accelerated Linux policy to inherit catalog families", got)
+	}
+	if policy.RuntimePolicy.MaxRuntimeModelBytes != 18*bytesPerGiB ||
+		policy.RuntimePolicy.MaxRuntimeParameterCountBillions < 32 ||
+		!policy.RuntimePolicy.AllowLargeModels {
+		t.Fatalf("runtime policy = %+v, want Linux RTX large-model policy derived from capacity", policy.RuntimePolicy)
+	}
+	decision := EvaluateRuntimeRequest(policy, RuntimeRequest{
+		ModelID:                "phi-4-Q4_K_M.gguf",
+		ModelSizeBytes:         10 * bytesPerGiB,
+		ParameterCountBillions: 14,
+		Family:                 "phi",
+	})
+	if !decision.Allowed {
+		t.Fatalf("decision = %+v, want Phi runnable on capable Linux GPU policy", decision)
 	}
 }
 

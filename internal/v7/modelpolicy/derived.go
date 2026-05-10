@@ -15,11 +15,11 @@ func BuildDerivedPolicy(input DerivedPolicyInput) Policy {
 	policy := NormalizePolicy(input.BasePolicy)
 	hardware := v7hardware.NormalizeInventory(input.Hardware)
 
-	if isDarwinApple(hardware) {
+	if isConstrainedAppleUnifiedMemory(hardware) {
 		policy.RuntimePolicy.DenyFamilies = appendIfMissing(policy.RuntimePolicy.DenyFamilies, "phi")
 	}
-	if isWindowsHardware(hardware) {
-		policy = deriveWindowsRuntimePolicy(policy, hardware)
+	if hasUsableAcceleratedRuntime(hardware) {
+		policy = deriveAcceleratedRuntimePolicy(policy, hardware)
 	}
 
 	if capBytes := runtimeHardwareByteCap(hardware); capBytes > 0 && capBytes < policy.RuntimePolicy.MaxRuntimeModelBytes {
@@ -36,11 +36,7 @@ func BuildDerivedPolicy(input DerivedPolicyInput) Policy {
 	return NormalizePolicy(policy)
 }
 
-func deriveWindowsRuntimePolicy(policy Policy, hardware v7hardware.CapacityInventory) Policy {
-	if !hasUsableWindowsAcceleration(hardware) {
-		return policy
-	}
-
+func deriveAcceleratedRuntimePolicy(policy Policy, hardware v7hardware.CapacityInventory) Policy {
 	capBytes := runtimeHardwareByteCap(hardware)
 	if capBytes > policy.RuntimePolicy.MaxRuntimeModelBytes &&
 		policy.RuntimePolicy.MaxRuntimeModelBytes == DefaultRuntimeMaxModelGB*bytesPerGiB {
@@ -89,12 +85,18 @@ func isDarwinApple(hardware v7hardware.CapacityInventory) bool {
 			hardware.UnifiedMemory)
 }
 
-func isWindowsHardware(hardware v7hardware.CapacityInventory) bool {
-	return strings.EqualFold(strings.TrimSpace(hardware.OS), "windows")
+func isConstrainedAppleUnifiedMemory(hardware v7hardware.CapacityInventory) bool {
+	if !isDarwinApple(hardware) {
+		return false
+	}
+	return runtimeHardwareByteCap(hardware) < 10*bytesPerGiB || hardware.SystemRAMBytes < 32*bytesPerGiB
 }
 
-func hasUsableWindowsAcceleration(hardware v7hardware.CapacityInventory) bool {
-	if !isWindowsHardware(hardware) || !hardware.GPUDetected || hardware.GPUVRAMBytes == 0 {
+func hasUsableAcceleratedRuntime(hardware v7hardware.CapacityInventory) bool {
+	if isDarwinApple(hardware) {
+		return hardware.MetalAvailable && hardware.UnifiedMemory && runtimeHardwareByteCap(hardware) >= 10*bytesPerGiB
+	}
+	if !hardware.GPUDetected || hardware.GPUVRAMBytes == 0 {
 		return false
 	}
 	return hardware.CUDAAvailable || hardware.VulkanAvailable || hardware.DirectMLAvailable

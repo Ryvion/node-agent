@@ -161,6 +161,49 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 	}
 }
 
+func TestBuildInventoryWindowsAMDAdapterRAMCapUsesKnownVRAM(t *testing.T) {
+	t.Parallel()
+
+	detector := Detector{
+		GOOS:   "windows",
+		GOARCH: "amd64",
+		LookPath: func(name string) (string, error) {
+			return "", os.ErrNotExist
+		},
+		RunCommand: func(name string, args []string, _ time.Duration) ([]byte, error) {
+			switch commandKey(name, args) {
+			case "wmic CPU get Name /format:csv":
+				return []byte("Node,Name\nDESKTOP,AMD Ryzen 9 7900X\n"), nil
+			case "wmic OS get TotalVisibleMemorySize,FreePhysicalMemory /format:csv":
+				return []byte("Node,FreePhysicalMemory,TotalVisibleMemorySize\nDESKTOP,1884288,33478364\n"), nil
+			case "wmic path win32_VideoController get Name,AdapterRAM /format:csv":
+				return []byte("Node,AdapterRAM,Name\nDESKTOP,4293918720,AMD Radeon RX 7900 XTX\n"), nil
+			case "wmic SystemEnclosure get ChassisTypes /format:csv":
+				return []byte("Node,ChassisTypes\nDESKTOP,{3}\n"), nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		Stat: func(path string) (os.FileInfo, error) {
+			if path == `C:\Windows\System32\DirectML.dll` {
+				return fakeHardwareFileInfo{name: "DirectML.dll"}, nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+
+	inventory := BuildInventory(detector)
+	if inventory.GPUVendor != GPUVendorAMD || inventory.GPUName != "AMD Radeon RX 7900 XTX" {
+		t.Fatalf("gpu = %+v, want RX 7900 XTX", inventory)
+	}
+	if inventory.GPUVRAMBytes != 24*bytesPerGiB {
+		t.Fatalf("gpu_vram_bytes = %d, want 24GiB fallback for WMI AdapterRAM cap", inventory.GPUVRAMBytes)
+	}
+	if !inventory.DirectMLAvailable {
+		t.Fatalf("directml_available = false, want true")
+	}
+}
+
 func TestBuildInventoryDoesNotExposeRawCommandOutput(t *testing.T) {
 	t.Parallel()
 

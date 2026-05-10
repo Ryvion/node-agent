@@ -27,6 +27,7 @@ const (
 const (
 	defaultProbeTimeout = 2 * time.Second
 	maxNameRunes        = 128
+	bytesPerGiB         = uint64(1024 * 1024 * 1024)
 )
 
 type CapacityInventory struct {

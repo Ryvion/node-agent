@@ -507,6 +507,7 @@ func detectWindowsWMIGPU(detector Detector) gpuInfo {
 		if ramIdx >= 0 && len(row) > ramIdx {
 			vramBytes, _ = strconv.ParseUint(strings.TrimSpace(row[ramIdx]), 10, 64)
 		}
+		vramBytes = effectiveWindowsGPUVRAMBytes(name, vramBytes)
 		candidate := gpuInfo{name: name, vendor: inferGPUVendor(name), vramBytes: vramBytes}
 		if best.name == "" || candidate.vramBytes > best.vramBytes || gpuTier(candidate.name) > gpuTier(best.name) {
 			best = candidate
@@ -540,12 +541,48 @@ func detectWindowsPowerShellGPU(detector Detector) gpuInfo {
 		if ramIdx >= 0 && len(row) > ramIdx {
 			vramBytes, _ = strconv.ParseUint(strings.TrimSpace(row[ramIdx]), 10, 64)
 		}
+		vramBytes = effectiveWindowsGPUVRAMBytes(name, vramBytes)
 		candidate := gpuInfo{name: name, vendor: inferGPUVendor(name), vramBytes: vramBytes}
 		if best.name == "" || candidate.vramBytes > best.vramBytes || gpuTier(candidate.name) > gpuTier(best.name) {
 			best = candidate
 		}
 	}
 	return best
+}
+
+func effectiveWindowsGPUVRAMBytes(name string, reported uint64) uint64 {
+	estimated := estimatedDedicatedVRAMFromGPUName(name)
+	if estimated > reported && reported <= 4*bytesPerGiB {
+		return estimated
+	}
+	return reported
+}
+
+func estimatedDedicatedVRAMFromGPUName(name string) uint64 {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case strings.Contains(lower, "7900 xtx"):
+		return 24 * bytesPerGiB
+	case strings.Contains(lower, "7900 xt"):
+		return 20 * bytesPerGiB
+	case strings.Contains(lower, "7800 xt"):
+		return 16 * bytesPerGiB
+	case strings.Contains(lower, "7700 xt"):
+		return 12 * bytesPerGiB
+	case strings.Contains(lower, "7600 xt"):
+		return 16 * bytesPerGiB
+	case strings.Contains(lower, "7600"):
+		return 8 * bytesPerGiB
+	case strings.Contains(lower, "6950 xt") || strings.Contains(lower, "6900 xt") ||
+		strings.Contains(lower, "6800 xt") || strings.Contains(lower, "6800"):
+		return 16 * bytesPerGiB
+	case strings.Contains(lower, "6750 xt") || strings.Contains(lower, "6700 xt"):
+		return 12 * bytesPerGiB
+	case strings.Contains(lower, "6650 xt") || strings.Contains(lower, "6600 xt") || strings.Contains(lower, "6600"):
+		return 8 * bytesPerGiB
+	default:
+		return 0
+	}
 }
 
 func detectNVIDIAComputeCapability(detector Detector, nvidiaSmiPath string) string {
