@@ -32,7 +32,7 @@ func TestOpenAIClientStreamingChunksComputeTimings(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":"hello"}}]}`)
 		fmt.Fprintln(w, `data: {"choices":[{"delta":{"content":" world"}}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`)
-		fmt.Fprintln(w, `data: {"choices":[{"finish_reason":"stop"}]}`)
+		fmt.Fprintln(w, `data: {"choices":[{"finish_reason":"stop"}],"timings":{"predicted_n":2,"predicted_ms":50,"predicted_per_second":40}}`)
 		fmt.Fprintln(w, `data: [DONE]`)
 	}))
 	defer server.Close()
@@ -64,6 +64,9 @@ func TestOpenAIClientStreamingChunksComputeTimings(t *testing.T) {
 	}
 	if result.TokensGenerated != 2 || result.PromptTokens != 7 || result.CompletionTokens != 2 {
 		t.Fatalf("tokens = %+v, want usage token counts", result)
+	}
+	if result.BackendDecodeMs != 50 || result.BackendDecodeTPS != 40 {
+		t.Fatalf("backend decode stats = %+v, want 50ms/40tps", result)
 	}
 	if result.FinishReason != FinishReasonStop || result.BackendFinishReason != FinishReasonStop || result.MaxTokensReached {
 		t.Fatalf("finish metadata = %+v, want natural stop", result)

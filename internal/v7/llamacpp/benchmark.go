@@ -274,6 +274,7 @@ func (r BenchmarkRunner) Run(ctx context.Context, config BenchmarkConfig) Benchm
 		if i < config.WarmupRuns {
 			continue
 		}
+		result = maybeProbeNonStreamingDecode(runCtx, client, req, result, usedStreaming)
 		measurement := measurementFromCompletion(result)
 		measurements = append(measurements, measurement)
 		outputs = append(outputs, append([]byte(nil), result.Output...))
@@ -301,6 +302,23 @@ func completeWithFallback(ctx context.Context, client CompletionClient, req Comp
 		}
 	}
 	return CompletionResult{}, req.Stream, err
+}
+
+func maybeProbeNonStreamingDecode(ctx context.Context, client CompletionClient, req CompletionRequest, result CompletionResult, usedStreaming bool) CompletionResult {
+	if !usedStreaming || client == nil || result.BackendDecodeTPS <= 0 {
+		return result
+	}
+	probeReq := req
+	probeReq.Stream = false
+	probeReq.OnDelta = nil
+	probe, err := client.Complete(ctx, probeReq)
+	if err != nil {
+		return result
+	}
+	if probe.BackendDecodeTPS > result.BackendDecodeTPS {
+		result.applyBackendDecodeStats(probe.BackendDecodeMs, probe.BackendDecodeTPS)
+	}
+	return result
 }
 
 func (r BenchmarkRunner) failedSnapshot(config BenchmarkConfig, status LlamaCppSidecarStatus, code string) BenchmarkStatusSnapshot {
@@ -370,7 +388,11 @@ func measurementFromCompletion(result CompletionResult) runMeasurement {
 		decodeWindowMs = total
 	}
 	var decodeTPS float64
-	if tokens > 0 && decodeWindowMs > 0 {
+	if result.BackendDecodeTPS > 0 {
+		decodeTPS = result.BackendDecodeTPS
+	} else if result.BackendDecodeMs > 0 && tokens > 0 {
+		decodeTPS = float64(tokens) / (result.BackendDecodeMs / 1000)
+	} else if tokens > 0 && decodeWindowMs > 0 {
 		decodeTPS = float64(tokens) / (float64(decodeWindowMs) / 1000)
 	}
 	var endToEndTPS float64

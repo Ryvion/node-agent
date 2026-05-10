@@ -49,11 +49,11 @@ type LlamaCppSidecarConfig struct {
 	// V8 speculative decoding (Level 0).
 	// DraftModelPath, when non-empty, enables backend-local speculative
 	// decoding by passing --model-draft to llama-server.
-	DraftModelPath  string
-	DraftMaxTokens  int     // --spec-draft-n-max (default 16 when DraftModelPath set)
-	DraftMinTokens  int     // --spec-draft-n-min
-	DraftPMin       float64 // --draft-p-min (0 = llama.cpp default 0.75)
-	DraftGPULayers  int     // --n-gpu-layers-draft (0 = auto)
+	DraftModelPath string
+	DraftMaxTokens int     // --spec-draft-n-max (default 16 when DraftModelPath set)
+	DraftMinTokens int     // --spec-draft-n-min
+	DraftPMin      float64 // --draft-p-min (0 = llama.cpp default 0.75)
+	DraftGPULayers int     // --n-gpu-layers-draft (0 = auto)
 }
 
 type LlamaCppSidecarStatus struct {
@@ -83,13 +83,13 @@ type LlamaCppSidecarStatus struct {
 	Reason                 string    `json:"reason"`
 
 	// V8 speculative decoding (Level 0 - backend-local).
-	SpeculativeEnabled       bool   `json:"speculative_enabled"`
-	DraftModelPath           string `json:"draft_model_path,omitempty"`
-	DraftModelFilename       string `json:"draft_model_filename,omitempty"`
-	DraftModelSizeBytes      int64  `json:"draft_model_size_bytes,omitempty"`
-	DraftModelFamilyHint     string `json:"draft_model_family_hint,omitempty"`
-	DraftMaxTokens           int    `json:"draft_max_tokens,omitempty"`
-	DraftMinTokens           int    `json:"draft_min_tokens,omitempty"`
+	SpeculativeEnabled   bool   `json:"speculative_enabled"`
+	DraftModelPath       string `json:"draft_model_path,omitempty"`
+	DraftModelFilename   string `json:"draft_model_filename,omitempty"`
+	DraftModelSizeBytes  int64  `json:"draft_model_size_bytes,omitempty"`
+	DraftModelFamilyHint string `json:"draft_model_family_hint,omitempty"`
+	DraftMaxTokens       int    `json:"draft_max_tokens,omitempty"`
+	DraftMinTokens       int    `json:"draft_min_tokens,omitempty"`
 }
 
 type BackendRuntimes struct {

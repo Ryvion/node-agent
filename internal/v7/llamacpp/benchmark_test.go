@@ -110,6 +110,65 @@ func TestBenchmarkFallsBackToNonStreamingWhenSSEUnavailable(t *testing.T) {
 	assertBenchmarkJSONSafe(t, snapshot, "fallback measured")
 }
 
+func TestMeasurementPrefersBackendDecodeTiming(t *testing.T) {
+	measurement := measurementFromCompletion(CompletionResult{
+		Output:           []byte("measured output"),
+		TokensGenerated:  25,
+		TTFTMs:           29,
+		TotalTimeMs:      795,
+		BackendDecodeTPS: 45.05876564215049,
+	})
+
+	if measurement.decodeTPS != 45.05876564215049 {
+		t.Fatalf("decodeTPS = %.12f, want backend decode timing", measurement.decodeTPS)
+	}
+	if measurement.endToEndTPS == measurement.decodeTPS {
+		t.Fatalf("endToEndTPS should remain wall-clock based, got %.12f", measurement.endToEndTPS)
+	}
+}
+
+func TestBenchmarkUsesNonStreamingDecodeProbeWhenStreamingDecodeIsSlower(t *testing.T) {
+	stream := completionResult("stream measured", 25, 29, 795, true)
+	stream.BackendDecodeMs = 758
+	stream.BackendDecodeTPS = 33
+	probe := completionResult("probe measured", 25, 795, 795, false)
+	probe.BackendDecodeMs = 555
+	probe.BackendDecodeTPS = 45
+	client := &queuedCompletionClient{steps: []completionStep{
+		{result: stream},
+		{result: probe},
+	}}
+	runner := BenchmarkRunner{
+		Sidecar: healthyBenchmarkSidecar(),
+		Client:  client,
+		Now:     fixedBenchmarkNow,
+	}
+
+	snapshot := runner.Run(context.Background(), BenchmarkConfig{
+		MaxTokens:    32,
+		TimeoutMs:    10_000,
+		Streaming:    true,
+		WarmupRuns:   0,
+		MeasuredRuns: 1,
+	})
+	if snapshot.Status != BenchmarkStatusCompleted {
+		t.Fatalf("status = %q, want completed: %+v", snapshot.Status, snapshot)
+	}
+	if len(client.requests) != 2 {
+		t.Fatalf("requests = %d, want streaming measurement plus non-streaming probe", len(client.requests))
+	}
+	if !client.requests[0].Stream || client.requests[1].Stream {
+		t.Fatalf("request stream flags = %v/%v, want true/false", client.requests[0].Stream, client.requests[1].Stream)
+	}
+	if snapshot.Metrics.P50DecodeTPS != 45 {
+		t.Fatalf("p50_decode_tps = %.3f, want non-streaming backend probe", snapshot.Metrics.P50DecodeTPS)
+	}
+	if snapshot.Metrics.P50EndToEndTPS != 31.447 {
+		t.Fatalf("p50_end_to_end_tps = %.3f, want streaming wall-clock metric", snapshot.Metrics.P50EndToEndTPS)
+	}
+	assertBenchmarkJSONSafe(t, snapshot, "stream measured", "probe measured")
+}
+
 func TestBenchmarkSidecarUnavailableReturnsSafeStatus(t *testing.T) {
 	client := &queuedCompletionClient{}
 	runner := BenchmarkRunner{

@@ -61,6 +61,36 @@ func TestConfigFromEnv(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvDefaultsToCPUAndAllowsExplicitGPU(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			return ""
+		},
+	})
+	if cfg.GPULayers != 0 {
+		t.Fatalf("default gpu layers = %d, want 0", cfg.GPULayers)
+	}
+	if cfg.DraftGPULayers != 0 {
+		t.Fatalf("default draft gpu layers = %d, want 0", cfg.DraftGPULayers)
+	}
+
+	cfg = ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			switch name {
+			case EnvGPULayers, EnvDraftGPULayers:
+				return "99"
+			default:
+				return ""
+			}
+		},
+	})
+	if cfg.GPULayers != 99 || cfg.DraftGPULayers != 99 {
+		t.Fatalf("explicit gpu config = %+v, want 99 GPU layers", cfg)
+	}
+}
+
 func TestConfigDiscoversKnownDirServerAndModel(t *testing.T) {
 	t.Parallel()
 

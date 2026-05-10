@@ -54,24 +54,26 @@ type CompletionDelta struct {
 }
 
 type CompletionResult struct {
-	Output                   []byte `json:"-"`
-	OutputBytes              int64  `json:"output_bytes"`
-	PromptTokens             int64  `json:"prompt_tokens,omitempty"`
-	CompletionTokens         int64  `json:"completion_tokens,omitempty"`
-	RequestedMaxTokens       int    `json:"requested_max_tokens"`
-	TokensGenerated          int64  `json:"tokens_generated"`
-	FinishReason             string `json:"finish_reason"`
-	BackendFinishReason      string `json:"backend_finish_reason"`
-	BackendStopReason        string `json:"backend_stop_reason"`
-	MaxTokensReached         bool   `json:"max_tokens_reached"`
-	RuntimeMeasurementStatus string `json:"runtime_measurement_status"`
-	MetadataParseStatus      string `json:"metadata_parse_status"`
-	TokenCountEstimated      bool   `json:"token_count_estimated,omitempty"`
-	PromptMode               string `json:"prompt_mode,omitempty"`
-	SystemPromptHash         string `json:"system_prompt_hash,omitempty"`
-	TTFTMs                   int64  `json:"ttft_ms"`
-	TotalTimeMs              int64  `json:"total_time_ms"`
-	Streamed                 bool   `json:"streamed"`
+	Output                   []byte  `json:"-"`
+	OutputBytes              int64   `json:"output_bytes"`
+	PromptTokens             int64   `json:"prompt_tokens,omitempty"`
+	CompletionTokens         int64   `json:"completion_tokens,omitempty"`
+	RequestedMaxTokens       int     `json:"requested_max_tokens"`
+	TokensGenerated          int64   `json:"tokens_generated"`
+	FinishReason             string  `json:"finish_reason"`
+	BackendFinishReason      string  `json:"backend_finish_reason"`
+	BackendStopReason        string  `json:"backend_stop_reason"`
+	MaxTokensReached         bool    `json:"max_tokens_reached"`
+	RuntimeMeasurementStatus string  `json:"runtime_measurement_status"`
+	MetadataParseStatus      string  `json:"metadata_parse_status"`
+	TokenCountEstimated      bool    `json:"token_count_estimated,omitempty"`
+	PromptMode               string  `json:"prompt_mode,omitempty"`
+	SystemPromptHash         string  `json:"system_prompt_hash,omitempty"`
+	TTFTMs                   int64   `json:"ttft_ms"`
+	TotalTimeMs              int64   `json:"total_time_ms"`
+	BackendDecodeMs          float64 `json:"backend_decode_ms,omitempty"`
+	BackendDecodeTPS         float64 `json:"backend_decode_tps,omitempty"`
+	Streamed                 bool    `json:"streamed"`
 
 	// V8 Phase 1.2: speculative-decoding runtime counts.
 	// Populated when llama-server reports them via the timings block;
@@ -406,6 +408,8 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 	// V8 Phase 1.2: capture speculative-decoding counts from any chunk
 	// that carries a Timings block (typically the terminal one).
 	var specDrafted, specAccepted int64
+	var backendDecodeMs float64
+	var backendDecodeTPS float64
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -440,6 +444,9 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 		if d, a := chunk.Timings.speculativeCounts(); d > 0 || a > 0 {
 			specDrafted, specAccepted = d, a
 		}
+		if ms, tps := chunk.Timings.decodeStats(); ms > 0 || tps > 0 {
+			backendDecodeMs, backendDecodeTPS = ms, tps
+		}
 		content := generatedTextFromStreamChunk(chunk)
 		if content != "" {
 			if firstTokenAt.IsZero() {
@@ -472,6 +479,7 @@ func (c OpenAIClient) readStreamingCompletion(body io.Reader, started time.Time,
 	})
 	finished := c.now()
 	result := buildCompletionResult(output.Bytes(), promptTokens, measurement, firstTokenAt, started, finished, true, finish.metadata(requestedMaxTokens, measurement.TokensGenerated))
+	result.applyBackendDecodeStats(backendDecodeMs, backendDecodeTPS)
 	result.SpeculativeTokensDrafted = specDrafted
 	result.SpeculativeTokensAccepted = specAccepted
 	return result, nil
@@ -511,6 +519,7 @@ func (c OpenAIClient) readNonStreamingCompletion(body io.Reader, started time.Ti
 	})
 	finished := c.now()
 	result := buildCompletionResult(output.Bytes(), promptTokens, measurement, finished, started, finished, false, finishMetadataFromChatResponse(payload, requestedMaxTokens, measurement.TokensGenerated))
+	result.applyBackendDecodeStats(payload.Timings.decodeStats())
 	result.SpeculativeTokensDrafted, result.SpeculativeTokensAccepted = payload.Timings.speculativeCounts()
 	return result, nil
 }
@@ -549,6 +558,22 @@ func buildCompletionResult(output []byte, promptTokens int64, measurement comple
 		result.CompletionTokens = completionTokens
 	}
 	return result
+}
+
+func (result *CompletionResult) applyBackendDecodeStats(decodeMs float64, decodeTPS float64) {
+	if result == nil {
+		return
+	}
+	if decodeMs > 0 {
+		result.BackendDecodeMs = decodeMs
+	}
+	if decodeTPS > 0 {
+		result.BackendDecodeTPS = decodeTPS
+		return
+	}
+	if decodeMs > 0 && result.TokensGenerated > 0 {
+		result.BackendDecodeTPS = float64(result.TokensGenerated) / (decodeMs / 1000)
+	}
 }
 
 type completionTokenSources struct {
@@ -709,16 +734,33 @@ type openAIChatChoice struct {
 }
 
 type llamaTimings struct {
-	PredictedN int64 `json:"predicted_n,omitempty"`
-	NPredicted int64 `json:"n_predicted,omitempty"`
+	PredictedN         int64   `json:"predicted_n,omitempty"`
+	NPredicted         int64   `json:"n_predicted,omitempty"`
+	PredictedMs        float64 `json:"predicted_ms,omitempty"`
+	PredictedPerSecond float64 `json:"predicted_per_second,omitempty"`
 
 	// V8 Phase 1.2: speculative-decoding counts emitted by llama-server
 	// when running with --model-draft. Older builds may emit only one
 	// of these; we read whichever is present.
-	NDrafted        int64 `json:"n_drafted,omitempty"`
-	NAccepted       int64 `json:"n_accepted,omitempty"`
-	DraftN          int64 `json:"draft_n,omitempty"`
-	DraftNAccepted  int64 `json:"draft_n_accepted,omitempty"`
+	NDrafted       int64 `json:"n_drafted,omitempty"`
+	NAccepted      int64 `json:"n_accepted,omitempty"`
+	DraftN         int64 `json:"draft_n,omitempty"`
+	DraftNAccepted int64 `json:"draft_n_accepted,omitempty"`
+}
+
+func (t *llamaTimings) decodeStats() (float64, float64) {
+	if t == nil {
+		return 0, 0
+	}
+	ms := t.PredictedMs
+	if ms < 0 {
+		ms = 0
+	}
+	tps := t.PredictedPerSecond
+	if tps < 0 {
+		tps = 0
+	}
+	return ms, tps
 }
 
 // speculativeCounts returns (drafted, accepted) from any name variant

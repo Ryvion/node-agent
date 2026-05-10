@@ -2147,8 +2147,12 @@ func llamaCppBenchmarkAccelerationMode(cfg v7llamacpp.LlamaCppSidecarConfig, har
 	switch {
 	case hardware.CUDAAvailable:
 		return "cuda"
+	case hardware.MetalAvailable:
+		return "metal"
 	case hardware.VulkanAvailable:
 		return "vulkan"
+	case hardware.DirectMLAvailable:
+		return "directml"
 	default:
 		return "other"
 	}
