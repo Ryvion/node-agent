@@ -41,11 +41,12 @@ type progressBatcher struct {
 	spec     Spec
 	maxBatch int
 
-	mu      sync.Mutex
-	flushMu sync.Mutex
-	pending []ProgressChunk
-	nextSeq int64
-	err     error
+	mu       sync.Mutex
+	flushMu  sync.Mutex
+	pending  []ProgressChunk
+	nextSeq  int64
+	err      error
+	disabled bool
 
 	done chan struct{}
 }
@@ -76,10 +77,14 @@ func (b *progressBatcher) addDelta(text string) error {
 		return nil
 	}
 	if err := b.currentErr(); err != nil {
-		return err
+		return nil
 	}
 
 	b.mu.Lock()
+	if b.disabled {
+		b.mu.Unlock()
+		return nil
+	}
 	b.nextSeq++
 	chunk := ProgressChunk{
 		Seq:  b.nextSeq,
@@ -105,9 +110,13 @@ func (b *progressBatcher) addDone(ctx context.Context, finishReason string) erro
 		finishReason = "unknown"
 	}
 	if err := b.currentErr(); err != nil {
-		return err
+		return nil
 	}
 	b.mu.Lock()
+	if b.disabled {
+		b.mu.Unlock()
+		return nil
+	}
 	b.nextSeq++
 	b.pending = append(b.pending, ProgressChunk{
 		Seq:          b.nextSeq,
@@ -128,10 +137,8 @@ func (b *progressBatcher) close(ctx context.Context) error {
 	flushErr := b.flush(ctx)
 	b.cancel()
 	<-b.done
-	if flushErr != nil {
-		return flushErr
-	}
-	return b.currentErr()
+	_ = flushErr
+	return nil
 }
 
 func (b *progressBatcher) loop() {
@@ -153,7 +160,7 @@ func (b *progressBatcher) flush(ctx context.Context) error {
 		return nil
 	}
 	if err := b.currentErr(); err != nil {
-		return err
+		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -164,9 +171,9 @@ func (b *progressBatcher) flush(ctx context.Context) error {
 
 	for {
 		b.mu.Lock()
-		if len(b.pending) == 0 {
+		if b.disabled || len(b.pending) == 0 {
 			b.mu.Unlock()
-			return b.currentErr()
+			return nil
 		}
 		batchSize := len(b.pending)
 		if batchSize > b.maxBatch {
@@ -185,8 +192,8 @@ func (b *progressBatcher) flush(ctx context.Context) error {
 		}
 		if err := b.sender.SendDashboardInferenceProgress(ctx, batch); err != nil {
 			safeErr := codedError{code: "dashboard_inference_stream_progress_failed", err: ErrStreamProgressFailed}
-			b.setErr(safeErr)
-			return safeErr
+			b.disable(safeErr)
+			return nil
 		}
 	}
 }
@@ -207,6 +214,19 @@ func (b *progressBatcher) setErr(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.err == nil {
+		b.err = err
+	}
+}
+
+func (b *progressBatcher) disable(err error) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.disabled = true
+	b.pending = nil
+	if err != nil && b.err == nil {
 		b.err = err
 	}
 }

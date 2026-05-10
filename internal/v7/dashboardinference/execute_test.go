@@ -501,7 +501,7 @@ func TestLlamaCppRunnerDoesNotPostChunksWhenSpecStreamFalse(t *testing.T) {
 	}
 }
 
-func TestLlamaCppRunnerProgressFailureReturnsSafeRejection(t *testing.T) {
+func TestLlamaCppRunnerProgressFailureKeepsMeasuredReceipt(t *testing.T) {
 	client := &fakeCompletionClient{
 		result: llamacpp.CompletionResult{
 			Output:          []byte("private streamed output"),
@@ -525,11 +525,11 @@ func TestLlamaCppRunnerProgressFailureReturnsSafeRejection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunDashboardInferenceWithProgress() error = %v", err)
 	}
-	if result.ProofStatus != ProofStatusRejected || result.ErrorCode != "dashboard_inference_stream_progress_failed" {
-		t.Fatalf("result = %+v, want safe progress rejection", result)
+	if result.ProofStatus != ProofStatusMeasured || result.ErrorCode != "" {
+		t.Fatalf("result = %+v, want measured result despite best-effort progress failure", result)
 	}
-	if strings.Contains(result.ErrorCode, "private") || strings.Contains(result.GeneratedText, "private") {
-		t.Fatalf("result leaked private text: %+v", result)
+	if result.GeneratedText != "private streamed output" {
+		t.Fatalf("generated text = %q, want final measured output", result.GeneratedText)
 	}
 }
 
