@@ -30,6 +30,7 @@ const (
 	DefaultHost            = "127.0.0.1"
 	DefaultPort            = 45910
 	DefaultContextSize     = 4096
+	DefaultGPULayers       = 99
 	DefaultDraftMaxTokens  = 16
 	DefaultDraftMinTokens  = 0
 	DefaultDraftPMinMillis = 0 // 0 = use llama.cpp default (0.75)

@@ -61,7 +61,7 @@ func TestConfigFromEnv(t *testing.T) {
 	}
 }
 
-func TestConfigFromEnvDefaultsToCPUAndAllowsExplicitGPU(t *testing.T) {
+func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) {
 	t.Parallel()
 
 	cfg := ConfigFromEnvWith(ConfigSource{
@@ -69,11 +69,23 @@ func TestConfigFromEnvDefaultsToCPUAndAllowsExplicitGPU(t *testing.T) {
 			return ""
 		},
 	})
-	if cfg.GPULayers != 0 {
-		t.Fatalf("default gpu layers = %d, want 0", cfg.GPULayers)
+	if cfg.GPULayers != DefaultGPULayers {
+		t.Fatalf("default gpu layers = %d, want %d", cfg.GPULayers, DefaultGPULayers)
 	}
 	if cfg.DraftGPULayers != 0 {
 		t.Fatalf("default draft gpu layers = %d, want 0", cfg.DraftGPULayers)
+	}
+
+	cfg = ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			if name == EnvGPULayers {
+				return "0"
+			}
+			return ""
+		},
+	})
+	if cfg.GPULayers != 0 {
+		t.Fatalf("explicit gpu opt-out = %d, want 0", cfg.GPULayers)
 	}
 
 	cfg = ConfigFromEnvWith(ConfigSource{

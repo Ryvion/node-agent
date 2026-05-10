@@ -73,7 +73,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 		Port:           envInt(source.Getenv(EnvPort), DefaultPort),
 		ContextSize:    envInt(source.Getenv(EnvCtxSize), DefaultContextSize),
 		Threads:        envInt(source.Getenv(EnvThreads), 0),
-		GPULayers:      envInt(source.Getenv(EnvGPULayers), 0),
+		GPULayers:      envInt(source.Getenv(EnvGPULayers), DefaultGPULayers),
 		ExtraArgs:      sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
 		DraftModelPath: cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
 		DraftMaxTokens: envInt(source.Getenv(EnvDraftMaxTokens), 0),
