@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -349,6 +351,31 @@ func TestRestartWithModelRehomesAttachedServerBeforeManagedStart(t *testing.T) {
 	}
 }
 
+func TestConfigureProcessCommandUsesBinaryDirForBackendLibraries(t *testing.T) {
+	t.Parallel()
+
+	binDir := t.TempDir()
+	binary := filepath.Join(binDir, "llama-server")
+	cmd := exec.Command(binary)
+
+	configureProcessCommand(cmd, binary)
+
+	if cmd.Dir != binDir {
+		t.Fatalf("cmd.Dir = %q, want llama.cpp binary dir %q", cmd.Dir, binDir)
+	}
+	if firstEnvSearchPath(cmd.Env, "PATH") != binDir {
+		t.Fatalf("PATH first entry = %q, want %q; env=%v", firstEnvSearchPath(cmd.Env, "PATH"), binDir, cmd.Env)
+	}
+	if runtime.GOOS != "windows" {
+		if firstEnvSearchPath(cmd.Env, "LD_LIBRARY_PATH") != binDir {
+			t.Fatalf("LD_LIBRARY_PATH first entry = %q, want %q", firstEnvSearchPath(cmd.Env, "LD_LIBRARY_PATH"), binDir)
+		}
+		if firstEnvSearchPath(cmd.Env, "DYLD_LIBRARY_PATH") != binDir {
+			t.Fatalf("DYLD_LIBRARY_PATH first entry = %q, want %q", firstEnvSearchPath(cmd.Env, "DYLD_LIBRARY_PATH"), binDir)
+		}
+	}
+}
+
 func TestStatusJSONExcludesPromptOutputAuthAndTensorData(t *testing.T) {
 	t.Parallel()
 
@@ -600,6 +627,21 @@ func argValue(args []string, name string) string {
 		if args[i] == name {
 			return args[i+1]
 		}
+	}
+	return ""
+}
+
+func firstEnvSearchPath(env []string, key string) string {
+	for _, item := range env {
+		name, value, ok := strings.Cut(item, "=")
+		if !ok || !strings.EqualFold(name, key) {
+			continue
+		}
+		parts := strings.Split(value, string(os.PathListSeparator))
+		if len(parts) == 0 {
+			return ""
+		}
+		return parts[0]
 	}
 	return ""
 }

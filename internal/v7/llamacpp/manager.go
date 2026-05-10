@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1128,6 +1129,7 @@ func defaultProcessStarter(ctx context.Context, binary string, args []string, ou
 		return nil, os.ErrNotExist
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
+	configureProcessCommand(cmd, binary)
 	if output != nil {
 		cmd.Stdout = output
 		cmd.Stderr = output
@@ -1136,6 +1138,66 @@ func defaultProcessStarter(ctx context.Context, binary string, args []string, ou
 		return nil, err
 	}
 	return &osManagedProcess{cmd: cmd}, nil
+}
+
+func configureProcessCommand(cmd *exec.Cmd, binary string) {
+	if cmd == nil {
+		return
+	}
+	binDir := filepath.Dir(strings.TrimSpace(binary))
+	if binDir == "" || binDir == "." {
+		return
+	}
+	cmd.Dir = binDir
+	env := os.Environ()
+	separator := string(os.PathListSeparator)
+	env = prependEnvSearchPath(env, "PATH", binDir, separator)
+	if runtime.GOOS != "windows" {
+		env = prependEnvSearchPath(env, "LD_LIBRARY_PATH", binDir, separator)
+		env = prependEnvSearchPath(env, "DYLD_LIBRARY_PATH", binDir, separator)
+	}
+	cmd.Env = env
+}
+
+func prependEnvSearchPath(env []string, key string, pathValue string, separator string) []string {
+	key = strings.TrimSpace(key)
+	pathValue = strings.TrimSpace(pathValue)
+	if key == "" || pathValue == "" {
+		return append([]string(nil), env...)
+	}
+	if separator == "" {
+		separator = string(os.PathListSeparator)
+	}
+	out := make([]string, 0, len(env)+1)
+	found := false
+	for _, item := range env {
+		name, value, ok := strings.Cut(item, "=")
+		if ok && strings.EqualFold(name, key) {
+			found = true
+			if envSearchPathContains(value, pathValue, separator) {
+				out = append(out, item)
+			} else if strings.TrimSpace(value) == "" {
+				out = append(out, name+"="+pathValue)
+			} else {
+				out = append(out, name+"="+pathValue+separator+value)
+			}
+			continue
+		}
+		out = append(out, item)
+	}
+	if !found {
+		out = append(out, key+"="+pathValue)
+	}
+	return out
+}
+
+func envSearchPathContains(value string, pathValue string, separator string) bool {
+	for _, part := range strings.Split(value, separator) {
+		if strings.EqualFold(strings.TrimSpace(part), pathValue) {
+			return true
+		}
+	}
+	return false
 }
 
 type boundedLogBuffer struct {
