@@ -204,6 +204,7 @@ func (m *Manager) Start(ctx context.Context) LlamaCppSidecarStatus {
 	if m == nil {
 		return NewManager(LlamaCppSidecarConfig{}).Start(ctx)
 	}
+	m.ensureBundledServer(ctx)
 	m.mu.Lock()
 	status := m.statusLocked()
 	if !status.Enabled {
@@ -257,6 +258,45 @@ func (m *Manager) Start(ctx context.Context) LlamaCppSidecarStatus {
 	m.mu.Unlock()
 
 	return m.Status(ctx)
+}
+
+func (m *Manager) ensureBundledServer(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	cfg := normalizeConfig(m.cfg)
+	shouldEnsure := shouldEnsureBundledServer(cfg)
+	serverPath := cfg.ServerPath
+	m.mu.Unlock()
+	if !shouldEnsure {
+		return
+	}
+	installed, reason, err := ensureWindowsCUDAServerBundle(ctx, serverPath)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err != nil {
+		m.lastError = cleanStatusText("llama-server bundle repair failed: "+err.Error(), maxStatusReasonLen)
+		return
+	}
+	if installed {
+		m.lastError = ""
+		m.serverProps = nil
+		if m.logs != nil {
+			_, _ = m.logs.Write([]byte("llama-server bundle refreshed: " + reason + "\n"))
+		}
+	}
+}
+
+func shouldEnsureBundledServer(cfg LlamaCppSidecarConfig) bool {
+	cfg = normalizeConfig(cfg)
+	if !cfg.Enabled || cfg.ServerPathExplicit || strings.TrimSpace(cfg.ServerPath) == "" {
+		return false
+	}
+	if runtime.GOOS != "windows" || runtime.GOARCH != "amd64" {
+		return false
+	}
+	return strings.EqualFold(filepath.Base(cfg.ServerPath), "llama-server.exe")
 }
 
 func (m *Manager) Stop(ctx context.Context) LlamaCppSidecarStatus {

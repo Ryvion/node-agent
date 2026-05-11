@@ -51,6 +51,9 @@ func TestConfigFromEnv(t *testing.T) {
 	if cfg.ServerPath != serverPath || cfg.ModelPath != modelPath {
 		t.Fatalf("paths = %q/%q, want explicit env paths", cfg.ServerPath, cfg.ModelPath)
 	}
+	if !cfg.ServerPathExplicit {
+		t.Fatalf("server_path_explicit = false, want true for env path")
+	}
 	if cfg.Host != DefaultHost {
 		t.Fatalf("host = %q, want safe default loopback", cfg.Host)
 	}
@@ -73,6 +76,9 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 	})
 	if cfg.GPULayers != DefaultGPULayers {
 		t.Fatalf("default gpu layers = %d, want %d", cfg.GPULayers, DefaultGPULayers)
+	}
+	if cfg.ServerPathExplicit {
+		t.Fatalf("server_path_explicit = true, want false for discovered/default path")
 	}
 	if cfg.FastDefaults {
 		t.Fatalf("fast defaults = true, want opt-in by default")

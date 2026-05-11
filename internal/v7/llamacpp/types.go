@@ -39,16 +39,17 @@ const (
 )
 
 type LlamaCppSidecarConfig struct {
-	Enabled      bool
-	ServerPath   string
-	ModelPath    string
-	Host         string
-	Port         int
-	ContextSize  int
-	Threads      int
-	GPULayers    int
-	ExtraArgs    []string
-	FastDefaults bool
+	Enabled            bool
+	ServerPath         string
+	ServerPathExplicit bool
+	ModelPath          string
+	Host               string
+	Port               int
+	ContextSize        int
+	Threads            int
+	GPULayers          int
+	ExtraArgs          []string
+	FastDefaults       bool
 
 	// V8 speculative decoding (Level 0).
 	// DraftModelPath, when non-empty, enables backend-local speculative

@@ -906,7 +906,7 @@ func shouldInstallServer(serverPath, markerPath, sourceURL string, sourceExplici
 		}
 		return false, ""
 	}
-	if strings.TrimSpace(string(marker)) != sourceURL {
+	if strings.TrimSpace(string(marker)) != expectedServerSourceMarker(sourceURL) {
 		return true, "source_url_changed"
 	}
 	return false, ""
@@ -920,11 +920,47 @@ func isWindowsCUDALlamaReleaseURL(sourceURL string) bool {
 }
 
 func writeServerSourceMarker(markerPath, sourceURL string) error {
-	sourceURL = strings.TrimSpace(sourceURL)
-	if sourceURL == "" {
+	marker := expectedServerSourceMarker(sourceURL)
+	if marker == "" {
 		return nil
 	}
-	return os.WriteFile(markerPath, []byte(sourceURL+"\n"), 0o644)
+	return os.WriteFile(markerPath, []byte(marker+"\n"), 0o644)
+}
+
+func expectedServerSourceMarker(sourceURL string) string {
+	sourceURL = strings.TrimSpace(sourceURL)
+	if sourceURL == "" {
+		return ""
+	}
+	return sourceURL + "\ninstaller=ryvion-managed-llama-v2"
+}
+
+// EnsureBundledServerPath refreshes the managed llama-server bundle for the
+// current platform when the existing file is missing or known stale.
+func EnsureBundledServerPath(ctx context.Context, serverPath string) (bool, string, error) {
+	serverPath = strings.TrimSpace(serverPath)
+	if serverPath == "" {
+		return false, "", nil
+	}
+	sourceURL := platformServerURL()
+	installServer, installReason := shouldInstallServer(serverPath, serverSourceMarkerPath(serverPath), sourceURL, false)
+	if !installServer {
+		return false, "", nil
+	}
+	dataDir := filepath.Dir(filepath.Dir(serverPath))
+	if err := os.MkdirAll(filepath.Dir(serverPath), 0o755); err != nil {
+		return false, installReason, fmt.Errorf("create bin dir: %w", err)
+	}
+	if err := checkDiskSpace(dataDir); err != nil {
+		return false, installReason, fmt.Errorf("disk space check: %w", err)
+	}
+	if err := downloadAndExtractServer(ctx, sourceURL, serverPath); err != nil {
+		return false, installReason, fmt.Errorf("download llama-server: %w", err)
+	}
+	if err := writeServerSourceMarker(serverSourceMarkerPath(serverPath), sourceURL); err != nil {
+		slog.Warn("failed to write llama-server source marker", "path", serverSourceMarkerPath(serverPath), "error", err)
+	}
+	return true, installReason, nil
 }
 
 // downloadAndExtractServer downloads a llama.cpp release and extracts

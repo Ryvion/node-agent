@@ -128,3 +128,21 @@ func TestShouldInstallServerUsesSourceMarker(t *testing.T) {
 		t.Fatalf("shouldInstallServer() = %t/%q, want changed source refresh", install, reason)
 	}
 }
+
+func TestShouldInstallServerRefreshesLegacySourceOnlyMarker(t *testing.T) {
+	dir := t.TempDir()
+	serverPath := filepath.Join(dir, "llama-server.exe")
+	markerPath := serverSourceMarkerPath(serverPath)
+	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
+	if err := os.WriteFile(serverPath, []byte("server"), 0o755); err != nil {
+		t.Fatalf("write server: %v", err)
+	}
+	if err := os.WriteFile(markerPath, []byte(sourceURL+"\n"), 0o644); err != nil {
+		t.Fatalf("write legacy marker: %v", err)
+	}
+
+	install, reason := shouldInstallServer(serverPath, markerPath, sourceURL, false)
+	if !install || reason != "source_url_changed" {
+		t.Fatalf("shouldInstallServer() = %t/%q, want legacy marker refresh", install, reason)
+	}
+}

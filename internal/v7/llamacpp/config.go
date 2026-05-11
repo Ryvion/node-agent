@@ -65,22 +65,24 @@ func ResidencyKeeperConfigFromEnvWith(source ConfigSource) ResidencyKeeperConfig
 
 func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	source = normalizeConfigSource(source)
+	explicitServerPath := strings.TrimSpace(source.Getenv(EnvServer)) != ""
 	cfg := LlamaCppSidecarConfig{
-		Enabled:        envBool(source.Getenv(EnvEnabled)),
-		ServerPath:     cleanConfigText(source.Getenv(EnvServer), maxConfigTextLen),
-		ModelPath:      cleanConfigText(source.Getenv(EnvModel), maxConfigTextLen),
-		Host:           normalizeHost(source.Getenv(EnvHost)),
-		Port:           envInt(source.Getenv(EnvPort), DefaultPort),
-		ContextSize:    envInt(source.Getenv(EnvCtxSize), DefaultContextSize),
-		Threads:        envInt(source.Getenv(EnvThreads), 0),
-		GPULayers:      envInt(source.Getenv(EnvGPULayers), DefaultGPULayers),
-		ExtraArgs:      sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
-		FastDefaults:   envBool(source.Getenv(EnvFastDefaults)),
-		DraftModelPath: cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
-		DraftMaxTokens: envInt(source.Getenv(EnvDraftMaxTokens), 0),
-		DraftMinTokens: envInt(source.Getenv(EnvDraftMinTokens), 0),
-		DraftPMin:      envFloat(source.Getenv(EnvDraftPMin), 0),
-		DraftGPULayers: envInt(source.Getenv(EnvDraftGPULayers), 0),
+		Enabled:            envBool(source.Getenv(EnvEnabled)),
+		ServerPath:         cleanConfigText(source.Getenv(EnvServer), maxConfigTextLen),
+		ServerPathExplicit: explicitServerPath,
+		ModelPath:          cleanConfigText(source.Getenv(EnvModel), maxConfigTextLen),
+		Host:               normalizeHost(source.Getenv(EnvHost)),
+		Port:               envInt(source.Getenv(EnvPort), DefaultPort),
+		ContextSize:        envInt(source.Getenv(EnvCtxSize), DefaultContextSize),
+		Threads:            envInt(source.Getenv(EnvThreads), 0),
+		GPULayers:          envInt(source.Getenv(EnvGPULayers), DefaultGPULayers),
+		ExtraArgs:          sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
+		FastDefaults:       envBool(source.Getenv(EnvFastDefaults)),
+		DraftModelPath:     cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
+		DraftMaxTokens:     envInt(source.Getenv(EnvDraftMaxTokens), 0),
+		DraftMinTokens:     envInt(source.Getenv(EnvDraftMinTokens), 0),
+		DraftPMin:          envFloat(source.Getenv(EnvDraftPMin), 0),
+		DraftGPULayers:     envInt(source.Getenv(EnvDraftGPULayers), 0),
 	}
 	if cfg.ServerPath == "" {
 		cfg.ServerPath = discoverServerPath(source)
