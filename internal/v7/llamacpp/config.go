@@ -87,7 +87,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	if cfg.ModelPath == "" {
 		cfg.ModelPath = discoverModelPath(source)
 	}
-	if cfg.DraftModelPath == "" {
+	if cfg.DraftModelPath == "" && envBool(source.Getenv(EnvDraftAuto)) {
 		cfg.DraftModelPath = discoverDraftModelPath(source, cfg.ModelPath)
 	}
 	return normalizeConfig(cfg)

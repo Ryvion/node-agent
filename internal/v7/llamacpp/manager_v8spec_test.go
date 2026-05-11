@@ -226,6 +226,63 @@ func TestConfigFromEnvLoadsDraftFields(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvDoesNotAutoDiscoverDraftByDefault(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	model := filepath.Join(dir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	draft := filepath.Join(dir, "tinyllama-1.1b-Q4_K_M.gguf")
+	for _, p := range []string{model, draft} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			if name == EnvModel {
+				return model
+			}
+			return ""
+		},
+		ConfiguredModelDirs: []string{dir},
+	})
+	if cfg.DraftModelPath != "" {
+		t.Fatalf("draft auto-discovered by default: %q", cfg.DraftModelPath)
+	}
+}
+
+func TestConfigFromEnvAutoDiscoversDraftWhenEnabled(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	model := filepath.Join(dir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	draft := filepath.Join(dir, "tinyllama-1.1b-Q4_K_M.gguf")
+	for _, p := range []string{model, draft} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			switch name {
+			case EnvModel:
+				return model
+			case EnvDraftAuto:
+				return "1"
+			default:
+				return ""
+			}
+		},
+		ConfiguredModelDirs: []string{dir},
+	})
+	if cfg.DraftModelPath != draft {
+		t.Fatalf("auto draft = %q, want %q", cfg.DraftModelPath, draft)
+	}
+	if cfg.DraftMaxTokens != DefaultDraftMaxTokens {
+		t.Fatalf("draft max tokens = %d, want %d", cfg.DraftMaxTokens, DefaultDraftMaxTokens)
+	}
+}
+
 func TestStatusReportsSpeculativeReadiness(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

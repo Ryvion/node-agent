@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// V8 Phase 1.6: re-discover draft companion on runtime model switch.
+// V8 Phase 1.6: optional draft companion redrive on runtime model switch.
 //
 // The dashboard inference path calls Manager.SetModelPath /
 // RestartWithModel each time a different target model is requested.
@@ -14,7 +14,7 @@ import (
 // speculation does not silently disable when buyers move between
 // resident models.
 
-func TestSetModelPathRediscoversDraftWhenSwitchingTarget(t *testing.T) {
+func TestSetModelPathDoesNotAutoDiscoverDraftByDefault(t *testing.T) {
 	dir := t.TempDir()
 	// Write minimal GGUF placeholders for the inventory scan.
 	target3B := filepath.Join(dir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
@@ -24,8 +24,9 @@ func TestSetModelPathRediscoversDraftWhenSwitchingTarget(t *testing.T) {
 			t.Fatalf("write %s: %v", p, err)
 		}
 	}
-	// Point the inventory scan at our tempdir.
-	t.Setenv("RYV_LLAMA_CPP_MODEL_DIRS", dir)
+	// Point the inventory scan at our tempdir, but leave auto-draft off.
+	t.Setenv("RYV_MODEL_DIR", dir)
+	t.Setenv(EnvDraftAuto, "")
 
 	// Manager starts with no model path; SetModelPath is what runtime
 	// dispatch calls.
@@ -40,12 +41,30 @@ func TestSetModelPathRediscoversDraftWhenSwitchingTarget(t *testing.T) {
 	if cfg.ModelPath != target3B {
 		t.Fatalf("model path = %q, want %q", cfg.ModelPath, target3B)
 	}
-	// The discoverer relies on configured model dirs / common dirs.
-	// In this test environment we may not pick up tinyllama, but the
-	// key invariant - that the draft is re-derived (i.e. SetModelPath
-	// runs the redrive path) - is asserted by the env-pinning test
-	// below.
-	_ = cfg
+	if cfg.DraftModelPath != "" {
+		t.Fatalf("draft auto-discovered by default: %q", cfg.DraftModelPath)
+	}
+}
+
+func TestSetModelPathRediscoversDraftWhenAutoEnabled(t *testing.T) {
+	dir := t.TempDir()
+	target3B := filepath.Join(dir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	tinyllama := filepath.Join(dir, "tinyllama-1.1b-Q4_K_M.gguf")
+	for _, p := range []string{target3B, tinyllama} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	t.Setenv("RYV_MODEL_DIR", dir)
+	t.Setenv(EnvDraftAuto, "1")
+
+	m := NewManager(LlamaCppSidecarConfig{
+		Enabled: true,
+	})
+	cfg := m.SetModelPath(target3B)
+	if cfg.DraftModelPath != tinyllama {
+		t.Fatalf("auto draft = %q, want %q", cfg.DraftModelPath, tinyllama)
+	}
 }
 
 func TestSetModelPathHonorsEnvPin(t *testing.T) {

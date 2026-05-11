@@ -21,6 +21,7 @@ const (
 	// draft/target loop. Typical pairing on Ryvion native models:
 	// target=ryvion-llama-3.2-3b, draft=tinyllama-1.1b (Llama family,
 	// tokenizer-compatible).
+	EnvDraftAuto      = "RYV_LLAMA_CPP_AUTO_DRAFT"
 	EnvDraftModel     = "RYV_LLAMA_CPP_DRAFT_MODEL_PATH"
 	EnvDraftMaxTokens = "RYV_LLAMA_CPP_DRAFT_MAX_TOKENS"
 	EnvDraftMinTokens = "RYV_LLAMA_CPP_DRAFT_MIN_TOKENS"
