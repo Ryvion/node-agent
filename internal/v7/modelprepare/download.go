@@ -100,12 +100,16 @@ func openHTTPArtifact(ctx context.Context, artifactURI string, options DownloadO
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/octet-stream")
+	attachHTTPArtifactAuth(req, artifactURI)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
+		if isHuggingFaceArtifactURI(artifactURI) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			return nil, fmt.Errorf("modelprepare: huggingface artifact access denied; accept the model license and set HF_TOKEN or HUGGINGFACE_TOKEN")
+		}
 		return nil, fmt.Errorf("modelprepare: artifact download status %d", resp.StatusCode)
 	}
 	if options.MaxBytes > 0 && resp.ContentLength > int64(options.MaxBytes) {
@@ -113,6 +117,29 @@ func openHTTPArtifact(ctx context.Context, artifactURI string, options DownloadO
 		return nil, ErrDownloadTooLarge
 	}
 	return resp.Body, nil
+}
+
+func attachHTTPArtifactAuth(req *http.Request, artifactURI string) {
+	if req == nil || !isHuggingFaceArtifactURI(artifactURI) {
+		return
+	}
+	token := strings.TrimSpace(os.Getenv("HF_TOKEN"))
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("HUGGINGFACE_TOKEN"))
+	}
+	if token == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+}
+
+func isHuggingFaceArtifactURI(artifactURI string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(artifactURI))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	return host == "huggingface.co" || strings.HasSuffix(host, ".huggingface.co") || host == "hf.co" || strings.HasSuffix(host, ".hf.co")
 }
 
 func openFileArtifact(parsed *url.URL) (io.ReadCloser, error) {
