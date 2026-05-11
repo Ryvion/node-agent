@@ -75,6 +75,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 		Threads:        envInt(source.Getenv(EnvThreads), 0),
 		GPULayers:      envInt(source.Getenv(EnvGPULayers), DefaultGPULayers),
 		ExtraArgs:      sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
+		FastDefaults:   envBoolDefault(source.Getenv(EnvFastDefaults), true),
 		DraftModelPath: cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
 		DraftMaxTokens: envInt(source.Getenv(EnvDraftMaxTokens), 0),
 		DraftMinTokens: envInt(source.Getenv(EnvDraftMinTokens), 0),
@@ -223,10 +224,17 @@ func (source ConfigSource) candidateDetector() runtimeinventory.CandidateBackend
 }
 
 func envBool(value string) bool {
+	return envBoolDefault(value, false)
+}
+
+func envBoolDefault(value string, fallback bool) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "1", "true", "yes", "on", "enabled":
 		return true
 	default:
+		if strings.TrimSpace(value) == "" {
+			return fallback
+		}
 		return false
 	}
 }

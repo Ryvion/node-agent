@@ -887,6 +887,9 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	if cfg.GPULayers > 0 {
 		args = append(args, "--n-gpu-layers", strconv.Itoa(cfg.GPULayers))
 	}
+	if cfg.FastDefaults && cfg.GPULayers > 0 {
+		args = appendGPUFastDefaults(args, cfg.ExtraArgs)
+	}
 	// V8 speculative decoding (Level 0).
 	// llama-server runs target+draft as a single process and produces
 	// speculative-accelerated tokens via its built-in draft/target loop.
@@ -909,6 +912,36 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	}
 	args = append(args, cfg.ExtraArgs...)
 	return args
+}
+
+func appendGPUFastDefaults(args []string, extraArgs []string) []string {
+	defaults := [][]string{
+		{"--flash-attn"},
+		{"--batch-size", "512"},
+		{"--ubatch-size", "512"},
+		{"--cache-type-k", "q8_0"},
+		{"--cache-type-v", "q8_0"},
+	}
+	for _, flag := range defaults {
+		if len(flag) == 0 || hasArgFlag(extraArgs, flag[0]) {
+			continue
+		}
+		args = append(args, flag...)
+	}
+	return args
+}
+
+func hasArgFlag(args []string, flag string) bool {
+	flag = strings.TrimSpace(flag)
+	if flag == "" {
+		return false
+	}
+	for _, arg := range args {
+		if strings.TrimSpace(arg) == flag {
+			return true
+		}
+	}
+	return false
 }
 
 // draftModelReadable verifies the draft GGUF exists before we hand the

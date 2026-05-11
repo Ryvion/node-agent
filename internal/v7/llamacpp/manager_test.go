@@ -74,6 +74,9 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 	if cfg.GPULayers != DefaultGPULayers {
 		t.Fatalf("default gpu layers = %d, want %d", cfg.GPULayers, DefaultGPULayers)
 	}
+	if !cfg.FastDefaults {
+		t.Fatalf("fast defaults = false, want true by default")
+	}
 	if cfg.DraftGPULayers != 0 {
 		t.Fatalf("default draft gpu layers = %d, want 0", cfg.DraftGPULayers)
 	}
@@ -102,6 +105,18 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 	})
 	if cfg.GPULayers != 99 || cfg.DraftGPULayers != 99 {
 		t.Fatalf("explicit gpu config = %+v, want 99 GPU layers", cfg)
+	}
+
+	cfg = ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			if name == EnvFastDefaults {
+				return "0"
+			}
+			return ""
+		},
+	})
+	if cfg.FastDefaults {
+		t.Fatalf("fast defaults = true, want explicit opt-out")
 	}
 }
 
@@ -226,6 +241,29 @@ func TestMockedBinaryStartRecordsRunningState(t *testing.T) {
 	}
 	if status.Healthy {
 		t.Fatalf("healthy = true, want health unconfirmed with failing mock client")
+	}
+}
+
+func TestBuildServerArgsAddsGPUFastDefaults(t *testing.T) {
+	t.Parallel()
+
+	args := buildServerArgs(LlamaCppSidecarConfig{
+		Host:         DefaultHost,
+		Port:         freePortForConfig(t),
+		ModelPath:    "/models/llama.gguf",
+		ContextSize:  DefaultContextSize,
+		GPULayers:    DefaultGPULayers,
+		FastDefaults: true,
+		ExtraArgs:    []string{"--batch-size", "256"},
+	})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--flash-attn", "--ubatch-size 512", "--cache-type-k q8_0", "--cache-type-v q8_0"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing fast default %q", joined, want)
+		}
+	}
+	if got := argValue(args, "--batch-size"); got != "256" {
+		t.Fatalf("--batch-size = %q, want explicit extra arg to override default; args=%v", got, args)
 	}
 }
 

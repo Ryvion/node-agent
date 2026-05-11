@@ -5,15 +5,16 @@ import "time"
 const (
 	BackendName = "llama.cpp"
 
-	EnvEnabled   = "RYV_LLAMA_CPP_ENABLED"
-	EnvServer    = "RYV_LLAMA_CPP_SERVER_PATH"
-	EnvModel     = "RYV_LLAMA_CPP_MODEL_PATH"
-	EnvHost      = "RYV_LLAMA_CPP_HOST"
-	EnvPort      = "RYV_LLAMA_CPP_PORT"
-	EnvCtxSize   = "RYV_LLAMA_CPP_CTX_SIZE"
-	EnvThreads   = "RYV_LLAMA_CPP_THREADS"
-	EnvGPULayers = "RYV_LLAMA_CPP_GPU_LAYERS"
-	EnvExtraArgs = "RYV_LLAMA_CPP_EXTRA_ARGS"
+	EnvEnabled      = "RYV_LLAMA_CPP_ENABLED"
+	EnvServer       = "RYV_LLAMA_CPP_SERVER_PATH"
+	EnvModel        = "RYV_LLAMA_CPP_MODEL_PATH"
+	EnvHost         = "RYV_LLAMA_CPP_HOST"
+	EnvPort         = "RYV_LLAMA_CPP_PORT"
+	EnvCtxSize      = "RYV_LLAMA_CPP_CTX_SIZE"
+	EnvThreads      = "RYV_LLAMA_CPP_THREADS"
+	EnvGPULayers    = "RYV_LLAMA_CPP_GPU_LAYERS"
+	EnvExtraArgs    = "RYV_LLAMA_CPP_EXTRA_ARGS"
+	EnvFastDefaults = "RYV_LLAMA_CPP_FAST_DEFAULTS"
 
 	// V8 speculative decoding (Level 0 - backend-local).
 	// When DraftModelPath is set, llama-server runs the target+draft pair
@@ -31,22 +32,23 @@ const (
 	DefaultHost            = "127.0.0.1"
 	DefaultPort            = 45910
 	DefaultContextSize     = 4096
-	DefaultGPULayers       = 99
+	DefaultGPULayers       = 999
 	DefaultDraftMaxTokens  = 16
 	DefaultDraftMinTokens  = 0
 	DefaultDraftPMinMillis = 0 // 0 = use llama.cpp default (0.75)
 )
 
 type LlamaCppSidecarConfig struct {
-	Enabled     bool
-	ServerPath  string
-	ModelPath   string
-	Host        string
-	Port        int
-	ContextSize int
-	Threads     int
-	GPULayers   int
-	ExtraArgs   []string
+	Enabled      bool
+	ServerPath   string
+	ModelPath    string
+	Host         string
+	Port         int
+	ContextSize  int
+	Threads      int
+	GPULayers    int
+	ExtraArgs    []string
+	FastDefaults bool
 
 	// V8 speculative decoding (Level 0).
 	// DraftModelPath, when non-empty, enables backend-local speculative
