@@ -310,7 +310,7 @@ func (m *Manager) rehomeExternalServerForManagedRestart() {
 	if m.process != nil {
 		return
 	}
-	port, ok := freeLocalPort(m.cfg.Host)
+	port, ok := freeLocalPortExcept(m.cfg.Host, m.cfg.Port)
 	if !ok {
 		return
 	}
@@ -935,17 +935,31 @@ func serverPathAvailable(path string) bool {
 }
 
 func freeLocalPort(host string) (int, bool) {
+	return freeLocalPortExcept(host, 0)
+}
+
+func freeLocalPortExcept(host string, excludedPort int) (int, bool) {
 	host = normalizeHost(host)
-	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-	if err != nil {
-		return 0, false
+	for i := 0; i < 8; i++ {
+		listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		if err != nil {
+			return 0, false
+		}
+		addr, ok := listener.Addr().(*net.TCPAddr)
+		port := 0
+		if ok {
+			port = addr.Port
+		}
+		_ = listener.Close()
+		if port <= 0 || port > 65535 {
+			continue
+		}
+		if excludedPort > 0 && port == excludedPort {
+			continue
+		}
+		return port, true
 	}
-	defer listener.Close()
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok || addr.Port <= 0 || addr.Port > 65535 {
-		return 0, false
-	}
-	return addr.Port, true
+	return 0, false
 }
 
 type modelMeta struct {

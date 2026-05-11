@@ -125,7 +125,7 @@ func ExecuteWarmSpec(ctx context.Context, spec WarmSpec, opts ExecuteOptions) (W
 	}
 
 	status := manager.Status(runCtx)
-	if !modelStatusWarm(status, cachedModel.Path) {
+	if status.Attached || !modelStatusWarm(status, cachedModel.Path) {
 		status = manager.RestartWithModel(runCtx, cachedModel.Path)
 		if !modelStatusWarm(status, cachedModel.Path) {
 			status = waitForWarmModel(runCtx, manager, cachedModel.Path, status)

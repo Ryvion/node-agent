@@ -116,6 +116,48 @@ func TestExecuteWarmAssignmentWaitsForAsyncWarmSidecar(t *testing.T) {
 	}
 }
 
+func TestExecuteWarmAssignmentRestartsAttachedWarmServer(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write cached model: %v", err)
+	}
+	manager := &fakeWarmManager{
+		status: llamacpp.LlamaCppSidecarStatus{
+			Enabled:       true,
+			Available:     true,
+			Running:       true,
+			Healthy:       true,
+			Attached:      true,
+			ModelPath:     phiPath,
+			ModelFilename: filepath.Base(phiPath),
+			Backend:       llamacpp.BackendName,
+		},
+	}
+
+	receipt, handled, err := ExecuteWarmAssignment(context.Background(), testWarmSpecJSON(t, testWarmSpec()), ExecuteOptions{
+		Getenv:          testWarmGetenv,
+		Policy:          testWarmPolicy(cacheDir),
+		LlamaCppManager: manager,
+		BenchmarkRunner: &fakeWarmBenchmarkRunner{snapshot: testWarmBenchmarkSnapshot()},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteWarmAssignment() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if manager.restartCalls != 1 || manager.modelPath != phiPath {
+		t.Fatalf("manager restart calls/path = %d/%q, want restart of attached warm server to %q", manager.restartCalls, manager.modelPath, phiPath)
+	}
+	metadata := warmMetadata(t, receipt)
+	if metadata["warm"] != true || metadata["proof_status"] != ProofStatusModelWarmed {
+		t.Fatalf("receipt metadata = %+v, want warmed receipt", metadata)
+	}
+}
+
 func TestExecuteWarmAssignmentMissingModelReturnsSafeReceipt(t *testing.T) {
 	t.Parallel()
 
