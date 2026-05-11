@@ -500,10 +500,20 @@ func TestBuildBackendRuntimesMarksHealthySidecarLoadedWarm(t *testing.T) {
 
 	lastHealth := time.Unix(123, 456000000)
 	runtimes := BuildBackendRuntimes(LlamaCppSidecarStatus{
-		Enabled:                true,
-		Available:              true,
-		Running:                true,
-		Healthy:                true,
+		Enabled:    true,
+		Available:  true,
+		Running:    true,
+		Healthy:    true,
+		ServerPath: "/opt/ryvion/bin/llama-server",
+		Launch: &LlamaCppLaunchConfig{
+			Mode:                     "managed",
+			Managed:                  true,
+			ServerPath:               "/opt/ryvion/bin/llama-server",
+			ServerFilename:           "llama-server",
+			ConfiguredGPULayers:      999,
+			FastDefaultsEnabled:      true,
+			ConfiguredDraftGPULayers: 12,
+		},
 		BaseURL:                "http://127.0.0.1:45910",
 		ModelPath:              "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
 		ModelFilename:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
@@ -527,6 +537,16 @@ func TestBuildBackendRuntimesMarksHealthySidecarLoadedWarm(t *testing.T) {
 		runtime.ModelFamilyHint != "llama" ||
 		runtime.QuantizationHint != "Q4_K_M" {
 		t.Fatalf("model residency metadata = %+v", runtime)
+	}
+	if runtime.Launch == nil ||
+		runtime.Launch.Mode != "managed" ||
+		!runtime.Launch.Managed ||
+		runtime.Launch.Attached ||
+		runtime.Launch.ServerFilename != "llama-server" ||
+		runtime.Launch.ConfiguredGPULayers != 999 ||
+		!runtime.Launch.FastDefaultsEnabled ||
+		runtime.Launch.ConfiguredDraftGPULayers != 12 {
+		t.Fatalf("launch telemetry = %+v, want managed GPU launch config", runtime.Launch)
 	}
 	if runtime.LastHealthAtUnixMs != lastHealth.UnixMilli() {
 		t.Fatalf("last_health_at_unix_ms = %d, want %d", runtime.LastHealthAtUnixMs, lastHealth.UnixMilli())

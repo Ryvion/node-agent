@@ -61,30 +61,31 @@ type LlamaCppSidecarConfig struct {
 }
 
 type LlamaCppSidecarStatus struct {
-	Enabled                bool      `json:"enabled"`
-	Available              bool      `json:"available"`
-	Running                bool      `json:"running"`
-	Healthy                bool      `json:"healthy"`
-	Attached               bool      `json:"attached,omitempty"`
-	PID                    int       `json:"pid,omitempty"`
-	BaseURL                string    `json:"base_url"`
-	ServerPath             string    `json:"server_path,omitempty"`
-	ModelPath              string    `json:"model_path,omitempty"`
-	ContextSize            int       `json:"context_size,omitempty"`
-	ModelFilename          string    `json:"model_filename,omitempty"`
-	ModelSizeBytes         int64     `json:"model_size_bytes"`
-	ModelFamilyHint        string    `json:"model_family_hint,omitempty"`
-	QuantizationHint       string    `json:"quantization_hint,omitempty"`
-	StartedAt              time.Time `json:"started_at,omitempty"`
-	LastHealthAt           time.Time `json:"last_health_at,omitempty"`
-	LastError              string    `json:"last_error"`
-	Backend                string    `json:"backend"`
-	OpenAICompatible       bool      `json:"openai_compatible"`
-	SupportsTextGeneration bool      `json:"supports_text_generation"`
-	SupportsStreaming      bool      `json:"supports_streaming"`
-	SupportsKVAccess       bool      `json:"supports_kv_access"`
-	SupportsTensorHooks    bool      `json:"supports_tensor_hooks"`
-	Reason                 string    `json:"reason"`
+	Enabled                bool                  `json:"enabled"`
+	Available              bool                  `json:"available"`
+	Running                bool                  `json:"running"`
+	Healthy                bool                  `json:"healthy"`
+	Attached               bool                  `json:"attached,omitempty"`
+	PID                    int                   `json:"pid,omitempty"`
+	BaseURL                string                `json:"base_url"`
+	ServerPath             string                `json:"server_path,omitempty"`
+	ModelPath              string                `json:"model_path,omitempty"`
+	ContextSize            int                   `json:"context_size,omitempty"`
+	ModelFilename          string                `json:"model_filename,omitempty"`
+	ModelSizeBytes         int64                 `json:"model_size_bytes"`
+	ModelFamilyHint        string                `json:"model_family_hint,omitempty"`
+	QuantizationHint       string                `json:"quantization_hint,omitempty"`
+	StartedAt              time.Time             `json:"started_at,omitempty"`
+	LastHealthAt           time.Time             `json:"last_health_at,omitempty"`
+	LastError              string                `json:"last_error"`
+	Backend                string                `json:"backend"`
+	Launch                 *LlamaCppLaunchConfig `json:"launch,omitempty"`
+	OpenAICompatible       bool                  `json:"openai_compatible"`
+	SupportsTextGeneration bool                  `json:"supports_text_generation"`
+	SupportsStreaming      bool                  `json:"supports_streaming"`
+	SupportsKVAccess       bool                  `json:"supports_kv_access"`
+	SupportsTensorHooks    bool                  `json:"supports_tensor_hooks"`
+	Reason                 string                `json:"reason"`
 
 	// V8 speculative decoding (Level 0 - backend-local).
 	SpeculativeEnabled   bool   `json:"speculative_enabled"`
@@ -94,6 +95,17 @@ type LlamaCppSidecarStatus struct {
 	DraftModelFamilyHint string `json:"draft_model_family_hint,omitempty"`
 	DraftMaxTokens       int    `json:"draft_max_tokens,omitempty"`
 	DraftMinTokens       int    `json:"draft_min_tokens,omitempty"`
+}
+
+type LlamaCppLaunchConfig struct {
+	Mode                     string `json:"mode,omitempty"`
+	Managed                  bool   `json:"managed"`
+	Attached                 bool   `json:"attached"`
+	ServerPath               string `json:"server_path,omitempty"`
+	ServerFilename           string `json:"server_filename,omitempty"`
+	ConfiguredGPULayers      int    `json:"configured_gpu_layers"`
+	FastDefaultsEnabled      bool   `json:"fast_defaults_enabled"`
+	ConfiguredDraftGPULayers int    `json:"configured_draft_gpu_layers,omitempty"`
 }
 
 type BackendRuntimes struct {
@@ -136,6 +148,7 @@ type BackendRuntimeStatus struct {
 	MaxContextTokens         int                      `json:"max_context_tokens,omitempty"`
 	LastHealthAtUnixMs       int64                    `json:"last_health_at_unix_ms"`
 	LastError                string                   `json:"last_error"`
+	Launch                   *LlamaCppLaunchConfig    `json:"launch,omitempty"`
 }
 
 type OptimizationCapability struct {

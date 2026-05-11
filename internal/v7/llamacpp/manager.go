@@ -368,6 +368,7 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 	if m.process != nil {
 		pid = m.process.PID()
 	}
+	launch := buildLaunchConfig(cfg, m.process != nil, m.attached && m.process == nil)
 
 	reason := "llama.cpp sidecar ready"
 	if !cfg.Enabled {
@@ -412,6 +413,7 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		LastHealthAt:           m.lastHealthAt,
 		LastError:              cleanStatusText(m.lastError, maxStatusReasonLen),
 		Backend:                BackendName,
+		Launch:                 launch,
 		OpenAICompatible:       true,
 		SupportsTextGeneration: true,
 		SupportsStreaming:      true,
@@ -455,7 +457,35 @@ func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 			SupportsTensorHooks:    status.SupportsTensorHooks,
 			LastHealthAtUnixMs:     unixMilliOrZero(status.LastHealthAt),
 			LastError:              status.LastError,
+			Launch:                 cloneLaunchConfig(status.Launch),
 		},
+	})
+}
+
+func buildLaunchConfig(cfg LlamaCppSidecarConfig, managed bool, attached bool) *LlamaCppLaunchConfig {
+	cfg = normalizeConfig(cfg)
+	mode := "stopped"
+	switch {
+	case !cfg.Enabled:
+		mode = "disabled"
+	case managed:
+		mode = "managed"
+	case attached:
+		mode = "attached"
+	}
+	serverFilename := ""
+	if strings.TrimSpace(cfg.ServerPath) != "" {
+		serverFilename = filepath.Base(cfg.ServerPath)
+	}
+	return normalizeLaunchConfig(&LlamaCppLaunchConfig{
+		Mode:                     mode,
+		Managed:                  managed,
+		Attached:                 attached,
+		ServerPath:               cfg.ServerPath,
+		ServerFilename:           serverFilename,
+		ConfiguredGPULayers:      cfg.GPULayers,
+		FastDefaultsEnabled:      cfg.FastDefaults,
+		ConfiguredDraftGPULayers: cfg.DraftGPULayers,
 	})
 }
 
@@ -520,6 +550,7 @@ func normalizeBackendRuntimeStatus(llama BackendRuntimeStatus, defaultBackend st
 	llama.GPUComputeCapability = cleanRuntimeCompactText(llama.GPUComputeCapability, 64)
 	llama.OptimizationCapabilities = normalizeOptimizationCapabilities(llama.OptimizationCapabilities, llama.Backend, llama.GPUArchitecture)
 	llama.LastError = cleanStatusText(llama.LastError, maxStatusReasonLen)
+	llama.Launch = normalizeLaunchConfig(llama.Launch)
 	llama.Acceleration = normalizeAcceleration(llama.Acceleration)
 	if llama.MaxContextTokens < 0 {
 		llama.MaxContextTokens = 0
@@ -556,6 +587,45 @@ func normalizeBackendRuntimeStatus(llama BackendRuntimeStatus, defaultBackend st
 	}
 	llama.Health = normalizeRuntimeHealth(llama)
 	return llama
+}
+
+func normalizeLaunchConfig(launch *LlamaCppLaunchConfig) *LlamaCppLaunchConfig {
+	if launch == nil {
+		return nil
+	}
+	out := *launch
+	out.Mode = cleanRuntimeCompactText(strings.ToLower(strings.TrimSpace(out.Mode)), 32)
+	switch out.Mode {
+	case "disabled", "managed", "attached", "stopped":
+	default:
+		out.Mode = "stopped"
+	}
+	out.ServerPath = cleanRuntimePath(out.ServerPath)
+	out.ServerFilename = cleanRuntimePath(out.ServerFilename)
+	if out.ServerFilename == "" && out.ServerPath != "" {
+		out.ServerFilename = cleanRuntimePath(filepath.Base(out.ServerPath))
+	}
+	if out.ConfiguredGPULayers < 0 {
+		out.ConfiguredGPULayers = 0
+	}
+	if out.ConfiguredDraftGPULayers < 0 {
+		out.ConfiguredDraftGPULayers = 0
+	}
+	if out.Mode == "managed" {
+		out.Managed = true
+		out.Attached = false
+	} else if out.Mode == "attached" {
+		out.Managed = false
+		out.Attached = true
+	} else {
+		out.Managed = false
+		out.Attached = false
+	}
+	return &out
+}
+
+func cloneLaunchConfig(launch *LlamaCppLaunchConfig) *LlamaCppLaunchConfig {
+	return normalizeLaunchConfig(launch)
 }
 
 func normalizeOtherBackendRuntimes(runtimes []BackendRuntimeStatus) []BackendRuntimeStatus {
