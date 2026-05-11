@@ -31,6 +31,9 @@ func TestProbeLlamaCPPDetectsMockedBinaries(t *testing.T) {
 			return []string{"tinyllama.Q4_K_M.gguf"}, nil
 		},
 		Stat: func(path string) (os.FileInfo, error) {
+			if strings.Contains(path, "/.ryvion/bin/") || strings.Contains(path, "/.ryvion/runtime/") {
+				return nil, errors.New("not found")
+			}
 			return fakeFileInfo{name: path, size: 1024}, nil
 		},
 		Getenv: func(name string) string {

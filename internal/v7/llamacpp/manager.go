@@ -300,14 +300,14 @@ func (m *Manager) RestartWithModel(ctx context.Context, modelPath string) LlamaC
 		return NewManager(LlamaCppSidecarConfig{}).RestartWithModel(ctx, modelPath)
 	}
 	_ = m.SetModelPath(modelPath)
-	m.rehomeAttachedServerForManagedRestart()
+	m.rehomeExternalServerForManagedRestart()
 	return m.Restart(ctx)
 }
 
-func (m *Manager) rehomeAttachedServerForManagedRestart() {
+func (m *Manager) rehomeExternalServerForManagedRestart() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.attached || m.process != nil {
+	if m.process != nil {
 		return
 	}
 	port, ok := freeLocalPort(m.cfg.Host)

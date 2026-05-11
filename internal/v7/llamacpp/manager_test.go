@@ -351,6 +351,58 @@ func TestRestartWithModelRehomesAttachedServerBeforeManagedStart(t *testing.T) {
 	}
 }
 
+func TestRestartWithModelAvoidsUntrackedHealthyDefaultServer(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	healthyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(healthyServer.Close)
+	host, oldPort := hostPortFromURL(t, healthyServer.URL)
+
+	proc := newFakeProcess(7654)
+	starts := 0
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  serverPath,
+		Host:        host,
+		Port:        oldPort,
+		ContextSize: DefaultContextSize,
+		GPULayers:   DefaultGPULayers,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		starts++
+		if binary != serverPath {
+			t.Fatalf("binary = %q, want %q", binary, serverPath)
+		}
+		if got := argValue(args, "--model"); got != modelPath {
+			t.Fatalf("--model = %q, want %q; args=%v", got, modelPath, args)
+		}
+		newPort, err := strconv.Atoi(argValue(args, "--port"))
+		if err != nil {
+			t.Fatalf("--port parse error: %v; args=%v", err, args)
+		}
+		if newPort == oldPort {
+			t.Fatalf("--port = %d, want fresh managed port distinct from untracked server", newPort)
+		}
+		return proc, nil
+	}), WithHealthTimeout(25*time.Millisecond))
+	t.Cleanup(func() {
+		_ = manager.Stop(context.Background())
+	})
+
+	status := manager.RestartWithModel(context.Background(), modelPath)
+	if starts != 1 {
+		t.Fatalf("managed starts = %d, want 1", starts)
+	}
+	if !status.Running || status.Attached || status.PID != 7654 {
+		t.Fatalf("restart status = %+v, want managed process instead of attached default server", status)
+	}
+	if status.BaseURL == healthyServer.URL {
+		t.Fatalf("restart base_url = %q, want fresh managed sidecar URL", status.BaseURL)
+	}
+}
+
 func TestConfigureProcessCommandUsesBinaryDirForBackendLibraries(t *testing.T) {
 	t.Parallel()
 

@@ -371,6 +371,17 @@ func findExecutable(detector CandidateBackendDetector, name string, includeKnown
 	if name == "" {
 		return ""
 	}
+	if includeKnownDirs {
+		for _, dir := range configuredBinaryDirs(detector) {
+			for _, candidateName := range executableNameVariants(detector.GOOS, name) {
+				path := joinConfiguredPath(detector.GOOS, dir, candidateName)
+				info, err := detector.Stat(path)
+				if err == nil && !info.IsDir() {
+					return path
+				}
+			}
+		}
+	}
 	for _, candidateName := range executableNameVariants(detector.GOOS, name) {
 		if detector.LookPath != nil {
 			path, err := detector.LookPath(candidateName)
@@ -381,15 +392,6 @@ func findExecutable(detector CandidateBackendDetector, name string, includeKnown
 	}
 	if !includeKnownDirs {
 		return ""
-	}
-	for _, dir := range configuredBinaryDirs(detector) {
-		for _, candidateName := range executableNameVariants(detector.GOOS, name) {
-			path := joinConfiguredPath(detector.GOOS, dir, candidateName)
-			info, err := detector.Stat(path)
-			if err == nil && !info.IsDir() {
-				return path
-			}
-		}
 	}
 	return ""
 }

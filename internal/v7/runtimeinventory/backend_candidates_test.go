@@ -65,6 +65,52 @@ func TestDetectBackendCandidatesFindsLlamaCPPBinariesFromPATH(t *testing.T) {
 	}
 }
 
+func TestDetectBackendCandidatesPreferConfiguredLlamaCPPDirOverPATH(t *testing.T) {
+	t.Parallel()
+
+	binDir := "/opt/ryvion/runtime/bin"
+	serverPath := binDir + "/llama-server"
+	versionPath := ""
+	candidates := DetectBackendCandidates(CandidateBackendDetector{
+		LookPath: func(name string) (string, error) {
+			switch name {
+			case "llama-cli", "llama-server", "llama-bench":
+				return "/usr/local/bin/" + name, nil
+			default:
+				return "", errors.New("not found")
+			}
+		},
+		Stat: func(path string) (os.FileInfo, error) {
+			if strings.HasPrefix(path, binDir+"/llama-") {
+				return fakeFileInfo{name: path, size: 1024}, nil
+			}
+			return nil, errors.New("not found")
+		},
+		VersionCommand: func(path string, timeout time.Duration) (string, error) {
+			versionPath = path
+			return "llama.cpp configured build\n", nil
+		},
+		ReadDirNames: func(dir string, limit int) ([]string, error) {
+			return nil, errors.New("not configured")
+		},
+		Getenv: func(name string) string {
+			return ""
+		},
+		UserHomeDir: func() (string, error) {
+			return "", errors.New("not configured")
+		},
+		ConfiguredBinaryDirs: []string{binDir},
+	})
+
+	llama := backendCandidateByName(t, candidates, BackendCandidateLlamaCPP)
+	if llama.ServerBinaryPath != serverPath {
+		t.Fatalf("server_binary_path = %q, want configured runtime path %q", llama.ServerBinaryPath, serverPath)
+	}
+	if versionPath != serverPath {
+		t.Fatalf("version path = %q, want configured runtime server path %q", versionPath, serverPath)
+	}
+}
+
 func TestDetectBackendCandidatesMissingBinariesReturnSafeFalseValues(t *testing.T) {
 	t.Parallel()
 
