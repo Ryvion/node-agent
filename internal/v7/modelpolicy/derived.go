@@ -22,7 +22,7 @@ func BuildDerivedPolicy(input DerivedPolicyInput) Policy {
 		policy = deriveAcceleratedRuntimePolicy(policy, hardware)
 	}
 
-	if capBytes := runtimeHardwareByteCap(hardware); capBytes > 0 && capBytes < policy.RuntimePolicy.MaxRuntimeModelBytes {
+	if capBytes := runtimePolicyByteCap(policy, hardware); capBytes > 0 && capBytes < policy.RuntimePolicy.MaxRuntimeModelBytes {
 		policy.RuntimePolicy.MaxRuntimeModelBytes = capBytes
 	}
 	if hardware.GPUVRAMBytes >= 24*bytesPerGiB || hardware.SystemRAMBytes >= 96*bytesPerGiB {
@@ -37,10 +37,17 @@ func BuildDerivedPolicy(input DerivedPolicyInput) Policy {
 }
 
 func deriveAcceleratedRuntimePolicy(policy Policy, hardware v7hardware.CapacityInventory) Policy {
-	capBytes := runtimeHardwareByteCap(hardware)
+	capBytes := runtimePolicyByteCap(policy, hardware)
 	if capBytes > policy.RuntimePolicy.MaxRuntimeModelBytes &&
 		policy.RuntimePolicy.MaxRuntimeModelBytes == DefaultRuntimeMaxModelGB*bytesPerGiB {
 		policy.RuntimePolicy.MaxRuntimeModelBytes = capBytes
+	}
+	if capBytes > policy.MaxSingleModelBytes &&
+		policy.MaxSingleModelBytes == DefaultMaxSingleModelGB*bytesPerGiB {
+		policy.MaxSingleModelBytes = capBytes
+	}
+	if !policy.AutoDownload {
+		policy.AllowLicenseRestricted = true
 	}
 
 	if capBytes >= 10*bytesPerGiB && hardware.SystemRAMBytes >= 30*bytesPerGiB {
@@ -52,10 +59,12 @@ func deriveAcceleratedRuntimePolicy(policy Policy, hardware v7hardware.CapacityI
 		policy.RuntimePolicy.AllowLargeModels = true
 		policy.RuntimePolicy.RequireExplicitAllowForLargeModels = false
 	}
-	if capBytes >= 18*bytesPerGiB && hardware.SystemRAMBytes >= 48*bytesPerGiB {
+	if capBytes >= 18*bytesPerGiB && hardware.SystemRAMBytes >= 30*bytesPerGiB {
 		if policy.RuntimePolicy.MaxRuntimeParameterCountBillions < 32 {
 			policy.RuntimePolicy.MaxRuntimeParameterCountBillions = 32
 		}
+	}
+	if capBytes >= 18*bytesPerGiB && hardware.SystemRAMBytes >= 48*bytesPerGiB {
 		if policy.RuntimePolicy.MaxConcurrentInferenceJobs < 2 {
 			policy.RuntimePolicy.MaxConcurrentInferenceJobs = 2
 		}
@@ -64,6 +73,16 @@ func deriveAcceleratedRuntimePolicy(policy Policy, hardware v7hardware.CapacityI
 		}
 	}
 	return policy
+}
+
+func runtimePolicyByteCap(policy Policy, hardware v7hardware.CapacityInventory) uint64 {
+	capBytes := runtimeHardwareByteCap(hardware)
+	if policy.RuntimePolicy.AllowCPUOffload && hasDiscreteAcceleratedGPU(hardware) && hardware.SystemRAMBytes > 0 {
+		if offloadCap := (hardware.SystemRAMBytes * 3) / 5; offloadCap > capBytes {
+			capBytes = offloadCap
+		}
+	}
+	return capBytes
 }
 
 func runtimeHardwareByteCap(hardware v7hardware.CapacityInventory) uint64 {
@@ -77,6 +96,13 @@ func runtimeHardwareByteCap(hardware v7hardware.CapacityInventory) uint64 {
 		return hardware.SystemRAMBytes / 2
 	}
 	return 0
+}
+
+func hasDiscreteAcceleratedGPU(hardware v7hardware.CapacityInventory) bool {
+	if !hardware.GPUDetected || hardware.GPUVRAMBytes == 0 || hardware.UnifiedMemory {
+		return false
+	}
+	return hardware.CUDAAvailable || hardware.VulkanAvailable || hardware.DirectMLAvailable
 }
 
 func isDarwinApple(hardware v7hardware.CapacityInventory) bool {
