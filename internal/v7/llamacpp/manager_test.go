@@ -74,8 +74,8 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 	if cfg.GPULayers != DefaultGPULayers {
 		t.Fatalf("default gpu layers = %d, want %d", cfg.GPULayers, DefaultGPULayers)
 	}
-	if !cfg.FastDefaults {
-		t.Fatalf("fast defaults = false, want true by default")
+	if cfg.FastDefaults {
+		t.Fatalf("fast defaults = true, want opt-in by default")
 	}
 	if cfg.DraftGPULayers != 0 {
 		t.Fatalf("default draft gpu layers = %d, want 0", cfg.DraftGPULayers)
@@ -110,13 +110,13 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 	cfg = ConfigFromEnvWith(ConfigSource{
 		Getenv: func(name string) string {
 			if name == EnvFastDefaults {
-				return "0"
+				return "1"
 			}
 			return ""
 		},
 	})
-	if cfg.FastDefaults {
-		t.Fatalf("fast defaults = true, want explicit opt-out")
+	if !cfg.FastDefaults {
+		t.Fatalf("fast defaults = false, want explicit opt-in")
 	}
 }
 
