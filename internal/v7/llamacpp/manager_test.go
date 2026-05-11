@@ -250,6 +250,39 @@ func TestMockedBinaryStartRecordsRunningState(t *testing.T) {
 	}
 }
 
+func TestProcessExitPreservesStartupLogInLastError(t *testing.T) {
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	proc := newFakeProcess(2222)
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  serverPath,
+		ModelPath:   modelPath,
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ContextSize: DefaultContextSize,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		if output != nil {
+			_, _ = output.Write([]byte("ggml_vulkan: missing runtime library\n"))
+		}
+		return proc, nil
+	}), WithHealthClient(errorHealthClient{err: errors.New("connection refused")}))
+
+	_ = manager.Start(context.Background())
+	go func() {
+		proc.done <- errors.New("exit status 1")
+	}()
+
+	var status LlamaCppSidecarStatus
+	for i := 0; i < 20; i++ {
+		status = manager.Status(context.Background())
+		if !status.Running && strings.Contains(status.LastError, "missing runtime library") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("status.LastError = %q, running=%t; want process exit plus startup log", status.LastError, status.Running)
+}
+
 func TestBuildServerArgsAddsGPUFastDefaults(t *testing.T) {
 	t.Parallel()
 

@@ -13,26 +13,22 @@ import (
 	"strings"
 )
 
-const managedWindowsCUDAServerURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
-const managedWindowsCUDARuntimeURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/cudart-llama-bin-win-cuda-12.4-x64.zip"
+const managedWindowsGPUServerURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-vulkan-x64.zip"
 const managedServerSourceMarkerName = ".llama-server-source"
 
-func ensureWindowsCUDAServerBundle(ctx context.Context, serverPath string) (bool, string, error) {
+func ensureWindowsGPUServerBundle(ctx context.Context, serverPath string) (bool, string, error) {
 	serverPath = strings.TrimSpace(serverPath)
 	if runtime.GOOS != "windows" || runtime.GOARCH != "amd64" || serverPath == "" {
 		return false, "", nil
 	}
-	install, reason := shouldInstallWindowsCUDAServerBundle(serverPath, managedServerSourceMarkerPath(serverPath))
+	install, reason := shouldInstallWindowsGPUServerBundle(serverPath, managedServerSourceMarkerPath(serverPath))
 	if !install {
 		return false, "", nil
 	}
 	if err := os.MkdirAll(filepath.Dir(serverPath), 0o755); err != nil {
 		return false, reason, fmt.Errorf("create llama.cpp bin dir: %w", err)
 	}
-	if err := downloadAndExtractWindowsCUDAArchive(ctx, managedWindowsCUDAServerURL, serverPath, true); err != nil {
-		return false, reason, err
-	}
-	if err := downloadAndExtractWindowsCUDAArchive(ctx, managedWindowsCUDARuntimeURL, serverPath, false); err != nil {
+	if err := downloadAndExtractWindowsGPUArchive(ctx, managedWindowsGPUServerURL, serverPath, true); err != nil {
 		return false, reason, err
 	}
 	if err := os.WriteFile(managedServerSourceMarkerPath(serverPath), []byte(expectedManagedServerSourceMarker()+"\n"), 0o644); err != nil {
@@ -41,7 +37,7 @@ func ensureWindowsCUDAServerBundle(ctx context.Context, serverPath string) (bool
 	return true, reason, nil
 }
 
-func shouldInstallWindowsCUDAServerBundle(serverPath string, markerPath string) (bool, string) {
+func shouldInstallWindowsGPUServerBundle(serverPath string, markerPath string) (bool, string) {
 	if _, err := os.Stat(serverPath); err != nil {
 		if os.IsNotExist(err) {
 			return true, "missing_binary"
@@ -63,10 +59,10 @@ func managedServerSourceMarkerPath(serverPath string) string {
 }
 
 func expectedManagedServerSourceMarker() string {
-	return managedWindowsCUDAServerURL + "\ncuda_runtime_url=" + managedWindowsCUDARuntimeURL + "\ninstaller=ryvion-managed-llama-v3"
+	return managedWindowsGPUServerURL + "\nwindows_accelerator=vulkan\ninstaller=ryvion-managed-llama-v4"
 }
 
-func downloadAndExtractWindowsCUDAArchive(ctx context.Context, sourceURL string, dst string, requireServer bool) error {
+func downloadAndExtractWindowsGPUArchive(ctx context.Context, sourceURL string, dst string, requireServer bool) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return err
@@ -138,7 +134,7 @@ func downloadAndExtractWindowsCUDAArchive(ctx context.Context, sourceURL string,
 		}
 	}
 	if requireServer && !foundServer {
-		return fmt.Errorf("llama-server.exe not found in Windows CUDA bundle")
+		return fmt.Errorf("llama-server.exe not found in Windows GPU bundle")
 	}
 	return nil
 }

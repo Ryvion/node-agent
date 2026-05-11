@@ -85,7 +85,7 @@ func TestShouldInstallServerRefreshesUnmarkedWindowsCUDABundle(t *testing.T) {
 		"https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip",
 		false,
 	)
-	if !install || reason != "missing_source_marker_for_windows_cuda_runtime" {
+	if !install || reason != "missing_source_marker_for_windows_gpu_runtime" {
 		t.Fatalf("shouldInstallServer() = %t/%q, want refresh for unmarked CUDA bundle", install, reason)
 	}
 }
@@ -135,6 +135,14 @@ func TestExpectedServerSourceMarkerIncludesWindowsCUDARuntime(t *testing.T) {
 	marker := expectedServerSourceMarker(sourceURL)
 	if !containsAll(marker, sourceURL, windowsCUDARuntimeURL, "installer=ryvion-managed-llama-v3") {
 		t.Fatalf("expected Windows CUDA marker to include server/runtime/v3 marker, got %q", marker)
+	}
+}
+
+func TestExpectedServerSourceMarkerIncludesWindowsVulkanMarker(t *testing.T) {
+	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-vulkan-x64.zip"
+	marker := expectedServerSourceMarker(sourceURL)
+	if !containsAll(marker, sourceURL, "windows_accelerator=vulkan", "installer=ryvion-managed-llama-v4") {
+		t.Fatalf("expected Windows Vulkan marker to include source/vulkan/v4 marker, got %q", marker)
 	}
 }
 

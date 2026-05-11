@@ -131,7 +131,7 @@ func platformServerURL() string {
 	case "linux/arm64":
 		return base + "llama-b8106-bin-ubuntu-arm64.tar.gz"
 	case "windows/amd64":
-		return base + "llama-b8106-bin-win-cuda-12.4-x64.zip"
+		return base + "llama-b8106-bin-win-vulkan-x64.zip"
 	case "windows/arm64":
 		return base + "llama-b8106-bin-win-cpu-arm64.zip"
 	default:
@@ -902,8 +902,8 @@ func shouldInstallServer(serverPath, markerPath, sourceURL string, sourceExplici
 	}
 	marker, err := os.ReadFile(markerPath)
 	if err != nil {
-		if isWindowsCUDALlamaReleaseURL(sourceURL) {
-			return true, "missing_source_marker_for_windows_cuda_runtime"
+		if isWindowsAcceleratedLlamaReleaseURL(sourceURL) {
+			return true, "missing_source_marker_for_windows_gpu_runtime"
 		}
 		return false, ""
 	}
@@ -918,6 +918,17 @@ func isWindowsCUDALlamaReleaseURL(sourceURL string) bool {
 	return strings.Contains(lower, "github.com/ggml-org/llama.cpp/releases/download/") &&
 		strings.Contains(lower, "-bin-win-cuda-") &&
 		strings.HasSuffix(lower, ".zip")
+}
+
+func isWindowsVulkanLlamaReleaseURL(sourceURL string) bool {
+	lower := strings.ToLower(strings.TrimSpace(sourceURL))
+	return strings.Contains(lower, "github.com/ggml-org/llama.cpp/releases/download/") &&
+		strings.Contains(lower, "-bin-win-vulkan-") &&
+		strings.HasSuffix(lower, ".zip")
+}
+
+func isWindowsAcceleratedLlamaReleaseURL(sourceURL string) bool {
+	return isWindowsCUDALlamaReleaseURL(sourceURL) || isWindowsVulkanLlamaReleaseURL(sourceURL)
 }
 
 func writeServerSourceMarker(markerPath, sourceURL string) error {
@@ -935,6 +946,9 @@ func expectedServerSourceMarker(sourceURL string) string {
 	}
 	if isWindowsCUDALlamaReleaseURL(sourceURL) {
 		return sourceURL + "\ncuda_runtime_url=" + windowsCUDARuntimeURL + "\ninstaller=ryvion-managed-llama-v3"
+	}
+	if isWindowsVulkanLlamaReleaseURL(sourceURL) {
+		return sourceURL + "\nwindows_accelerator=vulkan\ninstaller=ryvion-managed-llama-v4"
 	}
 	return sourceURL + "\ninstaller=ryvion-managed-llama-v2"
 }

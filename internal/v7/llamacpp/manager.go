@@ -272,7 +272,7 @@ func (m *Manager) ensureBundledServer(ctx context.Context) {
 	if !shouldEnsure {
 		return
 	}
-	installed, reason, err := ensureWindowsCUDAServerBundle(ctx, serverPath)
+	installed, reason, err := ensureWindowsGPUServerBundle(ctx, serverPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err != nil {
@@ -384,9 +384,22 @@ func (m *Manager) waitForManagedProcess(process managedProcess) {
 	m.attached = false
 	m.startedAt = time.Time{}
 	if !m.stopping && err != nil {
-		m.lastError = cleanStatusText(err.Error(), maxStatusReasonLen)
+		m.lastError = cleanStatusText(processExitStatus(err, m.logs), maxStatusReasonLen)
 	}
 	m.stopping = false
+}
+
+func processExitStatus(err error, logs *boundedLogBuffer) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	if logs != nil {
+		if tail := logs.TailString(512); strings.TrimSpace(tail) != "" {
+			message += ": " + tail
+		}
+	}
+	return message
 }
 
 func (m *Manager) applyHealthLocked(health HealthResult) {
@@ -403,6 +416,9 @@ func (m *Manager) applyHealthLocked(health HealthResult) {
 	}
 	if m.process == nil {
 		m.attached = false
+		if strings.TrimSpace(m.lastError) != "" {
+			return
+		}
 	}
 	m.lastError = cleanStatusText(health.Error, maxStatusReasonLen)
 }
@@ -1427,4 +1443,23 @@ func (b *boundedLogBuffer) Write(p []byte) (int, error) {
 		b.data = append([]byte(nil), b.data[len(b.data)-b.limit:]...)
 	}
 	return len(p), nil
+}
+
+func (b *boundedLogBuffer) TailString(limit int) string {
+	if b == nil {
+		return ""
+	}
+	if limit <= 0 {
+		limit = 512
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.data) == 0 {
+		return ""
+	}
+	start := 0
+	if len(b.data) > limit {
+		start = len(b.data) - limit
+	}
+	return string(append([]byte(nil), b.data[start:]...))
 }
