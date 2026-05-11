@@ -236,11 +236,24 @@ func findCachedModel(status modelcache.Status, modelID string) (modelcache.Model
 func warmModelMatch(model modelcache.Model, modelID string) bool {
 	want := strings.ToLower(strings.TrimSpace(modelID))
 	for _, value := range []string{model.ModelID, model.Filename, filepath.Base(model.Path)} {
-		if strings.ToLower(strings.TrimSpace(value)) == want {
+		if strings.ToLower(strings.TrimSpace(value)) == want || warmModelAliasToken(value) == warmModelAliasToken(modelID) {
 			return true
 		}
 	}
 	return false
+}
+
+func warmModelAliasToken(value string) string {
+	token := strings.ToLower(strings.TrimSpace(filepath.Base(value)))
+	token = strings.TrimSuffix(token, ".gguf")
+	switch {
+	case token == "gemma-3-27b-it":
+		return token
+	case strings.HasPrefix(token, "gemma-3-27b-it-"):
+		return "gemma-3-27b-it"
+	default:
+		return token
+	}
 }
 
 func modelStatusWarm(status llamacpp.LlamaCppSidecarStatus, modelPath string) bool {

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/node-agent/internal/v7/modelcache"
 	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 )
 
@@ -177,6 +178,28 @@ func TestExecuteWarmAssignmentMissingModelReturnsSafeReceipt(t *testing.T) {
 	}
 	if receipt.MeteringUnits != 0 || receipt.ResultHashHex == "" {
 		t.Fatalf("receipt envelope = %+v, want rejection hash and zero units", receipt)
+	}
+}
+
+func TestFindCachedModelMatchesGemmaQATForLegacyCatalogName(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "gemma-3-27b-it-q4_0.gguf")
+	status := modelcache.Status{
+		CacheDir: filepath.Dir(path),
+		Models: []modelcache.Model{{
+			ModelID:   "gemma-3-27b-it-q4_0.gguf",
+			Filename:  "gemma-3-27b-it-q4_0.gguf",
+			Path:      path,
+			SizeBytes: 18 * 1024 * 1024 * 1024,
+			Format:    "gguf",
+			Installed: true,
+		}},
+	}
+
+	model, ok := findCachedModel(status, "gemma-3-27b-it-Q4_K_M.gguf")
+	if !ok || model.Path != path {
+		t.Fatalf("findCachedModel() = %+v/%v, want local Gemma QAT artifact", model, ok)
 	}
 }
 

@@ -131,6 +131,20 @@ func platformServerURL() string {
 	case "linux/arm64":
 		return base + "llama-b8106-bin-ubuntu-arm64.tar.gz"
 	case "windows/amd64":
+		accelerator := strings.TrimSpace(os.Getenv("RYV_LLAMA_CPP_WINDOWS_ACCELERATOR"))
+		if accelerator == "" {
+			accelerator = strings.TrimSpace(os.Getenv("RYV_WINDOWS_LLAMA_ACCELERATOR"))
+		}
+		accelerator = strings.ToLower(accelerator)
+		if accelerator == "vulkan" {
+			return base + "llama-b8106-bin-win-vulkan-x64.zip"
+		}
+		if accelerator == "cuda" || accelerator == "nvidia" {
+			return base + "llama-b8106-bin-win-cuda-12.4-x64.zip"
+		}
+		if _, err := exec.LookPath("nvidia-smi"); err == nil {
+			return base + "llama-b8106-bin-win-cuda-12.4-x64.zip"
+		}
 		return base + "llama-b8106-bin-win-vulkan-x64.zip"
 	case "windows/arm64":
 		return base + "llama-b8106-bin-win-cpu-arm64.zip"

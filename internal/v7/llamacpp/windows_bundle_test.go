@@ -13,7 +13,7 @@ func TestShouldInstallWindowsGPUServerBundleRefreshesMissingMarker(t *testing.T)
 		t.Fatalf("write server: %v", err)
 	}
 
-	install, reason := shouldInstallWindowsGPUServerBundle(serverPath, managedServerSourceMarkerPath(serverPath))
+	install, reason := shouldInstallWindowsGPUServerBundle(serverPath, managedServerSourceMarkerPath(serverPath), managedWindowsCUDABundle())
 	if !install || reason != "missing_source_marker_for_windows_cuda_runtime" {
 		t.Fatalf("shouldInstallWindowsGPUServerBundle() = %t/%q, want missing marker refresh", install, reason)
 	}
@@ -26,11 +26,11 @@ func TestShouldInstallWindowsGPUServerBundleAcceptsCurrentMarker(t *testing.T) {
 	if err := os.WriteFile(serverPath, []byte("server"), 0o755); err != nil {
 		t.Fatalf("write server: %v", err)
 	}
-	if err := os.WriteFile(markerPath, []byte(expectedManagedServerSourceMarker()+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(markerPath, []byte(expectedManagedServerSourceMarker(managedWindowsCUDABundle())+"\n"), 0o644); err != nil {
 		t.Fatalf("write marker: %v", err)
 	}
 
-	install, reason := shouldInstallWindowsGPUServerBundle(serverPath, markerPath)
+	install, reason := shouldInstallWindowsGPUServerBundle(serverPath, markerPath, managedWindowsCUDABundle())
 	if install || reason != "" {
 		t.Fatalf("shouldInstallWindowsGPUServerBundle() = %t/%q, want current marker accepted", install, reason)
 	}
@@ -48,17 +48,52 @@ func TestShouldInstallWindowsGPUServerBundleRefreshesV2Marker(t *testing.T) {
 		t.Fatalf("write marker: %v", err)
 	}
 
-	install, reason := shouldInstallWindowsGPUServerBundle(serverPath, markerPath)
+	install, reason := shouldInstallWindowsGPUServerBundle(serverPath, markerPath, managedWindowsCUDABundle())
 	if !install || reason != "source_url_changed" {
 		t.Fatalf("shouldInstallWindowsGPUServerBundle() = %t/%q, want v2 marker refresh", install, reason)
 	}
 }
 
-func TestExpectedManagedServerSourceMarkerIncludesVulkanBundle(t *testing.T) {
-	marker := expectedManagedServerSourceMarker()
-	for _, want := range []string{managedWindowsGPUServerURL, "windows_accelerator=vulkan", "installer=ryvion-managed-llama-v4"} {
+func TestExpectedManagedServerSourceMarkerIncludesCUDABundle(t *testing.T) {
+	marker := expectedManagedServerSourceMarker(managedWindowsCUDABundle())
+	for _, want := range []string{
+		managedWindowsCUDAServerURL,
+		managedWindowsCUDARuntimeURL,
+		"windows_accelerator=cuda",
+		"installer=ryvion-managed-llama-v5",
+	} {
 		if !strings.Contains(marker, want) {
 			t.Fatalf("expected marker to contain %q, got %q", want, marker)
 		}
+	}
+}
+
+func TestSelectManagedWindowsGPUBundlePrefersCUDAForNVIDIA(t *testing.T) {
+	bundle := selectManagedWindowsGPUBundle(
+		func(string) string { return "" },
+		func(name string) (string, error) {
+			if name == "nvidia-smi" {
+				return `C:\Windows\System32\nvidia-smi.exe`, nil
+			}
+			return "", os.ErrNotExist
+		},
+	)
+	if bundle.Accelerator != "cuda" || bundle.ServerURL != managedWindowsCUDAServerURL {
+		t.Fatalf("bundle = %+v, want cuda bundle", bundle)
+	}
+}
+
+func TestSelectManagedWindowsGPUBundleAllowsVulkanOverride(t *testing.T) {
+	bundle := selectManagedWindowsGPUBundle(
+		func(key string) string {
+			if key == EnvWindowsAccelerator {
+				return "vulkan"
+			}
+			return ""
+		},
+		func(string) (string, error) { return `C:\Windows\System32\nvidia-smi.exe`, nil },
+	)
+	if bundle.Accelerator != "vulkan" || bundle.ServerURL != managedWindowsVulkanServerURL {
+		t.Fatalf("bundle = %+v, want explicit Vulkan bundle", bundle)
 	}
 }
