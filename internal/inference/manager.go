@@ -150,15 +150,16 @@ func NativeRuntimeAvailable() bool {
 }
 
 type Manager struct {
-	dataDir    string
-	port       string
-	threads    string
-	gpuLayers  string
-	ctxSize    string
-	serverURL  string
-	serverPath string
-	hubURL     string
-	nodeToken  func(int64) string
+	dataDir           string
+	port              string
+	threads           string
+	gpuLayers         string
+	ctxSize           string
+	serverURL         string
+	serverURLExplicit bool
+	serverPath        string
+	hubURL            string
+	nodeToken         func(int64) string
 
 	mu              sync.RWMutex
 	healthy         bool
@@ -183,14 +184,16 @@ func New(dataDir string) *Manager {
 		dataDir = filepath.Join(home, ".ryvion")
 	}
 	port := envOr("RYV_INFERENCE_PORT", defaultPort)
+	serverURL, serverURLExplicit := envOrExplicit("RYV_SERVER_URL", platformServerURL())
 	return &Manager{
-		dataDir:         dataDir,
-		port:            port,
-		threads:         envOr("RYV_INFERENCE_THREADS", defaultThreads),
-		gpuLayers:       envOr("RYV_GPU_LAYERS", defaultGPULayers),
-		ctxSize:         envOr("RYV_CTX_SIZE", defaultCtxSize),
-		serverURL:       envOr("RYV_SERVER_URL", platformServerURL()),
-		activeModelName: "ryvion-llama-3.2-3b",
+		dataDir:           dataDir,
+		port:              port,
+		threads:           envOr("RYV_INFERENCE_THREADS", defaultThreads),
+		gpuLayers:         envOr("RYV_GPU_LAYERS", defaultGPULayers),
+		ctxSize:           envOr("RYV_CTX_SIZE", defaultCtxSize),
+		serverURL:         serverURL,
+		serverURLExplicit: serverURLExplicit,
+		activeModelName:   "ryvion-llama-3.2-3b",
 	}
 }
 
@@ -215,13 +218,17 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	serverPath := filepath.Join(binDir, serverBinaryName())
-	if _, err := os.Stat(serverPath); os.IsNotExist(err) {
+	installServer, installReason := shouldInstallServer(serverPath, serverSourceMarkerPath(serverPath), m.serverURL, m.serverURLExplicit)
+	if installServer {
 		if err := checkDiskSpace(m.dataDir); err != nil {
 			return fmt.Errorf("disk space check: %w", err)
 		}
-		slog.Info("downloading llama-server", "url", m.serverURL)
+		slog.Info("downloading llama-server", "url", m.serverURL, "reason", installReason)
 		if err := downloadAndExtractServer(ctx, m.serverURL, serverPath); err != nil {
 			return fmt.Errorf("download llama-server: %w", err)
+		}
+		if err := writeServerSourceMarker(serverSourceMarkerPath(serverPath), m.serverURL); err != nil {
+			slog.Warn("failed to write llama-server source marker", "path", serverSourceMarkerPath(serverPath), "error", err)
 		}
 		slog.Info("llama-server downloaded", "path", serverPath)
 	}
@@ -872,6 +879,54 @@ func serverBinaryName() string {
 	return "llama-server"
 }
 
+const serverSourceMarkerName = ".llama-server-source"
+
+func serverSourceMarkerPath(serverPath string) string {
+	return filepath.Join(filepath.Dir(serverPath), serverSourceMarkerName)
+}
+
+func shouldInstallServer(serverPath, markerPath, sourceURL string, sourceExplicit bool) (bool, string) {
+	sourceURL = strings.TrimSpace(sourceURL)
+	if sourceURL == "" {
+		return false, ""
+	}
+	if _, err := os.Stat(serverPath); err != nil {
+		if os.IsNotExist(err) {
+			return true, "missing_binary"
+		}
+		return false, ""
+	}
+	if sourceExplicit {
+		return false, ""
+	}
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		if isWindowsCUDALlamaReleaseURL(sourceURL) {
+			return true, "missing_source_marker_for_windows_cuda_runtime"
+		}
+		return false, ""
+	}
+	if strings.TrimSpace(string(marker)) != sourceURL {
+		return true, "source_url_changed"
+	}
+	return false, ""
+}
+
+func isWindowsCUDALlamaReleaseURL(sourceURL string) bool {
+	lower := strings.ToLower(strings.TrimSpace(sourceURL))
+	return strings.Contains(lower, "github.com/ggml-org/llama.cpp/releases/download/") &&
+		strings.Contains(lower, "-bin-win-cuda-") &&
+		strings.HasSuffix(lower, ".zip")
+}
+
+func writeServerSourceMarker(markerPath, sourceURL string) error {
+	sourceURL = strings.TrimSpace(sourceURL)
+	if sourceURL == "" {
+		return nil
+	}
+	return os.WriteFile(markerPath, []byte(sourceURL+"\n"), 0o644)
+}
+
 // downloadAndExtractServer downloads a llama.cpp release and extracts
 // llama-server plus required shared libraries.
 func downloadAndExtractServer(ctx context.Context, url, dst string) error {
@@ -1052,6 +1107,15 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envOrExplicit(key, fallback string) (string, bool) {
+	value, ok := os.LookupEnv(key)
+	value = strings.TrimSpace(value)
+	if ok && value != "" {
+		return value, true
+	}
+	return fallback, false
 }
 
 // runAMDSmokeTest downloads a tiny model and runs a quick inference to verify ROCm works.

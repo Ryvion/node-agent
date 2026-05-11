@@ -1,6 +1,10 @@
 package inference
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestSupportedNativeChatModelsGatesGemmaByVRAM(t *testing.T) {
 	t.Setenv("HF_TOKEN", "test-token")
@@ -65,5 +69,62 @@ func TestSupportedNativeChatModelsCanDisablePlatformGatedModels(t *testing.T) {
 		if model == "gemma-3-27b-it" {
 			t.Fatal("expected gated Gemma model to stay hidden when platform downloads are disabled and no local token is configured")
 		}
+	}
+}
+
+func TestShouldInstallServerRefreshesUnmarkedWindowsCUDABundle(t *testing.T) {
+	serverPath := filepath.Join(t.TempDir(), "llama-server.exe")
+	if err := os.WriteFile(serverPath, []byte("old cpu server"), 0o755); err != nil {
+		t.Fatalf("write server: %v", err)
+	}
+
+	install, reason := shouldInstallServer(
+		serverPath,
+		serverSourceMarkerPath(serverPath),
+		"https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip",
+		false,
+	)
+	if !install || reason != "missing_source_marker_for_windows_cuda_runtime" {
+		t.Fatalf("shouldInstallServer() = %t/%q, want refresh for unmarked CUDA bundle", install, reason)
+	}
+}
+
+func TestShouldInstallServerKeepsExplicitOperatorServer(t *testing.T) {
+	serverPath := filepath.Join(t.TempDir(), "llama-server.exe")
+	if err := os.WriteFile(serverPath, []byte("operator server"), 0o755); err != nil {
+		t.Fatalf("write server: %v", err)
+	}
+
+	install, reason := shouldInstallServer(
+		serverPath,
+		serverSourceMarkerPath(serverPath),
+		"https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip",
+		true,
+	)
+	if install || reason != "" {
+		t.Fatalf("shouldInstallServer() = %t/%q, want explicit operator server preserved", install, reason)
+	}
+}
+
+func TestShouldInstallServerUsesSourceMarker(t *testing.T) {
+	dir := t.TempDir()
+	serverPath := filepath.Join(dir, "llama-server.exe")
+	markerPath := serverSourceMarkerPath(serverPath)
+	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
+	if err := os.WriteFile(serverPath, []byte("current server"), 0o755); err != nil {
+		t.Fatalf("write server: %v", err)
+	}
+	if err := writeServerSourceMarker(markerPath, sourceURL); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	install, reason := shouldInstallServer(serverPath, markerPath, sourceURL, false)
+	if install || reason != "" {
+		t.Fatalf("shouldInstallServer() = %t/%q, want current marker accepted", install, reason)
+	}
+
+	install, reason = shouldInstallServer(serverPath, markerPath, sourceURL+"?new=1", false)
+	if !install || reason != "source_url_changed" {
+		t.Fatalf("shouldInstallServer() = %t/%q, want changed source refresh", install, reason)
 	}
 }

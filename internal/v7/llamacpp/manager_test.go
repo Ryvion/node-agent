@@ -569,6 +569,27 @@ func TestBuildBackendRuntimesMarksHealthySidecarLoadedWarm(t *testing.T) {
 	}
 }
 
+func TestGPUOffloadRequestedButServerReportsCPUOnly(t *testing.T) {
+	t.Parallel()
+
+	if !gpuOffloadRequestedButServerReportsCPUOnly(LlamaCppSidecarConfig{GPULayers: 999}, &LlamaCppServerProperties{
+		BuildInfo:            "llama.cpp b8106",
+		ReportedAcceleration: []string{"cpu"},
+	}) {
+		t.Fatal("gpuOffloadRequestedButServerReportsCPUOnly() = false, want CPU-only warning")
+	}
+	if gpuOffloadRequestedButServerReportsCPUOnly(LlamaCppSidecarConfig{GPULayers: 0}, &LlamaCppServerProperties{
+		ReportedAcceleration: []string{"cpu"},
+	}) {
+		t.Fatal("gpuOffloadRequestedButServerReportsCPUOnly() = true with GPU layers disabled")
+	}
+	if gpuOffloadRequestedButServerReportsCPUOnly(LlamaCppSidecarConfig{GPULayers: 999}, &LlamaCppServerProperties{
+		ReportedAcceleration: []string{"cuda"},
+	}) {
+		t.Fatal("gpuOffloadRequestedButServerReportsCPUOnly() = true for CUDA server")
+	}
+}
+
 func TestBuildBackendRuntimesDisabledSidecarNotLoadedWarm(t *testing.T) {
 	t.Parallel()
 

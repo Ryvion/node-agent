@@ -396,6 +396,9 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		} else {
 			reason = "managed llama.cpp sidecar healthy"
 		}
+		if gpuOffloadRequestedButServerReportsCPUOnly(cfg, m.serverProps) {
+			reason += "; GPU offload requested but server reports CPU-only acceleration"
+		}
 	} else if running {
 		reason = "llama.cpp sidecar running; health not confirmed"
 	} else if m.lastError != "" {
@@ -661,6 +664,17 @@ func normalizeServerProperties(props *LlamaCppServerProperties) *LlamaCppServerP
 
 func cloneServerProperties(props *LlamaCppServerProperties) *LlamaCppServerProperties {
 	return normalizeServerProperties(props)
+}
+
+func gpuOffloadRequestedButServerReportsCPUOnly(cfg LlamaCppSidecarConfig, props *LlamaCppServerProperties) bool {
+	if cfg.GPULayers <= 0 || props == nil {
+		return false
+	}
+	normalized := normalizeServerProperties(props)
+	if normalized == nil || len(normalized.ReportedAcceleration) != 1 {
+		return false
+	}
+	return normalized.ReportedAcceleration[0] == "cpu"
 }
 
 func normalizeOtherBackendRuntimes(runtimes []BackendRuntimeStatus) []BackendRuntimeStatus {
