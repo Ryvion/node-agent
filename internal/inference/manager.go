@@ -880,6 +880,7 @@ func serverBinaryName() string {
 }
 
 const serverSourceMarkerName = ".llama-server-source"
+const windowsCUDARuntimeURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/cudart-llama-bin-win-cuda-12.4-x64.zip"
 
 func serverSourceMarkerPath(serverPath string) string {
 	return filepath.Join(filepath.Dir(serverPath), serverSourceMarkerName)
@@ -931,6 +932,9 @@ func expectedServerSourceMarker(sourceURL string) string {
 	sourceURL = strings.TrimSpace(sourceURL)
 	if sourceURL == "" {
 		return ""
+	}
+	if isWindowsCUDALlamaReleaseURL(sourceURL) {
+		return sourceURL + "\ncuda_runtime_url=" + windowsCUDARuntimeURL + "\ninstaller=ryvion-managed-llama-v3"
 	}
 	return sourceURL + "\ninstaller=ryvion-managed-llama-v2"
 }
@@ -1048,6 +1052,18 @@ func downloadAndExtractServer(ctx context.Context, url, dst string) error {
 }
 
 func downloadAndExtractServerZip(ctx context.Context, url, dst string) error {
+	if err := downloadAndExtractServerZipArchive(ctx, url, dst, true); err != nil {
+		return err
+	}
+	if isWindowsCUDALlamaReleaseURL(url) {
+		if err := downloadAndExtractServerZipArchive(ctx, windowsCUDARuntimeURL, dst, false); err != nil {
+			return fmt.Errorf("download CUDA runtime: %w", err)
+		}
+	}
+	return nil
+}
+
+func downloadAndExtractServerZipArchive(ctx context.Context, url, dst string, requireServer bool) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -1132,7 +1148,7 @@ func downloadAndExtractServerZip(ctx context.Context, url, dst string) error {
 		}
 	}
 
-	if !foundServer {
+	if requireServer && !foundServer {
 		return fmt.Errorf("llama-server binary not found in zip archive")
 	}
 	return nil

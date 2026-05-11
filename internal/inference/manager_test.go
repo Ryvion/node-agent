@@ -3,6 +3,7 @@ package inference
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -129,6 +130,14 @@ func TestShouldInstallServerUsesSourceMarker(t *testing.T) {
 	}
 }
 
+func TestExpectedServerSourceMarkerIncludesWindowsCUDARuntime(t *testing.T) {
+	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
+	marker := expectedServerSourceMarker(sourceURL)
+	if !containsAll(marker, sourceURL, windowsCUDARuntimeURL, "installer=ryvion-managed-llama-v3") {
+		t.Fatalf("expected Windows CUDA marker to include server/runtime/v3 marker, got %q", marker)
+	}
+}
+
 func TestShouldInstallServerRefreshesLegacySourceOnlyMarker(t *testing.T) {
 	dir := t.TempDir()
 	serverPath := filepath.Join(dir, "llama-server.exe")
@@ -145,4 +154,13 @@ func TestShouldInstallServerRefreshesLegacySourceOnlyMarker(t *testing.T) {
 	if !install || reason != "source_url_changed" {
 		t.Fatalf("shouldInstallServer() = %t/%q, want legacy marker refresh", install, reason)
 	}
+}
+
+func containsAll(text string, wants ...string) bool {
+	for _, want := range wants {
+		if !strings.Contains(text, want) {
+			return false
+		}
+	}
+	return true
 }

@@ -14,6 +14,7 @@ import (
 )
 
 const managedWindowsCUDAServerURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
+const managedWindowsCUDARuntimeURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/cudart-llama-bin-win-cuda-12.4-x64.zip"
 const managedServerSourceMarkerName = ".llama-server-source"
 
 func ensureWindowsCUDAServerBundle(ctx context.Context, serverPath string) (bool, string, error) {
@@ -28,7 +29,10 @@ func ensureWindowsCUDAServerBundle(ctx context.Context, serverPath string) (bool
 	if err := os.MkdirAll(filepath.Dir(serverPath), 0o755); err != nil {
 		return false, reason, fmt.Errorf("create llama.cpp bin dir: %w", err)
 	}
-	if err := downloadAndExtractWindowsCUDAServer(ctx, managedWindowsCUDAServerURL, serverPath); err != nil {
+	if err := downloadAndExtractWindowsCUDAArchive(ctx, managedWindowsCUDAServerURL, serverPath, true); err != nil {
+		return false, reason, err
+	}
+	if err := downloadAndExtractWindowsCUDAArchive(ctx, managedWindowsCUDARuntimeURL, serverPath, false); err != nil {
 		return false, reason, err
 	}
 	if err := os.WriteFile(managedServerSourceMarkerPath(serverPath), []byte(expectedManagedServerSourceMarker()+"\n"), 0o644); err != nil {
@@ -59,10 +63,10 @@ func managedServerSourceMarkerPath(serverPath string) string {
 }
 
 func expectedManagedServerSourceMarker() string {
-	return managedWindowsCUDAServerURL + "\ninstaller=ryvion-managed-llama-v2"
+	return managedWindowsCUDAServerURL + "\ncuda_runtime_url=" + managedWindowsCUDARuntimeURL + "\ninstaller=ryvion-managed-llama-v3"
 }
 
-func downloadAndExtractWindowsCUDAServer(ctx context.Context, sourceURL string, dst string) error {
+func downloadAndExtractWindowsCUDAArchive(ctx context.Context, sourceURL string, dst string, requireServer bool) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return err
@@ -133,7 +137,7 @@ func downloadAndExtractWindowsCUDAServer(ctx context.Context, sourceURL string, 
 			foundServer = true
 		}
 	}
-	if !foundServer {
+	if requireServer && !foundServer {
 		return fmt.Errorf("llama-server.exe not found in Windows CUDA bundle")
 	}
 	return nil
