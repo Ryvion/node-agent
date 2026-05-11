@@ -514,6 +514,12 @@ func TestBuildBackendRuntimesMarksHealthySidecarLoadedWarm(t *testing.T) {
 			FastDefaultsEnabled:      true,
 			ConfiguredDraftGPULayers: 12,
 		},
+		ServerProperties: &LlamaCppServerProperties{
+			BuildInfo:            "llama.cpp b999 CUDA",
+			SystemInfo:           "CUDA enabled",
+			ReportedGPULayers:    999,
+			ReportedAcceleration: []string{"cuda"},
+		},
 		BaseURL:                "http://127.0.0.1:45910",
 		ModelPath:              "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
 		ModelFilename:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
@@ -547,6 +553,13 @@ func TestBuildBackendRuntimesMarksHealthySidecarLoadedWarm(t *testing.T) {
 		!runtime.Launch.FastDefaultsEnabled ||
 		runtime.Launch.ConfiguredDraftGPULayers != 12 {
 		t.Fatalf("launch telemetry = %+v, want managed GPU launch config", runtime.Launch)
+	}
+	if runtime.ServerProperties == nil ||
+		runtime.ServerProperties.BuildInfo != "llama.cpp b999 CUDA" ||
+		runtime.ServerProperties.ReportedGPULayers != 999 ||
+		len(runtime.ServerProperties.ReportedAcceleration) != 1 ||
+		runtime.ServerProperties.ReportedAcceleration[0] != "cuda" {
+		t.Fatalf("server properties = %+v, want safe CUDA build hints", runtime.ServerProperties)
 	}
 	if runtime.LastHealthAtUnixMs != lastHealth.UnixMilli() {
 		t.Fatalf("last_health_at_unix_ms = %d, want %d", runtime.LastHealthAtUnixMs, lastHealth.UnixMilli())

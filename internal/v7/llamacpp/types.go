@@ -61,31 +61,32 @@ type LlamaCppSidecarConfig struct {
 }
 
 type LlamaCppSidecarStatus struct {
-	Enabled                bool                  `json:"enabled"`
-	Available              bool                  `json:"available"`
-	Running                bool                  `json:"running"`
-	Healthy                bool                  `json:"healthy"`
-	Attached               bool                  `json:"attached,omitempty"`
-	PID                    int                   `json:"pid,omitempty"`
-	BaseURL                string                `json:"base_url"`
-	ServerPath             string                `json:"server_path,omitempty"`
-	ModelPath              string                `json:"model_path,omitempty"`
-	ContextSize            int                   `json:"context_size,omitempty"`
-	ModelFilename          string                `json:"model_filename,omitempty"`
-	ModelSizeBytes         int64                 `json:"model_size_bytes"`
-	ModelFamilyHint        string                `json:"model_family_hint,omitempty"`
-	QuantizationHint       string                `json:"quantization_hint,omitempty"`
-	StartedAt              time.Time             `json:"started_at,omitempty"`
-	LastHealthAt           time.Time             `json:"last_health_at,omitempty"`
-	LastError              string                `json:"last_error"`
-	Backend                string                `json:"backend"`
-	Launch                 *LlamaCppLaunchConfig `json:"launch,omitempty"`
-	OpenAICompatible       bool                  `json:"openai_compatible"`
-	SupportsTextGeneration bool                  `json:"supports_text_generation"`
-	SupportsStreaming      bool                  `json:"supports_streaming"`
-	SupportsKVAccess       bool                  `json:"supports_kv_access"`
-	SupportsTensorHooks    bool                  `json:"supports_tensor_hooks"`
-	Reason                 string                `json:"reason"`
+	Enabled                bool                      `json:"enabled"`
+	Available              bool                      `json:"available"`
+	Running                bool                      `json:"running"`
+	Healthy                bool                      `json:"healthy"`
+	Attached               bool                      `json:"attached,omitempty"`
+	PID                    int                       `json:"pid,omitempty"`
+	BaseURL                string                    `json:"base_url"`
+	ServerPath             string                    `json:"server_path,omitempty"`
+	ModelPath              string                    `json:"model_path,omitempty"`
+	ContextSize            int                       `json:"context_size,omitempty"`
+	ModelFilename          string                    `json:"model_filename,omitempty"`
+	ModelSizeBytes         int64                     `json:"model_size_bytes"`
+	ModelFamilyHint        string                    `json:"model_family_hint,omitempty"`
+	QuantizationHint       string                    `json:"quantization_hint,omitempty"`
+	StartedAt              time.Time                 `json:"started_at,omitempty"`
+	LastHealthAt           time.Time                 `json:"last_health_at,omitempty"`
+	LastError              string                    `json:"last_error"`
+	Backend                string                    `json:"backend"`
+	Launch                 *LlamaCppLaunchConfig     `json:"launch,omitempty"`
+	ServerProperties       *LlamaCppServerProperties `json:"server_properties,omitempty"`
+	OpenAICompatible       bool                      `json:"openai_compatible"`
+	SupportsTextGeneration bool                      `json:"supports_text_generation"`
+	SupportsStreaming      bool                      `json:"supports_streaming"`
+	SupportsKVAccess       bool                      `json:"supports_kv_access"`
+	SupportsTensorHooks    bool                      `json:"supports_tensor_hooks"`
+	Reason                 string                    `json:"reason"`
 
 	// V8 speculative decoding (Level 0 - backend-local).
 	SpeculativeEnabled   bool   `json:"speculative_enabled"`
@@ -108,6 +109,13 @@ type LlamaCppLaunchConfig struct {
 	ConfiguredDraftGPULayers int    `json:"configured_draft_gpu_layers,omitempty"`
 }
 
+type LlamaCppServerProperties struct {
+	BuildInfo            string   `json:"build_info,omitempty"`
+	SystemInfo           string   `json:"system_info,omitempty"`
+	ReportedGPULayers    int      `json:"reported_gpu_layers,omitempty"`
+	ReportedAcceleration []string `json:"reported_acceleration,omitempty"`
+}
+
 type BackendRuntimes struct {
 	LlamaCPP    BackendRuntimeStatus   `json:"llama_cpp"`
 	TensorRTLLM BackendRuntimeStatus   `json:"tensorrt_llm"`
@@ -117,38 +125,39 @@ type BackendRuntimes struct {
 }
 
 type BackendRuntimeStatus struct {
-	Enabled                  bool                     `json:"enabled"`
-	Available                bool                     `json:"available"`
-	Running                  bool                     `json:"running"`
-	Healthy                  bool                     `json:"healthy"`
-	Health                   string                   `json:"health"`
-	Backend                  string                   `json:"backend"`
-	BaseURL                  string                   `json:"base_url"`
-	ModelID                  string                   `json:"model_id,omitempty"`
-	ModelPath                string                   `json:"model_path,omitempty"`
-	ModelFilename            string                   `json:"model_filename,omitempty"`
-	ModelSizeBytes           int64                    `json:"model_size_bytes"`
-	ModelFamilyHint          string                   `json:"model_family_hint,omitempty"`
-	QuantizationHint         string                   `json:"quantization_hint,omitempty"`
-	Loaded                   bool                     `json:"loaded"`
-	Warm                     bool                     `json:"warm"`
-	WarmModelID              string                   `json:"warm_model_id,omitempty"`
-	Acceleration             []string                 `json:"acceleration"`
-	GPUArchitecture          string                   `json:"gpu_architecture,omitempty"`
-	GPUComputeCapability     string                   `json:"gpu_compute_capability,omitempty"`
-	OpenAICompatible         bool                     `json:"openai_compatible"`
-	SupportsTextGeneration   bool                     `json:"supports_text_generation"`
-	SupportsStreaming        bool                     `json:"supports_streaming"`
-	SupportsStatefulSessions bool                     `json:"supports_stateful_sessions"`
-	SupportsKVAccess         bool                     `json:"supports_kv_access"`
-	SupportsKVHooks          bool                     `json:"supports_kv_hooks"`
-	SupportsTensorHooks      bool                     `json:"supports_tensor_hooks"`
-	SupportsDistributedKV    bool                     `json:"supports_distributed_kv"`
-	OptimizationCapabilities []OptimizationCapability `json:"optimization_capabilities,omitempty"`
-	MaxContextTokens         int                      `json:"max_context_tokens,omitempty"`
-	LastHealthAtUnixMs       int64                    `json:"last_health_at_unix_ms"`
-	LastError                string                   `json:"last_error"`
-	Launch                   *LlamaCppLaunchConfig    `json:"launch,omitempty"`
+	Enabled                  bool                      `json:"enabled"`
+	Available                bool                      `json:"available"`
+	Running                  bool                      `json:"running"`
+	Healthy                  bool                      `json:"healthy"`
+	Health                   string                    `json:"health"`
+	Backend                  string                    `json:"backend"`
+	BaseURL                  string                    `json:"base_url"`
+	ModelID                  string                    `json:"model_id,omitempty"`
+	ModelPath                string                    `json:"model_path,omitempty"`
+	ModelFilename            string                    `json:"model_filename,omitempty"`
+	ModelSizeBytes           int64                     `json:"model_size_bytes"`
+	ModelFamilyHint          string                    `json:"model_family_hint,omitempty"`
+	QuantizationHint         string                    `json:"quantization_hint,omitempty"`
+	Loaded                   bool                      `json:"loaded"`
+	Warm                     bool                      `json:"warm"`
+	WarmModelID              string                    `json:"warm_model_id,omitempty"`
+	Acceleration             []string                  `json:"acceleration"`
+	GPUArchitecture          string                    `json:"gpu_architecture,omitempty"`
+	GPUComputeCapability     string                    `json:"gpu_compute_capability,omitempty"`
+	OpenAICompatible         bool                      `json:"openai_compatible"`
+	SupportsTextGeneration   bool                      `json:"supports_text_generation"`
+	SupportsStreaming        bool                      `json:"supports_streaming"`
+	SupportsStatefulSessions bool                      `json:"supports_stateful_sessions"`
+	SupportsKVAccess         bool                      `json:"supports_kv_access"`
+	SupportsKVHooks          bool                      `json:"supports_kv_hooks"`
+	SupportsTensorHooks      bool                      `json:"supports_tensor_hooks"`
+	SupportsDistributedKV    bool                      `json:"supports_distributed_kv"`
+	OptimizationCapabilities []OptimizationCapability  `json:"optimization_capabilities,omitempty"`
+	MaxContextTokens         int                       `json:"max_context_tokens,omitempty"`
+	LastHealthAtUnixMs       int64                     `json:"last_health_at_unix_ms"`
+	LastError                string                    `json:"last_error"`
+	Launch                   *LlamaCppLaunchConfig     `json:"launch,omitempty"`
+	ServerProperties         *LlamaCppServerProperties `json:"server_properties,omitempty"`
 }
 
 type OptimizationCapability struct {

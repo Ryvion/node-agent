@@ -51,6 +51,7 @@ type Manager struct {
 	startedAt     time.Time
 	lastHealthAt  time.Time
 	lastError     string
+	serverProps   *LlamaCppServerProperties
 	attached      bool
 	stopping      bool
 	now           func() time.Time
@@ -181,8 +182,18 @@ func (m *Manager) Status(ctx context.Context) LlamaCppSidecarStatus {
 
 	if shouldHealthCheck {
 		health := CheckHealth(ctx, status.BaseURL, m.client, m.healthTimeout)
+		props := LlamaCppServerProperties{}
+		propsOK := false
+		if health.Healthy {
+			props, propsOK = FetchServerProperties(ctx, status.BaseURL, m.client, m.healthTimeout)
+		}
 		m.mu.Lock()
 		m.applyHealthLocked(health)
+		if propsOK {
+			m.serverProps = normalizeServerProperties(&props)
+		} else if !health.Healthy {
+			m.serverProps = nil
+		}
 		status = m.statusLocked()
 		m.mu.Unlock()
 	}
@@ -414,6 +425,7 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		LastError:              cleanStatusText(m.lastError, maxStatusReasonLen),
 		Backend:                BackendName,
 		Launch:                 launch,
+		ServerProperties:       cloneServerProperties(m.serverProps),
 		OpenAICompatible:       true,
 		SupportsTextGeneration: true,
 		SupportsStreaming:      true,
@@ -458,6 +470,7 @@ func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 			LastHealthAtUnixMs:     unixMilliOrZero(status.LastHealthAt),
 			LastError:              status.LastError,
 			Launch:                 cloneLaunchConfig(status.Launch),
+			ServerProperties:       cloneServerProperties(status.ServerProperties),
 		},
 	})
 }
@@ -551,6 +564,7 @@ func normalizeBackendRuntimeStatus(llama BackendRuntimeStatus, defaultBackend st
 	llama.OptimizationCapabilities = normalizeOptimizationCapabilities(llama.OptimizationCapabilities, llama.Backend, llama.GPUArchitecture)
 	llama.LastError = cleanStatusText(llama.LastError, maxStatusReasonLen)
 	llama.Launch = normalizeLaunchConfig(llama.Launch)
+	llama.ServerProperties = normalizeServerProperties(llama.ServerProperties)
 	llama.Acceleration = normalizeAcceleration(llama.Acceleration)
 	if llama.MaxContextTokens < 0 {
 		llama.MaxContextTokens = 0
@@ -626,6 +640,27 @@ func normalizeLaunchConfig(launch *LlamaCppLaunchConfig) *LlamaCppLaunchConfig {
 
 func cloneLaunchConfig(launch *LlamaCppLaunchConfig) *LlamaCppLaunchConfig {
 	return normalizeLaunchConfig(launch)
+}
+
+func normalizeServerProperties(props *LlamaCppServerProperties) *LlamaCppServerProperties {
+	if props == nil {
+		return nil
+	}
+	out := *props
+	out.BuildInfo = cleanRuntimeCompactText(out.BuildInfo, 256)
+	out.SystemInfo = cleanRuntimeCompactText(out.SystemInfo, 512)
+	if out.ReportedGPULayers < 0 {
+		out.ReportedGPULayers = 0
+	}
+	out.ReportedAcceleration = normalizeAcceleration(out.ReportedAcceleration)
+	if out.BuildInfo == "" && out.SystemInfo == "" && out.ReportedGPULayers == 0 && len(out.ReportedAcceleration) == 0 {
+		return nil
+	}
+	return &out
+}
+
+func cloneServerProperties(props *LlamaCppServerProperties) *LlamaCppServerProperties {
+	return normalizeServerProperties(props)
 }
 
 func normalizeOtherBackendRuntimes(runtimes []BackendRuntimeStatus) []BackendRuntimeStatus {
