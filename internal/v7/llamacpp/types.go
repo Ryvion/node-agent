@@ -36,20 +36,28 @@ const (
 	DefaultDraftMaxTokens  = 16
 	DefaultDraftMinTokens  = 0
 	DefaultDraftPMinMillis = 0 // 0 = use llama.cpp default (0.75)
+
+	LaunchProfileDefault     = "default"
+	LaunchProfileCUDAFast    = "cuda_fast"
+	LaunchProfileCUDASafe    = "cuda_safe"
+	LaunchProfileCUDAPartial = "cuda_partial"
 )
 
 type LlamaCppSidecarConfig struct {
-	Enabled            bool
-	ServerPath         string
-	ServerPathExplicit bool
-	ModelPath          string
-	Host               string
-	Port               int
-	ContextSize        int
-	Threads            int
-	GPULayers          int
-	ExtraArgs          []string
-	FastDefaults       bool
+	Enabled              bool
+	ServerPath           string
+	ServerPathExplicit   bool
+	ModelPath            string
+	Host                 string
+	Port                 int
+	ContextSize          int
+	Threads              int
+	GPULayers            int
+	GPULayersExplicit    bool
+	ExtraArgs            []string
+	FastDefaults         bool
+	FastDefaultsExplicit bool
+	LaunchProfile        string
 
 	// V8 speculative decoding (Level 0).
 	// DraftModelPath, when non-empty, enables backend-local speculative
@@ -108,6 +116,7 @@ type LlamaCppLaunchConfig struct {
 	ConfiguredGPULayers      int    `json:"configured_gpu_layers"`
 	FastDefaultsEnabled      bool   `json:"fast_defaults_enabled"`
 	ConfiguredDraftGPULayers int    `json:"configured_draft_gpu_layers,omitempty"`
+	Profile                  string `json:"profile,omitempty"`
 }
 
 type LlamaCppServerProperties struct {

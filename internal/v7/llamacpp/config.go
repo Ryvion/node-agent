@@ -66,23 +66,27 @@ func ResidencyKeeperConfigFromEnvWith(source ConfigSource) ResidencyKeeperConfig
 func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	source = normalizeConfigSource(source)
 	explicitServerPath := strings.TrimSpace(source.Getenv(EnvServer)) != ""
+	gpuLayersRaw := source.Getenv(EnvGPULayers)
+	fastDefaultsRaw := source.Getenv(EnvFastDefaults)
 	cfg := LlamaCppSidecarConfig{
-		Enabled:            envBool(source.Getenv(EnvEnabled)),
-		ServerPath:         cleanConfigText(source.Getenv(EnvServer), maxConfigTextLen),
-		ServerPathExplicit: explicitServerPath,
-		ModelPath:          cleanConfigText(source.Getenv(EnvModel), maxConfigTextLen),
-		Host:               normalizeHost(source.Getenv(EnvHost)),
-		Port:               envInt(source.Getenv(EnvPort), DefaultPort),
-		ContextSize:        envInt(source.Getenv(EnvCtxSize), DefaultContextSize),
-		Threads:            envInt(source.Getenv(EnvThreads), 0),
-		GPULayers:          envInt(source.Getenv(EnvGPULayers), DefaultGPULayers),
-		ExtraArgs:          sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
-		FastDefaults:       envBoolDefault(source.Getenv(EnvFastDefaults), defaultFastDefaults(source)),
-		DraftModelPath:     cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
-		DraftMaxTokens:     envInt(source.Getenv(EnvDraftMaxTokens), 0),
-		DraftMinTokens:     envInt(source.Getenv(EnvDraftMinTokens), 0),
-		DraftPMin:          envFloat(source.Getenv(EnvDraftPMin), 0),
-		DraftGPULayers:     envInt(source.Getenv(EnvDraftGPULayers), 0),
+		Enabled:              envBool(source.Getenv(EnvEnabled)),
+		ServerPath:           cleanConfigText(source.Getenv(EnvServer), maxConfigTextLen),
+		ServerPathExplicit:   explicitServerPath,
+		ModelPath:            cleanConfigText(source.Getenv(EnvModel), maxConfigTextLen),
+		Host:                 normalizeHost(source.Getenv(EnvHost)),
+		Port:                 envInt(source.Getenv(EnvPort), DefaultPort),
+		ContextSize:          envInt(source.Getenv(EnvCtxSize), DefaultContextSize),
+		Threads:              envInt(source.Getenv(EnvThreads), 0),
+		GPULayers:            envInt(gpuLayersRaw, DefaultGPULayers),
+		GPULayersExplicit:    strings.TrimSpace(gpuLayersRaw) != "",
+		ExtraArgs:            sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
+		FastDefaults:         envBoolDefault(fastDefaultsRaw, defaultFastDefaults(source)),
+		FastDefaultsExplicit: strings.TrimSpace(fastDefaultsRaw) != "",
+		DraftModelPath:       cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
+		DraftMaxTokens:       envInt(source.Getenv(EnvDraftMaxTokens), 0),
+		DraftMinTokens:       envInt(source.Getenv(EnvDraftMinTokens), 0),
+		DraftPMin:            envFloat(source.Getenv(EnvDraftPMin), 0),
+		DraftGPULayers:       envInt(source.Getenv(EnvDraftGPULayers), 0),
 	}
 	if cfg.ServerPath == "" {
 		cfg.ServerPath = discoverServerPath(source)
@@ -93,6 +97,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	if cfg.DraftModelPath == "" && envBool(source.Getenv(EnvDraftAuto)) {
 		cfg.DraftModelPath = discoverDraftModelPath(source, cfg.ModelPath)
 	}
+	cfg.LaunchProfile = deriveLaunchProfile(cfg)
 	return normalizeConfig(cfg)
 }
 
@@ -131,12 +136,41 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 	if cfg.DraftGPULayers < 0 {
 		cfg.DraftGPULayers = 0
 	}
+	cfg.LaunchProfile = normalizeLaunchProfile(cfg.LaunchProfile)
+	if cfg.LaunchProfile == "" {
+		cfg.LaunchProfile = deriveLaunchProfile(cfg)
+	}
 	// If draft model is set without explicit max tokens, default to 16
 	// (the llama.cpp default and a safe consumer-hardware setting).
 	if cfg.DraftModelPath != "" && cfg.DraftMaxTokens == 0 {
 		cfg.DraftMaxTokens = DefaultDraftMaxTokens
 	}
 	return cfg
+}
+
+func deriveLaunchProfile(cfg LlamaCppSidecarConfig) string {
+	if cfg.GPULayers <= 0 {
+		return LaunchProfileDefault
+	}
+	if cfg.FastDefaults {
+		return LaunchProfileCUDAFast
+	}
+	return LaunchProfileDefault
+}
+
+func normalizeLaunchProfile(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case LaunchProfileDefault:
+		return LaunchProfileDefault
+	case LaunchProfileCUDAFast:
+		return LaunchProfileCUDAFast
+	case LaunchProfileCUDASafe:
+		return LaunchProfileCUDASafe
+	case LaunchProfileCUDAPartial:
+		return LaunchProfileCUDAPartial
+	default:
+		return ""
+	}
 }
 
 func defaultFastDefaults(source ConfigSource) bool {

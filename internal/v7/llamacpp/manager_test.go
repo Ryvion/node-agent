@@ -441,10 +441,52 @@ func TestRestartWithModelSafeCUDAKeepsGPUOffloadWithoutFastFlags(t *testing.T) {
 	if !strings.Contains(joined, "--n-gpu-layers 999") {
 		t.Fatalf("args = %q, want CUDA GPU layers preserved", joined)
 	}
+	if status.Launch == nil || status.Launch.Profile != LaunchProfileCUDASafe {
+		t.Fatalf("launch = %+v, want safe CUDA profile", status.Launch)
+	}
 	for _, forbidden := range []string{"--flash-attn", "--cache-type-k", "--cache-type-v", "--batch-size 512", "--ubatch-size 512", "--model-draft"} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("args = %q, should not include safe-fallback forbidden flag %q", joined, forbidden)
 		}
+	}
+}
+
+func TestRestartWithModelFastCUDARestoresFullFastProfile(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	proc := newFakeProcess(335)
+	var gotArgs []string
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:       true,
+		ServerPath:    serverPath,
+		ModelPath:     modelPath,
+		Host:          DefaultHost,
+		Port:          freePortForConfig(t),
+		ContextSize:   DefaultContextSize,
+		GPULayers:     fallbackPartialGPULayers,
+		FastDefaults:  false,
+		LaunchProfile: LaunchProfileCUDAPartial,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		gotArgs = append([]string(nil), args...)
+		return proc, nil
+	}), WithHealthClient(errorHealthClient{}), WithHealthTimeout(time.Millisecond))
+	t.Cleanup(func() {
+		_ = manager.Stop(context.Background())
+	})
+
+	status := manager.RestartWithModelFastCUDA(context.Background(), modelPath)
+	if !status.Running {
+		t.Fatalf("status = %+v, want managed process running", status)
+	}
+	joined := strings.Join(gotArgs, " ")
+	for _, want := range []string{"--n-gpu-layers 999", "--flash-attn", "--ubatch-size 512", "--cache-type-k q8_0", "--cache-type-v q8_0"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing restored fast CUDA arg %q", joined, want)
+		}
+	}
+	if status.Launch == nil || status.Launch.Profile != LaunchProfileCUDAFast || !status.Launch.FastDefaultsEnabled || status.Launch.ConfiguredGPULayers != DefaultGPULayers {
+		t.Fatalf("launch = %+v, want restored fast CUDA profile", status.Launch)
 	}
 }
 
@@ -478,6 +520,9 @@ func TestRestartWithModelPartialGPUClampsGPUOffload(t *testing.T) {
 	joined := strings.Join(gotArgs, " ")
 	if !strings.Contains(joined, "--n-gpu-layers 35") {
 		t.Fatalf("args = %q, want partial GPU fallback layers", joined)
+	}
+	if status.Launch == nil || status.Launch.Profile != LaunchProfileCUDAPartial {
+		t.Fatalf("launch = %+v, want partial CUDA profile", status.Launch)
 	}
 	if strings.Contains(joined, "--flash-attn") || strings.Contains(joined, "--cache-type-k") {
 		t.Fatalf("args = %q, want partial fallback without fast flags", joined)

@@ -22,6 +22,9 @@ type fakeSidecar struct {
 	restarts            int
 	restartPath         string
 	restartStatus       llamacpp.LlamaCppSidecarStatus
+	fastCUDARestarts    int
+	fastCUDAStatus      llamacpp.LlamaCppSidecarStatus
+	fastRestartPath     string
 	safeCUDAFallbacks   int
 	partialGPUFallbacks int
 	safeCUDAStatus      llamacpp.LlamaCppSidecarStatus
@@ -58,7 +61,18 @@ func (f *fakeSidecar) RestartWithModel(_ context.Context, modelPath string) llam
 	f.status.Available = true
 	f.status.Running = true
 	f.status.Healthy = true
+	f.status.Launch = &llamacpp.LlamaCppLaunchConfig{Mode: "managed", Managed: true, ConfiguredGPULayers: llamacpp.DefaultGPULayers, FastDefaultsEnabled: true, Profile: llamacpp.LaunchProfileCUDAFast}
 	return f.status
+}
+
+func (f *fakeSidecar) RestartWithModelFastCUDA(_ context.Context, modelPath string) llamacpp.LlamaCppSidecarStatus {
+	f.fastCUDARestarts++
+	f.fastRestartPath = modelPath
+	if f.fastCUDAStatus.ModelPath != "" {
+		f.status = f.fastCUDAStatus
+		return f.status
+	}
+	return f.RestartWithModel(context.Background(), modelPath)
 }
 
 func (f *fakeSidecar) RestartWithModelSafeCUDA(_ context.Context, modelPath string) llamacpp.LlamaCppSidecarStatus {
@@ -343,7 +357,6 @@ func TestExecuteAssignmentRetriesCudaFallbackWhenColdLaunchExits(t *testing.T) {
 		status:           healthySidecarStatus(),
 		restartStatus:    launching,
 		statusQueue:      []llamacpp.LlamaCppSidecarStatus{exited},
-		safeCUDAStatus:   exited,
 		partialGPUStatus: ready,
 	}
 	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
@@ -386,8 +399,8 @@ func TestExecuteAssignmentRetriesCudaFallbackWhenColdLaunchExits(t *testing.T) {
 	if err != nil || !handled {
 		t.Fatalf("ExecuteAssignment() handled=%v error=%v, want handled success", handled, err)
 	}
-	if sidecar.safeCUDAFallbacks != 1 || sidecar.partialGPUFallbacks != 1 || sidecar.fallbackRestartPath != phiPath {
-		t.Fatalf("fallbacks safe/partial/path = %d/%d/%q, want one safe and one partial to %q", sidecar.safeCUDAFallbacks, sidecar.partialGPUFallbacks, sidecar.fallbackRestartPath, phiPath)
+	if sidecar.safeCUDAFallbacks != 0 || sidecar.partialGPUFallbacks != 1 || sidecar.fallbackRestartPath != phiPath {
+		t.Fatalf("fallbacks safe/partial/path = %d/%d/%q, want direct partial fallback to %q", sidecar.safeCUDAFallbacks, sidecar.partialGPUFallbacks, sidecar.fallbackRestartPath, phiPath)
 	}
 	if len(client.reqs) != 1 {
 		t.Fatalf("completion calls = %d, want 1 after fallback readiness", len(client.reqs))
@@ -395,6 +408,156 @@ func TestExecuteAssignmentRetriesCudaFallbackWhenColdLaunchExits(t *testing.T) {
 	metadata := receipt.Metadata[Task].(map[string]any)
 	if metadata["proof_status"] != ProofStatusMeasured || metadata["error_code"] != nil {
 		t.Fatalf("metadata = %+v, want measured receipt after CUDA fallback", metadata)
+	}
+}
+
+func TestExecuteAssignmentRetriesSafeCUDAForUnsupportedFastFlag(t *testing.T) {
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write phi fixture: %v", err)
+	}
+	launching := healthySidecarStatus()
+	launching.ModelPath = phiPath
+	launching.ModelFilename = filepath.Base(phiPath)
+	launching.ModelSizeBytes = int64(len("gguf"))
+	launching.Healthy = false
+	exited := launching
+	exited.Running = false
+	exited.Healthy = false
+	exited.LastError = "exit status 1: unknown argument --flash-attn"
+	exited.Reason = exited.LastError
+	ready := launching
+	ready.Healthy = true
+	sidecar := &fakeSidecar{
+		status:         healthySidecarStatus(),
+		restartStatus:  launching,
+		statusQueue:    []llamacpp.LlamaCppSidecarStatus{exited},
+		safeCUDAStatus: ready,
+	}
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("phi safe cuda output"),
+		OutputBytes:     int64(len("phi safe cuda output")),
+		TokensGenerated: 4,
+		TTFTMs:          20,
+		TotalTimeMs:     80,
+	}}
+	spec := validSpec(t)
+	spec.ModelID = "phi-4-Q4_K_M.gguf"
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	policy := modelpolicy.Policy{
+		AutoDownload:        false,
+		MaxSingleModelBytes: 16 << 30,
+		MaxCacheBytes:       64 << 30,
+		CacheDir:            cacheDir,
+		AllowedFamilies:     []string{"llama", "phi"},
+		AllowedFormats:      []string{"gguf"},
+		RuntimePolicy: modelpolicy.RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             16 << 30,
+			MaxRuntimeParameterCountBillions: 16,
+			AllowFamilies:                    []string{"llama", "phi"},
+		},
+	}
+
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvEnabled,
+		Policy: policy,
+		Runner: LlamaCppRunner{
+			Sidecar: sidecar,
+			Client:  client,
+			Policy:  policy,
+		},
+	})
+	if err != nil || !handled {
+		t.Fatalf("ExecuteAssignment() handled=%v error=%v, want handled success", handled, err)
+	}
+	if sidecar.safeCUDAFallbacks != 1 || sidecar.partialGPUFallbacks != 0 || sidecar.fallbackRestartPath != phiPath {
+		t.Fatalf("fallbacks safe/partial/path = %d/%d/%q, want one safe fallback to %q", sidecar.safeCUDAFallbacks, sidecar.partialGPUFallbacks, sidecar.fallbackRestartPath, phiPath)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["proof_status"] != ProofStatusMeasured || metadata["error_code"] != nil {
+		t.Fatalf("metadata = %+v, want measured receipt after safe CUDA fallback", metadata)
+	}
+}
+
+func TestExecuteAssignmentRestoresFastCUDAFromDegradedWarmSidecar(t *testing.T) {
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write phi fixture: %v", err)
+	}
+	degraded := healthySidecarStatus()
+	degraded.ModelPath = phiPath
+	degraded.ModelFilename = filepath.Base(phiPath)
+	degraded.ModelSizeBytes = int64(len("gguf"))
+	degraded.Launch = &llamacpp.LlamaCppLaunchConfig{
+		Mode:                "managed",
+		Managed:             true,
+		ConfiguredGPULayers: 35,
+		Profile:             llamacpp.LaunchProfileCUDAPartial,
+	}
+	fast := degraded
+	fast.Launch = &llamacpp.LlamaCppLaunchConfig{
+		Mode:                "managed",
+		Managed:             true,
+		ConfiguredGPULayers: llamacpp.DefaultGPULayers,
+		FastDefaultsEnabled: true,
+		Profile:             llamacpp.LaunchProfileCUDAFast,
+	}
+	sidecar := &fakeSidecar{
+		status:         degraded,
+		fastCUDAStatus: fast,
+	}
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("phi fast cuda output"),
+		OutputBytes:     int64(len("phi fast cuda output")),
+		TokensGenerated: 4,
+		TTFTMs:          20,
+		TotalTimeMs:     80,
+	}}
+	spec := validSpec(t)
+	spec.ModelID = "phi-4-Q4_K_M.gguf"
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	policy := modelpolicy.Policy{
+		AutoDownload:        false,
+		MaxSingleModelBytes: 16 << 30,
+		MaxCacheBytes:       64 << 30,
+		CacheDir:            cacheDir,
+		AllowedFamilies:     []string{"llama", "phi"},
+		AllowedFormats:      []string{"gguf"},
+		RuntimePolicy: modelpolicy.RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             16 << 30,
+			MaxRuntimeParameterCountBillions: 16,
+			AllowFamilies:                    []string{"llama", "phi"},
+		},
+	}
+
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvEnabled,
+		Policy: policy,
+		Runner: LlamaCppRunner{
+			Sidecar: sidecar,
+			Client:  client,
+			Policy:  policy,
+		},
+	})
+	if err != nil || !handled {
+		t.Fatalf("ExecuteAssignment() handled=%v error=%v, want handled success", handled, err)
+	}
+	if sidecar.fastCUDARestarts != 1 || sidecar.fastRestartPath != phiPath {
+		t.Fatalf("fast CUDA restarts/path = %d/%q, want one restart to %q", sidecar.fastCUDARestarts, sidecar.fastRestartPath, phiPath)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["proof_status"] != ProofStatusMeasured || metadata["error_code"] != nil {
+		t.Fatalf("metadata = %+v, want measured receipt after fast CUDA restore", metadata)
 	}
 }
 

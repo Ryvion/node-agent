@@ -142,6 +142,7 @@ func (m *Manager) SetModelPath(modelPath string) LlamaCppSidecarConfig {
 	// target model changes at runtime. Auto-discovery is opt-in because
 	// draft/target compatibility is backend-build sensitive.
 	m.cfg.DraftModelPath = redriveDraftModelPath(m.cfg.DraftModelPath, m.cfg.ModelPath)
+	redriveFastCUDAProfile(&m.cfg, false)
 	m.cfg = normalizeConfig(m.cfg)
 	return m.cfg
 }
@@ -357,10 +358,17 @@ func (m *Manager) RestartWithModel(ctx context.Context, modelPath string) LlamaC
 	return m.Restart(ctx)
 }
 
+func (m *Manager) RestartWithModelFastCUDA(ctx context.Context, modelPath string) LlamaCppSidecarStatus {
+	return m.restartWithModelLaunchFallback(ctx, modelPath, func(cfg *LlamaCppSidecarConfig) {
+		redriveFastCUDAProfile(cfg, true)
+	})
+}
+
 func (m *Manager) RestartWithModelSafeCUDA(ctx context.Context, modelPath string) LlamaCppSidecarStatus {
 	return m.restartWithModelLaunchFallback(ctx, modelPath, func(cfg *LlamaCppSidecarConfig) {
 		cfg.FastDefaults = false
 		cfg.DraftModelPath = ""
+		cfg.LaunchProfile = LaunchProfileCUDASafe
 	})
 }
 
@@ -371,6 +379,7 @@ func (m *Manager) RestartWithModelPartialGPU(ctx context.Context, modelPath stri
 		if cfg.GPULayers > fallbackPartialGPULayers {
 			cfg.GPULayers = fallbackPartialGPULayers
 		}
+		cfg.LaunchProfile = LaunchProfileCUDAPartial
 	})
 }
 
@@ -391,6 +400,28 @@ func (m *Manager) restartWithModelLaunchFallback(ctx context.Context, modelPath 
 	m.mu.Unlock()
 	m.rehomeExternalServerForManagedRestart()
 	return m.Restart(ctx)
+}
+
+func redriveFastCUDAProfile(cfg *LlamaCppSidecarConfig, force bool) {
+	if cfg == nil {
+		return
+	}
+	if !cfg.GPULayersExplicit && cfg.GPULayers > 0 && cfg.GPULayers < DefaultGPULayers {
+		cfg.GPULayers = DefaultGPULayers
+	}
+	if !cfg.FastDefaultsExplicit && cfg.GPULayers > 0 && (force || cudaLaunchDefaultsSupportedGOOS(runtime.GOOS)) {
+		cfg.FastDefaults = true
+	}
+	cfg.LaunchProfile = ""
+}
+
+func cudaLaunchDefaultsSupportedGOOS(goos string) bool {
+	switch strings.ToLower(strings.TrimSpace(goos)) {
+	case "windows", "linux":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) rehomeExternalServerForManagedRestart() {
@@ -596,6 +627,7 @@ func buildLaunchConfig(cfg LlamaCppSidecarConfig, managed bool, attached bool) *
 		ConfiguredGPULayers:      cfg.GPULayers,
 		FastDefaultsEnabled:      cfg.FastDefaults,
 		ConfiguredDraftGPULayers: cfg.DraftGPULayers,
+		Profile:                  cfg.LaunchProfile,
 	})
 }
 
@@ -721,6 +753,10 @@ func normalizeLaunchConfig(launch *LlamaCppLaunchConfig) *LlamaCppLaunchConfig {
 	}
 	if out.ConfiguredDraftGPULayers < 0 {
 		out.ConfiguredDraftGPULayers = 0
+	}
+	out.Profile = normalizeLaunchProfile(out.Profile)
+	if out.Profile == "" {
+		out.Profile = LaunchProfileDefault
 	}
 	if out.Mode == "managed" {
 		out.Managed = true

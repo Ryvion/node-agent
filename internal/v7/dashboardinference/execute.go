@@ -53,6 +53,10 @@ type LlamaCppModelSwitcher interface {
 	RestartWithModel(context.Context, string) llamacpp.LlamaCppSidecarStatus
 }
 
+type LlamaCppLaunchOptimizer interface {
+	RestartWithModelFastCUDA(context.Context, string) llamacpp.LlamaCppSidecarStatus
+}
+
 type LlamaCppLaunchFallbackSwitcher interface {
 	RestartWithModelSafeCUDA(context.Context, string) llamacpp.LlamaCppSidecarStatus
 	RestartWithModelPartialGPU(context.Context, string) llamacpp.LlamaCppSidecarStatus
@@ -214,6 +218,10 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 		status = r.ensureRequestedModelWith(runCtx, sidecar, status, spec)
 	}
 	modelPath := firstNonEmpty(status.ModelPath, r.resolveModelPath(spec))
+	if optimizer, ok := sidecar.(LlamaCppLaunchOptimizer); ok && shouldTryFastLaunch(status, spec) {
+		status = optimizer.RestartWithModelFastCUDA(runCtx, modelPath)
+		modelPath = firstNonEmpty(status.ModelPath, modelPath)
+	}
 	if shouldWaitForSidecarReadiness(status, spec, canSwitchModel) {
 		status = waitForSidecarReadiness(runCtx, sidecar, spec, status, modelPath)
 	}
@@ -409,14 +417,14 @@ func waitForSidecarReadiness(ctx context.Context, sidecar LlamaCppSidecar, spec 
 			}
 			modelPath = firstNonEmpty(modelPath, last.ModelPath)
 			if canFallback && modelPath != "" && sidecarLaunchExited(last) {
-				switch {
-				case !triedSafeCUDA:
+				switch launchFallbackForStatus(last, triedSafeCUDA, triedPartialGPU) {
+				case "safe_cuda":
 					triedSafeCUDA = true
 					last = fallback.RestartWithModelSafeCUDA(ctx, modelPath)
 					if sidecarReadyForSpec(last, spec) {
 						return last
 					}
-				case !triedPartialGPU:
+				case "partial_gpu":
 					triedPartialGPU = true
 					last = fallback.RestartWithModelPartialGPU(ctx, modelPath)
 					if sidecarReadyForSpec(last, spec) {
@@ -425,6 +433,40 @@ func waitForSidecarReadiness(ctx context.Context, sidecar LlamaCppSidecar, spec 
 				}
 			}
 		}
+	}
+}
+
+func shouldTryFastLaunch(status llamacpp.LlamaCppSidecarStatus, spec Spec) bool {
+	if !status.Enabled || !status.Available || !sidecarModelMatches(status, spec.ModelID) {
+		return false
+	}
+	if status.Attached {
+		return true
+	}
+	if status.Launch == nil {
+		return false
+	}
+	switch status.Launch.Profile {
+	case llamacpp.LaunchProfileCUDASafe, llamacpp.LaunchProfileCUDAPartial:
+		return true
+	default:
+		return false
+	}
+}
+
+func launchFallbackForStatus(status llamacpp.LlamaCppSidecarStatus, triedSafeCUDA bool, triedPartialGPU bool) string {
+	code := safeSidecarLaunchErrorCode(status)
+	if code == "llamacpp_cuda_out_of_memory" && !triedPartialGPU {
+		return "partial_gpu"
+	}
+	if triedSafeCUDA {
+		return ""
+	}
+	switch code {
+	case "", "llamacpp_launch_arg_unsupported", "llamacpp_model_load_failed", "llamacpp_sidecar_timeout":
+		return "safe_cuda"
+	default:
+		return ""
 	}
 }
 
