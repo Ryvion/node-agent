@@ -77,7 +77,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 		Threads:            envInt(source.Getenv(EnvThreads), 0),
 		GPULayers:          envInt(source.Getenv(EnvGPULayers), DefaultGPULayers),
 		ExtraArgs:          sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
-		FastDefaults:       envBool(source.Getenv(EnvFastDefaults)),
+		FastDefaults:       envBoolDefault(source.Getenv(EnvFastDefaults), defaultFastDefaults(source)),
 		DraftModelPath:     cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
 		DraftMaxTokens:     envInt(source.Getenv(EnvDraftMaxTokens), 0),
 		DraftMinTokens:     envInt(source.Getenv(EnvDraftMinTokens), 0),
@@ -137,6 +137,19 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 		cfg.DraftMaxTokens = DefaultDraftMaxTokens
 	}
 	return cfg
+}
+
+func defaultFastDefaults(source ConfigSource) bool {
+	source = normalizeConfigSource(source)
+	if envInt(source.Getenv(EnvGPULayers), DefaultGPULayers) <= 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(source.GOOS)) {
+	case "windows", "linux":
+		return nvidiaSMIAvailable(source.Getenv, source.LookPath, source.Stat)
+	default:
+		return false
+	}
 }
 
 func normalizeResidencyKeeperConfig(cfg ResidencyKeeperConfig) ResidencyKeeperConfig {
@@ -233,6 +246,8 @@ func envBoolDefault(value string, fallback bool) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "1", "true", "yes", "on", "enabled":
 		return true
+	case "0", "false", "no", "off", "disabled":
+		return false
 	default:
 		if strings.TrimSpace(value) == "" {
 			return fallback

@@ -73,6 +73,13 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 		Getenv: func(name string) string {
 			return ""
 		},
+		LookPath: func(string) (string, error) {
+			return "", os.ErrNotExist
+		},
+		Stat: func(string) (os.FileInfo, error) {
+			return nil, os.ErrNotExist
+		},
+		GOOS: "linux",
 	})
 	if cfg.GPULayers != DefaultGPULayers {
 		t.Fatalf("default gpu layers = %d, want %d", cfg.GPULayers, DefaultGPULayers)
@@ -81,7 +88,7 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 		t.Fatalf("server_path_explicit = true, want false for discovered/default path")
 	}
 	if cfg.FastDefaults {
-		t.Fatalf("fast defaults = true, want opt-in by default")
+		t.Fatalf("fast defaults = true, want false without CUDA signal")
 	}
 	if cfg.DraftGPULayers != 0 {
 		t.Fatalf("default draft gpu layers = %d, want 0", cfg.DraftGPULayers)
@@ -94,9 +101,19 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 			}
 			return ""
 		},
+		LookPath: func(name string) (string, error) {
+			if name == "nvidia-smi" {
+				return "/usr/bin/nvidia-smi", nil
+			}
+			return "", os.ErrNotExist
+		},
+		GOOS: "linux",
 	})
 	if cfg.GPULayers != 0 {
 		t.Fatalf("explicit gpu opt-out = %d, want 0", cfg.GPULayers)
+	}
+	if cfg.FastDefaults {
+		t.Fatalf("fast defaults = true, want false when GPU layers are disabled")
 	}
 
 	cfg = ConfigFromEnvWith(ConfigSource{
@@ -108,9 +125,38 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 				return ""
 			}
 		},
+		LookPath: func(name string) (string, error) {
+			if name == "nvidia-smi" {
+				return "/usr/bin/nvidia-smi", nil
+			}
+			return "", os.ErrNotExist
+		},
+		GOOS: "linux",
 	})
 	if cfg.GPULayers != 99 || cfg.DraftGPULayers != 99 {
 		t.Fatalf("explicit gpu config = %+v, want 99 GPU layers", cfg)
+	}
+	if !cfg.FastDefaults {
+		t.Fatalf("fast defaults = false, want automatic CUDA fast defaults")
+	}
+
+	cfg = ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			if name == EnvFastDefaults {
+				return "0"
+			}
+			return ""
+		},
+		LookPath: func(name string) (string, error) {
+			if name == "nvidia-smi" {
+				return "/usr/bin/nvidia-smi", nil
+			}
+			return "", os.ErrNotExist
+		},
+		GOOS: "linux",
+	})
+	if cfg.FastDefaults {
+		t.Fatalf("fast defaults = true, want explicit opt-out to win")
 	}
 
 	cfg = ConfigFromEnvWith(ConfigSource{
@@ -120,9 +166,62 @@ func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) 
 			}
 			return ""
 		},
+		LookPath: func(string) (string, error) {
+			return "", os.ErrNotExist
+		},
+		GOOS: "linux",
 	})
 	if !cfg.FastDefaults {
 		t.Fatalf("fast defaults = false, want explicit opt-in")
+	}
+}
+
+func TestConfigFromEnvEnablesFastDefaultsForWindowsNVIDIAServicePath(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			if name == "SystemRoot" {
+				return `C:\Windows`
+			}
+			return ""
+		},
+		LookPath: func(string) (string, error) {
+			return "", os.ErrNotExist
+		},
+		Stat: func(path string) (os.FileInfo, error) {
+			if strings.EqualFold(path, `C:\Windows\System32\nvidia-smi.exe`) {
+				return fakeWindowsBundleFileInfo{name: "nvidia-smi.exe"}, nil
+			}
+			return nil, os.ErrNotExist
+		},
+		GOOS: "windows",
+	})
+	if !cfg.FastDefaults {
+		t.Fatalf("fast defaults = false, want CUDA fast defaults from known nvidia-smi path")
+	}
+}
+
+func TestConfigFromEnvEnablesFastDefaultsForLinuxNVIDIAServicePath(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(string) string {
+			return ""
+		},
+		LookPath: func(string) (string, error) {
+			return "", os.ErrNotExist
+		},
+		Stat: func(path string) (os.FileInfo, error) {
+			if path == "/usr/bin/nvidia-smi" {
+				return fakeWindowsBundleFileInfo{name: "nvidia-smi"}, nil
+			}
+			return nil, os.ErrNotExist
+		},
+		GOOS: "linux",
+	})
+	if !cfg.FastDefaults {
+		t.Fatalf("fast defaults = false, want CUDA fast defaults from known Linux nvidia-smi path")
 	}
 }
 

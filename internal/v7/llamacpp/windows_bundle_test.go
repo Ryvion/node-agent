@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShouldInstallWindowsGPUServerBundleRefreshesMissingMarker(t *testing.T) {
@@ -77,9 +78,33 @@ func TestSelectManagedWindowsGPUBundlePrefersCUDAForNVIDIA(t *testing.T) {
 			}
 			return "", os.ErrNotExist
 		},
+		func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
 	)
 	if bundle.Accelerator != "cuda" || bundle.ServerURL != managedWindowsCUDAServerURL {
 		t.Fatalf("bundle = %+v, want cuda bundle", bundle)
+	}
+}
+
+func TestSelectManagedWindowsGPUBundlePrefersCUDAForKnownNVIDIASMIPath(t *testing.T) {
+	bundle := selectManagedWindowsGPUBundle(
+		func(key string) string {
+			switch key {
+			case "SystemRoot":
+				return `C:\Windows`
+			default:
+				return ""
+			}
+		},
+		func(string) (string, error) { return "", os.ErrNotExist },
+		func(path string) (os.FileInfo, error) {
+			if strings.EqualFold(path, `C:\Windows\System32\nvidia-smi.exe`) {
+				return fakeWindowsBundleFileInfo{name: "nvidia-smi.exe"}, nil
+			}
+			return nil, os.ErrNotExist
+		},
+	)
+	if bundle.Accelerator != "cuda" || bundle.ServerURL != managedWindowsCUDAServerURL {
+		t.Fatalf("bundle = %+v, want cuda bundle from known nvidia-smi path", bundle)
 	}
 }
 
@@ -92,8 +117,21 @@ func TestSelectManagedWindowsGPUBundleAllowsVulkanOverride(t *testing.T) {
 			return ""
 		},
 		func(string) (string, error) { return `C:\Windows\System32\nvidia-smi.exe`, nil },
+		func(string) (os.FileInfo, error) { return fakeWindowsBundleFileInfo{name: "nvidia-smi.exe"}, nil },
 	)
 	if bundle.Accelerator != "vulkan" || bundle.ServerURL != managedWindowsVulkanServerURL {
 		t.Fatalf("bundle = %+v, want explicit Vulkan bundle", bundle)
 	}
 }
+
+type fakeWindowsBundleFileInfo struct {
+	name string
+	dir  bool
+}
+
+func (f fakeWindowsBundleFileInfo) Name() string       { return f.name }
+func (f fakeWindowsBundleFileInfo) Size() int64        { return 1 }
+func (f fakeWindowsBundleFileInfo) Mode() os.FileMode  { return 0o755 }
+func (f fakeWindowsBundleFileInfo) ModTime() time.Time { return time.Unix(100, 0) }
+func (f fakeWindowsBundleFileInfo) IsDir() bool        { return f.dir }
+func (f fakeWindowsBundleFileInfo) Sys() any           { return nil }

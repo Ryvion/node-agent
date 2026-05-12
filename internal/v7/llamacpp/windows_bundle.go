@@ -77,10 +77,10 @@ func managedServerSourceMarkerPath(serverPath string) string {
 }
 
 func selectedManagedWindowsGPUBundle() managedWindowsGPUBundle {
-	return selectManagedWindowsGPUBundle(os.Getenv, exec.LookPath)
+	return selectManagedWindowsGPUBundle(os.Getenv, exec.LookPath, os.Stat)
 }
 
-func selectManagedWindowsGPUBundle(getenv func(string) string, lookPath func(string) (string, error)) managedWindowsGPUBundle {
+func selectManagedWindowsGPUBundle(getenv func(string) string, lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) managedWindowsGPUBundle {
 	accelerator := ""
 	if getenv != nil {
 		accelerator = strings.ToLower(strings.TrimSpace(getenv(EnvWindowsAccelerator)))
@@ -91,12 +91,65 @@ func selectManagedWindowsGPUBundle(getenv func(string) string, lookPath func(str
 	case "vulkan":
 		return managedWindowsVulkanBundle()
 	}
-	if lookPath != nil {
-		if _, err := lookPath("nvidia-smi"); err == nil {
-			return managedWindowsCUDABundle()
-		}
+	if nvidiaSMIAvailable(getenv, lookPath, stat) {
+		return managedWindowsCUDABundle()
 	}
 	return managedWindowsVulkanBundle()
+}
+
+func nvidiaSMIAvailable(getenv func(string) string, lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) bool {
+	if lookPath != nil {
+		for _, name := range []string{"nvidia-smi", "nvidia-smi.exe"} {
+			if path, err := lookPath(name); err == nil && strings.TrimSpace(path) != "" {
+				return true
+			}
+		}
+	}
+	if stat == nil {
+		stat = os.Stat
+	}
+	for _, path := range knownNVIDIASMIPaths(getenv) {
+		info, err := stat(path)
+		if err == nil && info != nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func knownNVIDIASMIPaths(getenv func(string) string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	paths := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		for _, existing := range paths {
+			if strings.EqualFold(existing, path) {
+				return
+			}
+		}
+		paths = append(paths, path)
+	}
+	for _, root := range []string{getenv("SystemRoot"), getenv("WINDIR")} {
+		if strings.TrimSpace(root) != "" {
+			add(filepath.Join(root, "System32", "nvidia-smi.exe"))
+		}
+	}
+	for _, root := range []string{getenv("ProgramFiles"), getenv("ProgramW6432")} {
+		if strings.TrimSpace(root) != "" {
+			add(filepath.Join(root, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"))
+		}
+	}
+	add(`/usr/bin/nvidia-smi`)
+	add(`/usr/local/bin/nvidia-smi`)
+	add(`/usr/local/cuda/bin/nvidia-smi`)
+	add(`C:\Windows\System32\nvidia-smi.exe`)
+	add(`C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe`)
+	return paths
 }
 
 func managedWindowsCUDABundle() managedWindowsGPUBundle {
