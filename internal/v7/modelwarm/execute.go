@@ -113,7 +113,7 @@ func ExecuteWarmSpec(ctx context.Context, spec WarmSpec, opts ExecuteOptions) (W
 		return WarmReceipt{}, codedError{code: "policy_invalid", err: err}
 	}
 	cacheStatus := opts.cacheStatus(policy.CacheDir)
-	cachedModel, ok := findCachedModel(cacheStatus, spec.ModelID)
+	cachedModel, ok := resolveWarmModel(cacheStatus, spec)
 	if !ok {
 		err := codedError{code: "model_not_found", err: ErrModelNotFound}
 		return BuildWarmRejectionReceipt(spec, err), err
@@ -157,6 +157,28 @@ func ExecuteWarmSpec(ctx context.Context, spec WarmSpec, opts ExecuteOptions) (W
 		result.Benchmark = &snapshot
 	}
 	return BuildWarmReceipt(result)
+}
+
+func resolveWarmModel(status modelcache.Status, spec WarmSpec) (modelcache.Model, bool) {
+	if model, ok := findCachedModel(status, spec.ModelID); ok {
+		return model, true
+	}
+	if strings.TrimSpace(spec.ModelPath) == "" || !warmModelPathMatches(spec.ModelPath, spec.ModelID) {
+		return modelcache.Model{}, false
+	}
+	info, err := os.Stat(spec.ModelPath)
+	if err != nil || info.IsDir() {
+		return modelcache.Model{}, false
+	}
+	return modelcache.Model{
+		ModelID:   spec.ModelID,
+		Filename:  filepath.Base(spec.ModelPath),
+		Path:      spec.ModelPath,
+		SizeBytes: info.Size(),
+		Format:    "gguf",
+		Installed: true,
+		Resident:  true,
+	}, true
 }
 
 func buildWarmFailureReceipt(spec WarmSpec, cachedModel modelcache.Model, runErr error) WarmReceipt {
@@ -241,6 +263,14 @@ func warmModelMatch(model modelcache.Model, modelID string) bool {
 		}
 	}
 	return false
+}
+
+func warmModelPathMatches(modelPath string, modelID string) bool {
+	return warmModelMatch(modelcache.Model{
+		ModelID:  filepath.Base(modelPath),
+		Filename: filepath.Base(modelPath),
+		Path:     modelPath,
+	}, modelID)
 }
 
 func warmModelAliasToken(value string) string {

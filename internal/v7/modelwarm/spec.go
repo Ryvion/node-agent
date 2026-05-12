@@ -30,6 +30,7 @@ type WarmSpec struct {
 	WarmID                string `json:"warm_id"`
 	JobID                 string `json:"job_id"`
 	ModelID               string `json:"model_id"`
+	ModelPath             string `json:"model_path,omitempty"`
 	Backend               string `json:"backend"`
 	RunBenchmarkAfterWarm bool   `json:"run_benchmark_after_warm"`
 	TimeoutMs             int64  `json:"timeout_ms"`
@@ -133,6 +134,7 @@ func NormalizeWarmSpec(spec WarmSpec) WarmSpec {
 	spec.WarmID = cleanWarmText(spec.WarmID, maxWarmTextLen)
 	spec.JobID = cleanWarmText(spec.JobID, maxWarmTextLen)
 	spec.ModelID = cleanWarmText(spec.ModelID, maxWarmTextLen)
+	spec.ModelPath = cleanWarmPath(spec.ModelPath, maxWarmPathLen)
 	spec.Backend = normalizeBackend(spec.Backend)
 	if spec.Backend == "" {
 		spec.Backend = backendLlamaCPP
@@ -141,6 +143,20 @@ func NormalizeWarmSpec(spec WarmSpec) WarmSpec {
 		spec.TimeoutMs = defaultWarmTimeoutMs
 	}
 	return spec
+}
+
+func cleanWarmPath(value string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "\r", "")
+	value = strings.ReplaceAll(value, "\n", "")
+	if maxRunes <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes])
 }
 
 func normalizeBackend(value string) string {

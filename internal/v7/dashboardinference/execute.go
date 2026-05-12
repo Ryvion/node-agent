@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/node-agent/internal/v7/modelcache"
 	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 )
 
@@ -44,6 +45,10 @@ type ExecuteOptions struct {
 type LlamaCppSidecar interface {
 	Start(context.Context) llamacpp.LlamaCppSidecarStatus
 	Status(context.Context) llamacpp.LlamaCppSidecarStatus
+}
+
+type LlamaCppModelSwitcher interface {
+	RestartWithModel(context.Context, string) llamacpp.LlamaCppSidecarStatus
 }
 
 type KeepWarmChecker interface {
@@ -195,7 +200,11 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 		return failedExecutionResult(spec, "dashboard_inference_context_unavailable"), nil
 	}
 
-	status := r.ensureSidecar(runCtx)
+	sidecar := r.sidecar()
+	status := r.ensureSidecarWith(runCtx, sidecar)
+	if !sidecarModelMatches(status, spec.ModelID) {
+		status = r.ensureRequestedModelWith(runCtx, sidecar, status, spec)
+	}
 	if !status.Enabled || !status.Available || !status.Running || !status.Healthy {
 		return failedExecutionResult(spec, safeSidecarFailure(status)), nil
 	}
@@ -305,7 +314,10 @@ func shouldStreamDashboardInference(spec Spec, status llamacpp.LlamaCppSidecarSt
 }
 
 func (r LlamaCppRunner) ensureSidecar(ctx context.Context) llamacpp.LlamaCppSidecarStatus {
-	sidecar := r.sidecar()
+	return r.ensureSidecarWith(ctx, r.sidecar())
+}
+
+func (r LlamaCppRunner) ensureSidecarWith(ctx context.Context, sidecar LlamaCppSidecar) llamacpp.LlamaCppSidecarStatus {
 	if enabler, ok := sidecar.(LlamaCppEnabler); ok {
 		enabler.SetEnabled(true)
 	}
@@ -323,6 +335,47 @@ func (r LlamaCppRunner) ensureSidecar(ctx context.Context) llamacpp.LlamaCppSide
 		status = sidecar.Status(ctx)
 	}
 	return status
+}
+
+func (r LlamaCppRunner) ensureRequestedModel(ctx context.Context, status llamacpp.LlamaCppSidecarStatus, spec Spec) llamacpp.LlamaCppSidecarStatus {
+	return r.ensureRequestedModelWith(ctx, r.sidecar(), status, spec)
+}
+
+func (r LlamaCppRunner) ensureRequestedModelWith(ctx context.Context, sidecar LlamaCppSidecar, status llamacpp.LlamaCppSidecarStatus, spec Spec) llamacpp.LlamaCppSidecarStatus {
+	if sidecarModelMatches(status, spec.ModelID) {
+		return status
+	}
+	switcher, ok := sidecar.(LlamaCppModelSwitcher)
+	if !ok {
+		return status
+	}
+	modelPath := r.resolveModelPath(spec)
+	if modelPath == "" {
+		return status
+	}
+	if enabler, ok := sidecar.(LlamaCppEnabler); ok {
+		enabler.SetEnabled(true)
+	}
+	switched := switcher.RestartWithModel(ctx, modelPath)
+	if switched.Enabled || switched.Available || switched.Running || switched.Healthy || switched.ModelPath != "" {
+		return switched
+	}
+	return status
+}
+
+func (r LlamaCppRunner) resolveModelPath(spec Spec) string {
+	spec = normalizeSpec(spec)
+	if spec.ModelPath != "" && modelPathMatches(spec.ModelPath, spec.ModelID) {
+		return spec.ModelPath
+	}
+	policy := r.policy()
+	if err := modelpolicy.ValidatePolicy(policy); err != nil {
+		return ""
+	}
+	if model, ok := findDashboardCachedModel(modelcache.BuildStatus(policy.CacheDir), spec.ModelID); ok {
+		return model.Path
+	}
+	return ""
 }
 
 func (r LlamaCppRunner) sidecar() LlamaCppSidecar {
@@ -415,11 +468,60 @@ func sidecarModelMatches(status llamacpp.LlamaCppSidecarStatus, requested string
 	return false
 }
 
+func findDashboardCachedModel(status modelcache.Status, modelID string) (modelcache.Model, bool) {
+	status = modelcache.NormalizeStatus(status)
+	modelID = cleanText(modelID, maxModelIDLen)
+	if modelID == "" {
+		return modelcache.Model{}, false
+	}
+	for _, model := range status.Models {
+		if !model.Installed || strings.TrimSpace(model.Path) == "" {
+			continue
+		}
+		if dashboardModelMatch(model, modelID) {
+			return model, true
+		}
+	}
+	return modelcache.Model{}, false
+}
+
+func dashboardModelMatch(model modelcache.Model, modelID string) bool {
+	for _, value := range []string{model.ModelID, model.Filename, filepath.Base(model.Path), model.Path} {
+		if modelPathMatches(value, modelID) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelPathMatches(value string, modelID string) bool {
+	want := normalizeModelComparable(modelID)
+	if want == "" {
+		return false
+	}
+	return normalizeModelComparable(value) == want ||
+		modelAliasToken(value) == modelAliasToken(modelID)
+}
+
+func modelAliasToken(value string) string {
+	token := normalizeModelComparable(value)
+	token = strings.TrimSuffix(token, ".gguf")
+	switch {
+	case token == "gemma-3-27b-it":
+		return token
+	case strings.HasPrefix(token, "gemma-3-27b-it-"):
+		return "gemma-3-27b-it"
+	default:
+		return token
+	}
+}
+
 func normalizeModelComparable(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || value == "." || value == string(filepath.Separator) {
 		return ""
 	}
+	value = strings.ReplaceAll(value, "\\", "/")
 	return strings.ToLower(filepath.Base(value))
 }
 

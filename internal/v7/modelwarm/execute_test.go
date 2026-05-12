@@ -181,6 +181,46 @@ func TestExecuteWarmAssignmentMissingModelReturnsSafeReceipt(t *testing.T) {
 	}
 }
 
+func TestExecuteWarmAssignmentUsesSpecModelPathWhenCacheScanMisses(t *testing.T) {
+	t.Parallel()
+
+	modelDir := t.TempDir()
+	phiPath := filepath.Join(modelDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf-path"), 0o644); err != nil {
+		t.Fatalf("write phi fixture: %v", err)
+	}
+	spec := testWarmSpec()
+	spec.ModelPath = phiPath
+	manager := &fakeWarmManager{
+		status: llamacpp.LlamaCppSidecarStatus{
+			Enabled:       true,
+			Available:     true,
+			Running:       true,
+			Healthy:       true,
+			ModelPath:     filepath.Join(t.TempDir(), "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
+			ModelFilename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+			Backend:       llamacpp.BackendName,
+		},
+	}
+
+	receipt, handled, err := ExecuteWarmAssignment(context.Background(), testWarmSpecJSON(t, spec), ExecuteOptions{
+		Getenv:          testWarmGetenv,
+		Policy:          testWarmPolicy(t.TempDir()),
+		LlamaCppManager: manager,
+		BenchmarkRunner: &fakeWarmBenchmarkRunner{snapshot: testWarmBenchmarkSnapshot()},
+	})
+	if err != nil || !handled {
+		t.Fatalf("ExecuteWarmAssignment() handled=%v error=%v, want spec-path success", handled, err)
+	}
+	if manager.restartCalls != 1 || manager.modelPath != phiPath {
+		t.Fatalf("manager restart calls/path = %d/%q, want one restart to %q", manager.restartCalls, manager.modelPath, phiPath)
+	}
+	metadata := warmMetadata(t, receipt)
+	if metadata["model_path"] != phiPath || metadata["warm"] != true {
+		t.Fatalf("receipt metadata = %+v, want warmed spec model path", metadata)
+	}
+}
+
 func TestFindCachedModelMatchesGemmaQATForLegacyCatalogName(t *testing.T) {
 	t.Parallel()
 

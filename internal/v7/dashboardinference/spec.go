@@ -24,6 +24,7 @@ const (
 	defaultMaxReturnChars = 8192
 	maxIDLen              = 256
 	maxModelIDLen         = 256
+	maxModelPathLen       = 2048
 	maxPromptChars        = 32768
 	maxSystemPromptChars  = 4096
 	maxMessages           = 32
@@ -42,6 +43,7 @@ type Spec struct {
 	JobID                     string                       `json:"job_id"`
 	Backend                   string                       `json:"backend"`
 	ModelID                   string                       `json:"model_id"`
+	ModelPath                 string                       `json:"model_path,omitempty"`
 	TargetNodeID              string                       `json:"target_node_id"`
 	Prompt                    string                       `json:"prompt,omitempty"`
 	SystemPrompt              string                       `json:"system_prompt,omitempty"`
@@ -186,6 +188,7 @@ func normalizeSpec(spec Spec) Spec {
 	spec.JobID = cleanText(spec.JobID, maxIDLen)
 	spec.Backend = normalizeBackendName(spec.Backend)
 	spec.ModelID = cleanText(spec.ModelID, maxModelIDLen)
+	spec.ModelPath = cleanPath(spec.ModelPath, maxModelPathLen)
 	spec.TargetNodeID = cleanText(spec.TargetNodeID, maxIDLen)
 	spec.Prompt = cleanPrompt(spec.Prompt, maxPromptChars)
 	spec.SystemPrompt = cleanPrompt(spec.SystemPrompt, maxSystemPromptChars)
@@ -270,6 +273,20 @@ func cleanPrompt(value string, maxRunes int) string {
 	value = strings.TrimSpace(value)
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
+	if maxRunes <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes])
+}
+
+func cleanPath(value string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "\r", "")
+	value = strings.ReplaceAll(value, "\n", "")
 	if maxRunes <= 0 {
 		return value
 	}

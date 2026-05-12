@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,8 +16,11 @@ import (
 )
 
 type fakeSidecar struct {
-	status llamacpp.LlamaCppSidecarStatus
-	starts int
+	status        llamacpp.LlamaCppSidecarStatus
+	starts        int
+	restarts      int
+	restartPath   string
+	restartStatus llamacpp.LlamaCppSidecarStatus
 }
 
 func (f *fakeSidecar) Start(context.Context) llamacpp.LlamaCppSidecarStatus {
@@ -24,6 +29,23 @@ func (f *fakeSidecar) Start(context.Context) llamacpp.LlamaCppSidecarStatus {
 }
 
 func (f *fakeSidecar) Status(context.Context) llamacpp.LlamaCppSidecarStatus {
+	return f.status
+}
+
+func (f *fakeSidecar) RestartWithModel(_ context.Context, modelPath string) llamacpp.LlamaCppSidecarStatus {
+	f.restarts++
+	f.restartPath = modelPath
+	if f.restartStatus.ModelPath != "" {
+		f.status = f.restartStatus
+		return f.status
+	}
+	f.status.ModelPath = modelPath
+	f.status.ModelFilename = filepath.Base(modelPath)
+	f.status.ModelSizeBytes = int64(len(modelPath))
+	f.status.Enabled = true
+	f.status.Available = true
+	f.status.Running = true
+	f.status.Healthy = true
 	return f.status
 }
 
@@ -135,6 +157,65 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	if !ReceiptJSONContainsNoRawText(receipt) {
 		raw, _ := json.Marshal(receipt.Metadata)
 		t.Fatalf("metadata leaked raw text: %s", raw)
+	}
+}
+
+func TestExecuteAssignmentSwitchesColdResidentModelBeforeInference(t *testing.T) {
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write phi fixture: %v", err)
+	}
+	sidecar := &fakeSidecar{status: healthySidecarStatus()}
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("phi output"),
+		OutputBytes:     int64(len("phi output")),
+		TokensGenerated: 2,
+		TTFTMs:          12,
+		TotalTimeMs:     42,
+	}}
+	spec := validSpec(t)
+	spec.ModelID = "phi-4-Q4_K_M.gguf"
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+
+	policy := modelpolicy.Policy{
+		AutoDownload:        false,
+		MaxSingleModelBytes: 16 << 30,
+		MaxCacheBytes:       64 << 30,
+		CacheDir:            cacheDir,
+		AllowedFamilies:     []string{"llama", "phi"},
+		AllowedFormats:      []string{"gguf"},
+		RuntimePolicy: modelpolicy.RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             16 << 30,
+			MaxRuntimeParameterCountBillions: 16,
+			AllowFamilies:                    []string{"llama", "phi"},
+		},
+	}
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvEnabled,
+		Policy: policy,
+		Runner: LlamaCppRunner{
+			Sidecar: sidecar,
+			Client:  client,
+			Policy:  policy,
+		},
+	})
+	if err != nil || !handled {
+		t.Fatalf("ExecuteAssignment() handled=%v error=%v, want handled success", handled, err)
+	}
+	if sidecar.restarts != 1 || sidecar.restartPath != phiPath {
+		t.Fatalf("sidecar restarts/path = %d/%q, want one restart to %q", sidecar.restarts, sidecar.restartPath, phiPath)
+	}
+	if len(client.reqs) != 1 || client.reqs[0].ModelID != "phi-4-Q4_K_M.gguf" {
+		t.Fatalf("completion requests = %#v, want Phi inference after model switch", client.reqs)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["proof_status"] != ProofStatusMeasured || metadata["model_id"] != "phi-4-Q4_K_M.gguf" {
+		t.Fatalf("metadata = %+v, want measured Phi receipt", metadata)
 	}
 }
 
