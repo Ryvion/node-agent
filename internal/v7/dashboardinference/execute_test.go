@@ -17,6 +17,7 @@ import (
 
 type fakeSidecar struct {
 	status        llamacpp.LlamaCppSidecarStatus
+	statusQueue   []llamacpp.LlamaCppSidecarStatus
 	starts        int
 	restarts      int
 	restartPath   string
@@ -29,6 +30,12 @@ func (f *fakeSidecar) Start(context.Context) llamacpp.LlamaCppSidecarStatus {
 }
 
 func (f *fakeSidecar) Status(context.Context) llamacpp.LlamaCppSidecarStatus {
+	if len(f.statusQueue) > 0 {
+		next := f.statusQueue[0]
+		f.statusQueue = f.statusQueue[1:]
+		f.status = next
+		return f.status
+	}
 	return f.status
 }
 
@@ -216,6 +223,76 @@ func TestExecuteAssignmentSwitchesColdResidentModelBeforeInference(t *testing.T)
 	metadata := receipt.Metadata[Task].(map[string]any)
 	if metadata["proof_status"] != ProofStatusMeasured || metadata["model_id"] != "phi-4-Q4_K_M.gguf" {
 		t.Fatalf("metadata = %+v, want measured Phi receipt", metadata)
+	}
+}
+
+func TestExecuteAssignmentWaitsForColdModelRestartToBecomeHealthy(t *testing.T) {
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write phi fixture: %v", err)
+	}
+	restarting := healthySidecarStatus()
+	restarting.ModelPath = phiPath
+	restarting.ModelFilename = filepath.Base(phiPath)
+	restarting.ModelSizeBytes = int64(len("gguf"))
+	restarting.Healthy = false
+	ready := restarting
+	ready.Healthy = true
+	sidecar := &fakeSidecar{
+		status:        healthySidecarStatus(),
+		restartStatus: restarting,
+		statusQueue:   []llamacpp.LlamaCppSidecarStatus{ready},
+	}
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("phi warmed output"),
+		OutputBytes:     int64(len("phi warmed output")),
+		TokensGenerated: 3,
+		TTFTMs:          30,
+		TotalTimeMs:     90,
+	}}
+	spec := validSpec(t)
+	spec.ModelID = "phi-4-Q4_K_M.gguf"
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+
+	policy := modelpolicy.Policy{
+		AutoDownload:        false,
+		MaxSingleModelBytes: 16 << 30,
+		MaxCacheBytes:       64 << 30,
+		CacheDir:            cacheDir,
+		AllowedFamilies:     []string{"llama", "phi"},
+		AllowedFormats:      []string{"gguf"},
+		RuntimePolicy: modelpolicy.RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             16 << 30,
+			MaxRuntimeParameterCountBillions: 16,
+			AllowFamilies:                    []string{"llama", "phi"},
+		},
+	}
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvEnabled,
+		Policy: policy,
+		Runner: LlamaCppRunner{
+			Sidecar: sidecar,
+			Client:  client,
+			Policy:  policy,
+		},
+	})
+	if err != nil || !handled {
+		t.Fatalf("ExecuteAssignment() handled=%v error=%v, want handled success", handled, err)
+	}
+	if sidecar.restarts != 1 || sidecar.restartPath != phiPath {
+		t.Fatalf("sidecar restarts/path = %d/%q, want one restart to %q", sidecar.restarts, sidecar.restartPath, phiPath)
+	}
+	if len(client.reqs) != 1 {
+		t.Fatalf("completion calls = %d, want 1 after restart became healthy", len(client.reqs))
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["proof_status"] != ProofStatusMeasured || metadata["error_code"] != nil {
+		t.Fatalf("metadata = %+v, want measured receipt after delayed sidecar readiness", metadata)
 	}
 }
 

@@ -22,6 +22,8 @@ const (
 
 const internalDashboardPrompt = "Answer in one short sentence: confirm the local Ryvion dashboard inference path is ready."
 
+const sidecarReadinessPollInterval = 100 * time.Millisecond
+
 var (
 	ErrDisabled           = errors.New("dashboardinference: feature disabled")
 	ErrTextOutputDisabled = errors.New("dashboardinference: text output disabled")
@@ -202,8 +204,12 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 
 	sidecar := r.sidecar()
 	status := r.ensureSidecarWith(runCtx, sidecar)
+	_, canSwitchModel := sidecar.(LlamaCppModelSwitcher)
 	if !sidecarModelMatches(status, spec.ModelID) {
 		status = r.ensureRequestedModelWith(runCtx, sidecar, status, spec)
+	}
+	if shouldWaitForSidecarReadiness(status, spec, canSwitchModel) {
+		status = waitForSidecarReadiness(runCtx, sidecar, spec, status)
 	}
 	if !status.Enabled || !status.Available || !status.Running || !status.Healthy {
 		return failedExecutionResult(spec, safeSidecarFailure(status)), nil
@@ -361,6 +367,46 @@ func (r LlamaCppRunner) ensureRequestedModelWith(ctx context.Context, sidecar Ll
 		return switched
 	}
 	return status
+}
+
+func shouldWaitForSidecarReadiness(status llamacpp.LlamaCppSidecarStatus, spec Spec, canSwitchModel bool) bool {
+	if !status.Enabled || !status.Available || !status.Running {
+		return false
+	}
+	if sidecarReadyForSpec(status, spec) {
+		return false
+	}
+	if !status.Healthy {
+		return true
+	}
+	return canSwitchModel && !sidecarModelMatches(status, spec.ModelID)
+}
+
+func waitForSidecarReadiness(ctx context.Context, sidecar LlamaCppSidecar, spec Spec, last llamacpp.LlamaCppSidecarStatus) llamacpp.LlamaCppSidecarStatus {
+	if sidecar == nil || sidecarReadyForSpec(last, spec) {
+		return last
+	}
+	ticker := time.NewTicker(sidecarReadinessPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return last
+		case <-ticker.C:
+			last = sidecar.Status(ctx)
+			if sidecarReadyForSpec(last, spec) {
+				return last
+			}
+		}
+	}
+}
+
+func sidecarReadyForSpec(status llamacpp.LlamaCppSidecarStatus, spec Spec) bool {
+	return status.Enabled &&
+		status.Available &&
+		status.Running &&
+		status.Healthy &&
+		sidecarModelMatches(status, spec.ModelID)
 }
 
 func (r LlamaCppRunner) resolveModelPath(spec Spec) string {
