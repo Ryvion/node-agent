@@ -214,6 +214,33 @@ func TestResidencyKeeperConfigFromEnvDefaults(t *testing.T) {
 	}
 }
 
+func TestResidencyKeeperConfigDefaultsToEnabledForProductWarmResidency(t *testing.T) {
+	t.Parallel()
+
+	cfg := ResidencyKeeperConfigFromEnvWith(ConfigSource{
+		Getenv: func(string) string { return "" },
+	})
+	if !cfg.Enabled {
+		t.Fatal("enabled = false, want product warm residency on by default")
+	}
+}
+
+func TestResidencyKeeperConfigHonorsModelWarmDisable(t *testing.T) {
+	t.Parallel()
+
+	cfg := ResidencyKeeperConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			if name == EnvDisableModelWarm {
+				return "1"
+			}
+			return ""
+		},
+	})
+	if cfg.Enabled {
+		t.Fatal("enabled = true, want disabled when model warm is disabled")
+	}
+}
+
 type fakeResidencySidecar struct {
 	mu          sync.Mutex
 	cfg         LlamaCppSidecarConfig

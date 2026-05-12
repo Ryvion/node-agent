@@ -2468,6 +2468,9 @@ func processOptionalV7DashboardInference(ctx context.Context, client *hub.Client
 		}
 		status.RecordReceiptSubmitted(statusRunID, hubReceipt.JobID)
 	}
+	if measured {
+		requestV7CapabilityHeartbeat("v7_dashboard_inference_warm_changed")
+	}
 	return true, snapshot, recordErr
 }
 

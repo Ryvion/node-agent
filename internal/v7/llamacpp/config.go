@@ -18,6 +18,7 @@ const maxConfigTextLen = 1024
 
 const (
 	EnvKeepWarm               = "RYV_LLAMA_CPP_KEEP_WARM"
+	EnvDisableModelWarm       = "RYV_NODE_DISABLE_MODEL_WARM"
 	EnvHealthIntervalSecs     = "RYV_LLAMA_CPP_HEALTH_INTERVAL_SECONDS"
 	EnvRestartBackoffSecs     = "RYV_LLAMA_CPP_RESTART_BACKOFF_SECONDS"
 	EnvMaxRestartsPerHour     = "RYV_LLAMA_CPP_MAX_RESTARTS_PER_HOUR"
@@ -55,8 +56,12 @@ func ResidencyKeeperConfigFromEnv() ResidencyKeeperConfig {
 
 func ResidencyKeeperConfigFromEnvWith(source ConfigSource) ResidencyKeeperConfig {
 	source = normalizeConfigSource(source)
+	enabled := envBoolDefault(source.Getenv(EnvKeepWarm), true)
+	if envBool(source.Getenv(EnvDisableModelWarm)) {
+		enabled = false
+	}
 	return normalizeResidencyKeeperConfig(ResidencyKeeperConfig{
-		Enabled:            envBool(source.Getenv(EnvKeepWarm)),
+		Enabled:            enabled,
 		HealthInterval:     envDurationSeconds(source.Getenv(EnvHealthIntervalSecs), DefaultHealthInterval),
 		RestartBackoff:     envDurationSeconds(source.Getenv(EnvRestartBackoffSecs), DefaultRestartBackoff),
 		MaxRestartsPerHour: envInt(source.Getenv(EnvMaxRestartsPerHour), DefaultMaxRestartsPerHour),

@@ -213,7 +213,10 @@ func KeepWarmEnabledFromEnv(getenv func(string) string) bool {
 	if getenv == nil {
 		return false
 	}
-	return envBool(getenv(EnvKeepWarm))
+	if envBool(getenv(EnvDisableModelWarm)) {
+		return false
+	}
+	return envBoolDefault(getenv(EnvKeepWarm), true)
 }
 
 func CompleteInternalBenchmarkPrompt(ctx context.Context, client CompletionClient, req CompletionRequest) (CompletionResult, bool, error) {

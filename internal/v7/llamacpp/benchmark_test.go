@@ -258,6 +258,9 @@ func TestCompleteInternalBenchmarkPromptUsesFixedPromptAndFallback(t *testing.T)
 }
 
 func TestKeepWarmEnabledFromEnv(t *testing.T) {
+	if !KeepWarmEnabledFromEnv(func(string) string { return "" }) {
+		t.Fatal("KeepWarmEnabledFromEnv(empty) = false")
+	}
 	if !KeepWarmEnabledFromEnv(func(key string) string {
 		if key == EnvKeepWarm {
 			return "true"
@@ -266,8 +269,21 @@ func TestKeepWarmEnabledFromEnv(t *testing.T) {
 	}) {
 		t.Fatal("KeepWarmEnabledFromEnv(true) = false")
 	}
-	if KeepWarmEnabledFromEnv(func(string) string { return "" }) {
-		t.Fatal("KeepWarmEnabledFromEnv(empty) = true")
+	if KeepWarmEnabledFromEnv(func(key string) string {
+		if key == EnvKeepWarm {
+			return "false"
+		}
+		return ""
+	}) {
+		t.Fatal("KeepWarmEnabledFromEnv(false) = true")
+	}
+	if KeepWarmEnabledFromEnv(func(key string) string {
+		if key == EnvDisableModelWarm {
+			return "1"
+		}
+		return ""
+	}) {
+		t.Fatal("KeepWarmEnabledFromEnv(disable model warm) = true")
 	}
 }
 
