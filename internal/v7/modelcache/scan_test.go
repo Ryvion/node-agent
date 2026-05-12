@@ -83,6 +83,37 @@ func TestScanCanonicalizesTinyLlamaDrafterAlias(t *testing.T) {
 	}
 }
 
+func TestBuildStatusFromDirsMergesConfiguredModelDirectories(t *testing.T) {
+	t.Parallel()
+
+	primaryDir := t.TempDir()
+	extraDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(primaryDir, "phi-4-Q4_K_M.gguf"), []byte("phi"), 0o644); err != nil {
+		t.Fatalf("write primary model: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(extraDir, "gemma-3-27b-it-q4_0.gguf"), []byte("gemma"), 0o644); err != nil {
+		t.Fatalf("write extra model: %v", err)
+	}
+
+	status := BuildStatusFromDirs([]string{primaryDir, extraDir})
+	if status.CacheDir != primaryDir {
+		t.Fatalf("cache_dir = %q, want primary dir %q", status.CacheDir, primaryDir)
+	}
+	if len(status.Models) != 2 {
+		t.Fatalf("models = %+v, want primary and extra models", status.Models)
+	}
+	byID := map[string]Model{}
+	for _, model := range status.Models {
+		byID[model.ModelID] = model
+	}
+	if got := byID["phi-4-Q4_K_M.gguf"]; got.FamilyHint != "phi" || got.ParameterCountBillions != 14 {
+		t.Fatalf("phi model = %+v", got)
+	}
+	if got := byID["gemma-3-27b-it-q4_0.gguf"]; got.FamilyHint != "gemma" || got.ParameterCountBillions != 27 {
+		t.Fatalf("gemma model = %+v", got)
+	}
+}
+
 func TestScanAppliesModelCapAndDoesNotLeaveConfiguredDir(t *testing.T) {
 	t.Parallel()
 

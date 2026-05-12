@@ -12,6 +12,38 @@ func BuildStatus(cacheDir string) Status {
 	return Scan(cacheDir)
 }
 
+func BuildStatusFromDirs(cacheDirs []string) Status {
+	if len(cacheDirs) == 0 {
+		return BuildStatus("")
+	}
+	merged := Status{
+		CacheDir: cleanCachePath("", cacheDirs[0]),
+		Models:   []Model{},
+	}
+	seenModelIDs := map[string]struct{}{}
+	seenPaths := map[string]struct{}{}
+	for _, cacheDir := range cacheDirs {
+		status := Scan(cacheDir)
+		for _, model := range status.Models {
+			modelKey := strings.ToLower(strings.TrimSpace(firstNonEmptyString(model.ModelID, model.Filename)))
+			pathKey := strings.ToLower(strings.TrimSpace(model.Path))
+			if modelKey == "" || pathKey == "" {
+				continue
+			}
+			if _, ok := seenModelIDs[modelKey]; ok {
+				continue
+			}
+			if _, ok := seenPaths[pathKey]; ok {
+				continue
+			}
+			seenModelIDs[modelKey] = struct{}{}
+			seenPaths[pathKey] = struct{}{}
+			merged.Models = append(merged.Models, model)
+		}
+	}
+	return NormalizeStatus(merged)
+}
+
 func NormalizeStatus(status Status) Status {
 	status.CacheDir = cleanCachePath("", status.CacheDir)
 	if status.TotalBytes < 0 {

@@ -1188,7 +1188,42 @@ func buildHardwareCapacityStatus(modelCacheDir string) v7hardware.CapacityInvent
 }
 
 func buildModelCacheStatus(policy v7modelpolicy.Status) v7modelcache.Status {
-	return v7modelcache.BuildStatus(policy.CacheDir)
+	return v7modelcache.BuildStatusFromDirs(modelCacheScanDirs(policy.CacheDir, os.Getenv))
+}
+
+func modelCacheScanDirs(primary string, getenv func(string) string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	dirs := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	addDir := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		key := strings.ToLower(dir)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	addSplitDirs := func(value string) {
+		for _, part := range strings.Split(value, string(os.PathListSeparator)) {
+			for _, dir := range strings.Split(part, ",") {
+				addDir(dir)
+			}
+		}
+	}
+	addDir(primary)
+	addSplitDirs(getenv("RYV_MODEL_EXTRA_DIRS"))
+	addSplitDirs(getenv("RYV_MODEL_DIR"))
+	addSplitDirs(getenv("RYVION_MODEL_DIR"))
+	if len(dirs) == 0 {
+		return []string{primary}
+	}
+	return dirs
 }
 
 func buildModelCacheRuntimeStatus(modelCache v7modelcache.Status, policy v7modelpolicy.Status, hardware v7hardware.CapacityInventory, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes) v7modelcache.Status {

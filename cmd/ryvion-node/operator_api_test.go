@@ -27,6 +27,7 @@ import (
 	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
+	v7modelcache "github.com/Ryvion/node-agent/internal/v7/modelcache"
 )
 
 func TestAllowLocalOrigin(t *testing.T) {
@@ -320,6 +321,9 @@ func TestOperatorAPIStatusEndpointIncludesModelPolicyAndCache(t *testing.T) {
 	t.Setenv("RYV_MODEL_ALLOW_IDS", "")
 	t.Setenv("RYV_MODEL_RUNTIME_ALLOW_LARGE", "0")
 	t.Setenv("RYV_MODEL_REQUIRE_EXPLICIT_ALLOW_LARGE", "1")
+	t.Setenv("RYV_MODEL_EXTRA_DIRS", "")
+	t.Setenv("RYV_MODEL_DIR", "")
+	t.Setenv("RYVION_MODEL_DIR", "")
 
 	port := freeOperatorAPITestPort(t)
 	state := &operatorRuntime{
@@ -383,6 +387,46 @@ func TestOperatorAPIStatusEndpointIncludesModelPolicyAndCache(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("operator status contains forbidden marker %q: %s", forbidden, respBody)
 		}
+	}
+}
+
+func TestOperatorAPIStatusEndpointIncludesExtraModelDirs(t *testing.T) {
+	cacheDir := t.TempDir()
+	extraDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf"), []byte("phi"), 0o644); err != nil {
+		t.Fatalf("write primary model fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(extraDir, "gemma-3-27b-it-q4_0.gguf"), []byte("gemma"), 0o644); err != nil {
+		t.Fatalf("write extra model fixture: %v", err)
+	}
+	t.Setenv("RYV_MODEL_CACHE_DIR", cacheDir)
+	t.Setenv("RYV_MODEL_EXTRA_DIRS", extraDir)
+	t.Setenv("RYV_MODEL_DIR", "")
+	t.Setenv("RYVION_MODEL_DIR", "")
+
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		caps: hw.CapSet{
+			CPUCores:  16,
+			RAMBytes:  32 << 30,
+			GPUModel:  "NVIDIA GeForce RTX 4070 Ti SUPER",
+			VRAMBytes: 16 << 30,
+		},
+	}
+
+	status := state.statusSnapshot(defaultOperatorAPIPort)
+	if status.ModelCache.CacheDir != cacheDir {
+		t.Fatalf("model_cache.cache_dir = %q, want %q", status.ModelCache.CacheDir, cacheDir)
+	}
+	byID := map[string]v7modelcache.Model{}
+	for _, model := range status.ModelCache.Models {
+		byID[model.ModelID] = model
+	}
+	if got := byID["gemma-3-27b-it-q4_0.gguf"]; got.FamilyHint != "gemma" || !got.Resident || !got.Installed {
+		t.Fatalf("gemma model cache row = %+v; full cache=%+v", got, status.ModelCache)
 	}
 }
 
