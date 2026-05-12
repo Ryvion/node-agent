@@ -561,6 +561,89 @@ func TestExecuteAssignmentRestoresFastCUDAFromDegradedWarmSidecar(t *testing.T) 
 	}
 }
 
+func TestExecuteAssignmentPromotesDefaultCUDAProfileToFastDefaults(t *testing.T) {
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write phi fixture: %v", err)
+	}
+	defaultCUDA := healthySidecarStatus()
+	defaultCUDA.ModelPath = phiPath
+	defaultCUDA.ModelFilename = filepath.Base(phiPath)
+	defaultCUDA.ModelSizeBytes = int64(len("gguf"))
+	defaultCUDA.Launch = &llamacpp.LlamaCppLaunchConfig{
+		Mode:                "managed",
+		Managed:             true,
+		ConfiguredGPULayers: llamacpp.DefaultGPULayers,
+		FastDefaultsEnabled: false,
+		Profile:             llamacpp.LaunchProfileDefault,
+	}
+	defaultCUDA.ServerProperties = &llamacpp.LlamaCppServerProperties{
+		BuildInfo:            "llama.cpp CUDA",
+		SystemInfo:           "CUDA enabled",
+		ReportedAcceleration: []string{"cuda"},
+	}
+	fast := defaultCUDA
+	fast.Launch = &llamacpp.LlamaCppLaunchConfig{
+		Mode:                "managed",
+		Managed:             true,
+		ConfiguredGPULayers: llamacpp.DefaultGPULayers,
+		FastDefaultsEnabled: true,
+		Profile:             llamacpp.LaunchProfileCUDAFast,
+	}
+	sidecar := &fakeSidecar{
+		status:         defaultCUDA,
+		fastCUDAStatus: fast,
+	}
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("phi fast cuda output"),
+		OutputBytes:     int64(len("phi fast cuda output")),
+		TokensGenerated: 4,
+		TTFTMs:          20,
+		TotalTimeMs:     80,
+	}}
+	spec := validSpec(t)
+	spec.ModelID = "phi-4-Q4_K_M.gguf"
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	policy := modelpolicy.Policy{
+		AutoDownload:        false,
+		MaxSingleModelBytes: 16 << 30,
+		MaxCacheBytes:       64 << 30,
+		CacheDir:            cacheDir,
+		AllowedFamilies:     []string{"llama", "phi"},
+		AllowedFormats:      []string{"gguf"},
+		RuntimePolicy: modelpolicy.RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             16 << 30,
+			MaxRuntimeParameterCountBillions: 16,
+			AllowFamilies:                    []string{"llama", "phi"},
+		},
+	}
+
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvEnabled,
+		Policy: policy,
+		Runner: LlamaCppRunner{
+			Sidecar: sidecar,
+			Client:  client,
+			Policy:  policy,
+		},
+	})
+	if err != nil || !handled {
+		t.Fatalf("ExecuteAssignment() handled=%v error=%v, want handled success", handled, err)
+	}
+	if sidecar.fastCUDARestarts != 1 || sidecar.fastRestartPath != phiPath {
+		t.Fatalf("fast CUDA restarts/path = %d/%q, want one restart to %q", sidecar.fastCUDARestarts, sidecar.fastRestartPath, phiPath)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["proof_status"] != ProofStatusMeasured || metadata["error_code"] != nil {
+		t.Fatalf("metadata = %+v, want measured receipt after fast CUDA promotion", metadata)
+	}
+}
+
 func TestSafeSidecarFailureClassifiesCudaLaunchFailures(t *testing.T) {
 	status := healthySidecarStatus()
 	status.Running = false
@@ -859,15 +942,53 @@ func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
 	}
 	for idx, chunk := range batch.Chunks[:3] {
 		wantSeq := int64(idx + 1)
-		if chunk.Seq != wantSeq || chunk.Type != "delta" {
-			t.Fatalf("chunk[%d] = %+v, want seq %d delta", idx, chunk, wantSeq)
+		if chunk.Seq != wantSeq || chunk.Type != ProgressChunkTypeTokenCommit {
+			t.Fatalf("chunk[%d] = %+v, want seq %d token.commit", idx, chunk, wantSeq)
 		}
 	}
 	if got := batch.Chunks[0].Text + batch.Chunks[1].Text + batch.Chunks[2].Text; got != output {
 		t.Fatalf("concatenated chunks = %q, want %q", got, output)
 	}
-	if done := batch.Chunks[3]; done.Seq != 4 || done.Type != "done" || done.FinishReason != llamacpp.FinishReasonStop || done.Text != "" {
+	if done := batch.Chunks[3]; done.Seq != 4 || done.Type != ProgressChunkTypeTokenFinalize || done.FinishReason != llamacpp.FinishReasonStop || done.Text != "" {
 		t.Fatalf("done chunk = %+v, want final stop reason", done)
+	}
+}
+
+func TestLlamaCppRunnerCanPostLegacyDeltaChunksWhenV8EventsDisabled(t *testing.T) {
+	client := &fakeCompletionClient{
+		result: llamacpp.CompletionResult{
+			Output:          []byte("legacy chunk"),
+			OutputBytes:     int64(len("legacy chunk")),
+			TokensGenerated: 2,
+			FinishReason:    llamacpp.FinishReasonStop,
+			TTFTMs:          25,
+			TotalTimeMs:     100,
+			Streamed:        true,
+		},
+		deltas: []string{"legacy ", "chunk"},
+	}
+	progress := &fakeProgressSender{}
+	spec := validSpec(t)
+	spec.ReturnText = true
+	spec.Prompt = "Return a legacy streaming sentence."
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{status: healthySidecarStatus()},
+		Client:  client,
+		Getenv: func(key string) string {
+			if key == V8StreamEventsEnv {
+				return "0"
+			}
+			return getenvTextAndStreamingEnabled(key)
+		},
+	}
+	if _, err := runner.RunDashboardInferenceWithProgress(context.Background(), spec, progress); err != nil {
+		t.Fatalf("RunDashboardInferenceWithProgress() error = %v", err)
+	}
+	if len(progress.batches) != 1 || len(progress.batches[0].Chunks) != 3 {
+		t.Fatalf("progress batches = %+v, want one legacy batch", progress.batches)
+	}
+	if progress.batches[0].Chunks[0].Type != ProgressChunkTypeDelta || progress.batches[0].Chunks[2].Type != ProgressChunkTypeDone {
+		t.Fatalf("legacy chunk types = %+v, want delta/done", progress.batches[0].Chunks)
 	}
 }
 

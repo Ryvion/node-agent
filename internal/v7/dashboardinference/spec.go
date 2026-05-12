@@ -15,6 +15,7 @@ const (
 	FlagEnv           = "RYV_NODE_V7_DASHBOARD_INFERENCE"
 	TextOutputFlagEnv = "RYV_NODE_V7_INFERENCE_TEXT_OUTPUT"
 	StreamingFlagEnv  = "RYV_NODE_V7_INFERENCE_STREAMING"
+	V8StreamEventsEnv = "RYV_NODE_V8_STREAM_EVENTS"
 	DisableFlagEnv    = inferenceconfig.EnvDisableV7Inference
 	DisableTextEnv    = inferenceconfig.EnvDisableTextOutput
 	DisableStreamEnv  = inferenceconfig.EnvDisableStreaming
@@ -88,6 +89,19 @@ func TextOutputEnabledFromEnv(getenv func(string) string) bool {
 
 func StreamingEnabledFromEnv(getenv func(string) string) bool {
 	return inferenceconfig.StreamingEnabled(getenv)
+}
+
+func V8StreamEventsEnabledFromEnv(getenv func(string) string) bool {
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	value := strings.ToLower(strings.TrimSpace(getenv(V8StreamEventsEnv)))
+	switch value {
+	case "", "1", "true", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func AssignmentIdentityFromJSON(specJSON string) (AssignmentIdentity, bool) {

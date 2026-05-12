@@ -11,6 +11,11 @@ import (
 const (
 	defaultChunkBatchSize     = 16
 	defaultChunkBatchInterval = 150 * time.Millisecond
+
+	ProgressChunkTypeDelta         = "delta"
+	ProgressChunkTypeDone          = "done"
+	ProgressChunkTypeTokenCommit   = "token.commit"
+	ProgressChunkTypeTokenFinalize = "token.finalize"
 )
 
 var ErrStreamProgressFailed = errors.New("dashboardinference: stream progress failed")
@@ -40,6 +45,7 @@ type progressBatcher struct {
 	sender   ProgressSender
 	spec     Spec
 	maxBatch int
+	v8Events bool
 
 	mu       sync.Mutex
 	flushMu  sync.Mutex
@@ -51,7 +57,7 @@ type progressBatcher struct {
 	done chan struct{}
 }
 
-func newProgressBatcher(ctx context.Context, spec Spec, sender ProgressSender) *progressBatcher {
+func newProgressBatcher(ctx context.Context, spec Spec, sender ProgressSender, v8Events bool) *progressBatcher {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -62,6 +68,7 @@ func newProgressBatcher(ctx context.Context, spec Spec, sender ProgressSender) *
 		sender:   sender,
 		spec:     normalizeSpec(spec),
 		maxBatch: defaultChunkBatchSize,
+		v8Events: v8Events,
 		done:     make(chan struct{}),
 	}
 	go b.loop()
@@ -88,7 +95,7 @@ func (b *progressBatcher) addDelta(text string) error {
 	b.nextSeq++
 	chunk := ProgressChunk{
 		Seq:  b.nextSeq,
-		Type: "delta",
+		Type: b.deltaChunkType(),
 		Text: text,
 	}
 	b.pending = append(b.pending, chunk)
@@ -120,11 +127,25 @@ func (b *progressBatcher) addDone(ctx context.Context, finishReason string) erro
 	b.nextSeq++
 	b.pending = append(b.pending, ProgressChunk{
 		Seq:          b.nextSeq,
-		Type:         "done",
+		Type:         b.doneChunkType(),
 		FinishReason: finishReason,
 	})
 	b.mu.Unlock()
 	return b.flush(ctx)
+}
+
+func (b *progressBatcher) deltaChunkType() string {
+	if b != nil && b.v8Events {
+		return ProgressChunkTypeTokenCommit
+	}
+	return ProgressChunkTypeDelta
+}
+
+func (b *progressBatcher) doneChunkType() string {
+	if b != nil && b.v8Events {
+		return ProgressChunkTypeTokenFinalize
+	}
+	return ProgressChunkTypeDone
 }
 
 func (b *progressBatcher) close(ctx context.Context) error {

@@ -246,7 +246,7 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	var batcher *progressBatcher
 	var firstDeltaAt time.Time
 	if streaming && progress != nil {
-		batcher = newProgressBatcher(runCtx, spec, progress)
+		batcher = newProgressBatcher(runCtx, spec, progress, V8StreamEventsEnabledFromEnv(r.getenv()))
 	}
 	// V8 Phase 1.11: capture wall-clock at the dashboardinference
 	// boundary as a defensive measurement source. The downstream
@@ -449,9 +449,28 @@ func shouldTryFastLaunch(status llamacpp.LlamaCppSidecarStatus, spec Spec) bool 
 	switch status.Launch.Profile {
 	case llamacpp.LaunchProfileCUDASafe, llamacpp.LaunchProfileCUDAPartial:
 		return true
-	default:
+	case llamacpp.LaunchProfileCUDAFast:
 		return false
 	}
+	if status.Launch.ConfiguredGPULayers > 0 &&
+		!status.Launch.FastDefaultsEnabled &&
+		sidecarReportsCUDAAcceleration(status.ServerProperties) {
+		return true
+	}
+	return false
+}
+
+func sidecarReportsCUDAAcceleration(props *llamacpp.LlamaCppServerProperties) bool {
+	if props == nil {
+		return false
+	}
+	for _, value := range props.ReportedAcceleration {
+		if strings.EqualFold(strings.TrimSpace(value), "cuda") {
+			return true
+		}
+	}
+	combined := strings.ToLower(props.BuildInfo + " " + props.SystemInfo)
+	return strings.Contains(combined, "cuda") || strings.Contains(combined, "cublas")
 }
 
 func launchFallbackForStatus(status llamacpp.LlamaCppSidecarStatus, triedSafeCUDA bool, triedPartialGPU bool) string {
