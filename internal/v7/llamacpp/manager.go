@@ -26,6 +26,8 @@ const (
 	maxStatusReasonLen   = 256
 	maxLogBufferBytes    = 64 * 1024
 	maxRuntimePathLen    = 512
+
+	fallbackPartialGPULayers = 35
 )
 
 var ggufQuantizationPattern = regexp.MustCompile(`(?i)(?:^|[._\-\s])((?:IQ|Q)[0-9](?:_[A-Z0-9]+){0,3}|BF16|F16|F32)(?:[._\-\s]|$)`)
@@ -351,6 +353,42 @@ func (m *Manager) RestartWithModel(ctx context.Context, modelPath string) LlamaC
 		return NewManager(LlamaCppSidecarConfig{}).RestartWithModel(ctx, modelPath)
 	}
 	_ = m.SetModelPath(modelPath)
+	m.rehomeExternalServerForManagedRestart()
+	return m.Restart(ctx)
+}
+
+func (m *Manager) RestartWithModelSafeCUDA(ctx context.Context, modelPath string) LlamaCppSidecarStatus {
+	return m.restartWithModelLaunchFallback(ctx, modelPath, func(cfg *LlamaCppSidecarConfig) {
+		cfg.FastDefaults = false
+		cfg.DraftModelPath = ""
+	})
+}
+
+func (m *Manager) RestartWithModelPartialGPU(ctx context.Context, modelPath string) LlamaCppSidecarStatus {
+	return m.restartWithModelLaunchFallback(ctx, modelPath, func(cfg *LlamaCppSidecarConfig) {
+		cfg.FastDefaults = false
+		cfg.DraftModelPath = ""
+		if cfg.GPULayers > fallbackPartialGPULayers {
+			cfg.GPULayers = fallbackPartialGPULayers
+		}
+	})
+}
+
+func (m *Manager) restartWithModelLaunchFallback(ctx context.Context, modelPath string, mutate func(*LlamaCppSidecarConfig)) LlamaCppSidecarStatus {
+	if m == nil {
+		return NewManager(LlamaCppSidecarConfig{}).restartWithModelLaunchFallback(ctx, modelPath, mutate)
+	}
+	modelPath = cleanConfigText(modelPath, maxConfigTextLen)
+	m.mu.Lock()
+	if modelPath != "" {
+		m.cfg.ModelPath = modelPath
+		m.cfg.DraftModelPath = redriveDraftModelPath(m.cfg.DraftModelPath, m.cfg.ModelPath)
+	}
+	if mutate != nil {
+		mutate(&m.cfg)
+	}
+	m.cfg = normalizeConfig(m.cfg)
+	m.mu.Unlock()
 	m.rehomeExternalServerForManagedRestart()
 	return m.Restart(ctx)
 }

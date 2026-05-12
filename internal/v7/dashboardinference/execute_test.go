@@ -16,12 +16,17 @@ import (
 )
 
 type fakeSidecar struct {
-	status        llamacpp.LlamaCppSidecarStatus
-	statusQueue   []llamacpp.LlamaCppSidecarStatus
-	starts        int
-	restarts      int
-	restartPath   string
-	restartStatus llamacpp.LlamaCppSidecarStatus
+	status              llamacpp.LlamaCppSidecarStatus
+	statusQueue         []llamacpp.LlamaCppSidecarStatus
+	starts              int
+	restarts            int
+	restartPath         string
+	restartStatus       llamacpp.LlamaCppSidecarStatus
+	safeCUDAFallbacks   int
+	partialGPUFallbacks int
+	safeCUDAStatus      llamacpp.LlamaCppSidecarStatus
+	partialGPUStatus    llamacpp.LlamaCppSidecarStatus
+	fallbackRestartPath string
 }
 
 func (f *fakeSidecar) Start(context.Context) llamacpp.LlamaCppSidecarStatus {
@@ -54,6 +59,26 @@ func (f *fakeSidecar) RestartWithModel(_ context.Context, modelPath string) llam
 	f.status.Running = true
 	f.status.Healthy = true
 	return f.status
+}
+
+func (f *fakeSidecar) RestartWithModelSafeCUDA(_ context.Context, modelPath string) llamacpp.LlamaCppSidecarStatus {
+	f.safeCUDAFallbacks++
+	f.fallbackRestartPath = modelPath
+	if f.safeCUDAStatus.ModelPath != "" {
+		f.status = f.safeCUDAStatus
+		return f.status
+	}
+	return f.RestartWithModel(context.Background(), modelPath)
+}
+
+func (f *fakeSidecar) RestartWithModelPartialGPU(_ context.Context, modelPath string) llamacpp.LlamaCppSidecarStatus {
+	f.partialGPUFallbacks++
+	f.fallbackRestartPath = modelPath
+	if f.partialGPUStatus.ModelPath != "" {
+		f.status = f.partialGPUStatus
+		return f.status
+	}
+	return f.RestartWithModel(context.Background(), modelPath)
 }
 
 type fakeCompletionClient struct {
@@ -293,6 +318,101 @@ func TestExecuteAssignmentWaitsForColdModelRestartToBecomeHealthy(t *testing.T) 
 	metadata := receipt.Metadata[Task].(map[string]any)
 	if metadata["proof_status"] != ProofStatusMeasured || metadata["error_code"] != nil {
 		t.Fatalf("metadata = %+v, want measured receipt after delayed sidecar readiness", metadata)
+	}
+}
+
+func TestExecuteAssignmentRetriesCudaFallbackWhenColdLaunchExits(t *testing.T) {
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write phi fixture: %v", err)
+	}
+	launching := healthySidecarStatus()
+	launching.ModelPath = phiPath
+	launching.ModelFilename = filepath.Base(phiPath)
+	launching.ModelSizeBytes = int64(len("gguf"))
+	launching.Healthy = false
+	exited := launching
+	exited.Running = false
+	exited.Healthy = false
+	exited.LastError = "exit status 1: CUDA error: out of memory"
+	exited.Reason = exited.LastError
+	ready := launching
+	ready.Healthy = true
+	sidecar := &fakeSidecar{
+		status:           healthySidecarStatus(),
+		restartStatus:    launching,
+		statusQueue:      []llamacpp.LlamaCppSidecarStatus{exited},
+		safeCUDAStatus:   exited,
+		partialGPUStatus: ready,
+	}
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("phi recovered output"),
+		OutputBytes:     int64(len("phi recovered output")),
+		TokensGenerated: 3,
+		TTFTMs:          20,
+		TotalTimeMs:     80,
+	}}
+	spec := validSpec(t)
+	spec.ModelID = "phi-4-Q4_K_M.gguf"
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+
+	policy := modelpolicy.Policy{
+		AutoDownload:        false,
+		MaxSingleModelBytes: 16 << 30,
+		MaxCacheBytes:       64 << 30,
+		CacheDir:            cacheDir,
+		AllowedFamilies:     []string{"llama", "phi"},
+		AllowedFormats:      []string{"gguf"},
+		RuntimePolicy: modelpolicy.RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             16 << 30,
+			MaxRuntimeParameterCountBillions: 16,
+			AllowFamilies:                    []string{"llama", "phi"},
+		},
+	}
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvEnabled,
+		Policy: policy,
+		Runner: LlamaCppRunner{
+			Sidecar: sidecar,
+			Client:  client,
+			Policy:  policy,
+		},
+	})
+	if err != nil || !handled {
+		t.Fatalf("ExecuteAssignment() handled=%v error=%v, want handled success", handled, err)
+	}
+	if sidecar.safeCUDAFallbacks != 1 || sidecar.partialGPUFallbacks != 1 || sidecar.fallbackRestartPath != phiPath {
+		t.Fatalf("fallbacks safe/partial/path = %d/%d/%q, want one safe and one partial to %q", sidecar.safeCUDAFallbacks, sidecar.partialGPUFallbacks, sidecar.fallbackRestartPath, phiPath)
+	}
+	if len(client.reqs) != 1 {
+		t.Fatalf("completion calls = %d, want 1 after fallback readiness", len(client.reqs))
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["proof_status"] != ProofStatusMeasured || metadata["error_code"] != nil {
+		t.Fatalf("metadata = %+v, want measured receipt after CUDA fallback", metadata)
+	}
+}
+
+func TestSafeSidecarFailureClassifiesCudaLaunchFailures(t *testing.T) {
+	status := healthySidecarStatus()
+	status.Running = false
+	status.Healthy = false
+	status.LastError = `exit status 1: cudart64_12.dll was not found`
+	if got := safeSidecarFailure(status); got != "llamacpp_cuda_runtime_missing" {
+		t.Fatalf("safeSidecarFailure(runtime) = %q", got)
+	}
+	status.LastError = "exit status 1: CUDA error: out of memory"
+	if got := safeSidecarFailure(status); got != "llamacpp_cuda_out_of_memory" {
+		t.Fatalf("safeSidecarFailure(oom) = %q", got)
+	}
+	status.LastError = "exit status 1: unknown argument --flash-attn"
+	if got := safeSidecarFailure(status); got != "llamacpp_launch_arg_unsupported" {
+		t.Fatalf("safeSidecarFailure(args) = %q", got)
 	}
 }
 

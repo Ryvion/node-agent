@@ -53,6 +53,11 @@ type LlamaCppModelSwitcher interface {
 	RestartWithModel(context.Context, string) llamacpp.LlamaCppSidecarStatus
 }
 
+type LlamaCppLaunchFallbackSwitcher interface {
+	RestartWithModelSafeCUDA(context.Context, string) llamacpp.LlamaCppSidecarStatus
+	RestartWithModelPartialGPU(context.Context, string) llamacpp.LlamaCppSidecarStatus
+}
+
 type KeepWarmChecker interface {
 	CheckOnce(context.Context) llamacpp.LlamaCppSidecarStatus
 }
@@ -208,8 +213,9 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	if !sidecarModelMatches(status, spec.ModelID) {
 		status = r.ensureRequestedModelWith(runCtx, sidecar, status, spec)
 	}
+	modelPath := firstNonEmpty(status.ModelPath, r.resolveModelPath(spec))
 	if shouldWaitForSidecarReadiness(status, spec, canSwitchModel) {
-		status = waitForSidecarReadiness(runCtx, sidecar, spec, status)
+		status = waitForSidecarReadiness(runCtx, sidecar, spec, status, modelPath)
 	}
 	if !status.Enabled || !status.Available || !status.Running || !status.Healthy {
 		return failedExecutionResult(spec, safeSidecarFailure(status)), nil
@@ -382,10 +388,14 @@ func shouldWaitForSidecarReadiness(status llamacpp.LlamaCppSidecarStatus, spec S
 	return canSwitchModel && !sidecarModelMatches(status, spec.ModelID)
 }
 
-func waitForSidecarReadiness(ctx context.Context, sidecar LlamaCppSidecar, spec Spec, last llamacpp.LlamaCppSidecarStatus) llamacpp.LlamaCppSidecarStatus {
+func waitForSidecarReadiness(ctx context.Context, sidecar LlamaCppSidecar, spec Spec, last llamacpp.LlamaCppSidecarStatus, modelPath string) llamacpp.LlamaCppSidecarStatus {
 	if sidecar == nil || sidecarReadyForSpec(last, spec) {
 		return last
 	}
+	modelPath = firstNonEmpty(modelPath, last.ModelPath)
+	fallback, canFallback := sidecar.(LlamaCppLaunchFallbackSwitcher)
+	triedSafeCUDA := false
+	triedPartialGPU := false
 	ticker := time.NewTicker(sidecarReadinessPollInterval)
 	defer ticker.Stop()
 	for {
@@ -397,6 +407,23 @@ func waitForSidecarReadiness(ctx context.Context, sidecar LlamaCppSidecar, spec 
 			if sidecarReadyForSpec(last, spec) {
 				return last
 			}
+			modelPath = firstNonEmpty(modelPath, last.ModelPath)
+			if canFallback && modelPath != "" && sidecarLaunchExited(last) {
+				switch {
+				case !triedSafeCUDA:
+					triedSafeCUDA = true
+					last = fallback.RestartWithModelSafeCUDA(ctx, modelPath)
+					if sidecarReadyForSpec(last, spec) {
+						return last
+					}
+				case !triedPartialGPU:
+					triedPartialGPU = true
+					last = fallback.RestartWithModelPartialGPU(ctx, modelPath)
+					if sidecarReadyForSpec(last, spec) {
+						return last
+					}
+				}
+			}
 		}
 	}
 }
@@ -407,6 +434,13 @@ func sidecarReadyForSpec(status llamacpp.LlamaCppSidecarStatus, spec Spec) bool 
 		status.Running &&
 		status.Healthy &&
 		sidecarModelMatches(status, spec.ModelID)
+}
+
+func sidecarLaunchExited(status llamacpp.LlamaCppSidecarStatus) bool {
+	if !status.Enabled || !status.Available || status.Running {
+		return false
+	}
+	return strings.TrimSpace(status.LastError) != "" || strings.TrimSpace(status.Reason) != ""
 }
 
 func (r LlamaCppRunner) resolveModelPath(spec Spec) string {
@@ -754,6 +788,9 @@ func finishReasonFromErrorCode(code string) string {
 }
 
 func safeSidecarFailure(status llamacpp.LlamaCppSidecarStatus) string {
+	if code := safeSidecarLaunchErrorCode(status); code != "" {
+		return code
+	}
 	switch {
 	case !status.Enabled:
 		return "llamacpp_sidecar_disabled"
@@ -766,6 +803,44 @@ func safeSidecarFailure(status llamacpp.LlamaCppSidecarStatus) string {
 	default:
 		return "llamacpp_sidecar_unavailable"
 	}
+}
+
+func safeSidecarLaunchErrorCode(status llamacpp.LlamaCppSidecarStatus) string {
+	detail := strings.ToLower(strings.TrimSpace(firstNonEmpty(status.LastError, status.Reason)))
+	if detail == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(detail, "out of memory") ||
+		strings.Contains(detail, "cuda_malloc") ||
+		strings.Contains(detail, "cudamalloc") ||
+		strings.Contains(detail, "cuda error 2") ||
+		strings.Contains(detail, "cuda error: 2"):
+		return "llamacpp_cuda_out_of_memory"
+	case strings.Contains(detail, "cudart") ||
+		strings.Contains(detail, "cublas") ||
+		strings.Contains(detail, "cudnn"):
+		if strings.Contains(detail, "missing") ||
+			strings.Contains(detail, "not found") ||
+			strings.Contains(detail, "load") ||
+			strings.Contains(detail, "dll") {
+			return "llamacpp_cuda_runtime_missing"
+		}
+	case strings.Contains(detail, "unknown argument") ||
+		strings.Contains(detail, "unrecognized option") ||
+		strings.Contains(detail, "invalid argument") ||
+		strings.Contains(detail, "unknown option"):
+		return "llamacpp_launch_arg_unsupported"
+	case strings.Contains(detail, "failed to load model") ||
+		strings.Contains(detail, "unable to load model") ||
+		strings.Contains(detail, "model load"):
+		return "llamacpp_model_load_failed"
+	case strings.Contains(detail, "deadline exceeded") ||
+		strings.Contains(detail, "context canceled") ||
+		strings.Contains(detail, "context cancelled"):
+		return "llamacpp_sidecar_timeout"
+	}
+	return ""
 }
 
 func safeErrorCode(err error) string {

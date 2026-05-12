@@ -405,6 +405,85 @@ func TestBuildServerArgsAddsGPUFastDefaults(t *testing.T) {
 	}
 }
 
+func TestRestartWithModelSafeCUDAKeepsGPUOffloadWithoutFastFlags(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	draftPath := filepath.Join(t.TempDir(), "tinyllama.gguf")
+	if err := os.WriteFile(draftPath, []byte("draft"), 0o644); err != nil {
+		t.Fatalf("write draft fixture: %v", err)
+	}
+	proc := newFakeProcess(333)
+	var gotArgs []string
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:        true,
+		ServerPath:     serverPath,
+		ModelPath:      modelPath,
+		Host:           DefaultHost,
+		Port:           freePortForConfig(t),
+		ContextSize:    DefaultContextSize,
+		GPULayers:      DefaultGPULayers,
+		FastDefaults:   true,
+		DraftModelPath: draftPath,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		gotArgs = append([]string(nil), args...)
+		return proc, nil
+	}), WithHealthClient(errorHealthClient{}), WithHealthTimeout(time.Millisecond))
+	t.Cleanup(func() {
+		_ = manager.Stop(context.Background())
+	})
+
+	status := manager.RestartWithModelSafeCUDA(context.Background(), modelPath)
+	if !status.Running {
+		t.Fatalf("status = %+v, want managed process running", status)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "--n-gpu-layers 999") {
+		t.Fatalf("args = %q, want CUDA GPU layers preserved", joined)
+	}
+	for _, forbidden := range []string{"--flash-attn", "--cache-type-k", "--cache-type-v", "--batch-size 512", "--ubatch-size 512", "--model-draft"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("args = %q, should not include safe-fallback forbidden flag %q", joined, forbidden)
+		}
+	}
+}
+
+func TestRestartWithModelPartialGPUClampsGPUOffload(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	proc := newFakeProcess(334)
+	var gotArgs []string
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:      true,
+		ServerPath:   serverPath,
+		ModelPath:    modelPath,
+		Host:         DefaultHost,
+		Port:         freePortForConfig(t),
+		ContextSize:  DefaultContextSize,
+		GPULayers:    DefaultGPULayers,
+		FastDefaults: true,
+	}, WithProcessStarter(func(ctx context.Context, binary string, args []string, output io.Writer) (managedProcess, error) {
+		gotArgs = append([]string(nil), args...)
+		return proc, nil
+	}), WithHealthClient(errorHealthClient{}), WithHealthTimeout(time.Millisecond))
+	t.Cleanup(func() {
+		_ = manager.Stop(context.Background())
+	})
+
+	status := manager.RestartWithModelPartialGPU(context.Background(), modelPath)
+	if !status.Running {
+		t.Fatalf("status = %+v, want managed process running", status)
+	}
+	joined := strings.Join(gotArgs, " ")
+	if !strings.Contains(joined, "--n-gpu-layers 35") {
+		t.Fatalf("args = %q, want partial GPU fallback layers", joined)
+	}
+	if strings.Contains(joined, "--flash-attn") || strings.Contains(joined, "--cache-type-k") {
+		t.Fatalf("args = %q, want partial fallback without fast flags", joined)
+	}
+}
+
 func TestStopOnlyTerminatesManagedProcess(t *testing.T) {
 	t.Parallel()
 
