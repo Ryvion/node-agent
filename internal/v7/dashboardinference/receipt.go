@@ -36,6 +36,8 @@ type ReceiptMetadata struct {
 	BackendStopReason        string  `json:"backend_stop_reason"`
 	MaxTokensReached         bool    `json:"max_tokens_reached"`
 	TTFTMs                   int64   `json:"ttft_ms"`
+	PreInferenceMs           int64   `json:"pre_inference_ms,omitempty"`
+	PerceivedTTFTMs          int64   `json:"perceived_ttft_ms,omitempty"`
 	TotalTimeMs              int64   `json:"total_time_ms"`
 	DecodeTPS                float64 `json:"decode_tps"`
 	TPOTMs                   float64 `json:"tpot_ms"`
@@ -220,6 +222,12 @@ func (m ReceiptMetadata) Map() map[string]any {
 	if m.TokenCountEstimated {
 		out["token_count_estimated"] = true
 	}
+	if m.PreInferenceMs > 0 {
+		out["pre_inference_ms"] = m.PreInferenceMs
+	}
+	if m.PerceivedTTFTMs > 0 {
+		out["perceived_ttft_ms"] = m.PerceivedTTFTMs
+	}
 	if m.PromptHash != "" {
 		out["prompt_hash"] = m.PromptHash
 	}
@@ -306,6 +314,15 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 	if m.TTFTMs < 0 {
 		m.TTFTMs = 0
 	}
+	if m.PreInferenceMs < 0 {
+		m.PreInferenceMs = 0
+	}
+	if m.PerceivedTTFTMs < 0 {
+		m.PerceivedTTFTMs = 0
+	}
+	if m.PerceivedTTFTMs == 0 && m.PreInferenceMs > 0 && m.TTFTMs > 0 {
+		m.PerceivedTTFTMs = m.PreInferenceMs + m.TTFTMs
+	}
 	if m.TotalTimeMs < 0 {
 		m.TotalTimeMs = 0
 	}
@@ -364,6 +381,8 @@ func receiptMetadataFromResult(result ExecutionResult) ReceiptMetadata {
 		BackendStopReason:        result.BackendStopReason,
 		MaxTokensReached:         result.MaxTokensReached,
 		TTFTMs:                   result.TTFTMs,
+		PreInferenceMs:           result.PreInferenceMs,
+		PerceivedTTFTMs:          result.PerceivedTTFTMs,
 		TotalTimeMs:              result.TotalTimeMs,
 		DecodeTPS:                result.DecodeTPS,
 		TPOTMs:                   result.TPOTMs,
@@ -432,6 +451,15 @@ func normalizeExecutionResult(result ExecutionResult) ExecutionResult {
 	}
 	if result.TTFTMs < 0 {
 		result.TTFTMs = 0
+	}
+	if result.PreInferenceMs < 0 {
+		result.PreInferenceMs = 0
+	}
+	if result.PerceivedTTFTMs < 0 {
+		result.PerceivedTTFTMs = 0
+	}
+	if result.PerceivedTTFTMs == 0 && result.PreInferenceMs > 0 && result.TTFTMs > 0 {
+		result.PerceivedTTFTMs = result.PreInferenceMs + result.TTFTMs
 	}
 	if result.TotalTimeMs < 0 {
 		result.TotalTimeMs = 0
@@ -508,7 +536,7 @@ func validateReceiptMetadataForHash(metadata ReceiptMetadata) error {
 	if err := validateSHA256ID(metadata.OutputHash, "receipt output_hash", ErrInvalidReceipt); err != nil {
 		errs = append(errs, err)
 	}
-	if metadata.OutputBytes < 0 || metadata.TokensGenerated < 0 || metadata.TTFTMs < 0 || metadata.TotalTimeMs < 0 {
+	if metadata.OutputBytes < 0 || metadata.TokensGenerated < 0 || metadata.TTFTMs < 0 || metadata.PreInferenceMs < 0 || metadata.PerceivedTTFTMs < 0 || metadata.TotalTimeMs < 0 {
 		errs = append(errs, fmt.Errorf("%w: receipt metrics must be non-negative", ErrInvalidReceipt))
 	}
 	if metadata.RequestedMaxTokens < 0 || metadata.MaxReturnChars <= 0 {

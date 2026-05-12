@@ -91,6 +91,8 @@ type ExecutionResult struct {
 	BackendStopReason        string
 	MaxTokensReached         bool
 	TTFTMs                   int64
+	PreInferenceMs           int64
+	PerceivedTTFTMs          int64
 	TotalTimeMs              int64
 	DecodeTPS                float64
 	TPOTMs                   float64
@@ -210,6 +212,7 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	if err := runCtx.Err(); err != nil {
 		return failedExecutionResult(spec, "dashboard_inference_context_unavailable"), nil
 	}
+	preInferenceStart := time.Now()
 
 	sidecar := r.sidecar()
 	status := r.ensureSidecarWith(runCtx, sidecar)
@@ -255,6 +258,7 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	// final chunk), we fall back to these so receipts never ship
 	// ttft=0 / total=0 for an inference that actually ran.
 	wallStart := time.Now()
+	preInferenceMs := wallStart.Sub(preInferenceStart).Milliseconds()
 	req := llamacpp.CompletionRequest{
 		BaseURL:      status.BaseURL,
 		ModelID:      spec.ModelID,
@@ -306,6 +310,10 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 		return failedExecutionResult(spec, safeErrorCode(err)), nil
 	}
 	result := measuredExecutionResult(spec, completion)
+	result.PreInferenceMs = preInferenceMs
+	if result.TTFTMs > 0 {
+		result.PerceivedTTFTMs = result.PreInferenceMs + result.TTFTMs
+	}
 	// V8 Phase 1.7 (live trace fix): only enrich speculative metadata
 	// when the sidecar declared speculative-decoding readiness.
 	// Calling MergeRuntimeCounts on a zero-value SpeculativeMetadata

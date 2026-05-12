@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
 	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
@@ -30,10 +31,14 @@ type fakeSidecar struct {
 	safeCUDAStatus      llamacpp.LlamaCppSidecarStatus
 	partialGPUStatus    llamacpp.LlamaCppSidecarStatus
 	fallbackRestartPath string
+	startDelay          time.Duration
 }
 
 func (f *fakeSidecar) Start(context.Context) llamacpp.LlamaCppSidecarStatus {
 	f.starts++
+	if f.startDelay > 0 {
+		time.Sleep(f.startDelay)
+	}
 	return f.status
 }
 
@@ -954,6 +959,53 @@ func TestLlamaCppRunnerStreamsReturnTextWithProgressBatches(t *testing.T) {
 	}
 }
 
+func TestLlamaCppRunnerRecordsPreInferenceDelaySeparatelyFromBackendTTFT(t *testing.T) {
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("phi warmed after model load"),
+		OutputBytes:     int64(len("phi warmed after model load")),
+		TokensGenerated: 5,
+		FinishReason:    llamacpp.FinishReasonStop,
+		TTFTMs:          88,
+		TotalTimeMs:     620,
+	}}
+	spec := validSpec(t)
+	spec.Prompt = "Explain the route."
+	spec.ReturnText = true
+	runner := LlamaCppRunner{
+		Sidecar: &fakeSidecar{
+			status:     healthySidecarStatus(),
+			startDelay: 5 * time.Millisecond,
+		},
+		Client: client,
+		Getenv: getenvTextAndStreamingEnabled,
+	}
+
+	result, err := runner.RunDashboardInferenceWithProgress(context.Background(), spec, nil)
+	if err != nil {
+		t.Fatalf("RunDashboardInferenceWithProgress() error = %v", err)
+	}
+	if result.TTFTMs != 88 {
+		t.Fatalf("TTFTMs = %d, want backend TTFT unchanged", result.TTFTMs)
+	}
+	if result.PreInferenceMs <= 0 {
+		t.Fatalf("PreInferenceMs = %d, want positive sidecar preparation time", result.PreInferenceMs)
+	}
+	if result.PerceivedTTFTMs != result.PreInferenceMs+result.TTFTMs {
+		t.Fatalf("PerceivedTTFTMs = %d, want pre-inference + TTFT (%d + %d)", result.PerceivedTTFTMs, result.PreInferenceMs, result.TTFTMs)
+	}
+	receipt, err := BuildReceipt(result)
+	if err != nil {
+		t.Fatalf("BuildReceipt() error = %v", err)
+	}
+	metadata := receipt.Metadata[Task].(map[string]any)
+	if metadata["ttft_ms"] != int64(88) {
+		t.Fatalf("receipt ttft_ms = %v, want backend TTFT", metadata["ttft_ms"])
+	}
+	if metadata["pre_inference_ms"] == nil || metadata["perceived_ttft_ms"] == nil {
+		t.Fatalf("receipt missing perceived latency fields: %+v", metadata)
+	}
+}
+
 func TestLlamaCppRunnerCanPostLegacyDeltaChunksWhenV8EventsDisabled(t *testing.T) {
 	client := &fakeCompletionClient{
 		result: llamacpp.CompletionResult{
@@ -1485,6 +1537,13 @@ func healthySidecarStatus() llamacpp.LlamaCppSidecarStatus {
 		SupportsTextGeneration: true,
 		SupportsStreaming:      true,
 	}
+}
+
+func healthySidecarStatusForModel(modelID string) llamacpp.LlamaCppSidecarStatus {
+	status := healthySidecarStatus()
+	status.ModelPath = filepath.Join("/models", modelID)
+	status.ModelFilename = modelID
+	return status
 }
 
 func getenvEnabled(key string) string {
