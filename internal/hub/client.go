@@ -30,6 +30,7 @@ type Client struct {
 	wallet    string
 	adminKey  string
 	userAgent string
+	grpc      *grpcTransport
 }
 
 type Option func(*Client)
@@ -69,9 +70,13 @@ func New(baseURL string, pub ed25519.PublicKey, priv ed25519.PrivateKey, opts ..
 		priv:      priv,
 		http:      &http.Client{Timeout: 30 * time.Second},
 		userAgent: "ryvion-node/1.0",
+		grpc:      defaultGRPCTransport(),
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	if c.grpc != nil {
+		c.grpc.applyDefaultTarget(c.baseURL)
 	}
 	return c
 }
@@ -116,6 +121,11 @@ func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, re
 		strconv.FormatUint(uint64(body.AttestationMethod), 10),
 	)
 	body.Signature = c.sign(signParts...)
+	if c.useGRPCTransport() {
+		if err := c.registerGRPC(ctx, body); err == nil || !c.shouldFallbackGRPC(err) {
+			return err
+		}
+	}
 	return c.post(ctx, "/api/v1/node/register", body, nil)
 }
 
@@ -145,6 +155,11 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (HeartbeatRespo
 		formatFloatJSON(body.GPUUtil),
 		formatFloatJSON(body.PowerWatts),
 	)
+	if c.useGRPCTransport() {
+		if resp, err := c.heartbeatGRPC(ctx, body); err == nil || !c.shouldFallbackGRPC(err) {
+			return resp, err
+		}
+	}
 	var resp HeartbeatResponse
 	err := c.post(ctx, "/api/v1/node/heartbeat", body, &resp)
 	return resp, err
@@ -153,6 +168,12 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (HeartbeatRespo
 func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	ts := time.Now().UnixMilli()
 	pubHex := c.pubHex()
+	sig := c.sign("work", pubHex, strconv.FormatInt(ts, 10))
+	if c.useGRPCTransport() {
+		if work, err := c.fetchWorkGRPC(ctx, pubHex, ts, sig, true); err == nil || !c.shouldFallbackGRPC(err) {
+			return work, err
+		}
+	}
 
 	u, err := url.Parse(c.absoluteURL("/api/v1/node/work"))
 	if err != nil {
@@ -170,7 +191,7 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("X-Node-Timestamp", strconv.FormatInt(ts, 10))
-	req.Header.Set("X-Node-Signature", hex.EncodeToString(c.sign("work", pubHex, strconv.FormatInt(ts, 10))))
+	req.Header.Set("X-Node-Signature", hex.EncodeToString(sig))
 
 	// Use longer timeout for long-polling (hub holds up to 25s)
 	longPollClient := &http.Client{Timeout: 35 * time.Second}
@@ -238,6 +259,11 @@ func (c *Client) SubmitReceipt(ctx context.Context, receipt Receipt) error {
 		Metadata:      receipt.Metadata,
 	}
 	body.Signature = c.sign("receipt", jobID, pubHex, hashHex, strconv.FormatUint(units, 10))
+	if c.useGRPCTransport() {
+		if err := c.submitReceiptGRPC(ctx, body); err == nil || !c.shouldFallbackGRPC(err) {
+			return err
+		}
+	}
 	return c.post(ctx, "/api/v1/node/receipt", body, nil)
 }
 
@@ -567,6 +593,11 @@ func (c *Client) SendDashboardInferenceProgress(ctx context.Context, batch v7das
 		PublicKeyHex: pubHex,
 		SeqStart:     batch.SeqStart,
 		Chunks:       append([]v7dashboardinference.ProgressChunk(nil), batch.Chunks...),
+	}
+	if c.useGRPCTransport() {
+		if err := c.sendDashboardInferenceProgressGRPC(ctx, body); err == nil || !c.shouldFallbackGRPC(err) {
+			return err
+		}
 	}
 	return c.postWithHeaders(ctx, "/api/v1/node/inference/chunks", body, nil, map[string]string{
 		"X-Node-Pubkey": pubHex,

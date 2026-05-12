@@ -674,6 +674,11 @@ func runNode(ctx context.Context) {
 		hub.WithAdminKey(os.Getenv("RYV_ADMIN_KEY")),
 		hub.WithUserAgent("ryvion-node/"+version),
 	)
+	defer func() {
+		if err := client.Close(); err != nil {
+			slog.Warn("failed to close hub transport", "error", err)
+		}
+	}()
 	runtimeContract, err := resolveRuntimeContractMetadata(version)
 	if err != nil {
 		slog.Warn("failed to load runtime contract metadata, falling back to local defaults", "error", err)
