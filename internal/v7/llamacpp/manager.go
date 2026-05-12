@@ -521,9 +521,6 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		} else {
 			reason = "managed llama.cpp sidecar healthy"
 		}
-		if gpuOffloadRequestedButServerReportsCPUOnly(cfg, m.serverProps) {
-			reason += "; GPU offload requested but server reports CPU-only acceleration"
-		}
 	} else if running {
 		reason = "llama.cpp sidecar running; health not confirmed"
 	} else if m.lastError != "" {
@@ -532,6 +529,12 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 
 	draftMeta := modelMetadata(cfg.DraftModelPath)
 	speculativeReady := cfg.DraftModelPath != "" && draftMeta.readable && running && healthy
+	acceleration, accelerationReason := sidecarAccelerationStatus(cfg, m.serverProps)
+	if running && healthy {
+		if suffix := sidecarAccelerationReasonSuffix(accelerationReason); suffix != "" {
+			reason += "; " + suffix
+		}
+	}
 
 	return LlamaCppSidecarStatus{
 		Enabled:                cfg.Enabled,
@@ -554,6 +557,8 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		Backend:                BackendName,
 		Launch:                 launch,
 		ServerProperties:       cloneServerProperties(m.serverProps),
+		Acceleration:           acceleration,
+		AccelerationReason:     accelerationReason,
 		OpenAICompatible:       true,
 		SupportsTextGeneration: true,
 		SupportsStreaming:      true,
@@ -591,7 +596,8 @@ func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 			OpenAICompatible:       status.OpenAICompatible,
 			SupportsTextGeneration: status.SupportsTextGeneration,
 			SupportsStreaming:      status.SupportsStreaming,
-			Acceleration:           []string{"cpu"},
+			Acceleration:           statusAccelerationOrDefault(status),
+			AccelerationReason:     statusAccelerationReasonOrDefault(status),
 			GPUArchitecture:        gpuArchitectureFromHardware(v7hardware.CapacityInventory{}),
 			SupportsKVAccess:       status.SupportsKVAccess,
 			SupportsTensorHooks:    status.SupportsTensorHooks,
@@ -639,7 +645,9 @@ func EnrichBackendRuntimes(runtimes BackendRuntimes, inventory runtimeinventory.
 	inventory = runtimeinventory.NormalizeInventory(inventory)
 	hardware = v7hardware.NormalizeInventory(hardware)
 	runtimes = NormalizeBackendRuntimes(runtimes)
-	runtimes.LlamaCPP.Acceleration = mergeAcceleration(runtimes.LlamaCPP.Acceleration, accelerationFromHardware(hardware))
+	if !runtimes.LlamaCPP.Loaded {
+		runtimes.LlamaCPP.Acceleration = mergeAcceleration(runtimes.LlamaCPP.Acceleration, accelerationFromHardware(hardware))
+	}
 	runtimes.LlamaCPP.GPUArchitecture = firstNonEmptyRuntimeText(runtimes.LlamaCPP.GPUArchitecture, gpuArchitectureFromHardware(hardware))
 	runtimes.LlamaCPP.GPUComputeCapability = firstNonEmptyRuntimeText(runtimes.LlamaCPP.GPUComputeCapability, hardware.ComputeCapability)
 	for _, candidate := range inventory.BackendCandidates {
@@ -690,6 +698,7 @@ func normalizeBackendRuntimeStatus(llama BackendRuntimeStatus, defaultBackend st
 	llama.QuantizationHint = cleanRuntimeCompactText(llama.QuantizationHint, 64)
 	llama.GPUArchitecture = cleanRuntimeCompactText(llama.GPUArchitecture, 64)
 	llama.GPUComputeCapability = cleanRuntimeCompactText(llama.GPUComputeCapability, 64)
+	llama.AccelerationReason = cleanRuntimeCompactText(llama.AccelerationReason, maxStatusReasonLen)
 	llama.OptimizationCapabilities = normalizeOptimizationCapabilities(llama.OptimizationCapabilities, llama.Backend, llama.GPUArchitecture)
 	llama.LastError = cleanStatusText(llama.LastError, maxStatusReasonLen)
 	llama.Launch = normalizeLaunchConfig(llama.Launch)
@@ -805,6 +814,80 @@ func gpuOffloadRequestedButServerReportsCPUOnly(cfg LlamaCppSidecarConfig, props
 		return false
 	}
 	return normalized.ReportedAcceleration[0] == "cpu"
+}
+
+func sidecarAccelerationStatus(cfg LlamaCppSidecarConfig, props *LlamaCppServerProperties) ([]string, string) {
+	cfg = normalizeConfig(cfg)
+	normalizedProps := normalizeServerProperties(props)
+	if normalizedProps != nil && len(normalizedProps.ReportedAcceleration) > 0 {
+		acceleration := normalizedProps.ReportedAcceleration
+		switch {
+		case accelerationContains(acceleration, "cuda"):
+			return acceleration, "server_reported_cuda"
+		case len(acceleration) == 1 && acceleration[0] == "cpu" && cfg.GPULayers > 0:
+			return acceleration, "server_reported_cpu_after_gpu_offload_requested"
+		case len(acceleration) == 1 && acceleration[0] == "cpu":
+			return acceleration, "server_reported_cpu"
+		default:
+			return acceleration, "server_reported_acceleration"
+		}
+	}
+	if cfg.GPULayers > 0 && accelerationContains(cfg.AccelerationHints, "cuda") {
+		return []string{"cuda"}, "configured_cuda_unconfirmed"
+	}
+	return []string{"cpu"}, "server_acceleration_unreported"
+}
+
+func statusAccelerationOrDefault(status LlamaCppSidecarStatus) []string {
+	acceleration := normalizeAcceleration(status.Acceleration)
+	if len(acceleration) > 0 {
+		return acceleration
+	}
+	if status.ServerProperties != nil && len(status.ServerProperties.ReportedAcceleration) > 0 {
+		return status.ServerProperties.ReportedAcceleration
+	}
+	return []string{"cpu"}
+}
+
+func statusAccelerationReasonOrDefault(status LlamaCppSidecarStatus) string {
+	if strings.TrimSpace(status.AccelerationReason) != "" {
+		return status.AccelerationReason
+	}
+	cfg := LlamaCppSidecarConfig{}
+	if status.Launch != nil {
+		cfg.GPULayers = status.Launch.ConfiguredGPULayers
+	}
+	cfg.AccelerationHints = statusAccelerationOrDefault(status)
+	_, reason := sidecarAccelerationStatus(cfg, status.ServerProperties)
+	return reason
+}
+
+func accelerationContains(values []string, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" {
+		return false
+	}
+	for _, value := range normalizeAcceleration(values) {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sidecarAccelerationReasonSuffix(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "server_reported_cuda":
+		return "CUDA acceleration reported active"
+	case "server_reported_cpu_after_gpu_offload_requested":
+		return "GPU offload requested but server reports CPU-only acceleration"
+	case "server_reported_cpu":
+		return "CPU acceleration reported active"
+	case "configured_cuda_unconfirmed":
+		return "CUDA acceleration requested; server report not available"
+	default:
+		return ""
+	}
 }
 
 func normalizeOtherBackendRuntimes(runtimes []BackendRuntimeStatus) []BackendRuntimeStatus {

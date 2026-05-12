@@ -58,6 +58,7 @@ type LlamaCppSidecarConfig struct {
 	FastDefaults         bool
 	FastDefaultsExplicit bool
 	LaunchProfile        string
+	AccelerationHints    []string
 
 	// V8 speculative decoding (Level 0).
 	// DraftModelPath, when non-empty, enables backend-local speculative
@@ -90,6 +91,8 @@ type LlamaCppSidecarStatus struct {
 	Backend                string                    `json:"backend"`
 	Launch                 *LlamaCppLaunchConfig     `json:"launch,omitempty"`
 	ServerProperties       *LlamaCppServerProperties `json:"server_properties,omitempty"`
+	Acceleration           []string                  `json:"acceleration"`
+	AccelerationReason     string                    `json:"acceleration_reason,omitempty"`
 	OpenAICompatible       bool                      `json:"openai_compatible"`
 	SupportsTextGeneration bool                      `json:"supports_text_generation"`
 	SupportsStreaming      bool                      `json:"supports_streaming"`
@@ -152,6 +155,7 @@ type BackendRuntimeStatus struct {
 	Warm                     bool                      `json:"warm"`
 	WarmModelID              string                    `json:"warm_model_id,omitempty"`
 	Acceleration             []string                  `json:"acceleration"`
+	AccelerationReason       string                    `json:"acceleration_reason,omitempty"`
 	GPUArchitecture          string                    `json:"gpu_architecture,omitempty"`
 	GPUComputeCapability     string                    `json:"gpu_compute_capability,omitempty"`
 	OpenAICompatible         bool                      `json:"openai_compatible"`

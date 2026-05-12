@@ -125,10 +125,19 @@ func ExecuteWarmSpec(ctx context.Context, spec WarmSpec, opts ExecuteOptions) (W
 	}
 
 	status := manager.Status(runCtx)
-	if status.Attached || !modelStatusWarm(status, cachedModel.Path) {
+	if status.Attached {
 		status = manager.RestartWithModel(runCtx, cachedModel.Path)
 		if !modelStatusWarm(status, cachedModel.Path) {
 			status = waitForWarmModel(runCtx, manager, cachedModel.Path, status)
+		}
+	} else if !modelStatusWarm(status, cachedModel.Path) {
+		if sameWarmPath(status.ModelPath, cachedModel.Path) && status.Running {
+			status = waitForWarmModel(runCtx, manager, cachedModel.Path, status)
+		} else {
+			status = manager.RestartWithModel(runCtx, cachedModel.Path)
+			if !modelStatusWarm(status, cachedModel.Path) {
+				status = waitForWarmModel(runCtx, manager, cachedModel.Path, status)
+			}
 		}
 	}
 	warm := modelStatusWarm(status, cachedModel.Path)
@@ -256,34 +265,11 @@ func findCachedModel(status modelcache.Status, modelID string) (modelcache.Model
 }
 
 func warmModelMatch(model modelcache.Model, modelID string) bool {
-	want := strings.ToLower(strings.TrimSpace(modelID))
-	for _, value := range []string{model.ModelID, model.Filename, filepath.Base(model.Path)} {
-		if strings.ToLower(strings.TrimSpace(value)) == want || warmModelAliasToken(value) == warmModelAliasToken(modelID) {
-			return true
-		}
-	}
-	return false
+	return modelcache.ModelMatches(model, modelID)
 }
 
 func warmModelPathMatches(modelPath string, modelID string) bool {
-	return warmModelMatch(modelcache.Model{
-		ModelID:  filepath.Base(modelPath),
-		Filename: filepath.Base(modelPath),
-		Path:     modelPath,
-	}, modelID)
-}
-
-func warmModelAliasToken(value string) string {
-	token := strings.ToLower(strings.TrimSpace(filepath.Base(value)))
-	token = strings.TrimSuffix(token, ".gguf")
-	switch {
-	case token == "gemma-3-27b-it":
-		return token
-	case strings.HasPrefix(token, "gemma-3-27b-it-"):
-		return "gemma-3-27b-it"
-	default:
-		return token
-	}
+	return modelcache.ModelIDMatches(modelPath, modelID)
 }
 
 func modelStatusWarm(status llamacpp.LlamaCppSidecarStatus, modelPath string) bool {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/node-agent/internal/v7/modelcache"
 	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 )
 
@@ -267,6 +268,28 @@ func TestExecuteAssignmentSwitchesColdResidentModelBeforeInference(t *testing.T)
 	metadata := receipt.Metadata[Task].(map[string]any)
 	if metadata["proof_status"] != ProofStatusMeasured || metadata["model_id"] != "phi-4-Q4_K_M.gguf" {
 		t.Fatalf("metadata = %+v, want measured Phi receipt", metadata)
+	}
+}
+
+func TestFindDashboardCachedModelMatchesGemma4QATForCatalogName(t *testing.T) {
+	cacheDir := t.TempDir()
+	path := filepath.Join(cacheDir, "gemma-4-27b-it-q4_0.gguf")
+	status := modelcache.Status{
+		CacheDir: cacheDir,
+		Models: []modelcache.Model{{
+			ModelID:    "gemma-4-27b-it-q4_0.gguf",
+			Filename:   "gemma-4-27b-it-q4_0.gguf",
+			Path:       path,
+			SizeBytes:  18 << 30,
+			FamilyHint: "gemma",
+			Format:     "gguf",
+			Installed:  true,
+		}},
+	}
+
+	model, ok := findDashboardCachedModel(status, "gemma-4-27b-it-Q4_K_M.gguf")
+	if !ok || model.Path != path {
+		t.Fatalf("findDashboardCachedModel() = %+v/%v, want local Gemma 4 QAT artifact", model, ok)
 	}
 }
 

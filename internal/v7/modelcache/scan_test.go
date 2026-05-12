@@ -83,6 +83,51 @@ func TestScanCanonicalizesTinyLlamaDrafterAlias(t *testing.T) {
 	}
 }
 
+func TestModelIDMatchesGemma4CatalogAliases(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		cached    string
+		requested string
+		want      bool
+	}{
+		{
+			name:      "gemma 4 q4_0 artifact matches q4_k_m catalog name",
+			cached:    "/models/gemma-4-27b-it-q4_0.gguf",
+			requested: "gemma-4-27b-it-Q4_K_M.gguf",
+			want:      true,
+		},
+		{
+			name:      "gemma 4 artifact repo style name matches catalog family id",
+			cached:    "google/gemma-4-27b-it-qat-q4_0-gguf",
+			requested: "gemma-4-27b-it",
+			want:      true,
+		},
+		{
+			name:      "gemma mtp variant keeps its own alias",
+			cached:    "gemma-4-27b-it-mtp-q4_0.gguf",
+			requested: "gemma-4-27b-it-mtp",
+			want:      true,
+		},
+		{
+			name:      "gemma mtp variant does not collapse to base model",
+			cached:    "gemma-4-27b-it-mtp-q4_0.gguf",
+			requested: "gemma-4-27b-it",
+			want:      false,
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := ModelIDMatches(tc.cached, tc.requested); got != tc.want {
+				t.Fatalf("ModelIDMatches(%q, %q) = %v, want %v", tc.cached, tc.requested, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildStatusFromDirsMergesConfiguredModelDirectories(t *testing.T) {
 	t.Parallel()
 
@@ -262,6 +307,54 @@ func TestAnnotateRuntimeStatusSetsRunnableAndBlockedReasons(t *testing.T) {
 	}
 	if annotated.Models[1].Runnable || len(annotated.Models[1].BlockedReasons) == 0 {
 		t.Fatalf("phi annotation = %+v, want blocked reasons", annotated.Models[1])
+	}
+}
+
+func TestAnnotateRuntimeStatusAllowsGemma4QATArtifactWhenPolicyAllowsGemma(t *testing.T) {
+	t.Parallel()
+
+	status := NormalizeStatus(Status{
+		CacheDir: "/cache",
+		Models: []Model{{
+			ModelID:          "gemma-4-27b-it-q4_0.gguf",
+			Filename:         "gemma-4-27b-it-q4_0.gguf",
+			Path:             "/cache/gemma-4-27b-it-q4_0.gguf",
+			SizeBytes:        18 << 30,
+			FamilyHint:       "gemma",
+			QuantizationHint: "Q4_0",
+			Format:           "gguf",
+			Installed:        true,
+		}},
+	})
+	policy := modelpolicy.NormalizePolicy(modelpolicy.Policy{
+		CacheDir:            "/cache",
+		MaxSingleModelBytes: 24 << 30,
+		MaxCacheBytes:       64 << 30,
+		AllowedFamilies:     []string{"llama", "phi", "qwen", "gemma"},
+		AllowedFormats:      []string{"gguf"},
+		RuntimePolicy: modelpolicy.RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             24 << 30,
+			MaxRuntimeParameterCountBillions: 32,
+			AllowCPUOffload:                  true,
+			AllowLargeModels:                 true,
+			AllowFamilies:                    []string{"llama", "gemma"},
+		},
+	})
+
+	annotated := AnnotateRuntimeStatus(RuntimeAnnotationInput{
+		Status:                         status,
+		Policy:                         policy,
+		HardwareCapacityAvailable:      true,
+		BackendTextGenerationAvailable: true,
+		V7InferenceEnabled:             true,
+	})
+	if len(annotated.Models) != 1 {
+		t.Fatalf("models = %+v, want one Gemma 4 model", annotated.Models)
+	}
+	model := annotated.Models[0]
+	if !model.Runnable || len(model.BlockedReasons) != 0 || model.FamilyHint != "gemma" || model.ParameterCountBillions != 27 {
+		t.Fatalf("gemma 4 annotation = %+v, want runnable Gemma 4 artifact without policy block", model)
 	}
 }
 

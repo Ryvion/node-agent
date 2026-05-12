@@ -635,34 +635,11 @@ func findDashboardCachedModel(status modelcache.Status, modelID string) (modelca
 }
 
 func dashboardModelMatch(model modelcache.Model, modelID string) bool {
-	for _, value := range []string{model.ModelID, model.Filename, filepath.Base(model.Path), model.Path} {
-		if modelPathMatches(value, modelID) {
-			return true
-		}
-	}
-	return false
+	return modelcache.ModelMatches(model, modelID)
 }
 
 func modelPathMatches(value string, modelID string) bool {
-	want := normalizeModelComparable(modelID)
-	if want == "" {
-		return false
-	}
-	return normalizeModelComparable(value) == want ||
-		modelAliasToken(value) == modelAliasToken(modelID)
-}
-
-func modelAliasToken(value string) string {
-	token := normalizeModelComparable(value)
-	token = strings.TrimSuffix(token, ".gguf")
-	switch {
-	case token == "gemma-3-27b-it":
-		return token
-	case strings.HasPrefix(token, "gemma-3-27b-it-"):
-		return "gemma-3-27b-it"
-	default:
-		return token
-	}
+	return modelcache.ModelIDMatches(value, modelID)
 }
 
 func normalizeModelComparable(value string) string {

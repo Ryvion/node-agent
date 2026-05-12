@@ -117,6 +117,55 @@ func TestExecuteWarmAssignmentWaitsForAsyncWarmSidecar(t *testing.T) {
 	}
 }
 
+func TestExecuteWarmAssignmentWaitsForAlreadyLoadingRequestedModel(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	phiPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
+	if err := os.WriteFile(phiPath, []byte("gguf"), 0o644); err != nil {
+		t.Fatalf("write cached model: %v", err)
+	}
+	manager := &pollingWarmManager{
+		statuses: []llamacpp.LlamaCppSidecarStatus{{
+			Enabled:       true,
+			Available:     true,
+			Running:       true,
+			Healthy:       false,
+			ModelPath:     phiPath,
+			ModelFilename: filepath.Base(phiPath),
+			Backend:       llamacpp.BackendName,
+		}, {
+			Enabled:       true,
+			Available:     true,
+			Running:       true,
+			Healthy:       true,
+			ModelPath:     phiPath,
+			ModelFilename: filepath.Base(phiPath),
+			Backend:       llamacpp.BackendName,
+		}},
+	}
+
+	receipt, handled, err := ExecuteWarmAssignment(context.Background(), testWarmSpecJSON(t, testWarmSpec()), ExecuteOptions{
+		Getenv:          testWarmGetenv,
+		Policy:          testWarmPolicy(cacheDir),
+		LlamaCppManager: manager,
+		BenchmarkRunner: &fakeWarmBenchmarkRunner{snapshot: testWarmBenchmarkSnapshot()},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteWarmAssignment() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if manager.restartCalls != 0 || manager.statusCalls != 2 {
+		t.Fatalf("manager calls restart/status = %d/%d, want no restart and status polling", manager.restartCalls, manager.statusCalls)
+	}
+	metadata := warmMetadata(t, receipt)
+	if metadata["warm"] != true || metadata["proof_status"] != ProofStatusModelWarmed {
+		t.Fatalf("receipt metadata = %+v, want warmed receipt", metadata)
+	}
+}
+
 func TestExecuteWarmAssignmentRestartsAttachedWarmServer(t *testing.T) {
 	t.Parallel()
 
@@ -240,6 +289,28 @@ func TestFindCachedModelMatchesGemmaQATForLegacyCatalogName(t *testing.T) {
 	model, ok := findCachedModel(status, "gemma-3-27b-it-Q4_K_M.gguf")
 	if !ok || model.Path != path {
 		t.Fatalf("findCachedModel() = %+v/%v, want local Gemma QAT artifact", model, ok)
+	}
+}
+
+func TestFindCachedModelMatchesGemma4QATForCatalogName(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "gemma-4-27b-it-q4_0.gguf")
+	status := modelcache.Status{
+		CacheDir: filepath.Dir(path),
+		Models: []modelcache.Model{{
+			ModelID:   "gemma-4-27b-it-q4_0.gguf",
+			Filename:  "gemma-4-27b-it-q4_0.gguf",
+			Path:      path,
+			SizeBytes: 18 * 1024 * 1024 * 1024,
+			Format:    "gguf",
+			Installed: true,
+		}},
+	}
+
+	model, ok := findCachedModel(status, "gemma-4-27b-it-Q4_K_M.gguf")
+	if !ok || model.Path != path {
+		t.Fatalf("findCachedModel() = %+v/%v, want local Gemma 4 QAT artifact", model, ok)
 	}
 }
 
@@ -429,6 +500,45 @@ func (f *asyncWarmManager) RestartWithModel(_ context.Context, modelPath string)
 		Backend:       llamacpp.BackendName,
 	}
 	return f.status
+}
+
+type pollingWarmManager struct {
+	statuses     []llamacpp.LlamaCppSidecarStatus
+	enabled      bool
+	restartCalls int
+	statusCalls  int
+}
+
+func (f *pollingWarmManager) SetEnabled(enabled bool) llamacpp.LlamaCppSidecarConfig {
+	f.enabled = enabled
+	for i := range f.statuses {
+		f.statuses[i].Enabled = enabled
+	}
+	return llamacpp.LlamaCppSidecarConfig{Enabled: enabled}
+}
+
+func (f *pollingWarmManager) Status(context.Context) llamacpp.LlamaCppSidecarStatus {
+	f.statusCalls++
+	if len(f.statuses) == 0 {
+		return llamacpp.LlamaCppSidecarStatus{}
+	}
+	if f.statusCalls <= len(f.statuses) {
+		return f.statuses[f.statusCalls-1]
+	}
+	return f.statuses[len(f.statuses)-1]
+}
+
+func (f *pollingWarmManager) RestartWithModel(_ context.Context, modelPath string) llamacpp.LlamaCppSidecarStatus {
+	f.restartCalls++
+	return llamacpp.LlamaCppSidecarStatus{
+		Enabled:       true,
+		Available:     true,
+		Running:       true,
+		Healthy:       true,
+		ModelPath:     modelPath,
+		ModelFilename: filepath.Base(modelPath),
+		Backend:       llamacpp.BackendName,
+	}
 }
 
 type fakeWarmBenchmarkRunner struct {

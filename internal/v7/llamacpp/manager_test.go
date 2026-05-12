@@ -225,6 +225,40 @@ func TestConfigFromEnvEnablesFastDefaultsForLinuxNVIDIAServicePath(t *testing.T)
 	}
 }
 
+func TestConfigFromEnvUsesHardwareInventoryForCUDAFastDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(string) string {
+			return ""
+		},
+		LookPath: func(string) (string, error) {
+			return "", os.ErrNotExist
+		},
+		Stat: func(string) (os.FileInfo, error) {
+			return nil, os.ErrNotExist
+		},
+		GOOS: "linux",
+		HardwareCapacity: &v7hardware.CapacityInventory{
+			GPUDetected:       true,
+			GPUVendor:         v7hardware.GPUVendorNVIDIA,
+			GPUName:           "NVIDIA GeForce RTX 4090",
+			CUDAAvailable:     true,
+			ComputeCapability: "8.9",
+		},
+	})
+
+	if cfg.GPULayers != DefaultGPULayers {
+		t.Fatalf("gpu layers = %d, want default full offload", cfg.GPULayers)
+	}
+	if !cfg.FastDefaults || cfg.LaunchProfile != LaunchProfileCUDAFast {
+		t.Fatalf("fast launch config = enabled:%t profile:%q, want CUDA fast defaults from hardware inventory", cfg.FastDefaults, cfg.LaunchProfile)
+	}
+	if got := strings.Join(cfg.AccelerationHints, ","); !strings.Contains(got, "cuda") {
+		t.Fatalf("acceleration hints = %q, want cuda from hardware inventory", got)
+	}
+}
+
 func TestConfigDiscoversKnownDirServerAndModel(t *testing.T) {
 	t.Parallel()
 
@@ -823,6 +857,9 @@ func TestBuildBackendRuntimesMarksHealthySidecarLoadedWarm(t *testing.T) {
 		runtime.ServerProperties.ReportedAcceleration[0] != "cuda" {
 		t.Fatalf("server properties = %+v, want safe CUDA build hints", runtime.ServerProperties)
 	}
+	if len(runtime.Acceleration) != 1 || runtime.Acceleration[0] != "cuda" || !strings.Contains(runtime.AccelerationReason, "server_reported_cuda") {
+		t.Fatalf("runtime acceleration = %+v reason=%q, want reported CUDA status", runtime.Acceleration, runtime.AccelerationReason)
+	}
 	if runtime.LastHealthAtUnixMs != lastHealth.UnixMilli() {
 		t.Fatalf("last_health_at_unix_ms = %d, want %d", runtime.LastHealthAtUnixMs, lastHealth.UnixMilli())
 	}
@@ -849,6 +886,48 @@ func TestGPUOffloadRequestedButServerReportsCPUOnly(t *testing.T) {
 		ReportedAcceleration: []string{"cuda"},
 	}) {
 		t.Fatal("gpuOffloadRequestedButServerReportsCPUOnly() = true for CUDA server")
+	}
+}
+
+func TestEnrichBackendRuntimesDoesNotPromoteActiveCPUOnlySidecarToCUDA(t *testing.T) {
+	t.Parallel()
+
+	runtimes := BuildBackendRuntimes(LlamaCppSidecarStatus{
+		Enabled:   true,
+		Available: true,
+		Running:   true,
+		Healthy:   true,
+		Launch: &LlamaCppLaunchConfig{
+			Mode:                "managed",
+			Managed:             true,
+			ConfiguredGPULayers: DefaultGPULayers,
+		},
+		ServerProperties: &LlamaCppServerProperties{
+			BuildInfo:            "llama.cpp b8106",
+			ReportedAcceleration: []string{"cpu"},
+		},
+		BaseURL:                "http://127.0.0.1:45910",
+		ModelPath:              "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelFilename:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		Backend:                BackendName,
+		OpenAICompatible:       true,
+		SupportsTextGeneration: true,
+		SupportsStreaming:      true,
+	})
+
+	enriched := EnrichBackendRuntimes(runtimes, runtimeinventory.Inventory{}, v7hardware.CapacityInventory{
+		GPUDetected:       true,
+		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUName:           "NVIDIA GeForce RTX 4090",
+		CUDAAvailable:     true,
+		ComputeCapability: "8.9",
+	})
+	runtime := enriched.LlamaCPP
+	if len(runtime.Acceleration) != 1 || runtime.Acceleration[0] != "cpu" {
+		t.Fatalf("active acceleration = %+v, want CPU-only server report to remain authoritative", runtime.Acceleration)
+	}
+	if !strings.Contains(runtime.AccelerationReason, "server_reported_cpu") {
+		t.Fatalf("acceleration_reason = %q, want CPU-only explanation", runtime.AccelerationReason)
 	}
 }
 

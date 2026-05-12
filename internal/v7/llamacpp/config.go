@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
 	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 )
 
@@ -37,6 +38,7 @@ type ConfigSource struct {
 	ConfiguredBinaryDirs []string
 	ConfiguredModelDirs  []string
 	RuntimeInventory     *runtimeinventory.Inventory
+	HardwareCapacity     *v7hardware.CapacityInventory
 }
 
 type ResidencyKeeperConfig struct {
@@ -87,6 +89,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 		ExtraArgs:            sanitizeExtraArgs(source.Getenv(EnvExtraArgs)),
 		FastDefaults:         envBoolDefault(fastDefaultsRaw, defaultFastDefaults(source)),
 		FastDefaultsExplicit: strings.TrimSpace(fastDefaultsRaw) != "",
+		AccelerationHints:    configAccelerationHints(source),
 		DraftModelPath:       cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
 		DraftMaxTokens:       envInt(source.Getenv(EnvDraftMaxTokens), 0),
 		DraftMinTokens:       envInt(source.Getenv(EnvDraftMinTokens), 0),
@@ -122,6 +125,7 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 	if cfg.GPULayers < 0 {
 		cfg.GPULayers = 0
 	}
+	cfg.AccelerationHints = normalizeAcceleration(cfg.AccelerationHints)
 	cfg.ExtraArgs = sanitizeExtraArgs(strings.Join(cfg.ExtraArgs, " "))
 
 	// V8 speculative decoding (Level 0): clamp draft parameters.
@@ -185,10 +189,41 @@ func defaultFastDefaults(source ConfigSource) bool {
 	}
 	switch strings.ToLower(strings.TrimSpace(source.GOOS)) {
 	case "windows", "linux":
+		if hardwareCUDAAvailable(source) {
+			return true
+		}
 		return nvidiaSMIAvailable(source.Getenv, source.LookPath, source.Stat)
 	default:
 		return false
 	}
+}
+
+func configAccelerationHints(source ConfigSource) []string {
+	source = normalizeConfigSource(source)
+	hints := []string{}
+	if source.HardwareCapacity != nil {
+		hardware := v7hardware.NormalizeInventory(*source.HardwareCapacity)
+		if len(hardware.AccelerationHints) > 0 {
+			hints = append(hints, hardware.AccelerationHints...)
+		}
+	}
+	if hardwareCUDAAvailable(source) || nvidiaSMIAvailable(source.Getenv, source.LookPath, source.Stat) {
+		hints = append(hints, "cuda")
+	}
+	if len(hints) == 0 {
+		hints = append(hints, "cpu")
+	}
+	return normalizeAcceleration(hints)
+}
+
+func hardwareCUDAAvailable(source ConfigSource) bool {
+	if source.HardwareCapacity == nil {
+		return false
+	}
+	hardware := v7hardware.NormalizeInventory(*source.HardwareCapacity)
+	return hardware.GPUDetected &&
+		hardware.GPUVendor == v7hardware.GPUVendorNVIDIA &&
+		hardware.CUDAAvailable
 }
 
 func normalizeResidencyKeeperConfig(cfg ResidencyKeeperConfig) ResidencyKeeperConfig {
