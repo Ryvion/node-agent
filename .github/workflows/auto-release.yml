@@ -44,16 +44,15 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           MSG=$(git log -1 --pretty=%B "$HEAD_SHA")
-          # Skip on opt-out marker or on commits that don't change shippable code.
+          # Only the explicit [skip-release] / [no-release] marker opts out.
+          # The previous heuristic that skipped commits prefixed `ci:` /
+          # `chore:` / `docs:` etc. was too aggressive — it dropped genuine
+          # shippable changes (like a CI fix that itself unblocks the release
+          # publish path). Operators auto-update on every green main; if you
+          # truly don't want to ship, add [skip-release] explicitly.
           if printf '%s' "$MSG" | grep -qiE '\[skip[- ]release\]|\[no[- ]release\]'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "reason=opt-out marker" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          FIRST_LINE=$(printf '%s' "$MSG" | head -n1)
-          if printf '%s' "$FIRST_LINE" | grep -qiE '^(chore|docs|ci|test|style|refactor)(\(|:)'; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "reason=non-shippable commit type" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
