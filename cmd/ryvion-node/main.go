@@ -1492,16 +1492,13 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 
 	workLoopDiagnostics.RecordEvent("generic_path_entered", work.JobID, work.Kind, mainWorkLoopSpecContext(diagnostics.WorkSpecTaskFromJSON(work.SpecJSON)))
 
-	// Pre-job VRAM check — reject if GPU is too busy
+	// Low free VRAM is expected when llama-server already keeps a model
+	// resident. Let the native streaming manager execute or hot-swap the model
+	// instead of rejecting valid warm jobs before llama.cpp can run them.
 	if isStreaming {
 		freeVRAM := hw.GetFreeVRAM()
 		if freeVRAM > 0 && freeVRAM < 2*1024*1024*1024 { // Less than 2GB free
-			slog.Warn("insufficient free VRAM, rejecting job", "free_vram_mb", freeVRAM/(1024*1024), "job_id", work.JobID)
-			relayStreamingFailure(runCtx, client, work.JobID, fmt.Errorf("insufficient VRAM: %d MB free", freeVRAM/(1024*1024)))
-			if operatorRuntimeState != nil {
-				operatorRuntimeState.finishJob(work, nil, fmt.Errorf("insufficient VRAM"))
-			}
-			return
+			slog.Info("low free VRAM before native streaming; proceeding with llama.cpp residency manager", "free_vram_mb", freeVRAM/(1024*1024), "job_id", work.JobID)
 		}
 	}
 

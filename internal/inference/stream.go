@@ -158,8 +158,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 			} `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &errChunk); err == nil && errChunk.Error.Message != "" {
-			msg := fmt.Sprintf("data: {\"error\": \"llama-server stream error: %s\"}\n\n", errChunk.Error.Message)
-			pw.Write([]byte(msg))
+			writeHubStreamError(pw, "llama-server stream error: "+errChunk.Error.Message)
 			pw.Close()
 			<-streamErr
 			return fmt.Errorf("llama-server stream error: %s", errChunk.Error.Message)
@@ -184,24 +183,21 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	}
 
 	if err := scanner.Err(); err != nil {
-		msg := fmt.Sprintf("data: {\"error\": \"reading llama-server stream failed: %v\"}\n\n", err)
-		pw.Write([]byte(msg))
+		writeHubStreamError(pw, fmt.Sprintf("reading llama-server stream failed: %v", err))
 		pw.Close()
 		<-streamErr
 		return fmt.Errorf("reading llama-server stream failed: %w", err)
 	}
 
 	if err := ctx.Err(); err != nil {
-		msg := fmt.Sprintf("data: {\"error\": \"job context cancelled (timeout limit reached): %v\"}\n\n", err)
-		pw.Write([]byte(msg))
+		writeHubStreamError(pw, fmt.Sprintf("job context cancelled (timeout limit reached): %v", err))
 		pw.Close()
 		<-streamErr
 		return fmt.Errorf("job context cancelled: %w", err)
 	}
 
 	if fullContent.Len() == 0 {
-		msg := "data: {\"error\": \"llama-server returned empty output (context window or memory exceeded)\"}\n\n"
-		pw.Write([]byte(msg))
+		writeHubStreamError(pw, "llama-server returned empty output (context window or memory exceeded)")
 		pw.Close()
 		<-streamErr
 		return fmt.Errorf("llama-server returned empty inference generation")
@@ -241,6 +237,19 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 
 	slog.Info("streaming inference complete", "job_id", jobID, "duration", duration, "tokens_approx", fullContent.Len())
 	return nil
+}
+
+func writeHubStreamError(w io.Writer, message string) {
+	payload, err := json.Marshal(map[string]any{
+		"error": map[string]string{
+			"message": strings.TrimSpace(message),
+			"type":    "node_error",
+		},
+	})
+	if err != nil {
+		payload = []byte(`{"error":{"message":"streaming inference failed","type":"node_error"}}`)
+	}
+	_, _ = w.Write([]byte("data: " + string(payload) + "\n\n"))
 }
 
 // embedRequest and embedResponse are the OpenAI-compatible shapes that
