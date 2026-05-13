@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,12 +30,33 @@ const (
 	defaultGPULayers  = "99"
 	defaultCtxSize    = "16384"
 	healthCheckPeriod = 5 * time.Second
-	startupTimeout    = 120 * time.Second
+	// Cold CUDA loads of larger native models (phi-4 ~9 GB Q4_K_M, gemma-4
+	// 26B ~17 GB) can spend 60–180 s in cudaMalloc + tensor copies before
+	// llama-server's /health responds. The previous 120 s ceiling silently
+	// flipped these nodes to public-inference-ready:0 even though they were
+	// still warming up. Override via RYV_INFERENCE_STARTUP_TIMEOUT_SECONDS.
+	defaultStartupTimeout = 240 * time.Second
 	// GPU drivers commonly reserve a small slice of VRAM, so a 16 GB card can
 	// report slightly below 16 GiB. Keep model eligibility aligned with the
 	// hub's displayed/capability GB values instead of hiding valid cards.
 	modelVRAMReserveTolerance = 256 * 1024 * 1024
 )
+
+// resolvedStartupTimeout returns the cold-start budget for llama-server's
+// /health probe. RYV_INFERENCE_STARTUP_TIMEOUT_SECONDS overrides the default
+// when slow GPUs need extra time (e.g. shared CUDA contexts or paging in a
+// 17 GB model file from spinning disk).
+func resolvedStartupTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("RYV_INFERENCE_STARTUP_TIMEOUT_SECONDS"))
+	if raw == "" {
+		return defaultStartupTimeout
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs <= 0 {
+		return defaultStartupTimeout
+	}
+	return time.Duration(secs) * time.Second
+}
 
 // ModelMode distinguishes chat-style decoder models from encoder models that
 // llama-server serves via its /v1/embeddings endpoint. An empty Mode defaults
@@ -163,6 +185,24 @@ func NativeRuntimeAvailable() bool {
 	return platformServerURL() != ""
 }
 
+// BlockerReason is a short, dashboard-safe token explaining why the native
+// inference path is not currently ready. Operators see these via the
+// native-inference-blocker:<reason> token in the heartbeat StatusMessage.
+type BlockerReason string
+
+const (
+	BlockerNone               BlockerReason = ""
+	BlockerNotInstalled       BlockerReason = "not-installed"
+	BlockerBinaryMissing      BlockerReason = "binary-missing"
+	BlockerStartupTimeout     BlockerReason = "health-check-timeout"
+	BlockerProcessFailed      BlockerReason = "process-failed"
+	BlockerModelDownloadFail  BlockerReason = "model-download-failed"
+	BlockerDiskSpace          BlockerReason = "disk-space"
+	BlockerStarting           BlockerReason = "starting"
+	BlockerNotStarted         BlockerReason = "not-started"
+	BlockerPlatformUnsupported BlockerReason = "platform-unsupported"
+)
+
 type Manager struct {
 	dataDir           string
 	port              string
@@ -177,6 +217,7 @@ type Manager struct {
 
 	mu              sync.RWMutex
 	healthy         bool
+	blockerReason   BlockerReason
 	cmd             *exec.Cmd
 	cancel          context.CancelFunc
 	activeModelName string
@@ -199,7 +240,7 @@ func New(dataDir string) *Manager {
 	}
 	port := envOr("RYV_INFERENCE_PORT", defaultPort)
 	serverURL, serverURLExplicit := envOrExplicit("RYV_SERVER_URL", platformServerURL())
-	return &Manager{
+	mgr := &Manager{
 		dataDir:           dataDir,
 		port:              port,
 		threads:           envOr("RYV_INFERENCE_THREADS", defaultThreads),
@@ -208,7 +249,12 @@ func New(dataDir string) *Manager {
 		serverURL:         serverURL,
 		serverURLExplicit: serverURLExplicit,
 		activeModelName:   "ryvion-llama-3.2-3b",
+		blockerReason:     BlockerNotStarted,
 	}
+	if serverURL == "" {
+		mgr.blockerReason = BlockerPlatformUnsupported
+	}
+	return mgr
 }
 
 // amdSmokeTestPassed tracks whether the AMD GPU dry-run succeeded.
@@ -218,16 +264,21 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.serverURL == "" {
 		slog.Info("inference manager: no llama-server binary available for this platform, skipping",
 			"os", runtime.GOOS, "arch", runtime.GOARCH)
+		m.setBlockerReason(BlockerPlatformUnsupported)
 		<-ctx.Done()
 		return ctx.Err()
 	}
 
+	m.setBlockerReason(BlockerStarting)
+
 	binDir := filepath.Join(m.dataDir, "bin")
 	modelDir := filepath.Join(m.dataDir, "models")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		m.setBlockerReason(BlockerDiskSpace)
 		return fmt.Errorf("create bin dir: %w", err)
 	}
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		m.setBlockerReason(BlockerDiskSpace)
 		return fmt.Errorf("create model dir: %w", err)
 	}
 
@@ -235,10 +286,12 @@ func (m *Manager) Start(ctx context.Context) error {
 	installServer, installReason := shouldInstallServer(serverPath, serverSourceMarkerPath(serverPath), m.serverURL, m.serverURLExplicit)
 	if installServer {
 		if err := checkDiskSpace(m.dataDir); err != nil {
+			m.setBlockerReason(BlockerDiskSpace)
 			return fmt.Errorf("disk space check: %w", err)
 		}
 		slog.Info("downloading llama-server", "url", m.serverURL, "reason", installReason)
 		if err := downloadAndExtractServer(ctx, m.serverURL, serverPath); err != nil {
+			m.setBlockerReason(BlockerBinaryMissing)
 			return fmt.Errorf("download llama-server: %w", err)
 		}
 		if err := writeServerSourceMarker(serverSourceMarkerPath(serverPath), m.serverURL); err != nil {
@@ -293,6 +346,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			if _, err := os.Stat(modelPath); os.IsNotExist(err) {
 				if err := checkDiskSpace(m.dataDir); err != nil {
 					slog.Error("disk space check failed before model download", "error", err)
+					m.setBlockerReason(BlockerDiskSpace)
 					time.Sleep(5 * time.Second)
 					continue
 				}
@@ -300,6 +354,7 @@ func (m *Manager) Start(ctx context.Context) error {
 				slog.Info("downloading model", "model", currentModel, "url", redactDownloadURL(downloadURL))
 				if err := m.downloadModelFile(ctx, downloadURL, modelPath); err != nil {
 					slog.Error("failed to download model", "error", err)
+					m.setBlockerReason(BlockerModelDownloadFail)
 					time.Sleep(5 * time.Second)
 					continue
 				}
@@ -315,6 +370,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		slog.Info("starting llama-server", "port", m.port, "model", modelPath, "mode", string(activeMode))
 		if err := m.runServer(ctx); err != nil {
 			slog.Warn("llama-server exited", "error", err)
+			m.setBlockerReason(BlockerProcessFailed)
 		}
 		m.setHealthy(false)
 		select {
@@ -339,6 +395,25 @@ func (m *Manager) Healthy() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.healthy
+}
+
+// BlockerReason returns a short token explaining why Healthy() is false.
+// Returns BlockerNone when the manager is healthy. The reason feeds the
+// native-inference-blocker:<reason> heartbeat token so operators can see a
+// concrete cause (binary missing, health check timeout, etc.) on the dashboard.
+func (m *Manager) BlockerReason() BlockerReason {
+	if m == nil {
+		return BlockerNotStarted
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.healthy {
+		return BlockerNone
+	}
+	if m.blockerReason == BlockerNone {
+		return BlockerNotStarted
+	}
+	return m.blockerReason
 }
 
 func (m *Manager) ServerURL() string {
@@ -369,6 +444,8 @@ func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
 
 	m.mu.Lock()
 	m.activeModelName = modelName
+	m.healthy = false
+	m.blockerReason = BlockerStarting
 	if m.cancel != nil {
 		m.cancel() // Stop the server, it will restart with the new model
 	}
@@ -389,6 +466,7 @@ func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
 			}
 		}
 	}
+	m.setBlockerReason(BlockerStartupTimeout)
 	return fmt.Errorf("timeout waiting for %s to start", modelName)
 }
 
@@ -431,6 +509,8 @@ func (m *Manager) EnsureCustomModel(ctx context.Context, modelName, modelURL str
 	m.mu.Lock()
 	m.activeModelName = fileName
 	m.activeModelPath = modelPath
+	m.healthy = false
+	m.blockerReason = BlockerStarting
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -456,6 +536,25 @@ func (m *Manager) EnsureCustomModel(ctx context.Context, modelName, modelURL str
 func (m *Manager) setHealthy(v bool) {
 	m.mu.Lock()
 	m.healthy = v
+	if v {
+		m.blockerReason = BlockerNone
+	}
+	m.mu.Unlock()
+}
+
+// setBlockerReason records the most recent reason the native inference path
+// is blocked. Callers should set this whenever they fail to advance the
+// startup pipeline (binary missing, model download failure, health timeout,
+// process crash, etc.) so BlockerReason() reflects an actionable token.
+func (m *Manager) setBlockerReason(reason BlockerReason) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.blockerReason = reason
+	if reason != BlockerNone {
+		m.healthy = false
+	}
 	m.mu.Unlock()
 }
 
@@ -707,8 +806,9 @@ func (m *Manager) healthLoop(ctx context.Context) {
 	url := m.ServerURL() + "/health"
 	client := &http.Client{Timeout: 3 * time.Second}
 
-	// Initial startup: wait up to startupTimeout for first healthy response
-	deadline := time.After(startupTimeout)
+	// Initial startup: wait up to resolvedStartupTimeout for first healthy response.
+	startupBudget := resolvedStartupTimeout()
+	deadline := time.After(startupBudget)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -717,7 +817,9 @@ func (m *Manager) healthLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-deadline:
-			slog.Warn("llama-server failed to become healthy within timeout")
+			slog.Warn("llama-server failed to become healthy within timeout",
+				"timeout_seconds", int(startupBudget.Seconds()))
+			m.setBlockerReason(BlockerStartupTimeout)
 			return
 		case <-ticker.C:
 			if checkHealth(ctx, client, url) {
@@ -738,6 +840,7 @@ monitoring:
 			if !checkHealth(ctx, client, url) {
 				slog.Warn("llama-server health check failed")
 				m.setHealthy(false)
+				m.setBlockerReason(BlockerProcessFailed)
 			} else if !m.Healthy() {
 				slog.Info("llama-server recovered")
 				m.setHealthy(true)

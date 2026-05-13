@@ -3290,7 +3290,19 @@ func legacyNativeInferenceManagerEnabled(getenv func(string) string) bool {
 	case "0", "false", "no", "off", "disabled":
 		return false
 	}
-	return !v7dashboardinference.EnabledFromEnv(getenv)
+	// Default-on: the legacy inference.Manager owns native llama-server
+	// startup, the bundled binary install, model GGUF download, and the
+	// /health probe whose result feeds infMgr.Healthy(). The hub uses
+	// infMgr.Healthy() to gate cap:native_streaming and
+	// public-inference-ready, and the OpenAI-compatible streaming engine
+	// (executorKindNativeStreaming) executes through infMgr.
+	// The V7 llama.cpp sidecar runs on a different port (45910 vs 8081)
+	// and is purely opt-in via RYV_LLAMA_CPP_ENABLED=1 — it does not
+	// feed infMgr.Healthy() or replace the legacy /health signal, so
+	// disabling the legacy manager when V7 is enabled silently turns
+	// every node into fail-closed for streaming inference. Co-existence
+	// is safe; explicit RYV_NODE_LEGACY_NATIVE_INFERENCE=0 still opts out.
+	return true
 }
 
 func mainWorkLoopSpecContext(specTask string) map[string]string {
@@ -3515,6 +3527,13 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		parts = append(parts, "native-model:"+infMgr.ModelName())
 	} else {
 		parts = append(parts, "native-inference-ready:0")
+		// Surface a structured blocker so the hub dashboard can show the
+		// operator a concrete reason (binary-missing, health-check-timeout,
+		// model-download-failed, process-failed, disk-space, starting,
+		// not-started, platform-unsupported, not-installed). Without this
+		// token, operators see "degraded" but cannot tell whether to wait
+		// for a cold load or to investigate a missing GPU bundle.
+		parts = append(parts, "native-inference-blocker:"+nativeInferenceBlockerToken(nativeSupported, infMgr))
 	}
 	if publicInferenceReady {
 		parts = append(parts, "public-inference-ready:1")
@@ -3531,6 +3550,23 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		RuntimeGPU:  runtimeSnap.GPUReady,
 		Message:     strings.Join(parts, ","),
 	}
+}
+
+// nativeInferenceBlockerToken returns the dashboard-safe blocker token used
+// by the native-inference-blocker:<reason> heartbeat field. Caller must
+// have already established that the native path is NOT ready.
+func nativeInferenceBlockerToken(nativeSupported bool, infMgr *inference.Manager) string {
+	if !nativeSupported {
+		return string(inference.BlockerPlatformUnsupported)
+	}
+	if infMgr == nil {
+		return string(inference.BlockerNotStarted)
+	}
+	reason := infMgr.BlockerReason()
+	if reason == inference.BlockerNone {
+		return string(inference.BlockerNotStarted)
+	}
+	return string(reason)
 }
 
 func managedOCIRuntimeUnavailableError(runErr error, logs string) bool {

@@ -131,33 +131,33 @@ func mutateOperatorPreferences(mutator func(*operatorPreferences)) (operatorPref
 }
 
 func resolveInitialPublicAIOptIn() (bool, error) {
+	// Default is opt-in: nodes advertise public-inference-ready unless the
+	// operator explicitly opts out via env var or operator API. Fail-open so
+	// new GPU nodes start earning streaming work without a second toggle.
+	// Only an explicit "0"/"false"/"no"/"off" via env var or
+	// public_ai_opt_out marker in the saved config disables participation.
 	if raw := strings.TrimSpace(os.Getenv("RYV_PUBLIC_AI")); raw != "" {
 		return parsePublicAIOptIn(raw), nil
 	}
 	prefs, err := loadOperatorPreferences()
 	if err != nil {
-		return false, err
-	}
-	if prefs.PublicAIOptIn {
-		return true, nil
+		// Default-on even when preferences fail to load: operator can still
+		// opt out via env var or operator API once the config is repaired.
+		return true, err
 	}
 	if prefs.PublicAIOptOutSet && prefs.PublicAIOptOut {
 		return false, nil
 	}
-	// Legacy installers and early operator UI builds could persist
-	// "public_ai_opt_in": false as an implicit default, which silently removed
-	// otherwise-capable nodes from buyer inference. Treat that old shape as
-	// unset; the current explicit opt-out marker above is the durable disable.
-	// Operators who explicitly disable the managed OCI lane are clearly here to
-	// run native inference; auto-opt them into the public AI lane so they earn
-	// streaming work without a second toggle. Phase 1 friction removal.
-	if ociLaneDisabledFromEnv() {
+	// Saved public_ai_opt_in:true keeps explicit opt-ins working. Saved
+	// public_ai_opt_in:false from legacy installers is treated as unset —
+	// only the explicit public_ai_opt_out marker above can disable.
+	if prefs.PublicAIOptIn {
 		return true, nil
 	}
-	// Before operator preferences existed, Ryvion nodes defaulted public AI on
-	// unless RYV_PUBLIC_AI=0 was set. Preserve that behavior for existing config
-	// files that do not contain an explicit public_ai_opt_in decision; otherwise
-	// auto-updates can silently remove working buyer-facing inference capacity.
+	// Default-on for any remaining state (no saved preferences, RYV_DISABLE_OCI
+	// set, or only legacy public_ai_opt_in:false present). The operator can
+	// still toggle off via the operator API.
+	_ = ociLaneDisabledFromEnv()
 	return true, nil
 }
 

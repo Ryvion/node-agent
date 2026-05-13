@@ -1010,10 +1010,10 @@ func TestPublicAIOptInEnabled(t *testing.T) {
 	}
 }
 
-func TestLegacyNativeInferenceManagerDefaultsOffForV7Sidecar(t *testing.T) {
+func TestLegacyNativeInferenceManagerDefaultsOnForHealthSignal(t *testing.T) {
 	getenv := map[string]string{}
-	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
-		t.Fatal("expected legacy inference manager to stay off while V7 inference is enabled")
+	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to default-on so infMgr.Healthy() reflects native readiness")
 	}
 	getenv[legacyNativeInferenceFlagEnv] = "1"
 	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
@@ -1025,12 +1025,27 @@ func TestLegacyNativeInferenceManagerDefaultsOffForV7Sidecar(t *testing.T) {
 	}
 }
 
-func TestLegacyNativeInferenceManagerStartsWhenV7Disabled(t *testing.T) {
-	getenv := map[string]string{
-		v7dashboardinference.DisableFlagEnv: "1",
-	}
+func TestLegacyNativeInferenceManagerStaysOnWhenV7Enabled(t *testing.T) {
+	// V7 dashboard inference being enabled (the default) must NOT silently
+	// disable the legacy inference manager — the V7 sidecar runs on a
+	// different port and is purely opt-in via RYV_LLAMA_CPP_ENABLED, so
+	// gating off the legacy manager would break public-inference-ready.
+	getenv := map[string]string{}
 	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
-		t.Fatal("expected legacy inference manager to start when V7 inference is disabled")
+		t.Fatal("expected legacy inference manager to remain on when V7 inference is enabled")
+	}
+	getenv[v7dashboardinference.DisableFlagEnv] = "1"
+	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to remain on when V7 inference is disabled")
+	}
+}
+
+func TestNativeInferenceBlockerToken(t *testing.T) {
+	if got := nativeInferenceBlockerToken(false, nil); got != string(inference.BlockerPlatformUnsupported) {
+		t.Fatalf("unsupported platform should report platform-unsupported, got %q", got)
+	}
+	if got := nativeInferenceBlockerToken(true, nil); got != string(inference.BlockerNotStarted) {
+		t.Fatalf("nil manager should report not-started, got %q", got)
 	}
 }
 
@@ -1127,6 +1142,50 @@ func TestResolveInitialPublicAIOptInPrefersEnvOverride(t *testing.T) {
 	}
 	if !got {
 		t.Fatal("expected env override to take precedence over saved preferences")
+	}
+}
+
+func TestResolveInitialPublicAIOptInDefaultOnWithNoConfig(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected default-on opt-in when no config and no env override is set")
+	}
+}
+
+func TestResolveInitialPublicAIOptInEnvZeroOptsOut(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	for _, raw := range []string{"0", "false", "no", "off"} {
+		t.Run("env="+raw, func(t *testing.T) {
+			t.Setenv("RYV_PUBLIC_AI", raw)
+			got, err := resolveInitialPublicAIOptIn()
+			if err != nil {
+				t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+			}
+			if got {
+				t.Fatalf("RYV_PUBLIC_AI=%q must opt out, got true", raw)
+			}
+		})
 	}
 }
 

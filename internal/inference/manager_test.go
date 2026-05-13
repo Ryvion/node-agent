@@ -172,3 +172,76 @@ func containsAll(text string, wants ...string) bool {
 	}
 	return true
 }
+
+func TestNewReportsBlockerReasonBeforeStart(t *testing.T) {
+	t.Setenv("RYV_SERVER_URL", "")
+	mgr := New(t.TempDir())
+	if mgr == nil {
+		t.Fatal("New returned nil")
+	}
+	if mgr.Healthy() {
+		t.Fatal("expected new manager to report Healthy() == false before Start")
+	}
+	got := mgr.BlockerReason()
+	// On platforms with a bundled llama-server URL we report not-started;
+	// otherwise platform-unsupported. Either is non-empty and dashboard-safe.
+	if got == BlockerNone {
+		t.Fatalf("expected non-empty blocker reason on a fresh manager, got %q", got)
+	}
+	if got != BlockerNotStarted && got != BlockerPlatformUnsupported {
+		t.Fatalf("unexpected initial blocker %q", got)
+	}
+}
+
+func TestSetHealthyClearsBlocker(t *testing.T) {
+	mgr := New(t.TempDir())
+	mgr.setBlockerReason(BlockerStartupTimeout)
+	if got := mgr.BlockerReason(); got != BlockerStartupTimeout {
+		t.Fatalf("setBlockerReason did not stick: %q", got)
+	}
+	mgr.setHealthy(true)
+	if !mgr.Healthy() {
+		t.Fatal("expected Healthy() true after setHealthy(true)")
+	}
+	if got := mgr.BlockerReason(); got != BlockerNone {
+		t.Fatalf("expected blocker cleared after setHealthy(true), got %q", got)
+	}
+}
+
+func TestSetBlockerReasonForcesUnhealthy(t *testing.T) {
+	mgr := New(t.TempDir())
+	mgr.setHealthy(true)
+	mgr.setBlockerReason(BlockerProcessFailed)
+	if mgr.Healthy() {
+		t.Fatal("expected Healthy() false after setBlockerReason of non-empty token")
+	}
+	if got := mgr.BlockerReason(); got != BlockerProcessFailed {
+		t.Fatalf("expected BlockerProcessFailed, got %q", got)
+	}
+}
+
+func TestNilManagerBlockerReasonIsNotStarted(t *testing.T) {
+	var mgr *Manager
+	if got := mgr.BlockerReason(); got != BlockerNotStarted {
+		t.Fatalf("nil manager should report BlockerNotStarted, got %q", got)
+	}
+}
+
+func TestResolvedStartupTimeoutDefaultAndOverride(t *testing.T) {
+	t.Setenv("RYV_INFERENCE_STARTUP_TIMEOUT_SECONDS", "")
+	if got := resolvedStartupTimeout(); got != defaultStartupTimeout {
+		t.Fatalf("expected default startup timeout %v, got %v", defaultStartupTimeout, got)
+	}
+	t.Setenv("RYV_INFERENCE_STARTUP_TIMEOUT_SECONDS", "300")
+	if got := resolvedStartupTimeout(); got.Seconds() != 300 {
+		t.Fatalf("expected 300s timeout, got %v", got)
+	}
+	t.Setenv("RYV_INFERENCE_STARTUP_TIMEOUT_SECONDS", "garbage")
+	if got := resolvedStartupTimeout(); got != defaultStartupTimeout {
+		t.Fatalf("garbage env value must fall back to default, got %v", got)
+	}
+	t.Setenv("RYV_INFERENCE_STARTUP_TIMEOUT_SECONDS", "0")
+	if got := resolvedStartupTimeout(); got != defaultStartupTimeout {
+		t.Fatalf("non-positive override must fall back to default, got %v", got)
+	}
+}
