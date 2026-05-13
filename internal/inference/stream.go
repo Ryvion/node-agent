@@ -55,10 +55,37 @@ func IsEmbeddingJob(specJSON string) bool {
 	return strings.EqualFold(strings.TrimSpace(s.Task), "embedding")
 }
 
+// StreamingMetrics summarises the latency / throughput numbers a single
+// streaming inference job observed locally. The /v8 verifier (and hub
+// dashboards) read these from the receipt's MetadataJSON via the keys
+// p50_ttft_ms, p50_decode_tps, p50_end_to_end_tps, etc. Zero values mean the
+// metric was not measurable for this job (e.g. the request errored before the
+// first token arrived); callers must treat them as "unknown" rather than 0.
+type StreamingMetrics struct {
+	// TTFTMs is wall-clock milliseconds between dispatching the request to
+	// llama-server and observing the first content delta on the SSE stream.
+	TTFTMs int64
+	// DecodeTPS is generated tokens per second measured between the first
+	// content delta and the end of the stream — i.e. excludes prefill / TTFT.
+	DecodeTPS float64
+	// EndToEndTPS is generated tokens per second measured against the full
+	// wall-clock duration of the job (includes prefill / TTFT).
+	EndToEndTPS float64
+	// CompletionTokens is the count llama-server reported in its terminal
+	// `usage` chunk; falls back to a per-chunk content count when absent.
+	CompletionTokens int64
+}
+
 // RunStreamingJob handles an inference job by calling the local llama-server
 // with streaming, and relaying chunks to the hub.
 func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string) error {
 	start := time.Now()
+	var (
+		firstTokenAt  time.Time
+		usageTokens   int64 // from llama-server's terminal usage chunk
+		chunkTokens   int64 // fallback: count of chunks with non-empty delta
+		hasFirstToken bool
+	)
 
 	var spec specPayload
 	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
@@ -164,18 +191,37 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 			return fmt.Errorf("llama-server stream error: %s", errChunk.Error.Message)
 		}
 
-		// Extract content for hash/receipt
+		// Extract content for hash/receipt + capture llama-server's terminal
+		// `usage` object when emitted (some llama.cpp builds attach it to the
+		// final non-[DONE] chunk; others emit a standalone usage frame).
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
 			} `json:"choices"`
+			Usage *struct {
+				PromptTokens     int64 `json:"prompt_tokens"`
+				CompletionTokens int64 `json:"completion_tokens"`
+				TotalTokens      int64 `json:"total_tokens"`
+			} `json:"usage,omitempty"`
 		}
-		if err := json.Unmarshal([]byte(data), &chunk); err == nil && len(chunk.Choices) > 0 {
-			content := chunk.Choices[0].Delta.Content
-			fullContent.WriteString(content)
-			hash.Write([]byte(content))
+		if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+			if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+				usageTokens = chunk.Usage.CompletionTokens
+			}
+			if len(chunk.Choices) > 0 {
+				content := chunk.Choices[0].Delta.Content
+				if content != "" {
+					if !hasFirstToken {
+						firstTokenAt = time.Now()
+						hasFirstToken = true
+					}
+					chunkTokens++
+					fullContent.WriteString(content)
+					hash.Write([]byte(content))
+				}
+			}
 		}
 
 		// Relay SSE line to hub
@@ -210,33 +256,94 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		slog.Warn("hub stream relay error", "job_id", jobID, "error", err)
 	}
 
-	duration := time.Since(start)
+	finishedAt := time.Now()
+	duration := finishedAt.Sub(start)
 	resultHash := hex.EncodeToString(hash.Sum(nil))
+
+	// Compute streaming-timing metrics. Prefer llama-server's usage count for
+	// the token total; fall back to per-chunk counting if absent. Decode TPS
+	// excludes prefill (TTFT); end-to-end TPS includes it. The /v8 verifier
+	// reads p50_* and *_tps keys to populate its TTFT/DECODE TPS columns;
+	// emitting only the keys we measured keeps zero from being mistaken for a
+	// real value downstream.
+	tokensGenerated := usageTokens
+	if tokensGenerated == 0 {
+		tokensGenerated = chunkTokens
+	}
+	metrics := StreamingMetrics{CompletionTokens: tokensGenerated}
+	if hasFirstToken {
+		metrics.TTFTMs = firstTokenAt.Sub(start).Milliseconds()
+		decodeWindow := finishedAt.Sub(firstTokenAt).Seconds()
+		if tokensGenerated > 0 && decodeWindow > 0 {
+			metrics.DecodeTPS = float64(tokensGenerated) / decodeWindow
+		}
+	}
+	endToEndWindow := duration.Seconds()
+	if tokensGenerated > 0 && endToEndWindow > 0 {
+		metrics.EndToEndTPS = float64(tokensGenerated) / endToEndWindow
+	}
 
 	// Submit receipt — truncate response tail to avoid bloating metadata.
 	tail := fullContent.String()
 	if len(tail) > 4096 {
 		tail = tail[len(tail)-4096:]
 	}
+	meta := map[string]any{
+		"executor":        "llama-server",
+		"model":           m.ModelName(),
+		"duration_ms":     duration.Milliseconds(),
+		"exit_code":       0,
+		"response_length": fullContent.Len(),
+		"stderr_tail":     tail,
+	}
+	applyStreamingMetricsToMetadata(meta, metrics)
 	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
 		JobID:         jobID,
 		ResultHashHex: resultHash,
 		MeteringUnits: 1,
-		Metadata: map[string]any{
-			"executor":        "llama-server",
-			"model":           m.ModelName(),
-			"duration_ms":     duration.Milliseconds(),
-			"exit_code":       0,
-			"response_length": fullContent.Len(),
-			"stderr_tail":     tail,
-		},
+		Metadata:      meta,
 	}); err != nil {
 		slog.Warn("submit receipt failed", "job_id", jobID, "error", err)
 		return fmt.Errorf("submit receipt: %w", err)
 	}
 
-	slog.Info("streaming inference complete", "job_id", jobID, "duration", duration, "tokens_approx", fullContent.Len())
+	slog.Info("streaming inference complete",
+		"job_id", jobID,
+		"duration", duration,
+		"tokens", tokensGenerated,
+		"ttft_ms", metrics.TTFTMs,
+		"decode_tps", metrics.DecodeTPS,
+		"end_to_end_tps", metrics.EndToEndTPS,
+	)
 	return nil
+}
+
+// applyStreamingMetricsToMetadata writes the streaming-timing keys the hub
+// verifier expects into the receipt metadata map. Only non-zero metrics are
+// written so the hub can keep treating absence as "not measured" rather than
+// surfacing 0 ms / 0 tps in the dashboard. Speculative-decoding keys are
+// intentionally not emitted here: the streaming path does not currently run a
+// drafter, so the hub's missing-key fallback (false / 0) is the correct value.
+func applyStreamingMetricsToMetadata(meta map[string]any, metrics StreamingMetrics) {
+	if meta == nil {
+		return
+	}
+	if metrics.TTFTMs > 0 {
+		meta["p50_ttft_ms"] = metrics.TTFTMs
+		meta["ttft_ms"] = metrics.TTFTMs
+	}
+	if metrics.DecodeTPS > 0 {
+		meta["p50_decode_tps"] = metrics.DecodeTPS
+		meta["decode_tps"] = metrics.DecodeTPS
+		meta["tps"] = metrics.DecodeTPS
+	}
+	if metrics.EndToEndTPS > 0 {
+		meta["p50_end_to_end_tps"] = metrics.EndToEndTPS
+		meta["end_to_end_tps"] = metrics.EndToEndTPS
+	}
+	if metrics.CompletionTokens > 0 {
+		meta["completion_tokens"] = metrics.CompletionTokens
+	}
 }
 
 func writeHubStreamError(w io.Writer, message string) {
