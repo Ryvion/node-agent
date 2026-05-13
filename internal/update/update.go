@@ -31,9 +31,26 @@ const releasePublicKeyB64 = "KZWGe+VQWPy2ypCNpGwPEYlc8FnFVadufGXnbGAk2nE="
 
 // NeedsUpdate compares semver strings (with optional "v" prefix).
 // Returns true if latest is strictly newer than current.
+//
+// Special cases:
+//   - latest == "" → no update info → false
+//   - current == "" or "dev" → unstamped local build → update IF the user
+//     hasn't explicitly opted out via RYV_DISABLE_AUTO_UPDATE=1. This is the
+//     fix for operator nodes installed via `go install` (which doesn't
+//     stamp main.version), which previously got stuck on whatever they
+//     compiled against, silently missing every release.
 func NeedsUpdate(current, latest string) bool {
-	if latest == "" || current == "" || current == "dev" {
+	if latest == "" {
 		return false
+	}
+	if current == "" || current == "dev" {
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("RYV_DISABLE_AUTO_UPDATE")), "1") ||
+			strings.EqualFold(strings.TrimSpace(os.Getenv("RYV_DISABLE_AUTO_UPDATE")), "true") {
+			return false
+		}
+		// Treat dev / unstamped builds as older than any signed release tag.
+		// Active developers can opt out via the env flag above.
+		return parseSemver(latest) != nil
 	}
 	cur := parseSemver(current)
 	lat := parseSemver(latest)

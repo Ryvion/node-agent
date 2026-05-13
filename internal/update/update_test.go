@@ -12,6 +12,49 @@ import (
 	"testing"
 )
 
+func TestNeedsUpdateDevBuildsAutoUpdate(t *testing.T) {
+	// Default-on for unstamped builds: operator installed via `go install`
+	// (or older releases that didn't set main.version) should still pick up
+	// new releases. Pre-fix this returned false, leaving nodes stuck on
+	// whatever they originally compiled.
+	if !NeedsUpdate("dev", "v1.2.154") {
+		t.Fatal("expected dev build to auto-update to v1.2.154")
+	}
+	if !NeedsUpdate("", "v1.2.154") {
+		t.Fatal("expected empty version to auto-update to v1.2.154")
+	}
+}
+
+func TestNeedsUpdateRespectsExplicitDisable(t *testing.T) {
+	// Active developers can opt out so a local `go run` won't get clobbered.
+	t.Setenv("RYV_DISABLE_AUTO_UPDATE", "1")
+	if NeedsUpdate("dev", "v1.2.154") {
+		t.Fatal("expected RYV_DISABLE_AUTO_UPDATE=1 to suppress dev auto-update")
+	}
+}
+
+func TestNeedsUpdateSemverComparison(t *testing.T) {
+	if !NeedsUpdate("v1.2.150", "v1.2.154") {
+		t.Fatal("expected v1.2.150 → v1.2.154 update")
+	}
+	if NeedsUpdate("v1.2.154", "v1.2.154") {
+		t.Fatal("expected same version to skip update")
+	}
+	if NeedsUpdate("v1.2.155", "v1.2.154") {
+		t.Fatal("expected newer current to skip update")
+	}
+}
+
+func TestNeedsUpdateEmptyLatest(t *testing.T) {
+	// Hub may not have advertised a version yet — never update on empty.
+	if NeedsUpdate("v1.2.150", "") {
+		t.Fatal("expected empty latest to never trigger update")
+	}
+	if NeedsUpdate("dev", "") {
+		t.Fatal("expected empty latest to never trigger update from dev")
+	}
+}
+
 func TestFetchExpectedChecksumParsesBaseName(t *testing.T) {
 	name := expectedArchiveFilename()
 	if name == "" {
