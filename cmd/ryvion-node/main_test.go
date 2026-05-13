@@ -1010,6 +1010,30 @@ func TestPublicAIOptInEnabled(t *testing.T) {
 	}
 }
 
+func TestLegacyNativeInferenceManagerDefaultsOffForV7Sidecar(t *testing.T) {
+	getenv := map[string]string{}
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to stay off while V7 inference is enabled")
+	}
+	getenv[legacyNativeInferenceFlagEnv] = "1"
+	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected explicit legacy inference opt-in to start manager")
+	}
+	getenv[legacyNativeInferenceFlagEnv] = "0"
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected explicit legacy inference opt-out to keep manager stopped")
+	}
+}
+
+func TestLegacyNativeInferenceManagerStartsWhenV7Disabled(t *testing.T) {
+	getenv := map[string]string{
+		v7dashboardinference.DisableFlagEnv: "1",
+	}
+	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to start when V7 inference is disabled")
+	}
+}
+
 func TestResolveInitialPublicAIOptInUsesSavedPreferences(t *testing.T) {
 	prevResolver := operatorConfigPathResolver
 	configPath := filepath.Join(t.TempDir(), "config.json")

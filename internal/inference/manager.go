@@ -64,10 +64,10 @@ type ModelConfig struct {
 var NativeModels = map[string]ModelConfig{
 	"ryvion-llama-3.2-3b": {FileName: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
 	"phi-4":               {FileName: "phi-4-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf", MinVRAMBytes: 8 * 1024 * 1024 * 1024},
-	"gemma-3-27b-it": {
-		FileName:                "gemma-3-27b-it-q4_0.gguf",
-		URL:                     "https://huggingface.co/google/gemma-3-27b-it-qat-q4_0-gguf/resolve/main/gemma-3-27b-it-q4_0.gguf",
-		PlatformPath:            "/api/v1/node/models/gemma-3-27b-it/download",
+	"gemma-4-26b-a4b-it": {
+		FileName:                "gemma-4-26B-A4B-it-Q4_K_M.gguf",
+		URL:                     "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+		PlatformPath:            "/api/v1/node/models/gemma-4-26b-a4b-it/download",
 		MinVRAMBytes:            16 * 1024 * 1024 * 1024,
 		RequiresHuggingFaceAuth: true,
 	},

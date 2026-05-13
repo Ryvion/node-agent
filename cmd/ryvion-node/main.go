@@ -89,6 +89,7 @@ const (
 	v7ProofMetadataKey              = "v7_proof"
 	v7ProofOutputBytesMetadataKey   = "_v7_proof_output_bytes"
 	v7ProofArtifactBytesMetadataKey = "_v7_proof_artifact_bytes"
+	legacyNativeInferenceFlagEnv    = "RYV_NODE_LEGACY_NATIVE_INFERENCE"
 )
 
 var (
@@ -773,17 +774,22 @@ func runNode(ctx context.Context) {
 	dataDir := strings.TrimSpace(os.Getenv("RYV_DATA_DIR"))
 	infMgr := inference.New(dataDir)
 	infMgr.SetHubAuth(hubURL, client.NodeAuthToken)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("inference manager panic", "error", r)
+	if legacyNativeInferenceManagerEnabled(os.Getenv) {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("inference manager panic", "error", r)
+				}
+			}()
+			if err := infMgr.Start(ctx); err != nil && ctx.Err() == nil {
+				slog.Error("inference manager stopped", "error", err)
 			}
 		}()
-		if err := infMgr.Start(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("inference manager stopped", "error", err)
-		}
-	}()
-	defer infMgr.Stop()
+		defer infMgr.Stop()
+	} else {
+		slog.Info("legacy native inference manager disabled; V7 llama.cpp sidecar owns model execution",
+			"enable_env", legacyNativeInferenceFlagEnv)
+	}
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.setInferenceManager(infMgr)
 	}
@@ -3275,6 +3281,19 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func legacyNativeInferenceManagerEnabled(getenv func(string) string) bool {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	switch strings.ToLower(strings.TrimSpace(getenv(legacyNativeInferenceFlagEnv))) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	case "0", "false", "no", "off", "disabled":
+		return false
+	}
+	return !v7dashboardinference.EnabledFromEnv(getenv)
 }
 
 func mainWorkLoopSpecContext(specTask string) map[string]string {
