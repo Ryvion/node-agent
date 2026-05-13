@@ -1,0 +1,133 @@
+name: Auto-release on main
+
+# Auto-tags + triggers the existing release workflow whenever Go CI passes on main.
+#
+# Each successful main push gets the next patch version (vMAJOR.MINOR.PATCH+1).
+# To skip a release for a specific commit, include `[skip-release]` in the commit
+# message OR start the commit with `chore(`, `docs(`, `ci(`, etc.
+#
+# Operator nodes auto-update via heartbeat: the hub advertises the latest
+# version, agents compare semver, pull the new binary from GitHub Releases,
+# and restart. So a commit on main → operator fleet within minutes.
+
+on:
+  workflow_run:
+    workflows: ["Go CI"]
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag-and-release:
+    name: Cut next patch version
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
+
+    steps:
+      - name: Checkout (with full history for tag lookup)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: true
+
+      - name: Decide whether to release
+        id: gate
+        # Read commit message into env var (avoids workflow-injection via
+        # untrusted commit text being interpolated into the shell).
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          MSG=$(git log -1 --pretty=%B "$HEAD_SHA")
+          # Skip on opt-out marker or on commits that don't change shippable code.
+          if printf '%s' "$MSG" | grep -qiE '\[skip[- ]release\]|\[no[- ]release\]'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=opt-out marker" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FIRST_LINE=$(printf '%s' "$MSG" | head -n1)
+          if printf '%s' "$FIRST_LINE" | grep -qiE '^(chore|docs|ci|test|style|refactor)(\(|:)'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "reason=non-shippable commit type" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Skip release
+        if: steps.gate.outputs.skip == 'true'
+        env:
+          REASON: ${{ steps.gate.outputs.reason }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          echo "::notice title=Auto-release skipped::$REASON"
+          echo "Commit: $HEAD_SHA"
+
+      - name: Compute next version
+        if: steps.gate.outputs.skip != 'true'
+        id: version
+        run: |
+          # Latest stable v* tag (semver patch only — ignore prefixed/dated tags).
+          LATEST=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$LATEST" ]; then
+            NEXT="v0.1.0"
+          else
+            STRIPPED=${LATEST#v}
+            MAJOR=$(echo "$STRIPPED" | cut -d. -f1)
+            MINOR=$(echo "$STRIPPED" | cut -d. -f2)
+            PATCH=$(echo "$STRIPPED" | cut -d. -f3)
+            NEXT_PATCH=$((PATCH + 1))
+            NEXT="v${MAJOR}.${MINOR}.${NEXT_PATCH}"
+          fi
+          # Validate the computed version matches expected vN.N.N pattern before
+          # passing to downstream steps. Defense in depth.
+          if ! echo "$NEXT" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::computed version $NEXT failed validation"
+            exit 1
+          fi
+          echo "Latest tag: $LATEST"
+          echo "Next version: $NEXT"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Push tag
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          NEW_TAG: ${{ steps.version.outputs.version }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_TAG" -m "Auto-release $NEW_TAG from $HEAD_SHA"
+          git push origin "$NEW_TAG"
+
+      - name: Trigger release workflow
+        # GITHUB_TOKEN-pushed tags don't auto-trigger workflows by design (loop
+        # prevention). Manually dispatch the existing release.yml with the new
+        # version. workflow_dispatch from another workflow has full secret
+        # access, so RELEASE_SIGNING_PRIVATE_KEY_B64 still works.
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG: ${{ steps.version.outputs.version }}
+        run: |
+          gh workflow run release.yml \
+            --ref "$NEW_TAG" \
+            -f version="$NEW_TAG"
+
+      - name: Summary
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          NEW_TAG: ${{ steps.version.outputs.version }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          {
+            echo "## Auto-release \`$NEW_TAG\` cut"
+            echo ""
+            echo "- Commit: \`$HEAD_SHA\`"
+            echo "- Tag: \`$NEW_TAG\`"
+            echo "- Release workflow dispatched. See [Actions](../../actions)."
+          } >> "$GITHUB_STEP_SUMMARY"
