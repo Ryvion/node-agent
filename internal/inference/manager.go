@@ -87,11 +87,18 @@ var NativeModels = map[string]ModelConfig{
 	"ryvion-llama-3.2-3b": {FileName: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
 	"phi-4":               {FileName: "phi-4-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf", MinVRAMBytes: 8 * 1024 * 1024 * 1024},
 	"gemma-4-26b-a4b-it": {
-		FileName:                "gemma-4-26B-A4B-it-Q4_K_M.gguf",
-		URL:                     "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+		FileName: "gemma-4-26B-A4B-it-Q4_K_M.gguf",
+		URL:      "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+		// PlatformPath kept as a fallback so operators can opt into the
+		// Ryvion-managed proxy via a flag flip without code changes, but the
+		// public ggml-org GGUF mirror does not require an HF token (verified
+		// 2026-05: HEAD returns 302 → CDN with no auth header). Keeping
+		// RequiresHuggingFaceAuth=true was hiding the model from operators
+		// who didn't set HF_TOKEN themselves, which defeated the whole point
+		// of having the public mirror.
 		PlatformPath:            "/api/v1/node/models/gemma-4-26b-a4b-it/download",
 		MinVRAMBytes:            16 * 1024 * 1024 * 1024,
-		RequiresHuggingFaceAuth: true,
+		RequiresHuggingFaceAuth: false,
 	},
 	"tinyllama": {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
 	// Phase 1c: native embeddings. nomic-embed-text-v1.5 is 137M params,

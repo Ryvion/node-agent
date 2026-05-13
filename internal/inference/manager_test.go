@@ -43,7 +43,13 @@ func TestSupportedNativeChatModelsAllowsDriverReservedVRAMOn16GBCards(t *testing
 	t.Fatalf("expected Gemma 4 to be advertised for 16GB-class GPU with %d reported bytes", reportedVRAM)
 }
 
-func TestSupportedNativeChatModelsRequiresTokenForGatedGemma(t *testing.T) {
+func TestSupportedNativeChatModelsAdvertisesGemmaWithoutHFToken(t *testing.T) {
+	// The ggml-org Gemma 4 26B-A4B-it GGUF mirror is publicly downloadable
+	// without an HF token (verified 2026-05: HEAD → 302 to CDN, no auth).
+	// This regression guard prevents anyone from re-flipping
+	// RequiresHuggingFaceAuth=true and silently hiding the model from every
+	// operator who hasn't set HF_TOKEN. Without this, the user's 24GB VRAM
+	// node could not advertise gemma even though the weights were free.
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
 
@@ -56,11 +62,16 @@ func TestSupportedNativeChatModelsRequiresTokenForGatedGemma(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("expected gated Gemma model to be advertised through Ryvion platform-managed model downloads")
+		t.Fatal("expected Gemma model to advertise without HF_TOKEN — the ggml-org GGUF mirror is publicly accessible")
 	}
 }
 
-func TestSupportedNativeChatModelsCanDisablePlatformGatedModels(t *testing.T) {
+func TestSupportedNativeChatModelsAdvertisesGemmaEvenWithPlatformDownloadsDisabled(t *testing.T) {
+	// Even with RYV_DISABLE_PLATFORM_MODEL_DOWNLOADS=1 (operator opted out
+	// of the Ryvion-managed proxy), Gemma must still advertise because the
+	// upstream URL doesn't actually require auth. Previously this combo
+	// hid gemma since RequiresHuggingFaceAuth=true && no token && platform
+	// disabled => skip. Public mirror makes that gating obsolete.
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
 	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_DOWNLOADS", "1")
@@ -68,9 +79,10 @@ func TestSupportedNativeChatModelsCanDisablePlatformGatedModels(t *testing.T) {
 	models := SupportedNativeChatModels(16 * 1024 * 1024 * 1024)
 	for _, model := range models {
 		if model == "gemma-4-26b-a4b-it" {
-			t.Fatal("expected gated Gemma model to stay hidden when platform downloads are disabled and no local token is configured")
+			return
 		}
 	}
+	t.Fatal("expected Gemma model to advertise without HF_TOKEN even when platform-managed downloads are disabled")
 }
 
 func TestShouldInstallServerRefreshesUnmarkedWindowsCUDABundle(t *testing.T) {
