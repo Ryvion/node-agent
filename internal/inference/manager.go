@@ -97,7 +97,12 @@ var NativeModels = map[string]ModelConfig{
 		// who didn't set HF_TOKEN themselves, which defeated the whole point
 		// of having the public mirror.
 		PlatformPath:            "/api/v1/node/models/gemma-4-26b-a4b-it/download",
-		MinVRAMBytes:            16 * 1024 * 1024 * 1024,
+		// 14 GiB floor — Q4_K_M Gemma 26B fits in ~13-15GB VRAM with all
+		// layers offloaded; llama.cpp's `-ngl` partial-offload handles the
+		// edge. A 16GB card (RTX 4070 Ti SUPER, RTX 4080) reports ~16,376 MiB
+		// available after driver overhead, comfortably above 14 GiB. LM Studio
+		// runs Gemma 31B on the same hardware via the same offload mechanism.
+		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
 		RequiresHuggingFaceAuth: false,
 	},
 	"tinyllama": {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
