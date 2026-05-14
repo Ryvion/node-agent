@@ -80,6 +80,14 @@ type ModelConfig struct {
 	Mode                    ModelMode
 	MinVRAMBytes            uint64
 	RequiresHuggingFaceAuth bool
+	// MmprojFileName + MmprojURL are the multimodal vision projector
+	// artifact for vision-capable models like Gemma 4 26B and Nemotron
+	// 3 Nano Omni 30B. When set, the file is downloaded alongside the
+	// GGUF and llama-server is launched with --mmproj pointing at it,
+	// which is what makes the model actually consume image_url parts
+	// from OpenAI multimodal messages. Empty for text-only models.
+	MmprojFileName string
+	MmprojURL      string
 }
 
 // NativeModels maps UI model names to GGUF downloads
@@ -104,6 +112,11 @@ var NativeModels = map[string]ModelConfig{
 		// runs Gemma 31B on the same hardware via the same offload mechanism.
 		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
 		RequiresHuggingFaceAuth: false,
+		// Vision projector — auto-downloaded alongside the model so
+		// llama-server launches with --mmproj and the model can answer
+		// about images natively (no OCR fallback needed). ~2 GB on disk.
+		MmprojFileName: "mmproj-gemma-4-26B-A4B-it-F16.gguf",
+		MmprojURL:      "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-gemma-4-26B-A4B-it-F16.gguf",
 	},
 	"tinyllama": {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
 	"nemotron-3-nano-omni-30b-a3b": {
@@ -122,6 +135,10 @@ var NativeModels = map[string]ModelConfig{
 		PlatformPath:            "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download",
 		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
 		RequiresHuggingFaceAuth: false,
+		// Vision projector for the Omni multimodal mode. Same auto-
+		// download + --mmproj launch flow as Gemma 4.
+		MmprojFileName: "mmproj-Nemotron-3-Nano-Omni-30B-A3B-F16.gguf",
+		MmprojURL:      "https://huggingface.co/ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF/resolve/main/mmproj-Nemotron-3-Nano-Omni-30B-A3B-F16.gguf",
 	},
 	// Phase 1c: native embeddings. nomic-embed-text-v1.5 is 137M params,
 	// 768-dim, matches OpenAI text-embedding-3-small quality on MTEB, and
@@ -388,6 +405,31 @@ func (m *Manager) Start(ctx context.Context) error {
 					continue
 				}
 				slog.Info("model downloaded", "path", modelPath)
+			}
+			// Vision projector (mmproj) — auto-downloaded alongside the
+			// GGUF for vision-capable models. ~2 GB on disk for Gemma 4
+			// / Nemotron Omni. Failure is non-fatal: the model still
+			// runs in text-only mode without the projector, and the
+			// playground's OCR fallback handles image attachments.
+			if cfg.MmprojURL != "" && cfg.MmprojFileName != "" {
+				mmprojPath := filepath.Join(modelDir, cfg.MmprojFileName)
+				if _, err := os.Stat(mmprojPath); os.IsNotExist(err) {
+					slog.Info("downloading vision projector",
+						"model", currentModel,
+						"mmproj", cfg.MmprojFileName,
+						"url", redactDownloadURL(cfg.MmprojURL),
+					)
+					if err := m.downloadModelFile(ctx, cfg.MmprojURL, mmprojPath); err != nil {
+						slog.Warn("vision projector download failed; model will run text-only",
+							"model", currentModel,
+							"error", err,
+						)
+						// Cleanup partial file so a subsequent retry is clean.
+						_ = os.Remove(mmprojPath)
+					} else {
+						slog.Info("vision projector downloaded", "path", mmprojPath)
+					}
+				}
 			}
 		}
 
@@ -675,6 +717,19 @@ func (m *Manager) runServerContainerized(ctx context.Context, modelPath, port st
 		args = append(args, "--n-gpu-layers", m.gpuLayers)
 	}
 
+	// Vision projector auto-detection. Same logic as the native path —
+	// if a sibling .mmproj file exists, mount the model dir read-only
+	// (already done above) and pass --mmproj using the in-container
+	// path so the model can answer about images.
+	if mmprojPath := findVisionProjectorFor(modelPath); mmprojPath != "" {
+		mmprojFile := filepath.Base(mmprojPath)
+		args = append(args, "--mmproj", "/models/"+mmprojFile)
+		slog.Info("vision projector found — enabling multimodal in container",
+			"model", modelFile,
+			"mmproj", mmprojFile,
+		)
+	}
+
 	slog.Info("starting containerized llama-server",
 		"image", image,
 		"model", modelFile,
@@ -744,6 +799,20 @@ func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) e
 		"--threads", m.threads,
 		"--ctx-size", m.ctxSize,
 		"--log-disable",
+	}
+
+	// Vision projector auto-detection. If a .mmproj file lives alongside
+	// the GGUF (same dir, common naming conventions), pass --mmproj so
+	// llama-server starts in multimodal mode and accepts OpenAI-style
+	// {type:"image_url",...} parts in chat completions. Without this,
+	// even a vision-capable model like Gemma 4 26B silently drops
+	// image_url parts and answers as if the image weren't there.
+	if mmprojPath := findVisionProjectorFor(modelPath); mmprojPath != "" {
+		args = append(args, "--mmproj", mmprojPath)
+		slog.Info("vision projector found — enabling multimodal",
+			"model", modelPath,
+			"mmproj", mmprojPath,
+		)
 	}
 
 	m.mu.RLock()
@@ -1407,4 +1476,56 @@ func (m *Manager) runAMDSmokeTest(ctx context.Context, modelDir string) error {
 		return fmt.Errorf("smoke test failed — llama-server did not become healthy (possible gfx incompatibility)")
 	}
 	return nil
+}
+
+// findVisionProjectorFor returns the path to the multimodal projector
+// (mmproj) file that matches the given GGUF model, if one exists. The
+// projector is what makes a vision-capable model like Gemma 4 26B
+// actually consume image_url parts in OpenAI multimodal messages —
+// without it llama-server runs in text-only mode and silently drops
+// the image content.
+//
+// Convention check (in order, first hit wins):
+//
+//  1. <model_dir>/mmproj-<base>.gguf      — common ggml-org naming
+//  2. <model_dir>/<base>.mmproj.gguf      — bartowski / Hugging Face
+//  3. <model_dir>/<base>-mmproj.gguf      — older / unofficial
+//  4. <model_dir>/mmproj.gguf             — single-projector dirs
+//  5. <model_dir>/<base-with-mmproj-suffix>-Q*_K_M.gguf  — quantized variants
+//
+// Returns "" when no projector is found, which is the right signal
+// for callers — they simply omit `--mmproj` and the model continues
+// working in text-only mode for that session.
+func findVisionProjectorFor(modelPath string) string {
+	if modelPath == "" {
+		return ""
+	}
+	dir := filepath.Dir(modelPath)
+	base := filepath.Base(modelPath)
+	// Strip extension + common quant suffixes so naming like
+	// 'gemma-4-26B-A4B-it-Q4_K_M.gguf' becomes the canonical
+	// 'gemma-4-26B-A4B-it' for projector matching.
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	for _, suffix := range []string{
+		"-Q4_K_M", "-Q5_K_M", "-Q6_K", "-Q8_0", "-F16", "-BF16",
+		"-q4_k_m", "-q5_k_m", "-q6_k", "-q8_0", "-f16", "-bf16",
+	} {
+		stem = strings.TrimSuffix(stem, suffix)
+	}
+
+	candidates := []string{
+		filepath.Join(dir, "mmproj-"+stem+".gguf"),
+		filepath.Join(dir, stem+".mmproj.gguf"),
+		filepath.Join(dir, stem+"-mmproj.gguf"),
+		filepath.Join(dir, "mmproj.gguf"),
+		// Quantized projector variants — some HF mirrors ship multiple.
+		filepath.Join(dir, "mmproj-"+stem+"-Q4_K_M.gguf"),
+		filepath.Join(dir, "mmproj-"+stem+"-F16.gguf"),
+	}
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
