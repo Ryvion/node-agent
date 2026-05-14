@@ -22,6 +22,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/inference"
 	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	"github.com/Ryvion/node-agent/internal/update"
 	v7capabilityprofile "github.com/Ryvion/node-agent/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
@@ -50,6 +51,87 @@ func (f *fakeClient) SubmitReceipt(_ context.Context, receipt hub.Receipt) error
 		return fmt.Errorf("simulated failure %d", n)
 	}
 	return nil
+}
+
+func resetAutoUpdateTestState(t *testing.T) {
+	t.Helper()
+	autoUpdateInProgress.Store(0)
+	lastAutoUpdateAttemptMs.Store(0)
+	jobActive.Store(0)
+	applyAutoUpdate = update.Apply
+	restartAfterAutoUpdate = update.Restart
+	autoUpdateNow = time.Now
+	t.Cleanup(func() {
+		autoUpdateInProgress.Store(0)
+		lastAutoUpdateAttemptMs.Store(0)
+		jobActive.Store(0)
+		applyAutoUpdate = update.Apply
+		restartAfterAutoUpdate = update.Restart
+		autoUpdateNow = time.Now
+	})
+}
+
+func TestMaybeApplyAutoUpdateRunsFromHeartbeatPath(t *testing.T) {
+	resetAutoUpdateTestState(t)
+	var applyCalls int
+	var restartCalls int
+	applyAutoUpdate = func(_ context.Context, hubURL string) error {
+		applyCalls++
+		if hubURL != "https://hub.example" {
+			t.Fatalf("hubURL = %q, want https://hub.example", hubURL)
+		}
+		return nil
+	}
+	restartAfterAutoUpdate = func() error {
+		restartCalls++
+		return nil
+	}
+
+	if !maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_periodic") {
+		t.Fatal("maybeApplyAutoUpdate() = false, want true")
+	}
+	if applyCalls != 1 || restartCalls != 1 {
+		t.Fatalf("apply/restart calls = %d/%d, want 1/1", applyCalls, restartCalls)
+	}
+}
+
+func TestMaybeApplyAutoUpdateDefersWhileJobActive(t *testing.T) {
+	resetAutoUpdateTestState(t)
+	jobActive.Store(1)
+	var applyCalls int
+	applyAutoUpdate = func(context.Context, string) error {
+		applyCalls++
+		return nil
+	}
+
+	if maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_periodic") {
+		t.Fatal("maybeApplyAutoUpdate() = true, want false while job active")
+	}
+	if applyCalls != 0 {
+		t.Fatalf("apply calls = %d, want 0", applyCalls)
+	}
+}
+
+func TestMaybeApplyAutoUpdateThrottlesAttempts(t *testing.T) {
+	resetAutoUpdateTestState(t)
+	now := time.Unix(100, 0)
+	autoUpdateNow = func() time.Time { return now }
+	var applyCalls int
+	applyAutoUpdate = func(context.Context, string) error {
+		applyCalls++
+		return nil
+	}
+	restartAfterAutoUpdate = func() error { return nil }
+
+	if !maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_startup") {
+		t.Fatal("first maybeApplyAutoUpdate() = false, want true")
+	}
+	if maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_periodic") {
+		t.Fatal("second maybeApplyAutoUpdate() = true, want throttled false")
+	}
+	if applyCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
 }
 
 func TestImprovedHardwareCapsUpgradesCPUOnlyToGPU(t *testing.T) {

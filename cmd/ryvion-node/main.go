@@ -72,7 +72,7 @@ var cachedGPUUtil atomic.Uint64 // stores float64 bits via math.Float64bits
 var jobActive atomic.Int32
 
 // latestHubVersion stores the most recent agent version advertised by the hub.
-// Written by heartbeat goroutine, read by work loop for auto-update checks.
+// Written by heartbeat goroutine, read by heartbeat/work-loop auto-update checks.
 var latestHubVersion atomic.Value // string
 
 // v7CapabilityHeartbeatRequests wakes the heartbeat loop when local inventory
@@ -82,8 +82,19 @@ var v7CapabilityHeartbeatRequests = make(chan string, 1)
 type heartbeatSendResult struct {
 	hubOK               bool
 	capabilitySubmitted bool
+	latestVersion       string
 	payloadSummary      operatorHeartbeatPayloadSummary
 }
+
+const autoUpdateRetryInterval = 5 * time.Minute
+
+var (
+	autoUpdateInProgress    atomic.Int32
+	lastAutoUpdateAttemptMs atomic.Int64
+	applyAutoUpdate         = update.Apply
+	restartAfterAutoUpdate  = update.Restart
+	autoUpdateNow           = time.Now
+)
 
 type capabilityState struct {
 	mu         sync.RWMutex
@@ -194,6 +205,43 @@ func capabilityRegistrationKey(caps hw.CapSet, deviceType string) string {
 		strings.TrimSpace(caps.Sensors),
 		strings.TrimSpace(caps.GfxVersion),
 	}, "\x00")
+}
+
+func maybeApplyAutoUpdate(ctx context.Context, hubURL string, currentVersion string, latestVersion string, reason string) bool {
+	latestVersion = strings.TrimSpace(latestVersion)
+	if !update.NeedsUpdate(currentVersion, latestVersion) {
+		return false
+	}
+	if jobActive.Load() != 0 {
+		slog.Info("update available but job in progress, deferring", "latest", latestVersion, "reason", reason)
+		return false
+	}
+	if !autoUpdateInProgress.CompareAndSwap(0, 1) {
+		return false
+	}
+	defer autoUpdateInProgress.Store(0)
+
+	nowMs := autoUpdateNow().UnixMilli()
+	for {
+		lastMs := lastAutoUpdateAttemptMs.Load()
+		if lastMs > 0 && time.Duration(nowMs-lastMs)*time.Millisecond < autoUpdateRetryInterval {
+			return false
+		}
+		if lastAutoUpdateAttemptMs.CompareAndSwap(lastMs, nowMs) {
+			break
+		}
+	}
+
+	slog.Info("update available", "current", currentVersion, "latest", latestVersion, "reason", reason)
+	if err := applyAutoUpdate(ctx, hubURL); err != nil {
+		slog.Warn("auto-update failed", "error", err, "reason", reason)
+		return false
+	}
+	slog.Info("update applied, restarting", "reason", reason)
+	if restartErr := restartAfterAutoUpdate(); restartErr != nil {
+		slog.Warn("restart failed — update will take effect on next manual restart", "error", restartErr)
+	}
+	return true
 }
 
 const (
@@ -939,7 +987,7 @@ func runNode(ctx context.Context) {
 				slog.Error("heartbeat goroutine panic", "error", r)
 			}
 		}()
-		heartbeatLoop(ctx, client, capState, declaredCountry, infMgr, runtimeMgr)
+		heartbeatLoop(ctx, client, capState, declaredCountry, infMgr, runtimeMgr, hubURL, version)
 	}()
 
 	// Work loop — fetch and process jobs.
@@ -1011,7 +1059,7 @@ func capabilityRefreshLoop(ctx context.Context, client *hub.Client, capState *ca
 
 // heartbeatLoop sends heartbeats independently of the work loop. It also accepts
 // explicit wakeups when hub connectivity or local capability inventory changes.
-func heartbeatLoop(ctx context.Context, client *hub.Client, capState *capabilityState, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
+func heartbeatLoop(ctx context.Context, client *hub.Client, capState *capabilityState, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, hubURL string, currentVersion string) {
 	const (
 		normalInterval         = 30 * time.Second
 		backoffInterval        = 60 * time.Second
@@ -1042,6 +1090,13 @@ func heartbeatLoop(ctx context.Context, client *hub.Client, capState *capability
 			if result.capabilitySubmitted {
 				lastSubmittedSummary = result.payloadSummary
 				haveSubmittedSummary = true
+			}
+			if result.latestVersion != "" {
+				updateReason := "heartbeat"
+				if strings.TrimSpace(reason) != "" {
+					updateReason = "heartbeat_" + strings.TrimSpace(reason)
+				}
+				maybeApplyAutoUpdate(ctx, hubURL, currentVersion, result.latestVersion, updateReason)
 			}
 			return
 		}
@@ -1156,6 +1211,7 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 	return heartbeatSendResult{
 		hubOK:               true,
 		capabilitySubmitted: v7Payload != nil && heartbeatMetrics.V7Heartbeat != nil && heartbeat.V7SnapshotUpserted != nil && *heartbeat.V7SnapshotUpserted,
+		latestVersion:       strings.TrimSpace(heartbeat.LatestVersion),
 		payloadSummary:      payloadSummary,
 	}
 }
@@ -1463,7 +1519,6 @@ func healthReportLoop(ctx context.Context, client *hub.Client, capState *capabil
 
 // workLoop fetches and processes jobs. Heartbeats are handled separately.
 func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, infMgr *inference.Manager, runtimeMgr *runtimeManager, capState *capabilityState) {
-	var lastUpdateAttempt time.Time
 	backoff := 5 * time.Second
 	maxBackoff := 2 * time.Minute
 	hadPollFailure := false
@@ -1471,22 +1526,7 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 	for {
 		// Check for version updates (read from atomic, never missed).
 		if v, ok := latestHubVersion.Load().(string); ok && v != "" {
-			if update.NeedsUpdate(currentVersion, v) && time.Since(lastUpdateAttempt) > 5*time.Minute {
-				if jobActive.Load() != 0 {
-					slog.Info("update available but job in progress, deferring", "latest", v)
-				} else {
-					lastUpdateAttempt = time.Now()
-					slog.Info("update available", "current", currentVersion, "latest", v)
-					if err := update.Apply(ctx, hubURL); err != nil {
-						slog.Warn("auto-update failed", "error", err)
-					} else {
-						slog.Info("update applied, restarting")
-						if restartErr := update.Restart(); restartErr != nil {
-							slog.Warn("restart failed — update will take effect on next manual restart", "error", restartErr)
-						}
-					}
-				}
-			}
+			maybeApplyAutoUpdate(ctx, hubURL, currentVersion, v, "work_loop")
 		}
 
 		// GPU-aware scheduling: skip work fetch when operator's GPU is busy.
