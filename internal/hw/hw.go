@@ -11,37 +11,91 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// nvidiaSMIPath caches the resolved nvidia-smi binary path.
-var nvidiaSMIPath string
-
-func init() {
-	nvidiaSMIPath = findNvidiaSMI()
-}
+// nvidiaSMIPath caches the resolved nvidia-smi binary path. The cache
+// is INVALIDATED on every detection attempt (not init-only), because
+// Windows services start with a minimal PATH and the NVIDIA driver
+// folder often isn't reachable until the user PATH propagates a few
+// seconds later — caching the empty string at init meant the agent
+// would permanently report GPU nodes as CPU until a service restart.
+var (
+	nvidiaSMIPath   string
+	nvidiaSMIPathMu sync.Mutex
+)
 
 // findNvidiaSMI locates nvidia-smi, checking common OS-specific paths
-// when it's not in the default PATH (e.g. Windows services).
+// when it's not in the default PATH (e.g. Windows services). Returns
+// "" if nothing found. Re-runnable — caller should not assume the
+// result is stable across calls (driver installs, PATH changes, etc.
+// can flip the answer).
 func findNvidiaSMI() string {
 	if p, err := exec.LookPath("nvidia-smi"); err == nil {
 		return p
 	}
 	if runtime.GOOS == "windows" {
+		// Newer Windows installs put nvidia-smi.exe under DriverStore;
+		// older installs leave it in System32 or the legacy NVSMI dir.
+		// Probe all of them — first hit wins.
 		candidates := []string{
 			filepath.Join(os.Getenv("SystemRoot"), "System32", "nvidia-smi.exe"),
 			filepath.Join(os.Getenv("ProgramFiles"), "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"),
+			filepath.Join(os.Getenv("ProgramFiles"), "NVIDIA Corporation", "NVSMI"),
+			`C:\Windows\System32\nvidia-smi.exe`,
+			`C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe`,
 		}
 		for _, c := range candidates {
-			if _, err := os.Stat(c); err == nil {
-				return c
+			info, err := os.Stat(c)
+			if err != nil {
+				continue
 			}
+			if info.IsDir() {
+				// Some entries point at a directory — check for the binary inside.
+				bin := filepath.Join(c, "nvidia-smi.exe")
+				if _, statErr := os.Stat(bin); statErr == nil {
+					return bin
+				}
+				continue
+			}
+			return c
+		}
+		// Last resort: scan DriverStore/FileRepository (the Windows
+		// 10/11 driver staging area) for any nvidia-smi.exe. Slow
+		// but only runs when the obvious paths failed.
+		matches, err := filepath.Glob(`C:\Windows\System32\DriverStore\FileRepository\nv*\nvidia-smi.exe`)
+		if err == nil && len(matches) > 0 {
+			return matches[0]
 		}
 	}
 	return ""
 }
 
-func hasNvidiaSMI() bool { return nvidiaSMIPath != "" }
+// resolveNvidiaSMI returns a usable nvidia-smi path, refreshing the
+// cache on misses. Concurrent callers serialize on the mutex but the
+// fast path (cached non-empty value) is lock-free.
+func resolveNvidiaSMI() string {
+	if p := nvidiaSMIPath; p != "" {
+		// Verify the cached path still exists — driver uninstall /
+		// upgrade can move the binary.
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	nvidiaSMIPathMu.Lock()
+	defer nvidiaSMIPathMu.Unlock()
+	// Double-check after lock — another goroutine may have refreshed.
+	if nvidiaSMIPath != "" {
+		if _, err := os.Stat(nvidiaSMIPath); err == nil {
+			return nvidiaSMIPath
+		}
+	}
+	nvidiaSMIPath = findNvidiaSMI()
+	return nvidiaSMIPath
+}
+
+func hasNvidiaSMI() bool { return resolveNvidiaSMI() != "" }
 
 // GetFreeVRAM returns free VRAM in bytes. Returns 0 if detection fails.
 func GetFreeVRAM() uint64 {
@@ -49,7 +103,7 @@ func GetFreeVRAM() uint64 {
 	if hasNvidiaSMI() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, nvidiaSMIPath, "--query-gpu=memory.free", "--format=csv,noheader,nounits").Output()
+		out, err := exec.CommandContext(ctx, resolveNvidiaSMI(), "--query-gpu=memory.free", "--format=csv,noheader,nounits").Output()
 		if err == nil {
 			if mb, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64); err == nil {
 				return mb * 1024 * 1024
@@ -386,7 +440,7 @@ func sampleGPU(ctx context.Context) float64 {
 	}
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(cctx, nvidiaSMIPath, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits").CombinedOutput()
+	out, err := exec.CommandContext(cctx, resolveNvidiaSMI(), "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits").CombinedOutput()
 	if err != nil {
 		return -1
 	}
@@ -413,7 +467,7 @@ func samplePower() float64 {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, nvidiaSMIPath, "--query-gpu=power.draw", "--format=csv,noheader,nounits").CombinedOutput()
+	out, err := exec.CommandContext(ctx, resolveNvidiaSMI(), "--query-gpu=power.draw", "--format=csv,noheader,nounits").CombinedOutput()
 	if err != nil {
 		return -1
 	}
@@ -455,7 +509,7 @@ func detectGPU() (model string, vramBytes uint64, sensors string) {
 	// 1) NVIDIA via nvidia-smi
 	if hasNvidiaSMI() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		out, err := exec.CommandContext(ctx, nvidiaSMIPath, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits").CombinedOutput()
+		out, err := exec.CommandContext(ctx, resolveNvidiaSMI(), "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits").CombinedOutput()
 		cancel()
 		if err == nil {
 			line := strings.TrimSpace(strings.Split(string(out), "\n")[0])
