@@ -27,9 +27,54 @@ type chatRequest struct {
 	Temperature *float64      `json:"temperature,omitempty"`
 }
 
+// chatMessage carries either a plain string OR an OpenAI multimodal
+// content array, e.g.:
+//
+//	{"role":"user","content":[
+//	  {"type":"text","text":"What's in this image?"},
+//	  {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}
+//	]}
+//
+// Content is `json.RawMessage` so the multimodal payload survives the
+// hub → spec_json → node-agent → llama-server hop verbatim. llama-server
+// (with `--mmproj` loaded for vision-capable models like Gemma 4 26B
+// or Nemotron 3 Nano Omni) consumes the OpenAI multimodal format
+// directly — re-decoding the bytes as a Go `string` would corrupt
+// the array form and crash the unmarshal step.
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// MessageText returns the text content of a message, treating
+// multimodal arrays as the concatenation of their text parts. Used
+// only for diagnostics + non-content code paths (logging, metrics);
+// the actual chat payload is forwarded to llama-server as raw JSON.
+func (m chatMessage) MessageText() string {
+	if len(m.Content) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(m.Content, &s); err == nil {
+		return s
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(m.Content, &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.Type == "text" && p.Text != "" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
 }
 
 // specPayload is what the hub sends as spec_json for inference jobs.
