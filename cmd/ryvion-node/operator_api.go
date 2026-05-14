@@ -734,6 +734,18 @@ func (s *operatorRuntime) setRegistered(ok bool, err error) {
 	s.lastRegisterError = ""
 }
 
+func (s *operatorRuntime) setCapabilities(caps hw.CapSet, deviceType string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.caps = caps
+	if strings.TrimSpace(deviceType) != "" {
+		s.deviceType = strings.TrimSpace(deviceType)
+	}
+}
+
 func (s *operatorRuntime) recordHeartbeat(metrics hw.Metrics, heartbeat hub.HeartbeatResponse, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

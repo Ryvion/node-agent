@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -82,6 +83,117 @@ type heartbeatSendResult struct {
 	hubOK               bool
 	capabilitySubmitted bool
 	payloadSummary      operatorHeartbeatPayloadSummary
+}
+
+type capabilityState struct {
+	mu         sync.RWMutex
+	caps       hw.CapSet
+	deviceType string
+}
+
+func newCapabilityState(caps hw.CapSet, deviceType string) *capabilityState {
+	return &capabilityState{
+		caps:       caps,
+		deviceType: strings.TrimSpace(deviceType),
+	}
+}
+
+func (s *capabilityState) Snapshot() (hw.CapSet, string) {
+	if s == nil {
+		return hw.CapSet{}, ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.caps, s.deviceType
+}
+
+func (s *capabilityState) Update(caps hw.CapSet, deviceType string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.caps = caps
+	s.deviceType = strings.TrimSpace(deviceType)
+}
+
+func capSetGPUDetected(caps hw.CapSet) bool {
+	return strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
+}
+
+func hubCapabilitiesFromCaps(caps hw.CapSet) hub.Capabilities {
+	return hub.Capabilities{
+		GPUModel:          caps.GPUModel,
+		CPUCores:          caps.CPUCores,
+		RAMBytes:          caps.RAMBytes,
+		VRAMBytes:         caps.VRAMBytes,
+		Sensors:           caps.Sensors,
+		BandwidthMbps:     caps.BandwidthMbps,
+		GeohashBucket:     caps.GeohashBucket,
+		AttestationMethod: caps.Attestation,
+		TEESupported:      caps.TEESupported,
+		TEEType:           caps.TEEType,
+	}
+}
+
+func improvedHardwareCaps(current hw.CapSet, detected hw.CapSet) (hw.CapSet, bool) {
+	if !capSetGPUDetected(detected) {
+		return current, false
+	}
+	if !capSetGPUDetected(current) {
+		return detected, true
+	}
+	currentModel := strings.TrimSpace(current.GPUModel)
+	detectedModel := strings.TrimSpace(detected.GPUModel)
+	if currentModel == "" && detectedModel != "" {
+		return detected, true
+	}
+	if detected.VRAMBytes > current.VRAMBytes {
+		return detected, true
+	}
+	sameModel := currentModel != "" && detectedModel == currentModel
+	if sameModel && strings.TrimSpace(current.Sensors) == "" && strings.TrimSpace(detected.Sensors) != "" {
+		return detected, true
+	}
+	if sameModel && strings.TrimSpace(current.GfxVersion) == "" && strings.TrimSpace(detected.GfxVersion) != "" {
+		return detected, true
+	}
+	return current, false
+}
+
+func detectImprovedHardwareCaps(deviceFlag string, current hw.CapSet, detect func(string) hw.CapSet) (hw.CapSet, string, bool) {
+	if detect == nil {
+		detect = hw.DetectCaps
+	}
+	detected := detect(deviceFlag)
+	updated, ok := improvedHardwareCaps(current, detected)
+	if !ok {
+		return current, resolveDeviceType(deviceFlag, current), false
+	}
+	return updated, resolveDeviceType(deviceFlag, updated), true
+}
+
+func refreshCapabilityStateFromDetection(deviceFlag string, state *capabilityState, detect func(string) hw.CapSet) (hw.CapSet, string, bool) {
+	current, currentDeviceType := state.Snapshot()
+	updated, deviceType, changed := detectImprovedHardwareCaps(deviceFlag, current, detect)
+	if !changed {
+		if strings.TrimSpace(currentDeviceType) != "" {
+			deviceType = currentDeviceType
+		}
+		return current, deviceType, false
+	}
+	state.Update(updated, deviceType)
+	return updated, deviceType, true
+}
+
+func capabilityRegistrationKey(caps hw.CapSet, deviceType string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(deviceType),
+		strings.TrimSpace(caps.GPUModel),
+		strconv.FormatUint(caps.VRAMBytes, 10),
+		strings.TrimSpace(caps.Sensors),
+		strings.TrimSpace(caps.GfxVersion),
+	}, "\x00")
 }
 
 const (
@@ -694,6 +806,7 @@ func runNode(ctx context.Context) {
 
 	caps := hw.DetectCaps(flagDevice)
 	deviceType := resolveDeviceType(flagDevice, caps)
+	capState := newCapabilityState(caps, deviceType)
 	declaredCountry, err := resolveInitialDeclaredCountry(flagCountry)
 	if err != nil {
 		slog.Warn("failed to load declared country preference, defaulting to flag/env value", "error", err)
@@ -719,18 +832,19 @@ func runNode(ctx context.Context) {
 	// the process alive so SCM doesn't exhaust its restart budget.
 	regBackoff := 5 * time.Second
 	for {
-		if err := client.Register(ctx, hub.Capabilities{
-			GPUModel:          caps.GPUModel,
-			CPUCores:          caps.CPUCores,
-			RAMBytes:          caps.RAMBytes,
-			VRAMBytes:         caps.VRAMBytes,
-			Sensors:           caps.Sensors,
-			BandwidthMbps:     caps.BandwidthMbps,
-			GeohashBucket:     caps.GeohashBucket,
-			AttestationMethod: caps.Attestation,
-			TEESupported:      caps.TEESupported,
-			TEEType:           caps.TEEType,
-		}, deviceType, strings.TrimSpace(flagReferral), declaredCountry); err != nil {
+		if currentCaps, _ := capState.Snapshot(); !capSetGPUDetected(currentCaps) {
+			if refreshedCaps, refreshedDeviceType, refreshed := refreshCapabilityStateFromDetection(flagDevice, capState, hw.DetectCaps); refreshed {
+				if operatorRuntimeState != nil {
+					operatorRuntimeState.setCapabilities(refreshedCaps, refreshedDeviceType)
+				}
+				slog.Info("GPU capabilities detected during registration retry",
+					"device_type", refreshedDeviceType,
+					"gpu_model", strings.TrimSpace(refreshedCaps.GPUModel),
+					"vram_bytes", refreshedCaps.VRAMBytes)
+			}
+		}
+		caps, deviceType = capState.Snapshot()
+		if err := client.Register(ctx, hubCapabilitiesFromCaps(caps), deviceType, strings.TrimSpace(flagReferral), declaredCountry); err != nil {
 			if operatorRuntimeState != nil {
 				operatorRuntimeState.setRegistered(false, err)
 			}
@@ -750,6 +864,8 @@ func runNode(ctx context.Context) {
 		}
 		break
 	}
+	caps, deviceType = capState.Snapshot()
+	registeredCapabilitiesKey := capabilityRegistrationKey(caps, deviceType)
 	bindToken := strings.TrimSpace(os.Getenv("RYV_BIND_TOKEN"))
 	slog.Info("register succeeded", "hub", hubURL, "device_type", deviceType, "pubkey", client.PublicKeyHex(),
 		"bind_token", redact(bindToken))
@@ -803,7 +919,16 @@ func runNode(ctx context.Context) {
 				slog.Error("health report goroutine panic", "error", r)
 			}
 		}()
-		healthReportLoop(ctx, client, caps, infMgr, runtimeMgr)
+		healthReportLoop(ctx, client, capState, infMgr, runtimeMgr)
+	}()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("capability refresh goroutine panic", "error", r)
+			}
+		}()
+		capabilityRefreshLoop(ctx, client, capState, flagDevice, strings.TrimSpace(flagReferral), declaredCountry, registeredCapabilitiesKey)
 	}()
 
 	// Independent heartbeat goroutine — keeps node "online" regardless of
@@ -814,16 +939,79 @@ func runNode(ctx context.Context) {
 				slog.Error("heartbeat goroutine panic", "error", r)
 			}
 		}()
-		heartbeatLoop(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
+		heartbeatLoop(ctx, client, capState, declaredCountry, infMgr, runtimeMgr)
 	}()
 
 	// Work loop — fetch and process jobs.
-	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr, runtimeMgr, strings.TrimSpace(caps.GPUModel) != "")
+	workLoop(ctx, client, flagGPUs, hubURL, version, infMgr, runtimeMgr, capState)
+}
+
+func capabilityRefreshLoop(ctx context.Context, client *hub.Client, capState *capabilityState, deviceFlag string, referral string, declaredCountry string, registeredKey string) {
+	if client == nil || capState == nil {
+		return
+	}
+
+	const refreshInterval = 30 * time.Second
+	initialDelay := time.NewTimer(10 * time.Second)
+	defer initialDelay.Stop()
+	ticker := time.NewTicker(refreshInterval)
+	defer ticker.Stop()
+
+	tryRefresh := func(reason string) {
+		currentCaps, currentDeviceType := capState.Snapshot()
+		if !capSetGPUDetected(currentCaps) {
+			refreshedCaps, refreshedDeviceType, refreshed := refreshCapabilityStateFromDetection(deviceFlag, capState, hw.DetectCaps)
+			if refreshed {
+				currentCaps = refreshedCaps
+				currentDeviceType = refreshedDeviceType
+				if operatorRuntimeState != nil {
+					operatorRuntimeState.setCapabilities(refreshedCaps, refreshedDeviceType)
+				}
+				slog.Info("GPU capabilities refreshed after startup",
+					"reason", reason,
+					"device_type", refreshedDeviceType,
+					"gpu_model", strings.TrimSpace(refreshedCaps.GPUModel),
+					"vram_bytes", refreshedCaps.VRAMBytes)
+			}
+		}
+
+		desiredKey := capabilityRegistrationKey(currentCaps, currentDeviceType)
+		if desiredKey == registeredKey {
+			return
+		}
+		if err := client.Register(ctx, hubCapabilitiesFromCaps(currentCaps), currentDeviceType, referral, declaredCountry); err != nil {
+			if operatorRuntimeState != nil {
+				operatorRuntimeState.setRegistered(false, err)
+			}
+			slog.Warn("capability refresh register failed", "error", err, "retry_in", refreshInterval)
+			return
+		}
+		registeredKey = desiredKey
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.setRegistered(true, nil)
+		}
+		requestV7CapabilityHeartbeat("hardware_capabilities_refreshed")
+		slog.Info("capability refresh register succeeded",
+			"device_type", currentDeviceType,
+			"gpu_model", strings.TrimSpace(currentCaps.GPUModel),
+			"vram_bytes", currentCaps.VRAMBytes)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-initialDelay.C:
+			tryRefresh("startup_delay")
+		case <-ticker.C:
+			tryRefresh("periodic")
+		}
+	}
 }
 
 // heartbeatLoop sends heartbeats independently of the work loop. It also accepts
 // explicit wakeups when hub connectivity or local capability inventory changes.
-func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
+func heartbeatLoop(ctx context.Context, client *hub.Client, capState *capabilityState, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
 	const (
 		normalInterval         = 30 * time.Second
 		backoffInterval        = 60 * time.Second
@@ -841,6 +1029,7 @@ func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 	var haveSubmittedSummary bool
 
 	sendNow := func(reason string) {
+		caps, deviceType := capState.Snapshot()
 		result := sendHeartbeatDetailed(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
 		if result.hubOK {
 			if consecutiveFailures >= circuitBreakerMax {
@@ -882,6 +1071,7 @@ func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 			if consecutiveFailures >= circuitBreakerMax {
 				continue
 			}
+			caps, deviceType := capState.Snapshot()
 			summary, ok := currentV7HeartbeatPayloadSummary(ctx, client, caps, deviceType, declaredCountry, infMgr, runtimeMgr)
 			if ok && (!haveSubmittedSummary || summary != lastSubmittedSummary) {
 				sendNow("inventory_changed")
@@ -1243,11 +1433,12 @@ func v7SupportedRunnerKinds(nativeSupported bool, ociAvailable bool, ryvionRunti
 	return kinds
 }
 
-func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
+func healthReportLoop(ctx context.Context, client *hub.Client, capState *capabilityState, infMgr *inference.Manager, runtimeMgr *runtimeManager) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	send := func() {
+		caps, _ := capState.Snapshot()
 		report := buildHealthReport(caps, infMgr, runtimeMgr)
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.recordHealthReport(report)
@@ -1271,7 +1462,7 @@ func healthReportLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, i
 }
 
 // workLoop fetches and processes jobs. Heartbeats are handled separately.
-func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) {
+func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVersion string, infMgr *inference.Manager, runtimeMgr *runtimeManager, capState *capabilityState) {
 	var lastUpdateAttempt time.Time
 	backoff := 5 * time.Second
 	maxBackoff := 2 * time.Minute
@@ -1352,6 +1543,8 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		workLoopDiagnostics.RecordWorkSeen(work.JobID, work.Kind, specTask)
 
 		jobActive.Store(1)
+		caps, _ := capState.Snapshot()
+		gpuDetected := capSetGPUDetected(caps)
 		processWork(ctx, client, work, gpus, infMgr, runtimeMgr, gpuDetected)
 		jobActive.Store(0)
 	}

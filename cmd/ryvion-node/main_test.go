@@ -52,6 +52,100 @@ func (f *fakeClient) SubmitReceipt(_ context.Context, receipt hub.Receipt) error
 	return nil
 }
 
+func TestImprovedHardwareCapsUpgradesCPUOnlyToGPU(t *testing.T) {
+	current := hw.CapSet{
+		CPUCores: 24,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	detected := hw.CapSet{
+		GPUModel:  "NVIDIA GeForce RTX 3090",
+		CPUCores:  24,
+		RAMBytes:  8 * 1024 * 1024 * 1024,
+		VRAMBytes: 24 * 1024 * 1024 * 1024,
+		Sensors:   "nvidia-driver:550 model:NVIDIA GeForce RTX 3090",
+	}
+
+	got, changed := improvedHardwareCaps(current, detected)
+	if !changed {
+		t.Fatal("expected CPU-only caps to upgrade when GPU is later detected")
+	}
+	if got.GPUModel != detected.GPUModel || got.VRAMBytes != detected.VRAMBytes {
+		t.Fatalf("upgraded caps = %+v, want GPU model and VRAM from detection", got)
+	}
+}
+
+func TestImprovedHardwareCapsDoesNotDowngradeExistingGPU(t *testing.T) {
+	current := hw.CapSet{
+		GPUModel:  "NVIDIA GeForce RTX 3090",
+		CPUCores:  24,
+		RAMBytes:  8 * 1024 * 1024 * 1024,
+		VRAMBytes: 24 * 1024 * 1024 * 1024,
+		Sensors:   "nvidia-driver:550 model:NVIDIA GeForce RTX 3090",
+	}
+	detected := hw.CapSet{
+		CPUCores: 24,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+
+	got, changed := improvedHardwareCaps(current, detected)
+	if changed {
+		t.Fatalf("expected no downgrade when later probe misses GPU, got %+v", got)
+	}
+	if got.GPUModel != current.GPUModel || got.VRAMBytes != current.VRAMBytes {
+		t.Fatalf("caps downgraded to %+v, want %+v", got, current)
+	}
+}
+
+func TestImprovedHardwareCapsDoesNotReplaceGPUWithLowerFidelityFallback(t *testing.T) {
+	current := hw.CapSet{
+		GPUModel:  "NVIDIA GeForce RTX 3090",
+		CPUCores:  24,
+		RAMBytes:  8 * 1024 * 1024 * 1024,
+		VRAMBytes: 24 * 1024 * 1024 * 1024,
+		Sensors:   "nvidia-driver:550 model:NVIDIA GeForce RTX 3090",
+	}
+	detected := hw.CapSet{
+		GPUModel: "Intel UHD Graphics",
+		CPUCores: 24,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+		Sensors:  "wmic model:Intel UHD Graphics",
+	}
+
+	got, changed := improvedHardwareCaps(current, detected)
+	if changed {
+		t.Fatalf("expected lower-fidelity fallback to be ignored, got %+v", got)
+	}
+	if got.GPUModel != current.GPUModel || got.VRAMBytes != current.VRAMBytes {
+		t.Fatalf("caps replaced with %+v, want %+v", got, current)
+	}
+}
+
+func TestRefreshCapabilityStateFromDetectionKeepsExplicitDeviceTypeAndGPUCaps(t *testing.T) {
+	state := newCapabilityState(hw.CapSet{CPUCores: 24}, "cpu")
+	detect := func(string) hw.CapSet {
+		return hw.CapSet{
+			GPUModel:  "NVIDIA GeForce RTX 3090",
+			CPUCores:  24,
+			VRAMBytes: 24 * 1024 * 1024 * 1024,
+		}
+	}
+
+	gotCaps, gotDeviceType, changed := refreshCapabilityStateFromDetection("cpu", state, detect)
+	if !changed {
+		t.Fatal("expected refreshed GPU caps")
+	}
+	if gotDeviceType != "cpu" {
+		t.Fatalf("device type = %q, want explicit cpu flag preserved", gotDeviceType)
+	}
+	if gotCaps.GPUModel != "NVIDIA GeForce RTX 3090" {
+		t.Fatalf("gpu model = %q, want RTX 3090", gotCaps.GPUModel)
+	}
+	storedCaps, storedDeviceType := state.Snapshot()
+	if storedDeviceType != gotDeviceType || storedCaps.GPUModel != gotCaps.GPUModel {
+		t.Fatalf("stored snapshot = (%+v, %q), want (%+v, %q)", storedCaps, storedDeviceType, gotCaps, gotDeviceType)
+	}
+}
+
 func TestBuildDashboardInferencePolicyUsesDerivedHardwarePolicy(t *testing.T) {
 	cacheDir := t.TempDir()
 	const gib = uint64(1024 * 1024 * 1024)
