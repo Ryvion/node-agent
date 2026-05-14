@@ -135,6 +135,7 @@ func capSetGPUDetected(caps hw.CapSet) bool {
 func hubCapabilitiesFromCaps(caps hw.CapSet) hub.Capabilities {
 	return hub.Capabilities{
 		GPUModel:          caps.GPUModel,
+		CPUModel:          caps.CPUModel,
 		CPUCores:          caps.CPUCores,
 		RAMBytes:          caps.RAMBytes,
 		VRAMBytes:         caps.VRAMBytes,

@@ -150,6 +150,7 @@ func applyWindowsInventory(inventory *CapacityInventory, detector Detector) {
 }
 
 func applyLinuxInventory(inventory *CapacityInventory, detector Detector) {
+	inventory.CPUName = detectLinuxCPUName(detector)
 	total, available := detectProcMeminfo(detector)
 	inventory.SystemRAMBytes = total
 	inventory.AvailableRAMBytes = available
@@ -159,6 +160,36 @@ func applyLinuxInventory(inventory *CapacityInventory, detector Detector) {
 		applyGPU(inventory, gpu)
 	}
 	inventory.PowerProfile = detectLinuxPowerProfile(detector)
+}
+
+func detectLinuxCPUName(detector Detector) string {
+	if data, err := detector.ReadFile("/proc/cpuinfo"); err == nil {
+		if name := parseLinuxCPUName(data); name != "" {
+			return name
+		}
+	}
+	if data, err := detector.RunCommand("lscpu", nil, detector.CommandTimeout); err == nil {
+		if name := parseLinuxCPUName(data); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func parseLinuxCPUName(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "model name", "hardware", "processor name", "model":
+			if name := cleanName(value); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 type gpuInfo struct {

@@ -151,6 +151,7 @@ func findWindowsSystemTool(name string) string {
 
 type CapSet struct {
 	GPUModel      string
+	CPUModel      string
 	CPUCores      uint32
 	RAMBytes      uint64
 	VRAMBytes     uint64
@@ -177,6 +178,7 @@ func DetectCaps(_ string) CapSet {
 	teeSupported, teeType := DetectTEE()
 	return CapSet{
 		GPUModel:      gpuModel,
+		CPUModel:      detectCPUModel(),
 		CPUCores:      uint32(runtime.NumCPU()),
 		RAMBytes:      detectRAMBytes(),
 		VRAMBytes:     vramBytes,
@@ -188,6 +190,85 @@ func DetectCaps(_ string) CapSet {
 		TEEType:       teeType,
 		GfxVersion:    GetAMDGfxVersion(),
 	}
+}
+
+func detectCPUModel() string {
+	switch runtime.GOOS {
+	case "darwin":
+		if out, err := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output(); err == nil {
+			return cleanHardwareName(string(out))
+		}
+	case "windows":
+		if out, err := exec.Command(findWindowsSystemTool("wmic"), "CPU", "get", "Name", "/format:csv").Output(); err == nil {
+			if name := parseWindowsCPUModelCSV(out); name != "" {
+				return name
+			}
+		}
+	default:
+		if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+			if name := parseLinuxCPUModel(data); name != "" {
+				return name
+			}
+		}
+		if out, err := exec.Command("lscpu").Output(); err == nil {
+			if name := parseLinuxCPUModel(out); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func parseLinuxCPUModel(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "model name", "hardware", "processor name", "model":
+			if name := cleanHardwareName(value); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func parseWindowsCPUModelCSV(data []byte) string {
+	reader := csv.NewReader(strings.NewReader(string(data)))
+	reader.FieldsPerRecord = -1
+	records, err := reader.ReadAll()
+	if err != nil || len(records) == 0 {
+		return ""
+	}
+	nameIndex := -1
+	for i, header := range records[0] {
+		if strings.EqualFold(strings.TrimSpace(header), "Name") {
+			nameIndex = i
+			break
+		}
+	}
+	if nameIndex < 0 {
+		return ""
+	}
+	for _, record := range records[1:] {
+		if nameIndex >= len(record) {
+			continue
+		}
+		if name := cleanHardwareName(record[nameIndex]); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func cleanHardwareName(value string) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if len(value) > 128 {
+		value = value[:128]
+	}
+	return value
 }
 
 // GetAMDGfxVersion returns the AMD GPU architecture version (e.g., "gfx1100" for RDNA3).

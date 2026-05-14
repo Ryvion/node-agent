@@ -88,6 +88,7 @@ func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, re
 		DeviceType:        strings.TrimSpace(deviceType),
 		DeclaredCountry:   strings.ToUpper(strings.TrimSpace(declaredCountry)),
 		GPUModel:          caps.GPUModel,
+		CPUModel:          caps.CPUModel,
 		CPUCores:          caps.CPUCores,
 		RAMBytes:          caps.RAMBytes,
 		VRAMBytes:         caps.VRAMBytes,
@@ -742,6 +743,7 @@ func boolAsInt(v bool) string {
 
 type Capabilities struct {
 	GPUModel          string
+	CPUModel          string
 	CPUCores          uint32
 	RAMBytes          uint64
 	VRAMBytes         uint64
@@ -841,6 +843,7 @@ type registerRequest struct {
 	DeviceType        string `json:"device_type"`
 	DeclaredCountry   string `json:"declared_country,omitempty"`
 	GPUModel          string `json:"gpu_model"`
+	CPUModel          string `json:"cpu_model"`
 	CPUCores          uint32 `json:"cpu_cores"`
 	RAMBytes          uint64 `json:"ram_bytes"`
 	VRAMBytes         uint64 `json:"vram_bytes"`

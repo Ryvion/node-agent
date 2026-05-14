@@ -39,6 +39,20 @@ func TestDetectCaps(t *testing.T) {
 	}
 }
 
+func TestParseLinuxCPUModel(t *testing.T) {
+	got := parseLinuxCPUModel([]byte("processor\t: 0\nmodel name\t: AMD Ryzen 9 7900X 12-Core Processor\n"))
+	if got != "AMD Ryzen 9 7900X 12-Core Processor" {
+		t.Fatalf("parseLinuxCPUModel() = %q", got)
+	}
+}
+
+func TestParseWindowsCPUModelCSV(t *testing.T) {
+	got := parseWindowsCPUModelCSV([]byte("Node,Name\nDESKTOP,Intel(R) Core(TM) i9-14900K\n"))
+	if got != "Intel(R) Core(TM) i9-14900K" {
+		t.Fatalf("parseWindowsCPUModelCSV() = %q", got)
+	}
+}
+
 func TestParseDarwinCPU(t *testing.T) {
 	user, sys := parseDarwinCPU("CPU usage: 5.26% user, 3.94% sys, 90.78% idle")
 	if user < 5.0 || user > 5.5 {

@@ -161,6 +161,42 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 	}
 }
 
+func TestBuildInventoryMockedLinuxReportsCPUName(t *testing.T) {
+	t.Parallel()
+
+	detector := Detector{
+		GOOS:   "linux",
+		GOARCH: "amd64",
+		CPULogicalCores: func() int {
+			return 24
+		},
+		ReadFile: func(path string) ([]byte, error) {
+			switch path {
+			case "/proc/cpuinfo":
+				return []byte("processor\t: 0\nmodel name\t: AMD Ryzen 9 7900X 12-Core Processor\n"), nil
+			case "/proc/meminfo":
+				return []byte("MemTotal: 33554432 kB\nMemAvailable: 12582912 kB\n"), nil
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+		LookPath: func(name string) (string, error) {
+			return "", os.ErrNotExist
+		},
+		RunCommand: func(name string, args []string, _ time.Duration) ([]byte, error) {
+			return nil, os.ErrNotExist
+		},
+	}
+
+	inventory := BuildInventory(detector)
+	if inventory.CPUName != "AMD Ryzen 9 7900X 12-Core Processor" {
+		t.Fatalf("cpu_name = %q", inventory.CPUName)
+	}
+	if inventory.CPULogicalCores != 24 {
+		t.Fatalf("cpu_logical_cores = %d, want 24", inventory.CPULogicalCores)
+	}
+}
+
 func TestBuildInventoryWindowsAMDAdapterRAMCapUsesKnownVRAM(t *testing.T) {
 	t.Parallel()
 

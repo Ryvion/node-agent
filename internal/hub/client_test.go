@@ -56,6 +56,7 @@ func TestRegisterSignsExpectedMessage(t *testing.T) {
 			DeviceType        string `json:"device_type"`
 			DeclaredCountry   string `json:"declared_country"`
 			GPUModel          string `json:"gpu_model"`
+			CPUModel          string `json:"cpu_model"`
 			CPUCores          uint32 `json:"cpu_cores"`
 			RAMBytes          uint64 `json:"ram_bytes"`
 			VRAMBytes         uint64 `json:"vram_bytes"`
@@ -73,6 +74,11 @@ func TestRegisterSignsExpectedMessage(t *testing.T) {
 		}
 		if req.DeclaredCountry != "CA" {
 			setHandlerErr(fmt.Errorf("declared country mismatch: %q", req.DeclaredCountry))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.CPUModel != "AMD Ryzen 9 7900X" {
+			setHandlerErr(fmt.Errorf("cpu model mismatch: %q", req.CPUModel))
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -103,6 +109,7 @@ func TestRegisterSignsExpectedMessage(t *testing.T) {
 	c := New(ts.URL, pub, priv, WithBindToken("bind-123"), WithWallet("wallet-abc"))
 	err := c.Register(context.Background(), Capabilities{
 		GPUModel:          "RTX 4090",
+		CPUModel:          "AMD Ryzen 9 7900X",
 		CPUCores:          16,
 		RAMBytes:          64,
 		VRAMBytes:         24,
