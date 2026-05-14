@@ -106,6 +106,23 @@ var NativeModels = map[string]ModelConfig{
 		RequiresHuggingFaceAuth: false,
 	},
 	"tinyllama": {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
+	"nemotron-3-nano-omni-30b-a3b": {
+		// NVIDIA Nemotron 3 Nano Omni 30B-A3B — MoE model (30B total /
+		// 3B active per token). On Q4_K_M the resident footprint is
+		// ~14-15 GB, which fits on any 16GB consumer NVIDIA card after
+		// driver overhead. The MoE activation pattern means decode TPS
+		// scales like a 3B model — this is the "fast Gemma alternative"
+		// for RTX 4070 Ti SUPER / RTX 4080 nodes that want speed.
+		//
+		// URL: ggml-org community GGUF mirror (no HF token required;
+		// public CDN). PlatformPath kept as a fallback in case operators
+		// want the Ryvion-managed proxy without code changes.
+		FileName:                "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
+		URL:                     "https://huggingface.co/ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-Omni-30B-A3B-Q4_K_M.gguf",
+		PlatformPath:            "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download",
+		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
+		RequiresHuggingFaceAuth: false,
+	},
 	// Phase 1c: native embeddings. nomic-embed-text-v1.5 is 137M params,
 	// 768-dim, matches OpenAI text-embedding-3-small quality on MTEB, and
 	// the Q4_K_M GGUF is ~90MB. llama-server serves it via /v1/embeddings
