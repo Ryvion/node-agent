@@ -242,6 +242,53 @@ func TestOperatorHeartbeatRecordsEnergyPlanePowerSample(t *testing.T) {
 	}
 }
 
+func TestOperatorAPIEnergyPreferenceEndpoint(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := postOperatorAPITestJSON(t, port, "/api/v1/operator/preferences/energy", []byte(`{
+		"max_wattage": 220,
+		"min_payout_per_kwh_usd": 0.31,
+		"quiet_hours_start": "22:00",
+		"quiet_hours_end": "06:30",
+		"batch_only_during_quiet_hours": true,
+		"green_mode": true,
+		"energy_shiftable_batch_opt_in": true,
+		"prefer_energy_efficient_roles": true
+	}`))
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode response: %v\nbody=%s", err, respBody)
+	}
+	if status.EnergyPolicy.MaxWattage != 220 ||
+		status.EnergyPolicy.MinPayoutPerKWhUSD != 0.31 ||
+		status.EnergyPolicy.QuietHoursStart != "22:00" ||
+		status.EnergyPolicy.QuietHoursEnd != "06:30" ||
+		!status.EnergyPolicy.BatchOnlyDuringQuietHours ||
+		!status.EnergyPolicy.GreenMode ||
+		!status.EnergyPolicy.EnergyShiftableBatchOptIn ||
+		!status.EnergyPolicy.PreferEnergyEfficientRoles {
+		t.Fatalf("status energy policy = %+v", status.EnergyPolicy)
+	}
+}
+
 func TestOperatorAPIStatusEndpointIncludesHardwareCapacity(t *testing.T) {
 	t.Setenv("RYV_MODEL_CACHE_DIR", t.TempDir())
 	port := freeOperatorAPITestPort(t)
@@ -1478,6 +1525,13 @@ func TestUpdatePublicAIOptInPreservesOtherPreferences(t *testing.T) {
 		RuntimeArtifact:       "artifact.tar.gz",
 		RuntimeBackendBinary:  "/opt/ryvion/runtime/backend/ryvion-oci",
 		RuntimeManifestHash:   "abc123",
+		EnergyPolicy: operatorEnergyPolicy{
+			MaxWattage:                180,
+			MinPayoutPerKWhUSD:        0.42,
+			QuietHoursStart:           "22:00",
+			QuietHoursEnd:             "06:00",
+			BatchOnlyDuringQuietHours: true,
+		},
 	}); err != nil {
 		t.Fatalf("saveOperatorPreferences() error = %v", err)
 	}
@@ -1499,6 +1553,64 @@ func TestUpdatePublicAIOptInPreservesOtherPreferences(t *testing.T) {
 	}
 	if got.DeclaredCountry != "CA" || got.RuntimeChannel != "managed_oci_v1" || got.RuntimeArtifact != "artifact.tar.gz" {
 		t.Fatalf("expected unrelated preferences to be preserved, got %+v", got)
+	}
+	if got.EnergyPolicy.MaxWattage != 180 || got.EnergyPolicy.QuietHoursStart != "22:00" || !got.EnergyPolicy.BatchOnlyDuringQuietHours {
+		t.Fatalf("expected energy policy to be preserved, got %+v", got.EnergyPolicy)
+	}
+}
+
+func TestUpdateEnergyPolicyNormalizesAndPersists(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	state := &operatorRuntime{}
+	err := state.updateEnergyPolicy(operatorEnergyPolicy{
+		MaxWattage:                 240,
+		MinPayoutPerKWhUSD:         0.55,
+		QuietHoursStart:            "21:30",
+		QuietHoursEnd:              "07:00",
+		BatchOnlyDuringQuietHours:  true,
+		GreenMode:                  true,
+		EnergyShiftableBatchOptIn:  true,
+		PreferEnergyEfficientRoles: true,
+	})
+	if err != nil {
+		t.Fatalf("updateEnergyPolicy() error = %v", err)
+	}
+	got, err := loadOperatorPreferences()
+	if err != nil {
+		t.Fatalf("loadOperatorPreferences() error = %v", err)
+	}
+	if got.EnergyPolicy.MaxWattage != 240 ||
+		got.EnergyPolicy.MinPayoutPerKWhUSD != 0.55 ||
+		got.EnergyPolicy.QuietHoursStart != "21:30" ||
+		got.EnergyPolicy.QuietHoursEnd != "07:00" ||
+		!got.EnergyPolicy.BatchOnlyDuringQuietHours ||
+		!got.EnergyPolicy.GreenMode ||
+		!got.EnergyPolicy.EnergyShiftableBatchOptIn ||
+		!got.EnergyPolicy.PreferEnergyEfficientRoles {
+		t.Fatalf("energy policy = %+v", got.EnergyPolicy)
+	}
+
+	status := state.statusSnapshot(defaultOperatorAPIPort)
+	if status.EnergyPolicy.MaxWattage != 240 || !status.EnergyPolicy.GreenMode {
+		t.Fatalf("status energy policy = %+v", status.EnergyPolicy)
+	}
+}
+
+func TestUpdateEnergyPolicyRejectsInvalidQuietHours(t *testing.T) {
+	state := &operatorRuntime{}
+	if err := state.updateEnergyPolicy(operatorEnergyPolicy{QuietHoursStart: "99:00", QuietHoursEnd: "07:00"}); err == nil {
+		t.Fatal("expected invalid quiet hour to be rejected")
+	}
+	if err := state.updateEnergyPolicy(operatorEnergyPolicy{QuietHoursStart: "21:00"}); err == nil {
+		t.Fatal("expected incomplete quiet hours to be rejected")
 	}
 }
 

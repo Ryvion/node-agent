@@ -143,6 +143,7 @@ type operatorStatusResponse struct {
 	LlamaCPPBenchmark    v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
 	Metrics              operatorMetrics                                `json:"metrics"`
 	EnergyPlane          v8energyplane.Snapshot                         `json:"energy_plane"`
+	EnergyPolicy         operatorEnergyPolicy                           `json:"energy_policy"`
 	CurrentJob           *operatorJob                                   `json:"current_job,omitempty"`
 	RecentJobs           []operatorJob                                  `json:"recent_jobs"`
 	LastClaimAt          time.Time                                      `json:"last_claim_at,omitempty"`
@@ -726,6 +727,17 @@ func (s *operatorRuntime) updateDeclaredCountry(country string) error {
 	return nil
 }
 
+func (s *operatorRuntime) updateEnergyPolicy(policy operatorEnergyPolicy) error {
+	policy, err := normalizeOperatorEnergyPolicy(policy)
+	if err != nil {
+		return err
+	}
+	_, err = mutateOperatorPreferences(func(prefs *operatorPreferences) {
+		prefs.EnergyPolicy = policy
+	})
+	return err
+}
+
 func (s *operatorRuntime) setRegistered(ok bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1064,6 +1076,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	speculativeReport := buildSpeculativeReportStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory)
 	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory, &speculativeReport.SpeculativeDecoding, &kvCapability, runtimeInfo.TensorAccess)
 	llamaCppBenchmark := s.llamaCppBenchmarkSnapshot()
+	energyPolicy := loadOperatorEnergyPolicy()
 
 	return operatorStatusResponse{
 		Version:          s.version,
@@ -1107,6 +1120,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			PowerWatts: metrics.PowerWatts,
 		},
 		EnergyPlane:          energyPlane,
+		EnergyPolicy:         energyPolicy,
 		CurrentJob:           currentJob,
 		RecentJobs:           recent,
 		LastClaimAt:          lastClaimAt,
@@ -1759,6 +1773,18 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		}
 		if err := state.updateDeclaredCountry(rawCountry); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, state.statusSnapshot(port))
+	})
+	mux.HandleFunc("POST /api/v1/operator/preferences/energy", func(w http.ResponseWriter, r *http.Request) {
+		var body operatorEnergyPolicy
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
+			return
+		}
+		if err := state.updateEnergyPolicy(body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, state.statusSnapshot(port))

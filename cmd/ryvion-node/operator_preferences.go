@@ -4,28 +4,42 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
 type operatorPreferences struct {
-	PublicAIOptIn         bool   `json:"public_ai_opt_in"`
-	PublicAIOptInSet      bool   `json:"-"`
-	PublicAIOptOut        bool   `json:"public_ai_opt_out,omitempty"`
-	PublicAIOptOutSet     bool   `json:"-"`
-	DeclaredCountry       string `json:"declared_country,omitempty"`
-	RuntimeChannel        string `json:"runtime_channel,omitempty"`
-	RuntimeChannelVersion string `json:"runtime_channel_version,omitempty"`
-	RuntimeProvider       string `json:"runtime_provider,omitempty"`
-	RuntimeMode           string `json:"runtime_mode,omitempty"`
-	RuntimeSource         string `json:"runtime_source,omitempty"`
-	RuntimeArtifact       string `json:"runtime_artifact,omitempty"`
-	RuntimeBinary         string `json:"runtime_binary,omitempty"`
-	RuntimeBackendBinary  string `json:"runtime_backend_binary,omitempty"`
-	RuntimeEngineBinary   string `json:"runtime_engine_binary,omitempty"`
-	RuntimeEngineKind     string `json:"runtime_engine_kind,omitempty"`
-	RuntimeManifestHash   string `json:"runtime_manifest_hash,omitempty"`
+	PublicAIOptIn         bool                 `json:"public_ai_opt_in"`
+	PublicAIOptInSet      bool                 `json:"-"`
+	PublicAIOptOut        bool                 `json:"public_ai_opt_out,omitempty"`
+	PublicAIOptOutSet     bool                 `json:"-"`
+	DeclaredCountry       string               `json:"declared_country,omitempty"`
+	RuntimeChannel        string               `json:"runtime_channel,omitempty"`
+	RuntimeChannelVersion string               `json:"runtime_channel_version,omitempty"`
+	RuntimeProvider       string               `json:"runtime_provider,omitempty"`
+	RuntimeMode           string               `json:"runtime_mode,omitempty"`
+	RuntimeSource         string               `json:"runtime_source,omitempty"`
+	RuntimeArtifact       string               `json:"runtime_artifact,omitempty"`
+	RuntimeBinary         string               `json:"runtime_binary,omitempty"`
+	RuntimeBackendBinary  string               `json:"runtime_backend_binary,omitempty"`
+	RuntimeEngineBinary   string               `json:"runtime_engine_binary,omitempty"`
+	RuntimeEngineKind     string               `json:"runtime_engine_kind,omitempty"`
+	RuntimeManifestHash   string               `json:"runtime_manifest_hash,omitempty"`
+	EnergyPolicy          operatorEnergyPolicy `json:"energy_policy,omitempty"`
+}
+
+type operatorEnergyPolicy struct {
+	MaxWattage                 float64 `json:"max_wattage,omitempty"`
+	MinPayoutPerKWhUSD         float64 `json:"min_payout_per_kwh_usd,omitempty"`
+	QuietHoursStart            string  `json:"quiet_hours_start,omitempty"`
+	QuietHoursEnd              string  `json:"quiet_hours_end,omitempty"`
+	BatchOnlyDuringQuietHours  bool    `json:"batch_only_during_quiet_hours,omitempty"`
+	GreenMode                  bool    `json:"green_mode,omitempty"`
+	EnergyShiftableBatchOptIn  bool    `json:"energy_shiftable_batch_opt_in,omitempty"`
+	PreferEnergyEfficientRoles bool    `json:"prefer_energy_efficient_roles,omitempty"`
 }
 
 type runtimeContractMetadata struct {
@@ -43,6 +57,8 @@ type runtimeContractMetadata struct {
 }
 
 var operatorConfigPathResolver = defaultOperatorConfigPath
+
+var quietHourPattern = regexp.MustCompile(`^\d{2}:\d{2}$`)
 
 func defaultOperatorConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -128,6 +144,57 @@ func mutateOperatorPreferences(mutator func(*operatorPreferences)) (operatorPref
 		return operatorPreferences{}, err
 	}
 	return prefs, nil
+}
+
+func normalizeOperatorEnergyPolicy(policy operatorEnergyPolicy) (operatorEnergyPolicy, error) {
+	if policy.MaxWattage < 0 || policy.MaxWattage > 10000 {
+		return operatorEnergyPolicy{}, fmt.Errorf("max_wattage must be between 0 and 10000")
+	}
+	if policy.MinPayoutPerKWhUSD < 0 || policy.MinPayoutPerKWhUSD > 1000 {
+		return operatorEnergyPolicy{}, fmt.Errorf("min_payout_per_kwh_usd must be between 0 and 1000")
+	}
+	start, err := normalizeQuietHour(policy.QuietHoursStart)
+	if err != nil {
+		return operatorEnergyPolicy{}, fmt.Errorf("quiet_hours_start %w", err)
+	}
+	end, err := normalizeQuietHour(policy.QuietHoursEnd)
+	if err != nil {
+		return operatorEnergyPolicy{}, fmt.Errorf("quiet_hours_end %w", err)
+	}
+	policy.QuietHoursStart = start
+	policy.QuietHoursEnd = end
+	if (policy.QuietHoursStart == "") != (policy.QuietHoursEnd == "") {
+		return operatorEnergyPolicy{}, fmt.Errorf("quiet hours require both start and end")
+	}
+	return policy, nil
+}
+
+func normalizeQuietHour(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if !quietHourPattern.MatchString(value) {
+		return "", fmt.Errorf("must use HH:MM")
+	}
+	hour := int(value[0]-'0')*10 + int(value[1]-'0')
+	minute := int(value[3]-'0')*10 + int(value[4]-'0')
+	if hour > 23 || minute > 59 {
+		return "", fmt.Errorf("must be a valid 24-hour local time")
+	}
+	return value, nil
+}
+
+func loadOperatorEnergyPolicy() operatorEnergyPolicy {
+	prefs, err := loadOperatorPreferences()
+	if err != nil {
+		return operatorEnergyPolicy{}
+	}
+	policy, err := normalizeOperatorEnergyPolicy(prefs.EnergyPolicy)
+	if err != nil {
+		return operatorEnergyPolicy{}
+	}
+	return policy
 }
 
 func resolveInitialPublicAIOptIn() (bool, error) {
