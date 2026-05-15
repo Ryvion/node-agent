@@ -72,6 +72,7 @@ type operatorRuntime struct {
 	latestVersion        string
 	lastMetrics          hw.Metrics
 	energyPlane          v8energyplane.Accumulator
+	jobEnergyStarts      map[string]jobEnergyStart
 	lastHealthReport     hub.HealthReport
 	lastClaimAt          time.Time
 	lastClaimError       string
@@ -846,6 +847,7 @@ func (s *operatorRuntime) startJob(work *hub.WorkAssignment) {
 	if work == nil {
 		return
 	}
+	startedAt := time.Now()
 	job := operatorJob{
 		JobID:          strings.TrimSpace(work.JobID),
 		Kind:           strings.TrimSpace(work.Kind),
@@ -853,11 +855,20 @@ func (s *operatorRuntime) startJob(work *hub.WorkAssignment) {
 		ExecutorKind:   executorKindForAssignment(work),
 		AssuranceClass: assuranceClassForAssignment(work),
 		Status:         "running",
-		StartedAt:      time.Now(),
+		StartedAt:      startedAt,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.currentJob = &job
+	if job.JobID != "" {
+		if s.jobEnergyStarts == nil {
+			s.jobEnergyStarts = make(map[string]jobEnergyStart)
+		}
+		s.jobEnergyStarts[job.JobID] = jobEnergyStart{
+			startedAt: startedAt,
+			snapshot:  s.energyPlane.Snapshot(),
+		}
+	}
 }
 
 func (s *operatorRuntime) finishJob(work *hub.WorkAssignment, result *runnerResultSnapshot, runErr error) {
@@ -903,6 +914,9 @@ func (s *operatorRuntime) finishJob(work *hub.WorkAssignment, result *runnerResu
 		}
 	}
 	s.currentJob = nil
+	if job.JobID != "" && s.jobEnergyStarts != nil {
+		delete(s.jobEnergyStarts, job.JobID)
+	}
 	s.recentJobs = append([]operatorJob{job}, s.recentJobs...)
 	if len(s.recentJobs) > 20 {
 		s.recentJobs = append([]operatorJob(nil), s.recentJobs[:20]...)

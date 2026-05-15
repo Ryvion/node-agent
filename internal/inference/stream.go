@@ -123,7 +123,7 @@ type StreamingMetrics struct {
 
 // RunStreamingJob handles an inference job by calling the local llama-server
 // with streaming, and relaying chunks to the hub.
-func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string) error {
+func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string, metadataExtras ...map[string]any) error {
 	start := time.Now()
 	var (
 		firstTokenAt  time.Time
@@ -333,14 +333,13 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	if len(tail) > 4096 {
 		tail = tail[len(tail)-4096:]
 	}
-	meta := map[string]any{
-		"executor":        "llama-server",
-		"model":           m.ModelName(),
-		"duration_ms":     duration.Milliseconds(),
-		"exit_code":       0,
-		"response_length": fullContent.Len(),
-		"stderr_tail":     tail,
-	}
+	meta := mergeReceiptMetadata(metadataExtras...)
+	meta["executor"] = "llama-server"
+	meta["model"] = m.ModelName()
+	meta["duration_ms"] = duration.Milliseconds()
+	meta["exit_code"] = 0
+	meta["response_length"] = fullContent.Len()
+	meta["stderr_tail"] = tail
 	applyStreamingMetricsToMetadata(meta, metrics)
 	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
 		JobID:         jobID,
@@ -429,7 +428,7 @@ type embedResponse struct {
 // the requested embedding model (if not already loaded), posts to the local
 // llama-server /v1/embeddings endpoint, and submits a receipt with the
 // vector inline in metadata. No SSE relay — embeddings are one-shot.
-func (m *Manager) RunEmbeddingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string) error {
+func (m *Manager) RunEmbeddingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string, metadataExtras ...map[string]any) error {
 	start := time.Now()
 
 	var spec specPayload
@@ -496,26 +495,39 @@ func (m *Manager) RunEmbeddingJob(ctx context.Context, hubClient *hub.Client, jo
 	resultHash := hex.EncodeToString(hasher.Sum(nil))
 	duration := time.Since(start)
 
+	meta := mergeReceiptMetadata(metadataExtras...)
+	meta["executor"] = "llama-server"
+	meta["task"] = "embedding"
+	meta["model"] = modelName
+	meta["duration_ms"] = duration.Milliseconds()
+	meta["exit_code"] = 0
+	meta["dimensions"] = len(vector)
+	meta["prompt_tokens"] = embResp.Usage.PromptTokens
+	meta["embedding"] = vector
+
 	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
 		JobID:         jobID,
 		ResultHashHex: resultHash,
 		MeteringUnits: 1,
-		Metadata: map[string]any{
-			"executor":      "llama-server",
-			"task":          "embedding",
-			"model":         modelName,
-			"duration_ms":   duration.Milliseconds(),
-			"exit_code":     0,
-			"dimensions":    len(vector),
-			"prompt_tokens": embResp.Usage.PromptTokens,
-			"embedding":     vector,
-		},
+		Metadata:      meta,
 	}); err != nil {
 		return fmt.Errorf("submit embed receipt: %w", err)
 	}
 
 	slog.Info("native embedding complete", "job_id", jobID, "model", modelName, "dims", len(vector), "duration", duration)
 	return nil
+}
+
+func mergeReceiptMetadata(extras ...map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, extra := range extras {
+		for key, value := range extra {
+			if strings.TrimSpace(key) != "" {
+				out[key] = value
+			}
+		}
+	}
+	return out
 }
 
 // binaryLittleEndianPutFloat32 writes a float32 in little-endian bytes.

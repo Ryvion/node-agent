@@ -111,29 +111,31 @@ func (streamingEngine) Execute(ctx context.Context, work *hub.WorkAssignment, ex
 	// the vector inline in the receipt. No SSE relay required — the hub
 	// polls receipts and returns the vector to the buyer synchronously.
 	if inference.IsEmbeddingJob(work.SpecJSON) {
-		if err := execCtx.infMgr.RunEmbeddingJob(ctx, execCtx.client, work.JobID, work.SpecJSON); err != nil {
+		metadata := receiptMetadataBase(
+			work,
+			execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+			map[string]any{"executor": "llama-server", "task": "embedding"},
+		)
+		if err := execCtx.infMgr.RunEmbeddingJob(ctx, execCtx.client, work.JobID, work.SpecJSON, metadata); err != nil {
 			return nil, err
 		}
 		return &runnerResultSnapshot{
 			MeteringUnits: 1,
-			Metadata: receiptMetadataBase(
-				work,
-				execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
-				map[string]any{"executor": "llama-server", "task": "embedding"},
-			),
+			Metadata:      metadata,
 		}, nil
 	}
-	if err := execCtx.infMgr.RunStreamingJob(ctx, execCtx.client, work.JobID, work.SpecJSON); err != nil {
+	metadata := receiptMetadataBase(
+		work,
+		execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+		map[string]any{"executor": "llama-server"},
+	)
+	if err := execCtx.infMgr.RunStreamingJob(ctx, execCtx.client, work.JobID, work.SpecJSON, metadata); err != nil {
 		relayStreamingFailure(ctx, execCtx.client, work.JobID, err)
 		return nil, err
 	}
 	return &runnerResultSnapshot{
 		MeteringUnits: 1,
-		Metadata: receiptMetadataBase(
-			work,
-			execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
-			map[string]any{"executor": "llama-server"},
-		),
+		Metadata:      metadata,
 	}, nil
 }
 
@@ -361,6 +363,9 @@ func receiptMetadataBase(work *hub.WorkAssignment, extras ...map[string]any) map
 	out := map[string]any{
 		"executor_kind":   executorKindForAssignment(work),
 		"assurance_class": assuranceClassForAssignment(work),
+	}
+	if energyReceipt := jobEnergyReceiptMetadata(work); len(energyReceipt) > 0 {
+		out["energy_receipt"] = energyReceipt
 	}
 	for _, extra := range extras {
 		for key, value := range extra {
