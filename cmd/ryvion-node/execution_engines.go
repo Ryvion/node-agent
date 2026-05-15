@@ -214,7 +214,13 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 		return nil, fmt.Errorf("missing container image or spec")
 	}
 
-	result, runErr := runner.Run(ctx, work.Image, work.SpecJSON, execCtx.gpus)
+	var result *runner.Result
+	var runErr error
+	if runner.IsVerifierSessionSpec(work.SpecJSON) || strings.Contains(strings.ToLower(work.Image), "verifier-runner-v8") {
+		result, runErr = runner.RunVerifierSession(ctx, work.Image, work.SpecJSON, execCtx.gpus)
+	} else {
+		result, runErr = runner.Run(ctx, work.Image, work.SpecJSON, execCtx.gpus)
+	}
 	if result == nil {
 		return nil, runErr
 	}
@@ -234,6 +240,9 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 	aborted := managedOCIExecutionAborted(ctx, runErr)
 	if aborted {
 		metadata = annotateManagedOCIAbortReceipt(ctx, metadata, runErr)
+	}
+	if !aborted && len(result.DraftPackets) > 0 {
+		metadata["draft_packet_submission"] = submitForesightDraftPackets(ctx, execCtx.client, result.DraftPackets)
 	}
 	if strings.TrimSpace(result.OutputPath) != "" {
 		uploadRes, uploadErr := blob.Upload(ctx, execCtx.client, work.JobID, result.OutputPath)
@@ -286,6 +295,44 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 		ObjectKey:     stringValue(metadata["object_key"]),
 		Metadata:      metadata,
 	}, runErr
+}
+
+func submitForesightDraftPackets(ctx context.Context, client interface {
+	SubmitForesightDraftPacket(context.Context, string, map[string]any) (hub.DraftPacketDecision, error)
+}, packets []map[string]any) map[string]any {
+	summary := map[string]any{
+		"attempted": len(packets),
+		"accepted":  0,
+		"failed":    0,
+		"rejected":  0,
+		"reasons":   map[string]int{},
+	}
+	if len(packets) == 0 || client == nil {
+		return summary
+	}
+	submitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	reasons := summary["reasons"].(map[string]int)
+	for _, packet := range packets {
+		windowID := stringValue(packet["window_id"])
+		decision, err := client.SubmitForesightDraftPacket(submitCtx, windowID, packet)
+		if err != nil {
+			summary["failed"] = summary["failed"].(int) + 1
+			reasons["submit_failed"]++
+			continue
+		}
+		if decision.Accepted {
+			summary["accepted"] = summary["accepted"].(int) + 1
+		} else {
+			summary["rejected"] = summary["rejected"].(int) + 1
+		}
+		reason := strings.TrimSpace(decision.Reason)
+		if reason == "" {
+			reason = "unknown"
+		}
+		reasons[reason]++
+	}
+	return summary
 }
 
 func managedOCIExecutionAborted(ctx context.Context, runErr error) bool {

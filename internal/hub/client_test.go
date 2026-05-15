@@ -543,6 +543,44 @@ func TestSubmitReceiptSignsExpectedMessage(t *testing.T) {
 	}
 }
 
+func TestSubmitForesightDraftPacketUsesWindowEndpointAndAdminKey(t *testing.T) {
+	var gotPath string
+	var gotAdmin string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAdmin = r.Header.Get("X-Admin-Key")
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["packet_id"] != "pkt-client" {
+			t.Fatalf("body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schema_version":"ryvion.foresight.draft_packet_decision.v1","accepted":true,"reason":"accepted","packet_id":"pkt-client"}`))
+	}))
+	defer ts.Close()
+
+	pub, priv := testKeyPair()
+	c := New(ts.URL, pub, priv, WithAdminKey("admin-secret"))
+	decision, err := c.SubmitForesightDraftPacket(context.Background(), "win-client", map[string]any{"packet_id": "pkt-client"})
+	if err != nil {
+		t.Fatalf("SubmitForesightDraftPacket() error = %v", err)
+	}
+	if gotPath != "/v8/foresight/windows/win-client/draft-packets" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotAdmin != "admin-secret" {
+		t.Fatalf("admin header = %q", gotAdmin)
+	}
+	if !decision.Accepted || decision.Reason != "accepted" {
+		t.Fatalf("decision = %+v", decision)
+	}
+}
+
 func TestSendDashboardInferenceProgressPostsChunkBatch(t *testing.T) {
 	pub, priv := testKeyPair()
 	pubHex := hex.EncodeToString(pub)

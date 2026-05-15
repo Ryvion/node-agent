@@ -313,6 +313,25 @@ func (c *Client) SubmitReceipt(ctx context.Context, receipt Receipt) error {
 	return c.post(ctx, "/api/v1/node/receipt", body, nil)
 }
 
+func (c *Client) SubmitForesightDraftPacket(ctx context.Context, windowID string, packet map[string]any) (DraftPacketDecision, error) {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" {
+		return DraftPacketDecision{}, fmt.Errorf("window_id required")
+	}
+	if len(packet) == 0 {
+		return DraftPacketDecision{}, fmt.Errorf("draft packet required")
+	}
+	headers := map[string]string{
+		"X-Node-Token": c.NodeAuthToken(0),
+	}
+	if c.adminKey != "" {
+		headers["X-Admin-Key"] = c.adminKey
+	}
+	var out DraftPacketDecision
+	err := c.postWithHeaders(ctx, "/v8/foresight/windows/"+url.PathEscape(windowID)+"/draft-packets", packet, &out, headers)
+	return out, err
+}
+
 func (c *Client) SavePayout(ctx context.Context, stripeConnectID, currency string) error {
 	stripeConnectID = strings.TrimSpace(stripeConnectID)
 	if stripeConnectID == "" {
@@ -854,6 +873,14 @@ type Receipt struct {
 	ResultHashHex string
 	MeteringUnits uint64
 	Metadata      map[string]any
+}
+
+type DraftPacketDecision struct {
+	SchemaVersion string `json:"schema_version"`
+	WindowID      string `json:"window_id"`
+	Accepted      bool   `json:"accepted"`
+	Reason        string `json:"reason"`
+	PacketID      string `json:"packet_id"`
 }
 
 type HealthReport struct {
