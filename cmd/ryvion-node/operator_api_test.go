@@ -28,6 +28,7 @@ import (
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7modelcache "github.com/Ryvion/node-agent/internal/v7/modelcache"
+	v8energyplane "github.com/Ryvion/node-agent/internal/v8/energyplane"
 )
 
 func TestAllowLocalOrigin(t *testing.T) {
@@ -171,6 +172,73 @@ func TestOperatorAPIStatusEndpointIncludesWorkLoop(t *testing.T) {
 	}
 	if _, err := json.Marshal(status.WorkLoop); err != nil {
 		t.Fatalf("json.Marshal(status.WorkLoop) error = %v", err)
+	}
+}
+
+func TestOperatorStatusSnapshotIncludesEnergyPlaneTelemetry(t *testing.T) {
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+	}
+	start := time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC)
+	state.energyPlane.RecordPower(start, 120, v8energyplane.TelemetryDeviceSensor, v8energyplane.SourceHeartbeatPower)
+	state.energyPlane.RecordPower(start.Add(30*time.Second), 180, v8energyplane.TelemetryDeviceSensor, v8energyplane.SourceHeartbeatPower)
+
+	status := state.statusSnapshot(defaultOperatorAPIPort)
+	if status.EnergyPlane.SchemaVersion != v8energyplane.SchemaVersionV1 {
+		t.Fatalf("energy_plane.schema_version = %q", status.EnergyPlane.SchemaVersion)
+	}
+	if status.EnergyPlane.Status != v8energyplane.StatusMeasured {
+		t.Fatalf("energy_plane.status = %q, want measured: %+v", status.EnergyPlane.Status, status.EnergyPlane)
+	}
+	if status.EnergyPlane.EstimatedEnergyWh != 1.25 || status.EnergyPlane.AveragePowerWatts != 150 {
+		t.Fatalf("energy_plane integration = %+v, want 1.25 Wh at 150 W", status.EnergyPlane)
+	}
+	if !status.EnergyPlane.UsefulEnergyReady || !status.EnergyPlane.EnergyReceiptCandidate || !status.EnergyPlane.AcceptedValueRequired {
+		t.Fatalf("energy_plane useful-energy flags missing: %+v", status.EnergyPlane)
+	}
+
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal(status) error = %v", err)
+	}
+	text := strings.ToLower(string(raw))
+	for _, want := range []string{`"energy_plane"`, `"schema_version"`, `"telemetry_tier"`, `"estimated_energy_wh"`, `"useful_energy_ready"`, `"accepted_value_required"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status JSON missing %s: %s", want, raw)
+		}
+	}
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("status JSON contains forbidden marker %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestOperatorHeartbeatRecordsEnergyPlanePowerSample(t *testing.T) {
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+	}
+
+	state.recordHeartbeat(hw.Metrics{PowerWatts: 135}, hub.HeartbeatResponse{}, nil)
+
+	status := state.statusSnapshot(defaultOperatorAPIPort)
+	if status.Metrics.PowerWatts != 135 {
+		t.Fatalf("metrics.power_watts = %v, want 135", status.Metrics.PowerWatts)
+	}
+	if status.EnergyPlane.Status != v8energyplane.StatusMeasuring {
+		t.Fatalf("energy_plane.status = %q, want measuring: %+v", status.EnergyPlane.Status, status.EnergyPlane)
+	}
+	if status.EnergyPlane.SampleCount != 1 ||
+		status.EnergyPlane.LastPowerWatts != 135 ||
+		status.EnergyPlane.TelemetryTier != v8energyplane.TelemetryDeviceSensor ||
+		status.EnergyPlane.TelemetrySource != v8energyplane.SourceHeartbeatPower {
+		t.Fatalf("energy_plane heartbeat sample = %+v", status.EnergyPlane)
 	}
 }
 

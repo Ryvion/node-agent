@@ -37,6 +37,7 @@ import (
 	v7runtimeinventory "github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
 	v7speculative "github.com/Ryvion/node-agent/internal/v7/speculative"
 	v7tensoraccess "github.com/Ryvion/node-agent/internal/v7/tensoraccess"
+	v8energyplane "github.com/Ryvion/node-agent/internal/v8/energyplane"
 )
 
 const defaultOperatorAPIPort = "45890"
@@ -70,6 +71,7 @@ type operatorRuntime struct {
 	heartbeatStatus      operatorHeartbeatStatus
 	latestVersion        string
 	lastMetrics          hw.Metrics
+	energyPlane          v8energyplane.Accumulator
 	lastHealthReport     hub.HealthReport
 	lastClaimAt          time.Time
 	lastClaimError       string
@@ -140,6 +142,7 @@ type operatorStatusResponse struct {
 	LlamaCPPSidecar      v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
 	LlamaCPPBenchmark    v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
 	Metrics              operatorMetrics                                `json:"metrics"`
+	EnergyPlane          v8energyplane.Snapshot                         `json:"energy_plane"`
 	CurrentJob           *operatorJob                                   `json:"current_job,omitempty"`
 	RecentJobs           []operatorJob                                  `json:"recent_jobs"`
 	LastClaimAt          time.Time                                      `json:"last_claim_at,omitempty"`
@@ -750,6 +753,7 @@ func (s *operatorRuntime) recordHeartbeat(metrics hw.Metrics, heartbeat hub.Hear
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastMetrics = metrics
+	s.energyPlane.RecordPower(time.Now(), metrics.PowerWatts, v8energyplane.TelemetryDeviceSensor, v8energyplane.SourceHeartbeatPower)
 	if err != nil {
 		s.lastHeartbeatErr = strings.TrimSpace(err.Error())
 		return
@@ -932,6 +936,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	s.mu.RLock()
 	caps := s.caps
 	metrics := s.lastMetrics
+	energyPlane := s.energyPlane.Snapshot()
 	registered := s.registered
 	registerErr := s.lastRegisterError
 	latestVersion := s.latestVersion
@@ -1101,6 +1106,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUUtil:    metrics.GPUUtil,
 			PowerWatts: metrics.PowerWatts,
 		},
+		EnergyPlane:          energyPlane,
 		CurrentJob:           currentJob,
 		RecentJobs:           recent,
 		LastClaimAt:          lastClaimAt,
