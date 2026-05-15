@@ -220,6 +220,7 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 	metadata := receiptMetadataBase(
 		work,
 		execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+		result.Metadata,
 		map[string]any{
 			"executor":    "oci",
 			"duration_ms": result.Duration.Milliseconds(),

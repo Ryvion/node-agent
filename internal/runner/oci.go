@@ -136,6 +136,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 
 	receiptHash := readReceiptHash(filepath.Join(workDir, "receipt.json"))
 	metrics := readMetrics(filepath.Join(workDir, "metrics.json"), duration)
+	probeSummary := readProbeSummary(filepath.Join(workDir, "probe_summary.json"))
 	artifactPath, _ := copyArtifact(workDir, workBase)
 
 	hash := receiptHash
@@ -151,6 +152,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		OutputPath: artifactPath,
 		Duration:   duration,
 		Metrics:    metrics,
+		Metadata:   runnerMetadataFromProbeSummary(probeSummary),
 	}
 	return result, runErr
 }
@@ -322,6 +324,119 @@ func readMetrics(path string, duration time.Duration) map[string]any {
 		metrics["duration_ms"] = duration.Milliseconds()
 	}
 	return metrics
+}
+
+func readProbeSummary(path string) map[string]any {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	limited, err := io.ReadAll(io.LimitReader(f, 64<<10))
+	if err != nil {
+		return nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(limited, &raw); err != nil {
+		return nil
+	}
+	return sanitizeProbeSummary(raw)
+}
+
+func runnerMetadataFromProbeSummary(summary map[string]any) map[string]any {
+	if len(summary) == 0 {
+		return nil
+	}
+	return map[string]any{"probe_summary": summary}
+}
+
+func sanitizeProbeSummary(raw map[string]any) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{
+		"workgraph_id", "role_id", "model_hash", "probe_pack_cid",
+		"feature_scores_bps", "confidence_bps", "answer_confidence_bps",
+		"risk_flags", "accepted_tokens", "signature",
+		"reasoning_performativity_bps", "eval_awareness_risk_bps",
+		"early_exit_recommended", "verifier_signature",
+	} {
+		value, ok := raw[key]
+		if !ok || forbiddenProbeSummaryKey(key) {
+			continue
+		}
+		switch typed := value.(type) {
+		case map[string]any:
+			out[key] = sanitizeProbeSummaryMap(typed)
+		case []any:
+			out[key] = sanitizeProbeSummaryList(typed)
+		default:
+			out[key] = typed
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sanitizeProbeSummaryMap(raw map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range raw {
+		if forbiddenProbeSummaryKey(key) {
+			continue
+		}
+		switch typed := value.(type) {
+		case map[string]any:
+			nested := sanitizeProbeSummaryMap(typed)
+			if len(nested) > 0 {
+				out[key] = nested
+			}
+		case []any:
+			list := sanitizeProbeSummaryList(typed)
+			if len(list) > 0 {
+				out[key] = list
+			}
+		default:
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sanitizeProbeSummaryList(raw []any) []any {
+	out := make([]any, 0, len(raw))
+	for _, value := range raw {
+		switch typed := value.(type) {
+		case map[string]any:
+			nested := sanitizeProbeSummaryMap(typed)
+			if len(nested) > 0 {
+				out = append(out, nested)
+			}
+		default:
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func forbiddenProbeSummaryKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	k = strings.ReplaceAll(k, "-", "_")
+	switch k {
+	case "prompt", "raw_prompt", "prompt_text", "input_text", "raw_input",
+		"output", "raw_output", "output_text", "response_text", "completion_text",
+		"raw_activation", "raw_activations", "activation_values", "raw_hidden_state", "hidden_state_values",
+		"raw_logits", "logits", "logit_vector", "raw_attention", "attention_values",
+		"raw_sensor", "raw_media", "private_key", "secret", "api_key":
+		return true
+	default:
+		return false
+	}
 }
 
 func copyArtifact(workDir, workBase string) (string, error) {

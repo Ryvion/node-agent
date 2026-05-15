@@ -168,6 +168,41 @@ func TestCopyArtifactFindsNamedOutputFromMetrics(t *testing.T) {
 	}
 }
 
+func TestReadProbeSummaryKeepsScaledEvidenceAndDropsRawInternals(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "probe_summary.json")
+	if err := os.WriteFile(path, []byte(`{
+		"workgraph_id": "wg-1",
+		"role_id": "target-verifier",
+		"model_hash": "sha256:model",
+		"probe_pack_cid": "sha256:probe",
+		"feature_scores_bps": {"hallucination": 8800},
+		"confidence_bps": 2500,
+		"risk_flags": ["hallucination_risk"],
+		"raw_activation": [0.1, 0.2],
+		"raw_logits": [1, 2, 3]
+	}`), 0o644); err != nil {
+		t.Fatalf("write probe summary: %v", err)
+	}
+
+	got := readProbeSummary(path)
+	if got["model_hash"] != "sha256:model" || got["probe_pack_cid"] != "sha256:probe" {
+		t.Fatalf("safe probe summary fields missing: %#v", got)
+	}
+	if _, ok := got["raw_activation"]; ok {
+		t.Fatalf("raw activation leaked: %#v", got)
+	}
+	if _, ok := got["raw_logits"]; ok {
+		t.Fatalf("raw logits leaked: %#v", got)
+	}
+	scores, ok := got["feature_scores_bps"].(map[string]any)
+	if !ok || scores["hallucination"] == nil {
+		t.Fatalf("feature_scores_bps missing: %#v", got)
+	}
+}
+
 func TestAgentHealthIntervalClampsOperatorOverride(t *testing.T) {
 	t.Setenv("RYV_AGENT_HEALTH_INTERVAL_SECONDS", "1")
 	if got := agentHealthInterval(); got != 5*time.Second {
