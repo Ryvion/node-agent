@@ -225,6 +225,7 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	}
 	return &WorkAssignment{
 		JobID:               out.JobID,
+		WorkGraphID:         out.WorkGraphID,
 		JobPubkey:           out.JobPubkey,
 		Kind:                out.Kind,
 		PayloadURL:          out.PayloadURL,
@@ -236,6 +237,50 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 		AssuranceClass:      out.AssuranceClass,
 		RuntimeRequirements: out.RuntimeRequirements,
 	}, nil
+}
+
+func (c *Client) FetchWorkGraphAbort(ctx context.Context, workGraphID string) (*WorkGraphAbort, error) {
+	workGraphID = strings.TrimSpace(workGraphID)
+	if workGraphID == "" {
+		return nil, nil
+	}
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	sig := c.sign("workgraph_abort", pubHex, workGraphID, strconv.FormatInt(ts, 10))
+	u, err := url.Parse(c.absoluteURL("/api/v1/node/workgraph-aborts"))
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	q.Set("pubkey", pubHex)
+	q.Set("workgraph_id", workGraphID)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("X-Node-Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("X-Node-Signature", hex.EncodeToString(sig))
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return nil, fmt.Errorf("GET %s: %d %s", u.String(), resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out workGraphAbortResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if !out.Aborted {
+		return nil, nil
+	}
+	return &out.Abort, nil
 }
 
 func (c *Client) SubmitReceipt(ctx context.Context, receipt Receipt) error {
@@ -767,6 +812,7 @@ type Metrics struct {
 
 type WorkAssignment struct {
 	JobID               string
+	WorkGraphID         string
 	JobPubkey           string
 	Kind                string
 	PayloadURL          string
@@ -777,6 +823,15 @@ type WorkAssignment struct {
 	ExecutorKind        string
 	AssuranceClass      string
 	RuntimeRequirements RuntimeRequirements
+}
+
+type WorkGraphAbort struct {
+	WorkGraphHash   string `json:"workgraph_hash"`
+	AbortEpoch      int64  `json:"abort_epoch"`
+	Reason          string `json:"reason"`
+	IssuedAt        string `json:"issued_at"`
+	NoCreditAfter   string `json:"no_credit_after"`
+	NoCreditAfterMs int64  `json:"no_credit_after_ms"`
 }
 
 type RuntimeRequirements struct {
@@ -873,6 +928,7 @@ type heartbeatRequest struct {
 type workResponse struct {
 	HasWork             *bool               `json:"has_work"`
 	JobID               string              `json:"job_id"`
+	WorkGraphID         string              `json:"workgraph_id"`
 	JobPubkey           string              `json:"job_pubkey"`
 	Kind                string              `json:"kind"`
 	PayloadURL          string              `json:"payload_url"`
@@ -883,6 +939,13 @@ type workResponse struct {
 	ExecutorKind        string              `json:"executor_kind"`
 	AssuranceClass      string              `json:"assurance_class"`
 	RuntimeRequirements RuntimeRequirements `json:"runtime_requirements"`
+}
+
+type workGraphAbortResponse struct {
+	SchemaVersion string         `json:"schema_version"`
+	Status        string         `json:"status"`
+	Aborted       bool           `json:"aborted"`
+	Abort         WorkGraphAbort `json:"abort"`
 }
 
 type receiptRequest struct {

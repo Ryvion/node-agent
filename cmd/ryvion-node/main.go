@@ -1627,6 +1627,8 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 
 	runCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 	defer cancel()
+	stopAbortMonitor := startWorkGraphAbortMonitor(runCtx, client, work, cancel)
+	defer stopAbortMonitor()
 
 	if handled, result, runErr := processOptionalV7MemoryBenchmark(runCtx, client, work, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {

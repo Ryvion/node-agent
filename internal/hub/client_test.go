@@ -238,6 +238,68 @@ func TestFetchWorkNoWork(t *testing.T) {
 	}
 }
 
+func TestFetchWorkGraphAbortSignsCurrentGraphRequest(t *testing.T) {
+	pub, priv := testKeyPair()
+	pubHex := hex.EncodeToString(pub)
+	var (
+		mu         sync.Mutex
+		handlerErr error
+	)
+	setHandlerErr := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if handlerErr == nil {
+			handlerErr = err
+		}
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/workgraph-aborts" {
+			setHandlerErr(fmt.Errorf("unexpected path: %s", r.URL.Path))
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if got := r.URL.Query().Get("pubkey"); got != pubHex {
+			setHandlerErr(fmt.Errorf("pubkey query mismatch: %q", got))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if got := r.URL.Query().Get("workgraph_id"); got != "wg-current" {
+			setHandlerErr(fmt.Errorf("workgraph_id query mismatch: %q", got))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		tsStr := r.Header.Get("X-Node-Timestamp")
+		sigHex := r.Header.Get("X-Node-Signature")
+		sig, err := hex.DecodeString(sigHex)
+		if err != nil {
+			setHandlerErr(fmt.Errorf("decode signature: %w", err))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		msg := signPayload("workgraph_abort", pubHex, "wg-current", tsStr)
+		if !ed25519.Verify(pub, msg, sig) {
+			setHandlerErr(fmt.Errorf("invalid workgraph abort signature"))
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"schema_version":"ryvion.node_workgraph_aborts.v1","status":"ok","aborted":true,"abort":{"workgraph_hash":"sha256:test","abort_epoch":9,"reason":"disconnect","no_credit_after_ms":1700000000000}}`))
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	abort, err := c.FetchWorkGraphAbort(context.Background(), "wg-current")
+	if err != nil {
+		t.Fatalf("fetch abort failed: %v", err)
+	}
+	if abort == nil || abort.AbortEpoch != 9 || abort.Reason != "disconnect" {
+		t.Fatalf("abort = %#v, want epoch 9 disconnect", abort)
+	}
+	if handlerErr != nil {
+		t.Fatalf("handler failed: %v", handlerErr)
+	}
+}
+
 func TestHeartbeatParsesVerifiedLocation(t *testing.T) {
 	pub, priv := testKeyPair()
 	pubHex := hex.EncodeToString(pub)
