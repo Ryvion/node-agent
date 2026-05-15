@@ -532,6 +532,13 @@ func (c *Client) PublicKeyHex() string {
 	return c.pubHex()
 }
 
+func (c *Client) HeartbeatProbeTarget() string {
+	if c == nil {
+		return ""
+	}
+	return c.absoluteURL("/api/v1/node/heartbeat")
+}
+
 // RedeemClaimCode sends a claim code to the hub to link this node to a buyer account.
 func (c *Client) RedeemClaimCode(ctx context.Context, code string) error {
 	body := map[string]string{"code": code}

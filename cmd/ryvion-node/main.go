@@ -42,6 +42,7 @@ import (
 	v7modelpolicy "github.com/Ryvion/node-agent/internal/v7/modelpolicy"
 	v7modelprepare "github.com/Ryvion/node-agent/internal/v7/modelprepare"
 	v7modelwarm "github.com/Ryvion/node-agent/internal/v7/modelwarm"
+	v7netprofile "github.com/Ryvion/node-agent/internal/v7/netprofile"
 	v7onboarding "github.com/Ryvion/node-agent/internal/v7/onboarding"
 	v7proofrunner "github.com/Ryvion/node-agent/internal/v7/proofrunner"
 	v7sandbox "github.com/Ryvion/node-agent/internal/v7/sandbox"
@@ -66,6 +67,8 @@ var (
 // cachedGPUUtil stores the latest GPU utilization from heartbeat sampling.
 // Used by the work loop to skip fetching work when GPU is busy.
 var cachedGPUUtil atomic.Uint64 // stores float64 bits via math.Float64bits
+
+var hubNetworkProfile = v7netprofile.NewRollingHubProfile(8, "")
 
 // jobActive is set to 1 while a job is being processed.
 // The update check reads this to avoid restarting during active work.
@@ -1142,6 +1145,9 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 
 func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) heartbeatSendResult {
 	started := time.Now()
+	if client != nil && hubNetworkProfile != nil {
+		hubNetworkProfile.SetTarget(client.HeartbeatProbeTarget())
+	}
 	metrics := hw.SampleMetrics()
 
 	// Cache GPU utilization for the work loop's throttle check.
@@ -1175,6 +1181,7 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 		V7Heartbeat:  v7Payload,
 	}
 
+	heartbeatStart := time.Now()
 	heartbeat, err := client.Heartbeat(ctx, heartbeatMetrics)
 	if err != nil && heartbeatMetrics.V7Heartbeat != nil {
 		if operatorRuntimeState != nil {
@@ -1193,6 +1200,9 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 		}
 		slog.Warn("heartbeat failed", "error", err)
 		return heartbeatSendResult{hubOK: false, payloadSummary: payloadSummary}
+	}
+	if hubNetworkProfile != nil {
+		hubNetworkProfile.RecordRTT(time.Since(heartbeatStart), time.Now())
 	}
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.recordHeartbeat(metrics, heartbeat, nil)
@@ -1413,6 +1423,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 		DeviceType:           deviceType,
 		DeclaredCountry:      declaredCountry,
 		HardwareCapabilities: caps,
+		NetworkProfile:       currentHubNetworkProfile(),
 		RuntimeProfile:       runtimeProfile,
 		ModelCapabilitySummary: v7capability.ModelCapabilitySummary{
 			ResidentModelIDs:      residentModelIDs,
@@ -1437,6 +1448,17 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 		return nil, err
 	}
 	return &payload, nil
+}
+
+func currentHubNetworkProfile() *v7netprofile.NetworkProfile {
+	if hubNetworkProfile == nil {
+		return nil
+	}
+	profile, ok := hubNetworkProfile.Snapshot()
+	if !ok || profile.SampleCount == 0 {
+		return nil
+	}
+	return &profile
 }
 
 func buildCurrentBackendRuntimes(ctx context.Context) v7llamacpp.BackendRuntimes {
