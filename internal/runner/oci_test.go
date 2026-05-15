@@ -203,6 +203,108 @@ func TestReadProbeSummaryKeepsScaledEvidenceAndDropsRawInternals(t *testing.T) {
 	}
 }
 
+func TestReceiptAndProbeReadersPreferCommittedPartialFilesAndIgnoreTmp(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	partialReceipt := filepath.Join(tmp, "receipt.partial.json")
+	partialProbe := filepath.Join(tmp, "probe_summary.partial.json")
+	if err := os.WriteFile(filepath.Join(tmp, "receipt.partial.json.tmp"), []byte(`{"output_hash":"tmp-should-not-win"}`), 0o644); err != nil {
+		t.Fatalf("write tmp receipt: %v", err)
+	}
+	if err := os.WriteFile(partialReceipt, []byte(`{"output_hash":"sha256:partial-committed"}`), 0o644); err != nil {
+		t.Fatalf("write partial receipt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "probe_summary.partial.json.tmp"), []byte(`{"raw_activation":[1,2,3]}`), 0o644); err != nil {
+		t.Fatalf("write tmp probe: %v", err)
+	}
+	if err := os.WriteFile(partialProbe, []byte(`{"model_hash":"sha256:model","probe_pack_cid":"sha256:probe","feature_scores_bps":{"confidence":9100}}`), 0o644); err != nil {
+		t.Fatalf("write partial probe: %v", err)
+	}
+
+	hash := readReceiptHash(filepath.Join(tmp, "receipt.json"), partialReceipt, filepath.Join(tmp, "receipt.partial.json.tmp"))
+	if hash != "partial-committed" {
+		t.Fatalf("receipt hash = %q, want partial-committed", hash)
+	}
+	probe := readProbeSummary(filepath.Join(tmp, "probe_summary.json"), partialProbe, filepath.Join(tmp, "probe_summary.partial.json.tmp"))
+	if probe["model_hash"] != "sha256:model" {
+		t.Fatalf("partial probe not read: %#v", probe)
+	}
+	if _, ok := probe["raw_activation"]; ok {
+		t.Fatalf("tmp/raw probe leaked: %#v", probe)
+	}
+}
+
+func TestAbortAwareOCIArgsExposePartialReceiptPathsAndArtifactCandidatesSkipPartials(t *testing.T) {
+	t.Parallel()
+
+	args := baseOCIRunArgs("job-name", "/tmp/work", "512m", "1", "--network=none")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"RYV_RECEIPT_PATH=/work/receipt.json",
+		"RYV_PARTIAL_RECEIPT_PATH=/work/receipt.partial.json",
+		"RYV_PROBE_SUMMARY_PATH=/work/probe_summary.json",
+		"RYV_PARTIAL_PROBE_SUMMARY_PATH=/work/probe_summary.partial.json",
+		"RYV_VERIFIER_SESSION_RECEIPT_PATH=/work/verifier_session_receipt.json",
+		"RYV_PARTIAL_VERIFIER_SESSION_RECEIPT_PATH=/work/verifier_session_receipt.partial.json",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("OCI args missing %s: %v", want, args)
+		}
+	}
+
+	tmp := t.TempDir()
+	for _, name := range []string{"receipt.partial.json", "probe_summary.partial.json", "metrics.partial.json", "verifier_session_receipt.json", "verifier_session_receipt.partial.json"} {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte("control"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "output.bin"), []byte("artifact"), 0o644); err != nil {
+		t.Fatalf("write output: %v", err)
+	}
+	candidates := artifactCandidates(tmp)
+	for _, candidate := range candidates {
+		if strings.Contains(filepath.Base(candidate), "partial") {
+			t.Fatalf("partial control file considered artifact: %v", candidates)
+		}
+	}
+}
+
+func TestReadVerifierSessionReceiptKeepsCommitRollbackEvidenceAndDropsRawKV(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "verifier_session_receipt.partial.json")
+	if err := os.WriteFile(path, []byte(`{
+		"schema_version":"ryvion.verifier_wave_receipt.v1",
+		"method":"verify_tree",
+		"session_id":"sess-1",
+		"workgraph_id":"wg-1",
+		"window_id":"win-1",
+		"tree_cid":"sha256:tree",
+		"kv_epoch":7,
+		"accepted_len":4,
+		"commit_range":{"start":0,"end":4},
+		"rollback_branch_ids":["br-reject"],
+		"verifier_signature":"sig",
+		"raw_kv_cache":[1,2,3],
+		"candidate_text":"secret text"
+	}`), 0o644); err != nil {
+		t.Fatalf("write verifier receipt: %v", err)
+	}
+
+	got := readVerifierSessionReceipt(filepath.Join(tmp, "verifier_session_receipt.json"), path)
+	if got["method"] != "verify_tree" || got["tree_cid"] != "sha256:tree" {
+		t.Fatalf("safe verifier receipt missing: %#v", got)
+	}
+	if _, ok := got["raw_kv_cache"]; ok {
+		t.Fatalf("raw kv leaked: %#v", got)
+	}
+	if _, ok := got["candidate_text"]; ok {
+		t.Fatalf("candidate text leaked: %#v", got)
+	}
+}
+
 func TestAgentHealthIntervalClampsOperatorOverride(t *testing.T) {
 	t.Setenv("RYV_AGENT_HEALTH_INTERVAL_SECONDS", "1")
 	if got := agentHealthInterval(); got != 5*time.Second {

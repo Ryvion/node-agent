@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,12 +96,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	}
 	pullCancel()
 
-	args := []string{"run", "--name", name, "--rm", "-v", workDir + ":/work",
-		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256",
-		"--cpu-shares", "256",
-		"--cap-drop=ALL",
-		"--security-opt=no-new-privileges:true",
-		networkMode}
+	args := baseOCIRunArgs(name, workDir, memLimit, cpuLimit, networkMode)
 	if gpuArg := resolveGPUFlag(gpus); gpuArg != "" {
 		args = append(args, "--gpus", gpuArg)
 	} else if gpus == "auto" && isROCmAvailable() {
@@ -118,11 +114,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	duration := time.Since(start)
 
 	if ctx.Err() != nil {
-		killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := exec.CommandContext(killCtx, ociExec.command, ociCommandArgs(ociExec, "kill", name)...).Run(); err != nil {
-			slog.Warn("failed to kill timed-out container", "name", name, "error", err)
-		}
-		killCancel()
+		stopContainerGracefully(ociExec, name, abortGracePeriod())
 	}
 
 	exitCode := 0
@@ -134,9 +126,19 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		}
 	}
 
-	receiptHash := readReceiptHash(filepath.Join(workDir, "receipt.json"))
+	receiptHash := readReceiptHash(
+		filepath.Join(workDir, "receipt.json"),
+		filepath.Join(workDir, "receipt.partial.json"),
+	)
 	metrics := readMetrics(filepath.Join(workDir, "metrics.json"), duration)
-	probeSummary := readProbeSummary(filepath.Join(workDir, "probe_summary.json"))
+	probeSummary := readProbeSummary(
+		filepath.Join(workDir, "probe_summary.json"),
+		filepath.Join(workDir, "probe_summary.partial.json"),
+	)
+	verifierSessionReceipt := readVerifierSessionReceipt(
+		filepath.Join(workDir, "verifier_session_receipt.json"),
+		filepath.Join(workDir, "verifier_session_receipt.partial.json"),
+	)
 	artifactPath, _ := copyArtifact(workDir, workBase)
 
 	hash := receiptHash
@@ -152,9 +154,73 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		OutputPath: artifactPath,
 		Duration:   duration,
 		Metrics:    metrics,
-		Metadata:   runnerMetadataFromProbeSummary(probeSummary),
+		Metadata:   runnerMetadata(probeSummary, verifierSessionReceipt),
 	}
 	return result, runErr
+}
+
+func baseOCIRunArgs(name, workDir, memLimit, cpuLimit, networkMode string) []string {
+	graceSeconds := int(abortGracePeriod().Seconds())
+	if graceSeconds <= 0 {
+		graceSeconds = 10
+	}
+	return []string{"run", "--name", name, "--rm", "-v", workDir + ":/work",
+		"--memory", memLimit, "--memory-swap", memLimit, "--cpus", cpuLimit, "--pids-limit", "256",
+		"--cpu-shares", "256",
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges:true",
+		"--env", "RYV_RECEIPT_PATH=/work/receipt.json",
+		"--env", "RYV_PARTIAL_RECEIPT_PATH=/work/receipt.partial.json",
+		"--env", "RYV_PROBE_SUMMARY_PATH=/work/probe_summary.json",
+		"--env", "RYV_PARTIAL_PROBE_SUMMARY_PATH=/work/probe_summary.partial.json",
+		"--env", "RYV_VERIFIER_SESSION_RECEIPT_PATH=/work/verifier_session_receipt.json",
+		"--env", "RYV_PARTIAL_VERIFIER_SESSION_RECEIPT_PATH=/work/verifier_session_receipt.partial.json",
+		"--env", fmt.Sprintf("RYV_ABORT_GRACE_SECONDS=%d", graceSeconds),
+		networkMode}
+}
+
+func abortGracePeriod() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("RYV_ABORT_GRACE_PERIOD"))
+	if raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return clampAbortGracePeriod(d)
+		}
+	}
+	rawSeconds := strings.TrimSpace(os.Getenv("RYV_ABORT_GRACE_SECONDS"))
+	if rawSeconds != "" {
+		if seconds, err := strconv.Atoi(rawSeconds); err == nil && seconds > 0 {
+			return clampAbortGracePeriod(time.Duration(seconds) * time.Second)
+		}
+	}
+	return 10 * time.Second
+}
+
+func clampAbortGracePeriod(d time.Duration) time.Duration {
+	if d < time.Second {
+		return time.Second
+	}
+	if d > 60*time.Second {
+		return 60 * time.Second
+	}
+	return d
+}
+
+func stopContainerGracefully(ociExec ociExecutor, name string, grace time.Duration) {
+	seconds := int(grace.Seconds())
+	if seconds <= 0 {
+		seconds = 10
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), grace+5*time.Second)
+	stopErr := exec.CommandContext(stopCtx, ociExec.command, ociCommandArgs(ociExec, "stop", "--time", strconv.Itoa(seconds), name)...).Run()
+	stopCancel()
+	if stopErr == nil {
+		return
+	}
+	killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := exec.CommandContext(killCtx, ociExec.command, ociCommandArgs(ociExec, "kill", name)...).Run(); err != nil {
+		slog.Warn("failed to kill timed-out container", "name", name, "stop_error", stopErr, "error", err)
+	}
+	killCancel()
 }
 
 // needsNetwork checks if a job spec requires network access inside the container.
@@ -294,18 +360,26 @@ func isROCmAvailable() bool {
 	return err == nil
 }
 
-func readReceiptHash(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
+func readReceiptHash(paths ...string) string {
+	for _, path := range paths {
+		if strings.HasSuffix(path, ".tmp") {
+			continue
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rec struct {
+			OutputHash string `json:"output_hash"`
+		}
+		if err := json.Unmarshal(b, &rec); err != nil {
+			continue
+		}
+		if hash := trimDigestPrefix(strings.TrimSpace(rec.OutputHash)); hash != "" {
+			return hash
+		}
 	}
-	var rec struct {
-		OutputHash string `json:"output_hash"`
-	}
-	if err := json.Unmarshal(b, &rec); err != nil {
-		return ""
-	}
-	return trimDigestPrefix(strings.TrimSpace(rec.OutputHash))
+	return ""
 }
 
 func readMetrics(path string, duration time.Duration) map[string]any {
@@ -326,21 +400,29 @@ func readMetrics(path string, duration time.Duration) map[string]any {
 	return metrics
 }
 
-func readProbeSummary(path string) map[string]any {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
+func readProbeSummary(paths ...string) map[string]any {
+	for _, path := range paths {
+		if strings.HasSuffix(path, ".tmp") {
+			continue
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		limited, readErr := io.ReadAll(io.LimitReader(f, 64<<10))
+		_ = f.Close()
+		if readErr != nil {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(limited, &raw); err != nil {
+			continue
+		}
+		if summary := sanitizeProbeSummary(raw); len(summary) > 0 {
+			return summary
+		}
 	}
-	defer f.Close()
-	limited, err := io.ReadAll(io.LimitReader(f, 64<<10))
-	if err != nil {
-		return nil
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(limited, &raw); err != nil {
-		return nil
-	}
-	return sanitizeProbeSummary(raw)
+	return nil
 }
 
 func runnerMetadataFromProbeSummary(summary map[string]any) map[string]any {
@@ -348,6 +430,133 @@ func runnerMetadataFromProbeSummary(summary map[string]any) map[string]any {
 		return nil
 	}
 	return map[string]any{"probe_summary": summary}
+}
+
+func runnerMetadata(probeSummary, verifierSessionReceipt map[string]any) map[string]any {
+	out := map[string]any{}
+	if len(probeSummary) > 0 {
+		out["probe_summary"] = probeSummary
+	}
+	if len(verifierSessionReceipt) > 0 {
+		out["verifier_session"] = verifierSessionReceipt
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func readVerifierSessionReceipt(paths ...string) map[string]any {
+	for _, path := range paths {
+		if strings.HasSuffix(path, ".tmp") {
+			continue
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		limited, readErr := io.ReadAll(io.LimitReader(f, 64<<10))
+		_ = f.Close()
+		if readErr != nil {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(limited, &raw); err != nil {
+			continue
+		}
+		if summary := sanitizeVerifierSessionReceipt(raw); len(summary) > 0 {
+			return summary
+		}
+	}
+	return nil
+}
+
+func sanitizeVerifierSessionReceipt(raw map[string]any) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{
+		"schema_version", "receipt_type", "method", "session_id", "workgraph_id", "window_id",
+		"tree_cid", "kv_epoch", "accepted_len", "rejected_reason", "commit_range",
+		"rollback_branch_ids", "verifier_signature", "status", "latency_ms", "energy_mwh",
+	} {
+		value, ok := raw[key]
+		if !ok || forbiddenVerifierSessionKey(key) {
+			continue
+		}
+		switch typed := value.(type) {
+		case map[string]any:
+			out[key] = sanitizeVerifierSessionReceiptMap(typed)
+		case []any:
+			out[key] = sanitizeVerifierSessionReceiptList(typed)
+		default:
+			out[key] = typed
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sanitizeVerifierSessionReceiptMap(raw map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range raw {
+		if forbiddenVerifierSessionKey(key) {
+			continue
+		}
+		switch typed := value.(type) {
+		case map[string]any:
+			nested := sanitizeVerifierSessionReceiptMap(typed)
+			if len(nested) > 0 {
+				out[key] = nested
+			}
+		case []any:
+			list := sanitizeVerifierSessionReceiptList(typed)
+			if len(list) > 0 {
+				out[key] = list
+			}
+		default:
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sanitizeVerifierSessionReceiptList(raw []any) []any {
+	out := make([]any, 0, len(raw))
+	for _, value := range raw {
+		switch typed := value.(type) {
+		case map[string]any:
+			nested := sanitizeVerifierSessionReceiptMap(typed)
+			if len(nested) > 0 {
+				out = append(out, nested)
+			}
+		default:
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func forbiddenVerifierSessionKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	k = strings.ReplaceAll(k, "-", "_")
+	switch k {
+	case "prompt", "raw_prompt", "prompt_text", "input_text", "raw_input",
+		"output", "raw_output", "output_text", "response_text", "completion_text",
+		"candidate_text", "candidate_text_preview",
+		"raw_kv", "raw_kv_cache", "kv_cache", "kv_values", "raw_activation", "raw_activations",
+		"raw_hidden_state", "hidden_state_values", "raw_logits", "logits", "raw_attention",
+		"raw_sensor", "raw_media", "private_key", "secret", "api_key":
+		return true
+	default:
+		return false
+	}
 }
 
 func sanitizeProbeSummary(raw map[string]any) map[string]any {
@@ -481,9 +690,19 @@ func copyArtifact(workDir, workBase string) (string, error) {
 
 func artifactCandidates(workDir string) []string {
 	controlFiles := map[string]bool{
-		"job.json":     true,
-		"receipt.json": true,
-		"metrics.json": true,
+		"job.json":                                  true,
+		"receipt.json":                              true,
+		"receipt.partial.json":                      true,
+		"receipt.partial.json.tmp":                  true,
+		"metrics.json":                              true,
+		"metrics.partial.json":                      true,
+		"metrics.partial.json.tmp":                  true,
+		"probe_summary.json":                        true,
+		"probe_summary.partial.json":                true,
+		"probe_summary.partial.json.tmp":            true,
+		"verifier_session_receipt.json":             true,
+		"verifier_session_receipt.partial.json":     true,
+		"verifier_session_receipt.partial.json.tmp": true,
 	}
 	seen := map[string]bool{}
 	candidates := []string{}
