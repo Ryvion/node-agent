@@ -408,7 +408,44 @@ func metadataBool(metadata map[string]any, key string) bool {
 	}
 }
 
+// workCapsuleEnabled reports whether host-process WorkCapsule execution is
+// explicitly opted in. WorkCapsule runs buyer-supplied shell commands directly
+// on the operator host with NO container isolation, so it is disabled by
+// default and must only be enabled on trusted single-tenant enterprise
+// operators via RYV_ENABLE_WORK_CAPSULE.
+func workCapsuleEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_ENABLE_WORK_CAPSULE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func (workCapsuleEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {
+	if !workCapsuleEnabled() {
+		rejectHash := sha256.Sum256([]byte(work.JobID + ":work_capsule_disabled"))
+		receipt := hub.Receipt{
+			JobID:         work.JobID,
+			ResultHashHex: hex.EncodeToString(rejectHash[:]),
+			MeteringUnits: 0,
+			Metadata: receiptMetadataBase(
+				work,
+				execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+				map[string]any{
+					"executor":   executorKindWorkCapsule,
+					"work_type":  "certified_change",
+					"exit_code":  1,
+					"error":      "work_capsule execution disabled on this node; set RYV_ENABLE_WORK_CAPSULE=1 only on trusted enterprise operators",
+					"risk_level": "high",
+				},
+			),
+		}
+		if err := submitReceiptWithRetry(ctx, execCtx.client, receipt); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("work_capsule execution disabled on this node")
+	}
 	if strings.TrimSpace(work.SpecJSON) == "" {
 		rejectHash := sha256.Sum256([]byte(work.JobID + ":missing_work_capsule_spec"))
 		receipt := hub.Receipt{
