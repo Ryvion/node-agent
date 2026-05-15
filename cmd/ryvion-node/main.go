@@ -3778,6 +3778,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		parts = append(parts, "public-inference-ready:0")
 	}
 	parts = append(parts, foresightRoleStatusTokens(caps, diskGB, publicInferenceReady)...)
+	parts = append(parts, worldGridRoleStatusTokens(caps, ffmpegOK, spatialReady)...)
 
 	return hub.HealthReport{
 		TimestampMs: time.Now().UnixMilli(),
@@ -3809,6 +3810,40 @@ func foresightRoleStatusTokens(caps hw.CapSet, diskGB uint64, publicInferenceRea
 	} else {
 		tokens = append(tokens, "cap:cache_provider:0")
 	}
+	return tokens
+}
+
+func worldGridRoleStatusTokens(caps hw.CapSet, ffmpegOK bool, spatialReady bool) []string {
+	tokens := []string{}
+	asyncReady := caps.CPUCores >= 4 || strings.TrimSpace(caps.CPUModel) != "" || strings.TrimSpace(caps.GPUModel) != ""
+	frameReady := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes >= 4*1024*1024*1024
+	npcReady := asyncReady
+	if asyncReady {
+		tokens = append(tokens, "worldgrid_async:1", "cap:worldgrid_async_worker:1")
+	} else {
+		tokens = append(tokens, "worldgrid_async:0", "cap:worldgrid_async_worker:0")
+	}
+	if frameReady {
+		tokens = append(tokens, "role:frame_worker", "cap:worldgrid_frame_worker:1")
+	} else {
+		tokens = append(tokens, "cap:worldgrid_frame_worker:0")
+	}
+	if ffmpegOK {
+		tokens = append(tokens, "role:stream_segment_worker", "cap:worldgrid_stream_segment_worker:1")
+	} else {
+		tokens = append(tokens, "cap:worldgrid_stream_segment_worker:0")
+	}
+	if npcReady {
+		tokens = append(tokens, "role:future_branch_proposer", "cap:worldgrid_npc_foresight:1")
+	} else {
+		tokens = append(tokens, "cap:worldgrid_npc_foresight:0")
+	}
+	if spatialReady {
+		tokens = append(tokens, "role:stage_worker", "cap:worldgrid_spatial_worker:1")
+	} else {
+		tokens = append(tokens, "cap:worldgrid_spatial_worker:0")
+	}
+	tokens = append(tokens, "cap:worldgrid_realtime_cell:0")
 	return tokens
 }
 

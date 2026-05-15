@@ -92,6 +92,31 @@ func TestBuildHealthReportAdvertisesResidueSwarmBuilderWithoutDraftWorker(t *tes
 	}
 }
 
+func TestWorldGridRoleStatusTokensAdvertiseOnlySafeAsyncAndCellBoundaries(t *testing.T) {
+	caps := hw.CapSet{
+		GPUModel: "RTX 4090",
+		CPUCores: 12,
+		RAMBytes: 32 * 1024 * 1024 * 1024,
+	}
+	tokens := strings.Join(worldGridRoleStatusTokens(caps, true, true), ",")
+	for _, want := range []string{
+		"role:frame_worker",
+		"cap:worldgrid_frame_worker:1",
+		"role:stream_segment_worker",
+		"cap:worldgrid_stream_segment_worker:1",
+		"role:future_branch_proposer",
+		"cap:worldgrid_npc_foresight:1",
+		"worldgrid_async:1",
+	} {
+		if !strings.Contains(tokens, want) {
+			t.Fatalf("expected worldgrid tokens to contain %q, got %s", want, tokens)
+		}
+	}
+	if strings.Contains(tokens, "worldgrid_realtime_cell:1") || strings.Contains(tokens, "serving_cell:worldgrid") {
+		t.Fatalf("generic GPU node must not claim realtime serving-cell status, got %s", tokens)
+	}
+}
+
 func TestBuildHealthReportDoesNotAdvertiseLocalFluxUntilCacheReady(t *testing.T) {
 	t.Setenv("RYV_PUBLIC_AI", "1")
 	t.Setenv("RYV_DISABLE_OCI", "1")
