@@ -1145,9 +1145,7 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 
 func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) heartbeatSendResult {
 	started := time.Now()
-	if client != nil && hubNetworkProfile != nil {
-		hubNetworkProfile.SetTarget(client.HeartbeatProbeTarget())
-	}
+	recordHubRTTProbe(ctx, client)
 	metrics := hw.SampleMetrics()
 
 	// Cache GPU utilization for the work loop's throttle check.
@@ -1181,7 +1179,6 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 		V7Heartbeat:  v7Payload,
 	}
 
-	heartbeatStart := time.Now()
 	heartbeat, err := client.Heartbeat(ctx, heartbeatMetrics)
 	if err != nil && heartbeatMetrics.V7Heartbeat != nil {
 		if operatorRuntimeState != nil {
@@ -1200,9 +1197,6 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 		}
 		slog.Warn("heartbeat failed", "error", err)
 		return heartbeatSendResult{hubOK: false, payloadSummary: payloadSummary}
-	}
-	if hubNetworkProfile != nil {
-		hubNetworkProfile.RecordRTT(time.Since(heartbeatStart), time.Now())
 	}
 	if operatorRuntimeState != nil {
 		operatorRuntimeState.recordHeartbeat(metrics, heartbeat, nil)
@@ -1225,6 +1219,19 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 		latestVersion:       strings.TrimSpace(heartbeat.LatestVersion),
 		payloadSummary:      payloadSummary,
 	}
+}
+
+func recordHubRTTProbe(ctx context.Context, client *hub.Client) {
+	if client == nil || hubNetworkProfile == nil {
+		return
+	}
+	hubNetworkProfile.SetTarget(client.HeartbeatProbeTarget())
+	rtt, err := client.ProbeHubRTT(ctx)
+	if err != nil {
+		slog.Debug("hub RTT probe failed", "error", err)
+		return
+	}
+	hubNetworkProfile.RecordRTT(rtt, time.Now())
 }
 
 func requestV7CapabilityHeartbeat(reason string) {

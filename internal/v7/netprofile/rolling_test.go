@@ -6,7 +6,7 @@ import (
 )
 
 func TestRollingHubProfileComputesMovingPingAndJitter(t *testing.T) {
-	rolling := NewRollingHubProfile(4, "https://api.ryvion.ai/api/v1/node/heartbeat")
+	rolling := NewRollingHubProfile(4, "https://api.ryvion.ai/api/v1/ping")
 	for _, sample := range []time.Duration{
 		40 * time.Millisecond,
 		50 * time.Millisecond,
@@ -23,7 +23,7 @@ func TestRollingHubProfileComputesMovingPingAndJitter(t *testing.T) {
 	if profile.SampleCount != 4 {
 		t.Fatalf("sample_count = %d, want 4", profile.SampleCount)
 	}
-	if profile.ProbeTarget != "https://api.ryvion.ai/api/v1/node/heartbeat" {
+	if profile.ProbeTarget != "https://api.ryvion.ai/api/v1/ping" {
 		t.Fatalf("probe_target = %q", profile.ProbeTarget)
 	}
 	if profile.RTTMsP50 <= 0 || profile.RTTMsP95 <= profile.RTTMsP50 {

@@ -536,7 +536,43 @@ func (c *Client) HeartbeatProbeTarget() string {
 	if c == nil {
 		return ""
 	}
-	return c.absoluteURL("/api/v1/node/heartbeat")
+	return c.absoluteURL("/api/v1/ping")
+}
+
+func (c *Client) ProbeHubRTT(ctx context.Context) (time.Duration, error) {
+	if c == nil {
+		return 0, fmt.Errorf("nil hub client")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if rtt, err := c.probeHubRTT(probeCtx, http.MethodHead, "/api/v1/ping"); err == nil {
+		return rtt, nil
+	}
+	return c.probeHubRTT(probeCtx, http.MethodGet, "/healthz")
+}
+
+func (c *Client) probeHubRTT(ctx context.Context, method string, path string) (time.Duration, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.absoluteURL(path), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+	start := time.Now()
+	resp, err := c.http.Do(req)
+	rtt := time.Since(start)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("%s %s: %d", method, req.URL.String(), resp.StatusCode)
+	}
+	return rtt, nil
 }
 
 // RedeemClaimCode sends a claim code to the hub to link this node to a buyer account.

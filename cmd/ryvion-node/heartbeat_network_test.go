@@ -10,7 +10,7 @@ import (
 
 func TestBuildV7HeartbeatPayloadIncludesHubNetworkTelemetry(t *testing.T) {
 	previous := hubNetworkProfile
-	hubNetworkProfile = netprofile.NewRollingHubProfile(8, "https://api.ryvion.ai/api/v1/node/heartbeat")
+	hubNetworkProfile = netprofile.NewRollingHubProfile(8, "https://api.ryvion.ai/api/v1/ping")
 	t.Cleanup(func() { hubNetworkProfile = previous })
 
 	hubNetworkProfile.RecordRTT(42*time.Millisecond, time.UnixMilli(1770000000000))

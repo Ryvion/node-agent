@@ -799,6 +799,10 @@ func TestSendHeartbeatWarnsWhenV7SnapshotNotConfirmed(t *testing.T) {
 		t.Fatalf("GenerateKey() error = %v", err)
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ping" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.URL.Path != "/api/v1/node/heartbeat" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -860,6 +864,10 @@ func TestSendHeartbeatRecordsCapabilityFailureWhenV7FallbackSucceeds(t *testing.
 	}
 	calls := &atomic.Int32{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ping" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.URL.Path != "/api/v1/node/heartbeat" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -951,6 +959,10 @@ func heartbeatTestClient(t *testing.T) (*hub.Client, *atomic.Bool, *atomic.Int32
 	gotV7 := &atomic.Bool{}
 	calls := &atomic.Int32{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ping" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.URL.Path != "/api/v1/node/heartbeat" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)

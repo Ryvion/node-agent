@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Ryvion/node-agent/internal/hw"
 	"github.com/Ryvion/node-agent/internal/v7/capability"
@@ -355,6 +356,42 @@ func TestHeartbeatParsesVerifiedLocation(t *testing.T) {
 		!resp.HasCapabilityProfile ||
 		resp.HubInstanceID != "hub-test" {
 		t.Fatalf("unexpected V7 heartbeat response summary: %+v", resp)
+	}
+}
+
+func TestHeartbeatProbeTargetUsesLightweightPingEndpoint(t *testing.T) {
+	pub, priv := testKeyPair()
+	c := New("https://api.ryvion.ai", pub, priv)
+	if got := c.HeartbeatProbeTarget(); got != "https://api.ryvion.ai/api/v1/ping" {
+		t.Fatalf("HeartbeatProbeTarget() = %q", got)
+	}
+}
+
+func TestProbeHubRTTUsesHeadPingEndpoint(t *testing.T) {
+	pub, priv := testKeyPair()
+	var gotMethod string
+	var gotPath string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if r.Method != http.MethodHead || r.URL.Path != "/api/v1/ping" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	rtt, err := c.ProbeHubRTT(context.Background())
+	if err != nil {
+		t.Fatalf("ProbeHubRTT() error = %v", err)
+	}
+	if rtt <= 0 || rtt > time.Second {
+		t.Fatalf("rtt = %s, want small positive duration", rtt)
+	}
+	if gotMethod != http.MethodHead || gotPath != "/api/v1/ping" {
+		t.Fatalf("probe request = %s %s, want HEAD /api/v1/ping", gotMethod, gotPath)
 	}
 }
 
