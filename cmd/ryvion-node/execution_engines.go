@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Ryvion/node-agent/internal/blob"
 	"github.com/Ryvion/node-agent/internal/hub"
@@ -229,6 +231,10 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 			"metrics":     result.Metrics,
 		},
 	)
+	aborted := managedOCIExecutionAborted(ctx, runErr)
+	if aborted {
+		metadata = annotateManagedOCIAbortReceipt(ctx, metadata, runErr)
+	}
 	if strings.TrimSpace(result.OutputPath) != "" {
 		uploadRes, uploadErr := blob.Upload(ctx, execCtx.client, work.JobID, result.OutputPath)
 		if uploadErr == nil {
@@ -254,7 +260,13 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 		MeteringUnits: units,
 		Metadata:      metadata,
 	}
-	if err := submitReceiptWithRetry(ctx, execCtx.client, receipt); err != nil {
+	submitCtx := ctx
+	var submitCancel context.CancelFunc
+	if aborted {
+		submitCtx, submitCancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer submitCancel()
+	}
+	if err := submitReceiptWithRetry(submitCtx, execCtx.client, receipt); err != nil {
 		return &runnerResultSnapshot{
 			DurationMs:    result.Duration.Milliseconds(),
 			ResultHashHex: resultHash,
@@ -274,6 +286,72 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 		ObjectKey:     stringValue(metadata["object_key"]),
 		Metadata:      metadata,
 	}, runErr
+}
+
+func managedOCIExecutionAborted(ctx context.Context, runErr error) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded)
+}
+
+func annotateManagedOCIAbortReceipt(ctx context.Context, metadata map[string]any, runErr error) map[string]any {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if !managedOCIExecutionAborted(ctx, runErr) {
+		return metadata
+	}
+	committedBeforeAbort := metadataBool(metadata, "committed_before_abort") || metadataBool(metadata, "accepted_before_abort")
+	metadata["status"] = "aborted"
+	metadata["execution_status"] = "aborted"
+	metadata["abort_reason"] = managedOCIAbortReason(ctx, runErr)
+	if _, exists := metadata["accepted_before_abort"]; !exists {
+		metadata["accepted_before_abort"] = committedBeforeAbort
+	}
+	if _, exists := metadata["committed_before_abort"]; !exists {
+		metadata["committed_before_abort"] = committedBeforeAbort
+	}
+	if committedBeforeAbort {
+		metadata["billing_status"] = "committed_accepted_work_only"
+	} else {
+		metadata["billing_status"] = "not_billable_orphaned_compute"
+		metadata["accepted_value"] = 0
+	}
+	return metadata
+}
+
+func managedOCIAbortReason(ctx context.Context, runErr error) string {
+	if ctx != nil {
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return "context_deadline_exceeded"
+		case errors.Is(ctx.Err(), context.Canceled):
+			return "context_canceled"
+		}
+	}
+	switch {
+	case errors.Is(runErr, context.DeadlineExceeded):
+		return "context_deadline_exceeded"
+	case errors.Is(runErr, context.Canceled):
+		return "context_canceled"
+	default:
+		return "abort_requested"
+	}
+}
+
+func metadataBool(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	switch v := metadata[key].(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true") || strings.TrimSpace(v) == "1"
+	default:
+		return false
+	}
 }
 
 func (workCapsuleEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {
