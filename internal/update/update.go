@@ -25,9 +25,24 @@ import (
 )
 
 // releasePublicKeyB64 is the pinned Ed25519 public key used to verify
-// SHA256SUMS signatures for update artifacts. Override at runtime with
-// RYV_UPDATE_PUBKEY_B64 for key rotation.
+// SHA256SUMS signatures for update artifacts. It is the SOLE trust anchor for
+// auto-update and is intentionally NOT overridable at runtime/env — key
+// rotation ships as a new signed release binary. (A prior RYV_UPDATE_PUBKEY_B64
+// env override let any env-write foothold replace the entire trust anchor.)
 const releasePublicKeyB64 = "KZWGe+VQWPy2ypCNpGwPEYlc8FnFVadufGXnbGAk2nE="
+
+// releaseAssetBaseURL is the GitHub Releases download root. Update artifacts
+// (SHA256SUMS, SHA256SUMS.sig, per-platform archives) are fetched from here
+// keyed by the release tag — NOT from the hub. The hub only advertises a
+// version number (an untrusted hint), so it cannot substitute or downgrade
+// signed binaries. This is a package var ONLY so in-package tests can point it
+// at a local server; there is no runtime/env path to change it.
+var releaseAssetBaseURL = "https://github.com/Ryvion/node-agent/releases/download"
+
+// testSigningPublicKeyB64, when set by an in-package test, overrides the pinned
+// verification key. There is no runtime/env path to set it (not an attack
+// surface); production always uses releasePublicKeyB64.
+var testSigningPublicKeyB64 string
 
 // NeedsUpdate compares semver strings (with optional "v" prefix).
 // Returns true if latest is strictly newer than current.
@@ -89,19 +104,25 @@ func parseSemver(s string) []int {
 	return out
 }
 
-// Apply downloads the latest binary from the hub and replaces the current executable.
-func Apply(ctx context.Context, hubBaseURL string) error {
+// Apply downloads the signed release binary for the given version from GitHub
+// Releases (verified against the pinned key, version-bound by tag) and replaces
+// the current executable. The hub is NOT in the artifact trust path — it only
+// advertises the version number, which is validated and used as the release tag.
+func Apply(ctx context.Context, version string) error {
+	if !isValidReleaseVersion(version) {
+		return fmt.Errorf("refusing update: invalid release version %q", version)
+	}
 	expectedFile := expectedArchiveFilename()
 	if expectedFile == "" {
 		return fmt.Errorf("unsupported platform for updates: %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
-	expectedSHA, err := fetchExpectedChecksum(ctx, hubBaseURL, expectedFile)
+	expectedSHA, err := fetchExpectedChecksum(ctx, version, expectedFile)
 	if err != nil {
 		return fmt.Errorf("fetch checksums: %w", err)
 	}
 
-	downloadURL := buildDownloadURL(hubBaseURL)
-	slog.Info("downloading update", "url", downloadURL)
+	downloadURL := releaseAssetURL(version, expectedFile)
+	slog.Info("downloading update", "url", downloadURL, "version", releaseTag(version))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
@@ -446,23 +467,30 @@ func Restart() error {
 	}
 }
 
-func buildDownloadURL(hubBase string) string {
-	hubBase = strings.TrimRight(hubBase, "/")
-	switch runtime.GOOS {
-	case "windows":
-		return hubBase + "/download/windows/binary"
-	case "darwin":
-		return hubBase + "/download/macos/binary?arch=" + runtime.GOARCH
-	default:
-		if runtime.GOARCH == "arm64" {
-			return hubBase + "/download/linux/arm64"
-		}
-		return hubBase + "/download/linux/binary"
+// isValidReleaseVersion rejects anything that is not a clean semver, which also
+// blocks path/URL injection via a hub-advertised version string.
+func isValidReleaseVersion(version string) bool {
+	v := strings.TrimSpace(version)
+	if v == "" || strings.ContainsAny(v, "/\\ \t\r\n?#:@") {
+		return false
 	}
+	return parseSemver(v) != nil
 }
 
-func buildChecksumsURL(hubBase string) string {
-	return strings.TrimRight(hubBase, "/") + "/api/v1/downloads/checksums"
+func releaseTag(version string) string {
+	v := strings.TrimSpace(version)
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	return v
+}
+
+// releaseAssetURL builds a version-bound GitHub Releases download URL. The
+// release tag is in the path, so an attacker who controls the advertised
+// version number still cannot substitute a different version's signed
+// artifacts, and the pinned key verifies SHA256SUMS.
+func releaseAssetURL(version, asset string) string {
+	return strings.TrimRight(releaseAssetBaseURL, "/") + "/" + releaseTag(version) + "/" + asset
 }
 
 func expectedArchiveFilename() string {
@@ -476,12 +504,12 @@ func expectedArchiveFilename() string {
 	}
 }
 
-func fetchExpectedChecksum(ctx context.Context, hubBaseURL, archiveName string) (string, error) {
-	checksums, err := fetchText(ctx, buildChecksumsURL(hubBaseURL))
+func fetchExpectedChecksum(ctx context.Context, version, archiveName string) (string, error) {
+	checksums, err := fetchText(ctx, releaseAssetURL(version, "SHA256SUMS"))
 	if err != nil {
 		return "", fmt.Errorf("download checksums: %w", err)
 	}
-	sigB64, err := fetchText(ctx, buildChecksumsSigURL(hubBaseURL))
+	sigB64, err := fetchText(ctx, releaseAssetURL(version, "SHA256SUMS.sig"))
 	if err != nil {
 		return "", fmt.Errorf("download checksums signature: %w", err)
 	}
@@ -523,10 +551,6 @@ func fetchExpectedChecksum(ctx context.Context, hubBaseURL, archiveName string) 
 	return "", fmt.Errorf("checksum for %s not found", target)
 }
 
-func buildChecksumsSigURL(hubBase string) string {
-	return strings.TrimRight(hubBase, "/") + "/api/v1/downloads/checksums.sig"
-}
-
 func fetchText(ctx context.Context, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -548,7 +572,7 @@ func fetchText(ctx context.Context, url string) (string, error) {
 }
 
 func resolveUpdatePublicKey() (ed25519.PublicKey, error) {
-	keyB64 := strings.TrimSpace(os.Getenv("RYV_UPDATE_PUBKEY_B64"))
+	keyB64 := strings.TrimSpace(testSigningPublicKeyB64)
 	if keyB64 == "" {
 		keyB64 = strings.TrimSpace(releasePublicKeyB64)
 	}
