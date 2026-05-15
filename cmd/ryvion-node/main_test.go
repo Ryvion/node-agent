@@ -75,10 +75,10 @@ func TestMaybeApplyAutoUpdateRunsFromHeartbeatPath(t *testing.T) {
 	resetAutoUpdateTestState(t)
 	var applyCalls int
 	var restartCalls int
-	applyAutoUpdate = func(_ context.Context, hubURL string) error {
+	applyAutoUpdate = func(_ context.Context, version string) error {
 		applyCalls++
-		if hubURL != "https://hub.example" {
-			t.Fatalf("hubURL = %q, want https://hub.example", hubURL)
+		if version != "v1.2.162" {
+			t.Fatalf("version = %q, want v1.2.162 (updater must receive the validated version, not the hub URL)", version)
 		}
 		return nil
 	}

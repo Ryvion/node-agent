@@ -234,7 +234,7 @@ func maybeApplyAutoUpdate(ctx context.Context, hubURL string, currentVersion str
 	}
 
 	slog.Info("update available", "current", currentVersion, "latest", latestVersion, "reason", reason)
-	if err := applyAutoUpdate(ctx, hubURL); err != nil {
+	if err := applyAutoUpdate(ctx, latestVersion); err != nil {
 		slog.Warn("auto-update failed", "error", err, "reason", reason)
 		return false
 	}

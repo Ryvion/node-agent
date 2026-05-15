@@ -65,24 +65,29 @@ func TestFetchExpectedChecksumParsesBaseName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	t.Setenv("RYV_UPDATE_PUBKEY_B64", base64.StdEncoding.EncodeToString(pub))
+	origKey, origBase := testSigningPublicKeyB64, releaseAssetBaseURL
+	defer func() { testSigningPublicKeyB64, releaseAssetBaseURL = origKey, origBase }()
+	testSigningPublicKeyB64 = base64.StdEncoding.EncodeToString(pub)
 
-	checksums := fmt.Sprintf("%s  releases/%s\n", want, name)
+	const version = "v9.9.9"
+	checksums := fmt.Sprintf("%s  ryvion-node-%s/%s\n", want, version, name)
 	sigB64 := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(checksums)))
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/downloads/checksums":
+		case "/" + version + "/SHA256SUMS":
 			fmt.Fprint(w, checksums)
-		case "/api/v1/downloads/checksums.sig":
+		case "/" + version + "/SHA256SUMS.sig":
 			fmt.Fprint(w, sigB64)
 		default:
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.NotFound(w, r)
 		}
 	}))
 	defer srv.Close()
+	releaseAssetBaseURL = srv.URL
 
-	got, err := fetchExpectedChecksum(context.Background(), srv.URL, name)
+	got, err := fetchExpectedChecksum(context.Background(), version, name)
 	if err != nil {
 		t.Fatalf("fetchExpectedChecksum error: %v", err)
 	}
@@ -101,22 +106,27 @@ func TestFetchExpectedChecksumRejectsInvalidSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	t.Setenv("RYV_UPDATE_PUBKEY_B64", base64.StdEncoding.EncodeToString(pub))
+	origKey, origBase := testSigningPublicKeyB64, releaseAssetBaseURL
+	defer func() { testSigningPublicKeyB64, releaseAssetBaseURL = origKey, origBase }()
+	testSigningPublicKeyB64 = base64.StdEncoding.EncodeToString(pub)
 
+	const version = "v9.9.9"
 	checksums := fmt.Sprintf("%s  %s\n", want, name)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/downloads/checksums":
+		case "/" + version + "/SHA256SUMS":
 			fmt.Fprint(w, checksums)
-		case "/api/v1/downloads/checksums.sig":
+		case "/" + version + "/SHA256SUMS.sig":
 			fmt.Fprint(w, base64.StdEncoding.EncodeToString([]byte("bad-signature")))
 		default:
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.NotFound(w, r)
 		}
 	}))
 	defer srv.Close()
+	releaseAssetBaseURL = srv.URL
 
-	_, err = fetchExpectedChecksum(context.Background(), srv.URL, name)
+	_, err = fetchExpectedChecksum(context.Background(), version, name)
 	if err == nil || !strings.Contains(err.Error(), "signature") {
 		t.Fatalf("expected signature error, got %v", err)
 	}
