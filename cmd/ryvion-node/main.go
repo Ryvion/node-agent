@@ -3778,6 +3778,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		parts = append(parts, "public-inference-ready:0")
 	}
 	parts = append(parts, foresightRoleStatusTokens(caps, diskGB, publicInferenceReady)...)
+	parts = append(parts, smartShardingStatusTokens(caps, diskGB, publicInferenceReady)...)
 	parts = append(parts, worldGridRoleStatusTokens(caps, ffmpegOK, spatialReady)...)
 
 	return hub.HealthReport{
@@ -3810,6 +3811,25 @@ func foresightRoleStatusTokens(caps hw.CapSet, diskGB uint64, publicInferenceRea
 	} else {
 		tokens = append(tokens, "cap:cache_provider:0")
 	}
+	return tokens
+}
+
+func smartShardingStatusTokens(caps hw.CapSet, diskGB uint64, publicInferenceReady bool) []string {
+	tokens := []string{
+		"hmm_router_shadow:1",
+		"smart_sharding:mode_aware:1",
+		"scheduler:auto_apply:0",
+		"pricing:auto_apply:0",
+		"cap:smart_sharding_token_critical_wan:0",
+	}
+	observationReady := caps.CPUCores >= 2 || strings.TrimSpace(caps.CPUModel) != "" || strings.TrimSpace(caps.GPUModel) != ""
+	if observationReady {
+		tokens = append(tokens, "cap:hmm_router_observation:1", "cap:smart_sharding_scheduler:1")
+	} else {
+		tokens = append(tokens, "cap:hmm_router_observation:0", "cap:smart_sharding_scheduler:0")
+	}
+	tokens = append(tokens, boolStatusToken("cap:smart_sharding_draft_signal", publicInferenceReady))
+	tokens = append(tokens, boolStatusToken("cap:smart_sharding_cache_signal", diskGB >= 10))
 	return tokens
 }
 

@@ -92,6 +92,34 @@ func TestBuildHealthReportAdvertisesResidueSwarmBuilderWithoutDraftWorker(t *tes
 	}
 }
 
+func TestSmartShardingStatusTokensAdvertiseShadowOnlyModeAwareSignals(t *testing.T) {
+	caps := hw.CapSet{
+		CPUModel: "Apple M-series",
+		CPUCores: 8,
+		RAMBytes: 16 * 1024 * 1024 * 1024,
+	}
+	tokens := strings.Join(smartShardingStatusTokens(caps, 64, true), ",")
+	for _, want := range []string{
+		"hmm_router_shadow:1",
+		"smart_sharding:mode_aware:1",
+		"cap:hmm_router_observation:1",
+		"cap:smart_sharding_scheduler:1",
+		"cap:smart_sharding_draft_signal:1",
+		"cap:smart_sharding_cache_signal:1",
+		"cap:smart_sharding_token_critical_wan:0",
+		"scheduler:auto_apply:0",
+		"pricing:auto_apply:0",
+	} {
+		if !strings.Contains(tokens, want) {
+			t.Fatalf("expected smart sharding tokens to contain %q, got %s", want, tokens)
+		}
+	}
+	if strings.Contains(tokens, "cap:smart_sharding_token_critical_wan:1") ||
+		strings.Contains(tokens, "tensor_parallel_public_wan:1") {
+		t.Fatalf("smart sharding tokens must not advertise public-WAN token-critical tensor paths: %s", tokens)
+	}
+}
+
 func TestWorldGridRoleStatusTokensAdvertiseOnlySafeAsyncAndCellBoundaries(t *testing.T) {
 	caps := hw.CapSet{
 		GPUModel: "RTX 4090",
