@@ -237,9 +237,9 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 			"metrics":     result.Metrics,
 		},
 	)
-	aborted := managedOCIExecutionAborted(ctx, runErr)
+	aborted := managedOCIExecutionAborted(ctx, runErr, result)
 	if aborted {
-		metadata = annotateManagedOCIAbortReceipt(ctx, metadata, runErr)
+		metadata = annotateManagedOCIAbortReceipt(ctx, metadata, runErr, result)
 	}
 	if !aborted && len(result.DraftPackets) > 0 {
 		metadata["draft_packet_submission"] = submitForesightDraftPackets(ctx, execCtx.client, result.DraftPackets)
@@ -335,18 +335,25 @@ func submitForesightDraftPackets(ctx context.Context, client interface {
 	return summary
 }
 
-func managedOCIExecutionAborted(ctx context.Context, runErr error) bool {
+func managedOCIExecutionAborted(ctx context.Context, runErr error, result *runner.Result) bool {
+	if managedOCIResultDelivered(result) {
+		return false
+	}
 	if ctx != nil && ctx.Err() != nil {
 		return true
 	}
 	return errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded)
 }
 
-func annotateManagedOCIAbortReceipt(ctx context.Context, metadata map[string]any, runErr error) map[string]any {
+func managedOCIResultDelivered(result *runner.Result) bool {
+	return result != nil && result.ExitCode == 0 && result.ReceiptComplete
+}
+
+func annotateManagedOCIAbortReceipt(ctx context.Context, metadata map[string]any, runErr error, result *runner.Result) map[string]any {
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
-	if !managedOCIExecutionAborted(ctx, runErr) {
+	if !managedOCIExecutionAborted(ctx, runErr, result) {
 		return metadata
 	}
 	committedBeforeAbort := metadataBool(metadata, "committed_before_abort") || metadataBool(metadata, "accepted_before_abort")

@@ -21,14 +21,15 @@ import (
 )
 
 type Result struct {
-	Hash         string
-	ExitCode     int
-	Logs         string
-	OutputPath   string
-	Duration     time.Duration
-	Metrics      map[string]any
-	Metadata     map[string]any
-	DraftPackets []map[string]any
+	Hash            string
+	ExitCode        int
+	Logs            string
+	OutputPath      string
+	Duration        time.Duration
+	Metrics         map[string]any
+	Metadata        map[string]any
+	DraftPackets    []map[string]any
+	ReceiptComplete bool
 }
 
 // Run executes an OCI image with /work mounted and specJSON written to /work/job.json.
@@ -131,6 +132,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 		filepath.Join(workDir, "receipt.json"),
 		filepath.Join(workDir, "receipt.partial.json"),
 	)
+	receiptComplete := receiptFileHasHash(filepath.Join(workDir, "receipt.json"))
 	metrics := readMetrics(filepath.Join(workDir, "metrics.json"), duration)
 	probeSummary := readProbeSummary(
 		filepath.Join(workDir, "probe_summary.json"),
@@ -153,14 +155,15 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	}
 
 	result := &Result{
-		Hash:         hash,
-		ExitCode:     exitCode,
-		Logs:         out.Tail(32768),
-		OutputPath:   artifactPath,
-		Duration:     duration,
-		Metrics:      metrics,
-		Metadata:     runnerMetadata(probeSummary, verifierSessionReceipt),
-		DraftPackets: draftPackets,
+		Hash:            hash,
+		ExitCode:        exitCode,
+		Logs:            out.Tail(32768),
+		OutputPath:      artifactPath,
+		Duration:        duration,
+		Metrics:         metrics,
+		Metadata:        runnerMetadata(probeSummary, verifierSessionReceipt),
+		DraftPackets:    draftPackets,
+		ReceiptComplete: receiptComplete,
 	}
 	return result, runErr
 }
@@ -250,6 +253,7 @@ func RunVerifierSession(ctx context.Context, image, specJSON, gpus string) (*Res
 		filepath.Join(workDir, "receipt.json"),
 		filepath.Join(workDir, "receipt.partial.json"),
 	)
+	receiptComplete := receiptFileHasHash(filepath.Join(workDir, "receipt.json"))
 	metrics := readMetrics(filepath.Join(workDir, "metrics.json"), duration)
 	probeSummary := readProbeSummary(
 		filepath.Join(workDir, "probe_summary.json"),
@@ -274,13 +278,14 @@ func RunVerifierSession(ctx context.Context, image, specJSON, gpus string) (*Res
 		"tree_cid":              execResult.TreeCID,
 	}
 	return &Result{
-		Hash:       hash,
-		ExitCode:   0,
-		Logs:       string(logsOut),
-		OutputPath: artifactPath,
-		Duration:   duration,
-		Metrics:    metrics,
-		Metadata:   metadata,
+		Hash:            hash,
+		ExitCode:        0,
+		Logs:            string(logsOut),
+		OutputPath:      artifactPath,
+		Duration:        duration,
+		Metrics:         metrics,
+		Metadata:        metadata,
+		ReceiptComplete: receiptComplete,
 	}, rpcErr
 }
 
@@ -513,24 +518,32 @@ func isROCmAvailable() bool {
 
 func readReceiptHash(paths ...string) string {
 	for _, path := range paths {
-		if strings.HasSuffix(path, ".tmp") {
-			continue
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var rec struct {
-			OutputHash string `json:"output_hash"`
-		}
-		if err := json.Unmarshal(b, &rec); err != nil {
-			continue
-		}
-		if hash := trimDigestPrefix(strings.TrimSpace(rec.OutputHash)); hash != "" {
+		if hash := receiptFileOutputHash(path); hash != "" {
 			return hash
 		}
 	}
 	return ""
+}
+
+func receiptFileHasHash(path string) bool {
+	return receiptFileOutputHash(path) != ""
+}
+
+func receiptFileOutputHash(path string) string {
+	if strings.HasSuffix(path, ".tmp") {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var rec struct {
+		OutputHash string `json:"output_hash"`
+	}
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return ""
+	}
+	return trimDigestPrefix(strings.TrimSpace(rec.OutputHash))
 }
 
 func readMetrics(path string, duration time.Duration) map[string]any {
