@@ -1480,7 +1480,7 @@ func v7SupportedRunnerKinds(nativeSupported bool, ociAvailable bool, ryvionRunti
 	}
 	if ociAvailable {
 		kinds = append(kinds, executorKindManagedOCI, executorKindAgentHosting)
-		if commandExists("git") {
+		if commandExists("git") && workCapsuleEnabled() {
 			kinds = append(kinds, executorKindWorkCapsule)
 		}
 	}
