@@ -1591,6 +1591,7 @@ func TestOCILaneDisabledSkipsManagedRuntimeProbe(t *testing.T) {
 	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
 		Channel: "managed_oci_v1",
 		Version: "2026.04.16.10",
+		Binary:  "/tmp/ryvion-runtime-test",
 	})
 	snap := runtimeMgr.Snapshot(true)
 	if called {
@@ -1612,6 +1613,32 @@ func TestOCILaneDisabledSkipsManagedRuntimeProbe(t *testing.T) {
 	}
 	if !containsToken(tokens, "cap:managed_oci_cpu:0") {
 		t.Fatalf("expected cap:managed_oci_cpu:0 token, got %v", tokens)
+	}
+}
+
+func TestRuntimeStatusTokensGateWorkCapsuleByEnv(t *testing.T) {
+	if !commandExists("git") {
+		t.Skip("git not available in test environment")
+	}
+	t.Setenv("RYV_ENABLE_WORK_CAPSULE", "")
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		return runtimeexec.Status{CLIInstalled: true, Ready: true, GPUReady: true, Health: "ready"}, true
+	}
+	defer func() { probeManagedRuntimeStatus = prevProbe }()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Channel: "managed_oci_v1",
+		Version: "2026.04.16.10",
+		Binary:  "/tmp/ryvion-runtime-test",
+	})
+	if tokens := runtimeMgr.StatusTokens(true); !containsToken(tokens, "cap:work_capsule:0") {
+		t.Fatalf("expected cap:work_capsule:0 without opt-in, got %v", tokens)
+	}
+
+	t.Setenv("RYV_ENABLE_WORK_CAPSULE", "1")
+	if tokens := runtimeMgr.StatusTokens(true); !containsToken(tokens, "cap:work_capsule:1") {
+		t.Fatalf("expected cap:work_capsule:1 after opt-in, got %v", tokens)
 	}
 }
 

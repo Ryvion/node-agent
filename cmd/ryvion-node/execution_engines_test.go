@@ -44,3 +44,33 @@ func TestManagedOCIExecutionAbortedIgnoresLateContextCancelAfterCompleteReceipt(
 		t.Fatal("complete exit-0 runner receipt must not be reclassified as aborted orphaned compute")
 	}
 }
+
+func TestWorkCapsuleDisabledByDefaultIsNotAdvertised(t *testing.T) {
+	t.Setenv("RYV_ENABLE_WORK_CAPSULE", "")
+
+	kinds := v7SupportedRunnerKinds(false, true, false)
+	if containsString(kinds, executorKindWorkCapsule) {
+		t.Fatalf("work_capsule advertised by default: %v", kinds)
+	}
+}
+
+func TestWorkCapsuleOptInIsAdvertisedWhenGitExists(t *testing.T) {
+	if !commandExists("git") {
+		t.Skip("git not available in test environment")
+	}
+	t.Setenv("RYV_ENABLE_WORK_CAPSULE", "1")
+
+	kinds := v7SupportedRunnerKinds(false, true, false)
+	if !containsString(kinds, executorKindWorkCapsule) {
+		t.Fatalf("work_capsule not advertised after explicit opt-in: %v", kinds)
+	}
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}

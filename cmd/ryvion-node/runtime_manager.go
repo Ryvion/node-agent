@@ -221,7 +221,7 @@ func (m *runtimeManager) StatusTokens(gpuDetected bool) []string {
 		boolStatusToken("cap:managed_oci_cpu", snap.Ready),
 		boolStatusToken("cap:managed_oci_gpu", snap.GPUReady),
 		boolStatusToken("cap:agent_hosting", snap.Ready),
-		boolStatusToken("cap:work_capsule", snap.Ready && commandExists("git")),
+		boolStatusToken("cap:work_capsule", snap.Ready && commandExists("git") && workCapsuleEnabled()),
 	}
 	if ociLaneDisabled() {
 		tokens = append(tokens, "oci-lane:disabled")
