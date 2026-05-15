@@ -68,6 +68,30 @@ func TestBuildHealthReportDoesNotAdvertiseLocalFluxOnSmallGPU(t *testing.T) {
 	}
 }
 
+func TestBuildHealthReportAdvertisesResidueSwarmBuilderWithoutDraftWorker(t *testing.T) {
+	t.Setenv("RYV_PUBLIC_AI", "")
+	t.Setenv("RYV_DISABLE_OCI", "1")
+
+	caps := hw.CapSet{
+		CPUModel: "Apple M-series",
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	report := buildHealthReport(caps, nil, newRuntimeManager("test", runtimeContractMetadata{}))
+	for _, want := range []string{
+		"role:residue_swarm_builder",
+		"cap:residue_swarm_builder:1",
+		"foresight:proposal_window:ready:1",
+	} {
+		if !strings.Contains(report.Message, want) {
+			t.Fatalf("expected health report to contain %q, got %s", want, report.Message)
+		}
+	}
+	if strings.Contains(report.Message, "role:draft_worker") {
+		t.Fatalf("node without public native inference should not advertise draft_worker, got %s", report.Message)
+	}
+}
+
 func TestBuildHealthReportDoesNotAdvertiseLocalFluxUntilCacheReady(t *testing.T) {
 	t.Setenv("RYV_PUBLIC_AI", "1")
 	t.Setenv("RYV_DISABLE_OCI", "1")

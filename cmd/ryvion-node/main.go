@@ -3777,6 +3777,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	} else {
 		parts = append(parts, "public-inference-ready:0")
 	}
+	parts = append(parts, foresightRoleStatusTokens(caps, diskGB, publicInferenceReady)...)
 
 	return hub.HealthReport{
 		TimestampMs: time.Now().UnixMilli(),
@@ -3784,6 +3785,31 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		RuntimeGPU:  runtimeSnap.GPUReady,
 		Message:     strings.Join(parts, ","),
 	}
+}
+
+func foresightRoleStatusTokens(caps hw.CapSet, diskGB uint64, publicInferenceReady bool) []string {
+	tokens := []string{}
+	residueReady := caps.CPUCores >= 2 || strings.TrimSpace(caps.CPUModel) != ""
+	if residueReady {
+		tokens = append(tokens,
+			"role:residue_swarm_builder",
+			"cap:residue_swarm_builder:1",
+			"foresight:proposal_window:ready:1",
+		)
+	} else {
+		tokens = append(tokens, "cap:residue_swarm_builder:0", "foresight:proposal_window:ready:0")
+	}
+	if publicInferenceReady {
+		tokens = append(tokens, "role:draft_worker", "cap:draft_worker:1")
+	} else {
+		tokens = append(tokens, "cap:draft_worker:0")
+	}
+	if diskGB >= 10 {
+		tokens = append(tokens, "role:cache_provider", "cap:cache_provider:1")
+	} else {
+		tokens = append(tokens, "cap:cache_provider:0")
+	}
+	return tokens
 }
 
 // nativeInferenceBlockerToken returns the dashboard-safe blocker token used
