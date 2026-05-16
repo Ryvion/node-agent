@@ -9,8 +9,8 @@ import (
 const defaultRollingHubProfileWindow = 8
 
 // RollingHubProfile keeps a small moving window of hub round-trip samples.
-// It is intentionally local and lightweight: the heartbeat path records the
-// actual HTTP heartbeat duration, and the next V7 heartbeat advertises the
+// It is intentionally local and lightweight: the heartbeat path records a
+// dedicated HEAD /api/v1/ping probe, and the next V7 heartbeat advertises the
 // aggregate as a network profile.
 type RollingHubProfile struct {
 	mu     sync.Mutex

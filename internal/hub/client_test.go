@@ -372,7 +372,9 @@ func TestProbeHubRTTUsesHeadPingEndpoint(t *testing.T) {
 	pub, priv := testKeyPair()
 	var gotMethod string
 	var gotPath string
+	var calls int
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		if r.Method != http.MethodHead || r.URL.Path != "/api/v1/ping" {
@@ -393,6 +395,39 @@ func TestProbeHubRTTUsesHeadPingEndpoint(t *testing.T) {
 	}
 	if gotMethod != http.MethodHead || gotPath != "/api/v1/ping" {
 		t.Fatalf("probe request = %s %s, want HEAD /api/v1/ping", gotMethod, gotPath)
+	}
+	if calls != 3 {
+		t.Fatalf("probe calls = %d, want best-of-3 HEAD probes", calls)
+	}
+}
+
+func TestProbeHubRTTUsesBestHeadSample(t *testing.T) {
+	pub, priv := testKeyPair()
+	delays := []time.Duration{80 * time.Millisecond, 10 * time.Millisecond, 60 * time.Millisecond}
+	var calls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead || r.URL.Path != "/api/v1/ping" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if calls < len(delays) {
+			time.Sleep(delays[calls])
+		}
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	rtt, err := c.ProbeHubRTT(context.Background())
+	if err != nil {
+		t.Fatalf("ProbeHubRTT() error = %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("probe calls = %d, want 3", calls)
+	}
+	if rtt >= 50*time.Millisecond {
+		t.Fatalf("rtt = %s, want best low sample rather than slow first sample", rtt)
 	}
 }
 

@@ -625,10 +625,49 @@ func (c *Client) ProbeHubRTT(ctx context.Context) (time.Duration, error) {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if rtt, err := c.probeHubRTT(probeCtx, http.MethodHead, "/api/v1/ping"); err == nil {
+	if rtt, err := c.probeHubRTTBurst(probeCtx, http.MethodHead, "/api/v1/ping", 3); err == nil {
 		return rtt, nil
 	}
-	return c.probeHubRTT(probeCtx, http.MethodGet, "/healthz")
+	return c.probeHubRTTBurst(probeCtx, http.MethodGet, "/healthz", 2)
+}
+
+func (c *Client) probeHubRTTBurst(ctx context.Context, method string, path string, attempts int) (time.Duration, error) {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var best time.Duration
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		rtt, err := c.probeHubRTT(ctx, method, path)
+		if err == nil {
+			if best <= 0 || rtt < best {
+				best = rtt
+			}
+		} else {
+			lastErr = err
+		}
+		if i+1 >= attempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			if best > 0 {
+				return best, nil
+			}
+			if lastErr != nil {
+				return 0, lastErr
+			}
+			return 0, ctx.Err()
+		case <-time.After(40 * time.Millisecond):
+		}
+	}
+	if best > 0 {
+		return best, nil
+	}
+	if lastErr != nil {
+		return 0, lastErr
+	}
+	return 0, fmt.Errorf("%s %s: no RTT samples", method, path)
 }
 
 func (c *Client) probeHubRTT(ctx context.Context, method string, path string) (time.Duration, error) {
