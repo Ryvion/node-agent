@@ -188,6 +188,9 @@ func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
 	if result.AcceptedLen != 4 || result.TreeCID != "sha256:tree" || result.AcceptedText != "Verified local text." || !result.AcceptedTextPublic {
 		t.Fatalf("verifier result = %+v, want measured llama.cpp acceptance", result)
 	}
+	if result.StopReason != "" || result.EOS {
+		t.Fatalf("verifier result stop = %q eos=%v, want non-terminal for llama.cpp finish_reason=stop", result.StopReason, result.EOS)
+	}
 	if result.ProbeSummary["source"] != "native_llamacpp_verifier" ||
 		result.ProbeSummary["backend"] != v7llamacpp.BackendName ||
 		result.ProbeSummary["output_hash"] == "" {
@@ -195,6 +198,50 @@ func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
 	}
 	if encoded, _ := json.Marshal(result.ProbeSummary); strings.Contains(string(encoded), "Write one short sentence") || strings.Contains(string(encoded), "Verified local text") {
 		t.Fatalf("probe summary leaked raw prompt/output: %s", encoded)
+	}
+}
+
+func TestNativeLlamaCppLabStopReasonKeepsBackendStopSeparateFromLabStop(t *testing.T) {
+	tests := []struct {
+		name       string
+		completion v7llamacpp.CompletionResult
+		wantReason string
+		wantEOS    bool
+	}{
+		{
+			name:       "backend stop is not lab eos",
+			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonStop},
+		},
+		{
+			name:       "length maps to max tokens",
+			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonLength},
+			wantReason: "max_tokens",
+		},
+		{
+			name:       "max tokens flag wins",
+			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonStop, MaxTokensReached: true},
+			wantReason: "max_tokens",
+		},
+		{
+			name:       "explicit eos remains terminal",
+			completion: v7llamacpp.CompletionResult{BackendStopReason: "eos"},
+			wantReason: "eos",
+			wantEOS:    true,
+		},
+		{
+			name:       "timeout remains terminal",
+			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonTimeout},
+			wantReason: "timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotReason, gotEOS := nativeLlamaCppLabStopReason(tt.completion)
+			if gotReason != tt.wantReason || gotEOS != tt.wantEOS {
+				t.Fatalf("nativeLlamaCppLabStopReason() = %q/%v, want %q/%v", gotReason, gotEOS, tt.wantReason, tt.wantEOS)
+			}
+		})
 	}
 }
 

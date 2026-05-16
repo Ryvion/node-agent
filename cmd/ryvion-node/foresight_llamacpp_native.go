@@ -148,7 +148,7 @@ func (v nativeLlamaCppVerifier) VerifyWave(ctx context.Context, spec foresightNa
 	if durationMs <= 0 {
 		durationMs = maxInt64Node(1, time.Since(started).Milliseconds())
 	}
-	stopReason := firstNonEmptyString(completion.FinishReason, completion.BackendStopReason, completion.BackendFinishReason)
+	stopReason, eos := nativeLlamaCppLabStopReason(completion)
 	result := hub.ForesightLiveLabVerifierResult{
 		WindowID:           command.WindowID,
 		WaveIndex:          command.WaveIndex,
@@ -157,7 +157,7 @@ func (v nativeLlamaCppVerifier) VerifyWave(ctx context.Context, spec foresightNa
 		DurationMs:         durationMs,
 		AcceptedText:       text,
 		AcceptedTextPublic: text != "",
-		EOS:                strings.EqualFold(stopReason, "stop") || strings.EqualFold(stopReason, "eos"),
+		EOS:                eos,
 		StopReason:         stopReason,
 		ProbeSummary:       nativeLlamaCppProbeSummary(status, req, completion, durationMs),
 	}
@@ -165,6 +165,25 @@ func (v nativeLlamaCppVerifier) VerifyWave(ctx context.Context, spec foresightNa
 		result.StopReason = "max_tokens"
 	}
 	return result, nil
+}
+
+func nativeLlamaCppLabStopReason(completion v7llamacpp.CompletionResult) (string, bool) {
+	if completion.MaxTokensReached {
+		return "max_tokens", false
+	}
+	for _, value := range []string{completion.FinishReason, completion.BackendStopReason, completion.BackendFinishReason} {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case v7llamacpp.FinishReasonLength, v7llamacpp.FinishReasonMaxTokens, "limit", "stopped_limit", "token_limit", "context_length", "max_new_tokens", "max_token", "max_tokens_reached":
+			return "max_tokens", false
+		case v7llamacpp.FinishReasonTimeout, "timed_out", "deadline", "deadline_exceeded":
+			return "timeout", false
+		case v7llamacpp.FinishReasonError:
+			return "native_llamacpp_completion_error", false
+		case "eos", "stopped_eos", "end_of_sequence", "end-of-sequence", "end_of_text", "eos_token":
+			return "eos", true
+		}
+	}
+	return "", false
 }
 
 func (v nativeLlamaCppVerifier) sidecar() nativeLlamaCppSidecar {
