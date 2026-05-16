@@ -332,6 +332,81 @@ func (c *Client) SubmitForesightDraftPacket(ctx context.Context, windowID string
 	return out, err
 }
 
+type ForesightLiveLabSessionCommand struct {
+	SchemaVersion       string         `json:"schema_version"`
+	Command             string         `json:"command"`
+	CommandID           string         `json:"command_id,omitempty"`
+	Role                string         `json:"role,omitempty"`
+	RunID               string         `json:"run_id,omitempty"`
+	JobID               string         `json:"job_id,omitempty"`
+	WorkGraphID         string         `json:"workgraph_id,omitempty"`
+	SessionID           string         `json:"session_id,omitempty"`
+	WindowID            string         `json:"window_id,omitempty"`
+	WaveIndex           int            `json:"wave_index,omitempty"`
+	RoleID              string         `json:"role_id,omitempty"`
+	TargetNodeID        string         `json:"target_node_id,omitempty"`
+	NodeID              string         `json:"node_id,omitempty"`
+	Prompt              string         `json:"prompt,omitempty"`
+	ParentPrefixHash    string         `json:"parent_prefix_hash,omitempty"`
+	BranchCount         int            `json:"branch_count,omitempty"`
+	Horizon             int            `json:"horizon,omitempty"`
+	DeadlineMs          int            `json:"deadline_ms,omitempty"`
+	FirstPacketTimeout  int            `json:"first_packet_timeout_ms,omitempty"`
+	ModelHash           string         `json:"model_hash,omitempty"`
+	DrafterModelID      string         `json:"drafter_model_id,omitempty"`
+	AcceptedTokensTotal int            `json:"accepted_tokens_total,omitempty"`
+	Reason              string         `json:"reason,omitempty"`
+	Tree                map[string]any `json:"tree,omitempty"`
+}
+
+type ForesightLiveLabVerifierResult struct {
+	JobID              string         `json:"job_id"`
+	WindowID           string         `json:"window_id"`
+	WaveIndex          int            `json:"wave_index"`
+	AcceptedLen        int            `json:"accepted_len"`
+	TreeCID            string         `json:"tree_cid,omitempty"`
+	DurationMs         int64          `json:"duration_ms,omitempty"`
+	AcceptedText       string         `json:"accepted_text,omitempty"`
+	AcceptedTextPublic bool           `json:"accepted_text_public,omitempty"`
+	EOS                bool           `json:"eos,omitempty"`
+	StopReason         string         `json:"stop_reason,omitempty"`
+	ProbeSummary       map[string]any `json:"probe_summary,omitempty"`
+}
+
+func (c *Client) FetchForesightLiveLabDraftCommand(ctx context.Context, runID string, jobID string) (ForesightLiveLabSessionCommand, error) {
+	return c.fetchForesightLiveLabSessionCommand(ctx, runID, jobID, "draft-command")
+}
+
+func (c *Client) FetchForesightLiveLabVerifierCommand(ctx context.Context, runID string, jobID string) (ForesightLiveLabSessionCommand, error) {
+	return c.fetchForesightLiveLabSessionCommand(ctx, runID, jobID, "verifier-command")
+}
+
+func (c *Client) fetchForesightLiveLabSessionCommand(ctx context.Context, runID string, jobID string, commandPath string) (ForesightLiveLabSessionCommand, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return ForesightLiveLabSessionCommand{}, fmt.Errorf("run_id required")
+	}
+	u := "/api/v1/node/foresight/live-lab/runs/" + url.PathEscape(runID) + "/" + commandPath
+	if strings.TrimSpace(jobID) != "" {
+		u += "?job_id=" + url.QueryEscape(strings.TrimSpace(jobID))
+	}
+	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
+	var out ForesightLiveLabSessionCommand
+	if err := c.getWithHeaders(ctx, u, &out, headers); err != nil {
+		return ForesightLiveLabSessionCommand{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) SubmitForesightLiveLabVerifierResult(ctx context.Context, runID string, result ForesightLiveLabVerifierResult) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return fmt.Errorf("run_id required")
+	}
+	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
+	return c.postWithHeaders(ctx, "/api/v1/node/foresight/live-lab/runs/"+url.PathEscape(runID)+"/verifier-results", result, nil, headers)
+}
+
 func (c *Client) SavePayout(ctx context.Context, stripeConnectID, currency string) error {
 	stripeConnectID = strings.TrimSpace(stripeConnectID)
 	if stripeConnectID == "" {

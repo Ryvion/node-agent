@@ -1707,6 +1707,30 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
+	if handled, result, runErr := processOptionalForesightNativeDraftHotSession(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("Foresight native hot draft session failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("Foresight native hot draft session completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
+	if handled, result, runErr := processOptionalForesightNativeVerifierHotSession(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+		if runErr != nil {
+			slog.Warn("Foresight native hot verifier session failed", "job_id", work.JobID, "error", runErr)
+		} else if result != nil {
+			slog.Info("Foresight native hot verifier session completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+		}
+		if operatorRuntimeState != nil {
+			operatorRuntimeState.finishJob(work, result, runErr)
+		}
+		return
+	}
+
 	if handled, result, runErr := processOptionalForesightNativeDraft(runCtx, client, work, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
 			slog.Warn("Foresight native draft execution failed", "job_id", work.JobID, "error", runErr)
