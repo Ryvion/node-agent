@@ -35,6 +35,7 @@ import (
 	v7modelprepare "github.com/Ryvion/node-agent/internal/v7/modelprepare"
 	v7modelwarm "github.com/Ryvion/node-agent/internal/v7/modelwarm"
 	v7runtimeinventory "github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
+	v7sglang "github.com/Ryvion/node-agent/internal/v7/sglang"
 	v7speculative "github.com/Ryvion/node-agent/internal/v7/speculative"
 	v7tensoraccess "github.com/Ryvion/node-agent/internal/v7/tensoraccess"
 	v8energyplane "github.com/Ryvion/node-agent/internal/v8/energyplane"
@@ -91,6 +92,7 @@ type operatorRuntime struct {
 	llamaCppSidecar      *v7llamacpp.Manager
 	llamaCppKeeper       *v7llamacpp.ResidencyKeeper
 	llamaCppBenchmark    *v7llamacpp.BenchmarkLocalStatus
+	sglangSidecar        *v7sglang.Manager
 }
 
 type operatorJob struct {
@@ -141,6 +143,7 @@ type operatorStatusResponse struct {
 	CapabilityProfile    v7capabilityprofile.Profile                    `json:"capability_profile"`
 	SpeculativeProfiles  []v7speculative.Profile                        `json:"speculative_profiles"`
 	LlamaCPPSidecar      v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
+	SGLangSidecar        v7sglang.SGLangSidecarStatus                   `json:"sglang_sidecar"`
 	LlamaCPPBenchmark    v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
 	Metrics              operatorMetrics                                `json:"metrics"`
 	EnergyPlane          v8energyplane.Snapshot                         `json:"energy_plane"`
@@ -336,6 +339,7 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		llamaCppSidecar:      llamaCppSidecar,
 		llamaCppKeeper:       v7llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
 		llamaCppBenchmark:    v7llamacpp.NewBenchmarkLocalStatus(),
+		sglangSidecar:        v7sglang.NewManagerFromEnv(),
 	}
 }
 
@@ -498,6 +502,25 @@ func (s *operatorRuntime) llamaCppResidencyKeeper() *v7llamacpp.ResidencyKeeper 
 	return s.llamaCppKeeper
 }
 
+func (s *operatorRuntime) sglangManager() *v7sglang.Manager {
+	if s == nil {
+		return v7sglang.NewManagerFromEnv()
+	}
+	s.mu.RLock()
+	manager := s.sglangSidecar
+	s.mu.RUnlock()
+	if manager != nil {
+		return manager
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sglangSidecar == nil {
+		s.sglangSidecar = v7sglang.NewManagerFromEnv()
+	}
+	return s.sglangSidecar
+}
+
 func (s *operatorRuntime) modelPrepareStatus() *v7modelprepare.LocalStatus {
 	if s == nil {
 		return nil
@@ -600,6 +623,10 @@ func (s *operatorRuntime) startLlamaCppResidencyKeeper(ctx context.Context) {
 	}
 }
 
+func (s *operatorRuntime) sglangSidecarStatus(ctx context.Context) v7sglang.SGLangSidecarStatus {
+	return s.sglangManager().Status(ctx)
+}
+
 func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) v7llamacpp.BackendRuntimes {
 	baseModelPolicy := buildModelPolicyStatus()
 	hardwareCapacity := buildHardwareCapacityStatus(baseModelPolicy.CacheDir)
@@ -614,9 +641,9 @@ func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) v7llamacpp.
 		}
 		tensorAccess := buildRuntimeTensorAccessStatus(infMgr)
 		runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, tensorAccess, infMgr)
-		return buildBackendRuntimesStatus(s.llamaCppSidecarStatus(ctx), runtimeInventory, hardwareCapacity)
+		return buildBackendRuntimesStatus(s.llamaCppSidecarStatus(ctx), s.sglangSidecarStatus(ctx), runtimeInventory, hardwareCapacity)
 	}
-	return buildBackendRuntimesStatus(v7llamacpp.LlamaCppSidecarStatus{}, v7runtimeinventory.Inventory{}, hardwareCapacity)
+	return buildBackendRuntimesStatus(v7llamacpp.LlamaCppSidecarStatus{}, v7sglang.SGLangSidecarStatus{}, v7runtimeinventory.Inventory{}, hardwareCapacity)
 }
 
 func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
@@ -632,6 +659,18 @@ func (s *operatorRuntime) stopLlamaCppSidecar(ctx context.Context) v7llamacpp.Ll
 func (s *operatorRuntime) restartLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
 	status := s.llamaCppManager().Restart(ctx)
 	return v7llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
+}
+
+func (s *operatorRuntime) startSGLangSidecar(ctx context.Context) v7sglang.SGLangSidecarStatus {
+	return s.sglangManager().Start(ctx)
+}
+
+func (s *operatorRuntime) stopSGLangSidecar(ctx context.Context) v7sglang.SGLangSidecarStatus {
+	return s.sglangManager().Stop(ctx)
+}
+
+func (s *operatorRuntime) restartSGLangSidecar(ctx context.Context) v7sglang.SGLangSidecarStatus {
+	return s.sglangManager().Restart(ctx)
 }
 
 func (s *operatorRuntime) runLlamaCppBenchmark(ctx context.Context, config v7llamacpp.BenchmarkConfig) v7llamacpp.BenchmarkStatusSnapshot {
@@ -1084,7 +1123,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	modelPolicy := buildDerivedModelPolicyStatus(baseModelPolicy, hardwareCapacity)
 	backendProbes := buildBackendProbeStatus()
 	llamaCppSidecar := s.llamaCppSidecarStatusView(context.Background())
-	backendRuntimes := buildBackendRuntimesStatus(llamaCppSidecar.LlamaCppSidecarStatus, runtimeInventory, hardwareCapacity)
+	sglangSidecar := s.sglangSidecarStatus(context.Background())
+	backendRuntimes := buildBackendRuntimesStatus(llamaCppSidecar.LlamaCppSidecarStatus, sglangSidecar, runtimeInventory, hardwareCapacity)
 	modelCache := buildModelCacheRuntimeStatus(buildModelCacheStatus(modelPolicy), modelPolicy, hardwareCapacity, backendProbes, backendRuntimes)
 	kvCapability := buildNativeTensorAccessCapability(infMgr)
 	speculativeReport := buildSpeculativeReportStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory)
@@ -1126,6 +1166,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 		CapabilityProfile:   capabilityProfile,
 		SpeculativeProfiles: speculativeReport.SpeculativeProfiles,
 		LlamaCPPSidecar:     llamaCppSidecar,
+		SGLangSidecar:       sglangSidecar,
 		LlamaCPPBenchmark:   llamaCppBenchmark,
 		Metrics: operatorMetrics{
 			CPUUtil:    metrics.CPUUtil,
@@ -1282,8 +1323,10 @@ func buildModelCacheRuntimeStatus(modelCache v7modelcache.Status, policy v7model
 	})
 }
 
-func buildBackendRuntimesStatus(llamaStatus v7llamacpp.LlamaCppSidecarStatus, runtimeInventory v7runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) v7llamacpp.BackendRuntimes {
-	return v7llamacpp.BuildBackendRuntimesWithInventory(llamaStatus, runtimeInventory, hardware)
+func buildBackendRuntimesStatus(llamaStatus v7llamacpp.LlamaCppSidecarStatus, sglangStatus v7sglang.SGLangSidecarStatus, runtimeInventory v7runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) v7llamacpp.BackendRuntimes {
+	runtimes := v7llamacpp.BuildBackendRuntimes(llamaStatus)
+	runtimes.SGLang = v7sglang.BuildBackendRuntime(sglangStatus, hardware)
+	return v7llamacpp.EnrichBackendRuntimes(runtimes, runtimeInventory, hardware)
 }
 
 func hardwareCapacityAvailable(hardware v7hardware.CapacityInventory) bool {
@@ -1690,6 +1733,18 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 	})
 	mux.HandleFunc("POST /api/v1/operator/llamacpp/restart", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, state.restartLlamaCppSidecar(r.Context()))
+	})
+	mux.HandleFunc("GET /api/v1/operator/sglang/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.sglangSidecarStatus(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/operator/sglang/start", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.startSGLangSidecar(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/operator/sglang/stop", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.stopSGLangSidecar(r.Context()))
+	})
+	mux.HandleFunc("POST /api/v1/operator/sglang/restart", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, state.restartSGLangSidecar(r.Context()))
 	})
 	mux.HandleFunc("POST /api/v1/operator/llamacpp/benchmark", func(w http.ResponseWriter, r *http.Request) {
 		if !v7llamacpp.BenchmarkEnabledFromEnv(os.Getenv) {

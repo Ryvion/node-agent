@@ -875,6 +875,7 @@ func runNode(ctx context.Context) {
 	operatorRuntimeState = newOperatorRuntime(version, hubURL, deviceType, declaredCountry, publicAIOptIn, caps, client)
 	operatorRuntimeState.setRuntimeManager(runtimeMgr)
 	defer operatorRuntimeState.stopLlamaCppSidecar(context.Background())
+	defer operatorRuntimeState.stopSGLangSidecar(context.Background())
 	startOperatorAPIServer(ctx, operatorRuntimeState, operatorAPIPort(flagUIPort))
 	operatorRuntimeState.startLlamaCppResidencyKeeper(ctx)
 

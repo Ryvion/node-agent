@@ -662,7 +662,7 @@ func EnrichBackendRuntimes(runtimes BackendRuntimes, inventory runtimeinventory.
 		case runtimeinventory.BackendCandidateVLLM:
 			runtimes.VLLM = runtime
 		case runtimeinventory.BackendCandidateSGLang:
-			runtimes.SGLang = runtime
+			runtimes.SGLang = mergeDetectedRuntime(runtimes.SGLang, runtime)
 		case runtimeinventory.BackendCandidateOllama:
 			if runtime.Available {
 				runtimes.Other = append(runtimes.Other, runtime)

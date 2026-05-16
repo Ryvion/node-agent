@@ -28,6 +28,7 @@ import (
 	v7memorybench "github.com/Ryvion/node-agent/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/node-agent/internal/v7/modelbench"
 	v7modelcache "github.com/Ryvion/node-agent/internal/v7/modelcache"
+	v7sglang "github.com/Ryvion/node-agent/internal/v7/sglang"
 	v8energyplane "github.com/Ryvion/node-agent/internal/v8/energyplane"
 )
 
@@ -703,6 +704,96 @@ func TestOperatorAPIStatusEndpointIncludesActiveBackendRuntime(t *testing.T) {
 	}
 }
 
+func TestOperatorAPIStatusEndpointIncludesSGLangSidecar(t *testing.T) {
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		sglangSidecar: v7sglang.NewManager(v7sglang.SGLangSidecarConfig{
+			Enabled: false,
+			Host:    v7sglang.DefaultHost,
+			Port:    v7sglang.DefaultPort,
+		}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
+	}
+	if status.SGLangSidecar.Enabled || status.SGLangSidecar.Running || status.SGLangSidecar.Healthy {
+		t.Fatalf("sglang_sidecar = %+v, want disabled stopped", status.SGLangSidecar)
+	}
+	if status.BackendRuntimes.SGLang.Backend != v7sglang.BackendName || status.BackendRuntimes.SGLang.Health == "" {
+		t.Fatalf("backend_runtimes.sglang missing backend health metadata: %+v", status.BackendRuntimes.SGLang)
+	}
+	if status.SGLangSidecar.Backend != v7sglang.BackendName ||
+		!status.SGLangSidecar.OpenAICompatible ||
+		!status.SGLangSidecar.SupportsTextGeneration ||
+		!status.SGLangSidecar.SupportsStreaming ||
+		status.SGLangSidecar.SupportsKVAccess ||
+		status.SGLangSidecar.SupportsTensorHooks {
+		t.Fatalf("sglang_sidecar capability flags = %+v", status.SGLangSidecar)
+	}
+	text := strings.ToLower(string(respBody))
+	if !strings.Contains(text, `"sglang_sidecar"`) ||
+		!strings.Contains(text, `"backend_runtimes"`) ||
+		!strings.Contains(text, `"sglang"`) {
+		t.Fatalf("status JSON missing SGLang runtime fields: %s", respBody)
+	}
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "model_output", "output_text", "generated_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "secret"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("status JSON contains forbidden marker %q: %s", forbidden, respBody)
+		}
+	}
+}
+
+func TestOperatorAPIStatusEndpointIncludesActiveSGLangBackendRuntime(t *testing.T) {
+	sglangServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/v1/models":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer sglangServer.Close()
+
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:       "test",
+		hubURL:        "https://api.ryvion.ai",
+		deviceType:    "gpu",
+		publicKeyHex:  "abc123",
+		sglangSidecar: testSGLangManagerForServer(t, sglangServer.URL),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	respBody := getOperatorAPITestJSON(t, port, "/api/v1/operator/status")
+	var status operatorStatusResponse
+	if err := json.Unmarshal(respBody, &status); err != nil {
+		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
+	}
+	runtime := status.BackendRuntimes.SGLang
+	if !runtime.Enabled || !runtime.Available || !runtime.Running || !runtime.Healthy || !runtime.Loaded || !runtime.Warm {
+		t.Fatalf("backend_runtimes.sglang = %+v, want active loaded warm sidecar", runtime)
+	}
+	if runtime.ModelID != "qwen2.5-7b-instruct" ||
+		!strings.HasSuffix(runtime.ModelPath, "qwen2.5-7b-instruct") {
+		t.Fatalf("backend runtime model metadata = %+v", runtime)
+	}
+	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
+		t.Fatalf("backend runtime should not advertise KV/tensor hooks: %+v", runtime)
+	}
+}
+
 func TestOperatorStatusAndHeartbeatPreviewUseSameBackendRuntimeBuilder(t *testing.T) {
 	state := &operatorRuntime{
 		version:      "test",
@@ -763,6 +854,45 @@ func TestOperatorAPILlamaCppEndpointsDisabledSafe(t *testing.T) {
 			body = postOperatorAPITestJSON(t, port, path, nil)
 		}
 		var status v7llamacpp.LlamaCppSidecarStatus
+		if err := json.Unmarshal(body, &status); err != nil {
+			t.Fatalf("decode %s response: %v\nbody: %s", path, err, body)
+		}
+		if status.Enabled || status.Running || status.Healthy {
+			t.Fatalf("%s status = %+v, want disabled stopped", path, status)
+		}
+	}
+}
+
+func TestOperatorAPISGLangEndpointsDisabledSafe(t *testing.T) {
+	port := freeOperatorAPITestPort(t)
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       "https://api.ryvion.ai",
+		deviceType:   "gpu",
+		publicKeyHex: "abc123",
+		sglangSidecar: v7sglang.NewManager(v7sglang.SGLangSidecarConfig{
+			Enabled: false,
+			Host:    v7sglang.DefaultHost,
+			Port:    v7sglang.DefaultPort,
+		}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	startOperatorAPIServer(ctx, state, port)
+
+	for _, path := range []string{
+		"/api/v1/operator/sglang/status",
+		"/api/v1/operator/sglang/start",
+		"/api/v1/operator/sglang/stop",
+		"/api/v1/operator/sglang/restart",
+	} {
+		var body []byte
+		if strings.Contains(path, "/status") {
+			body = getOperatorAPITestJSON(t, port, path)
+		} else {
+			body = postOperatorAPITestJSON(t, port, path, nil)
+		}
+		var status v7sglang.SGLangSidecarStatus
 		if err := json.Unmarshal(body, &status); err != nil {
 			t.Fatalf("decode %s response: %v\nbody: %s", path, err, body)
 		}
@@ -1001,6 +1131,39 @@ func testLlamaCppManagerForServerModel(t *testing.T, serverURL string, modelPath
 		ModelPath:  modelPath,
 		Host:       host,
 		Port:       port,
+	})
+}
+
+func testSGLangManagerForServer(t *testing.T, serverURL string) *v7sglang.Manager {
+	t.Helper()
+	parsed, err := url.Parse(serverURL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	host, portRaw, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("split test server host: %v", err)
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil {
+		t.Fatalf("parse test server port: %v", err)
+	}
+	modelPath := filepath.Join(t.TempDir(), "qwen2.5-7b-instruct")
+	if err := os.MkdirAll(modelPath, 0o755); err != nil {
+		t.Fatalf("write model fixture: %v", err)
+	}
+	serverPath := filepath.Join(t.TempDir(), "python3")
+	if err := os.WriteFile(serverPath, []byte("python"), 0o755); err != nil {
+		t.Fatalf("write SGLang launcher fixture: %v", err)
+	}
+	return v7sglang.NewManager(v7sglang.SGLangSidecarConfig{
+		Enabled:       true,
+		ServerPath:    serverPath,
+		ModelPath:     modelPath,
+		ModelID:       "qwen2.5-7b-instruct",
+		Host:          host,
+		Port:          port,
+		ContextLength: 8192,
 	})
 }
 

@@ -931,6 +931,52 @@ func TestEnrichBackendRuntimesDoesNotPromoteActiveCPUOnlySidecarToCUDA(t *testin
 	}
 }
 
+func TestEnrichBackendRuntimesPreservesActiveSGLangSidecar(t *testing.T) {
+	t.Parallel()
+
+	runtimes := NormalizeBackendRuntimes(BackendRuntimes{
+		SGLang: BackendRuntimeStatus{
+			Enabled:                  true,
+			Available:                true,
+			Running:                  true,
+			Healthy:                  true,
+			Backend:                  runtimeinventory.BackendCandidateSGLang,
+			BaseURL:                  "http://127.0.0.1:45921",
+			ModelID:                  "qwen2.5-7b-instruct",
+			ModelPath:                "/models/qwen2.5-7b-instruct",
+			ModelFilename:            "qwen2.5-7b-instruct",
+			OpenAICompatible:         true,
+			SupportsTextGeneration:   true,
+			SupportsStreaming:        true,
+			SupportsStatefulSessions: true,
+			Acceleration:             []string{"cuda"},
+		},
+	})
+
+	enriched := EnrichBackendRuntimes(runtimes, runtimeinventory.Inventory{
+		BackendCandidates: []runtimeinventory.BackendCandidate{{
+			Backend:                        runtimeinventory.BackendCandidateSGLang,
+			Detected:                       true,
+			SupportsTextGeneration:         true,
+			SupportsStreaming:              true,
+			SupportsOpenAICompatibleServer: true,
+		}},
+	}, v7hardware.CapacityInventory{
+		GPUDetected:       true,
+		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		CUDAAvailable:     true,
+		ComputeCapability: "8.9",
+	})
+
+	runtime := enriched.SGLang
+	if !runtime.Running || !runtime.Healthy || !runtime.Loaded || !runtime.Warm {
+		t.Fatalf("sglang runtime = %+v, want active managed sidecar preserved", runtime)
+	}
+	if runtime.BaseURL != "http://127.0.0.1:45921" || runtime.ModelID != "qwen2.5-7b-instruct" {
+		t.Fatalf("sglang active metadata = %+v, want managed sidecar URL/model preserved", runtime)
+	}
+}
+
 func TestBuildBackendRuntimesDisabledSidecarNotLoadedWarm(t *testing.T) {
 	t.Parallel()
 
