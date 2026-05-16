@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/Ryvion/node-agent/internal/hub"
 )
 
 func TestDecodeForesightNativeDraftSpecBuildsPackets(t *testing.T) {
 	specJSON := `{
 		"task":"draft_runner_v8",
+		"draft_backend":"native_bridge",
 		"workgraph_id":"wg-live",
 		"window_id":"win-live",
 		"role_id":"draft-worker-live",
@@ -23,6 +26,9 @@ func TestDecodeForesightNativeDraftSpecBuildsPackets(t *testing.T) {
 	spec, ok := decodeForesightNativeDraftSpec(specJSON)
 	if !ok {
 		t.Fatal("decodeForesightNativeDraftSpec ok = false")
+	}
+	if spec.DraftBackend != "native_bridge" {
+		t.Fatalf("DraftBackend = %q, want native_bridge", spec.DraftBackend)
 	}
 	packets := buildForesightNativeDraftPackets(spec)
 	if len(packets) != 3 {
@@ -60,14 +66,71 @@ func TestDecodeForesightNativeVerifierSpecAcceptsTree(t *testing.T) {
 			]
 		}
 	}`
-	accepted, treeCID, ok := decodeForesightNativeVerifierSpec(specJSON)
+	accepted, treeCID, backend, ok := decodeForesightNativeVerifierSpec(specJSON)
 	if !ok {
 		t.Fatal("decodeForesightNativeVerifierSpec ok = false")
+	}
+	if backend != "" {
+		t.Fatalf("backend = %q, want empty bridge default", backend)
 	}
 	if accepted != 8 {
 		t.Fatalf("accepted = %d, want capped 8", accepted)
 	}
 	if treeCID != "sha256:tree" {
 		t.Fatalf("treeCID = %q, want sha256:tree", treeCID)
+	}
+}
+
+func TestDecodeForesightNativeHotSessionSpecPreservesNativeSGLangFields(t *testing.T) {
+	specJSON := `{
+		"task":"verifier_session_v8_hot",
+		"executor_kind":"native_report",
+		"docker_required":false,
+		"verifier_backend":"native_sglang",
+		"run_id":"flab-native",
+		"session_id":"sess-native",
+		"workgraph_id":"wg-native",
+		"target_node_id":"node-verifier",
+		"model_id":"nemotron",
+		"model_path":"/models/nemotron",
+		"max_tokens":128
+	}`
+	spec, ok := decodeForesightNativeHotSessionSpec(specJSON, foresightVerifierHotSessionTask)
+	if !ok {
+		t.Fatal("decodeForesightNativeHotSessionSpec ok = false")
+	}
+	if spec.VerifierBackend != foresightVerifierBackendSGLang {
+		t.Fatalf("VerifierBackend = %q, want %q", spec.VerifierBackend, foresightVerifierBackendSGLang)
+	}
+	if spec.ModelPath != "/models/nemotron" {
+		t.Fatalf("ModelPath = %q", spec.ModelPath)
+	}
+	if foresightVerifierBackendKind(spec.VerifierBackend) != foresightVerifierBackendSGLang {
+		t.Fatalf("verifier backend kind did not select native SGLang")
+	}
+}
+
+func TestForesightNativeExternalRuntimeRequestedSkipsManagedOCI(t *testing.T) {
+	work := &hub.WorkAssignment{
+		Image:        "ghcr.io/ryvion/sglang-verifier-runner-v8:0.1.0",
+		ExecutorKind: executorKindManagedOCI,
+	}
+	if !foresightNativeExternalRuntimeRequested(work, executorKindManagedOCI, work.Image, true) {
+		t.Fatal("managed OCI verifier job should not be claimed by native CPU bridge")
+	}
+	nativeWork := &hub.WorkAssignment{Image: executorKindNativeReport, ExecutorKind: executorKindNativeReport}
+	if foresightNativeExternalRuntimeRequested(nativeWork, executorKindNativeReport, "", false) {
+		t.Fatal("native report job should be claimable by native Foresight handlers")
+	}
+}
+
+func TestResolveNativeSGLangVerifierCommandFromEnv(t *testing.T) {
+	t.Setenv("RYV_SGLANG_VERIFIER_CMD", "python /opt/ryvion/sglang-verifier/run.py")
+	command, ok := resolveNativeSGLangVerifierCommand()
+	if !ok {
+		t.Fatal("resolveNativeSGLangVerifierCommand ok = false")
+	}
+	if !command.Shell || command.Original == "" {
+		t.Fatalf("command = %+v, want shell command from env", command)
 	}
 }

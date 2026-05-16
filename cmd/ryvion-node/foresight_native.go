@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -19,11 +20,18 @@ const (
 	foresightDraftHotSessionTask    = "draft_runner_v8_hot_session"
 	foresightVerifierHotSessionTask = "verifier_session_v8_hot"
 	foresightNativeExecutor         = "native_foresight_v8"
+	foresightDraftBackendNative     = "native_bridge"
+	foresightVerifierBackendBridge  = "native_bridge"
+	foresightVerifierBackendSGLang  = "native_sglang"
 	defaultNativeDraftConfidenceBPS = int64(7600)
 )
 
 type foresightNativeDraftSpec struct {
 	Task                 string `json:"task"`
+	ExecutorKind         string `json:"executor_kind,omitempty"`
+	RunnerImage          string `json:"runner_image,omitempty"`
+	DockerRequired       bool   `json:"docker_required,omitempty"`
+	DraftBackend         string `json:"draft_backend,omitempty"`
 	WorkGraphID          string `json:"workgraph_id"`
 	WindowID             string `json:"window_id"`
 	RoleID               string `json:"role_id"`
@@ -41,6 +49,11 @@ type foresightNativeDraftSpec struct {
 
 type foresightNativeHotSessionSpec struct {
 	Task             string `json:"task"`
+	ExecutorKind     string `json:"executor_kind,omitempty"`
+	RunnerImage      string `json:"runner_image,omitempty"`
+	DockerRequired   bool   `json:"docker_required,omitempty"`
+	DraftBackend     string `json:"draft_backend,omitempty"`
+	VerifierBackend  string `json:"verifier_backend,omitempty"`
 	RunID            string `json:"run_id"`
 	SessionID        string `json:"session_id"`
 	WorkGraphID      string `json:"workgraph_id"`
@@ -51,6 +64,7 @@ type foresightNativeHotSessionSpec struct {
 	ParentPrefixHash string `json:"parent_prefix_hash"`
 	ModelID          string `json:"model_id"`
 	ModelHash        string `json:"model_hash"`
+	ModelPath        string `json:"model_path,omitempty"`
 	DrafterModelID   string `json:"drafter_model_id"`
 	MaxTokens        int    `json:"max_tokens"`
 }
@@ -59,6 +73,12 @@ func processOptionalForesightNativeDraft(ctx context.Context, client *hub.Client
 	spec, ok := decodeForesightNativeDraftSpec(work.SpecJSON)
 	if !ok {
 		return false, nil, nil
+	}
+	if foresightNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
+		return false, nil, nil
+	}
+	if !foresightDraftBackendIsNativeBridge(spec.DraftBackend) {
+		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.DraftBackend, foresightDraftRunnerTask), fmt.Errorf("unsupported native foresight draft backend: %s", spec.DraftBackend)
 	}
 	started := time.Now()
 	packets := buildForesightNativeDraftPackets(spec)
@@ -106,6 +126,12 @@ func processOptionalForesightNativeDraftHotSession(ctx context.Context, client *
 	spec, ok := decodeForesightNativeHotSessionSpec(work.SpecJSON, foresightDraftHotSessionTask)
 	if !ok {
 		return false, nil, nil
+	}
+	if foresightNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
+		return false, nil, nil
+	}
+	if !foresightDraftBackendIsNativeBridge(spec.DraftBackend) {
+		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.DraftBackend, foresightDraftHotSessionTask), fmt.Errorf("unsupported native foresight draft backend: %s", spec.DraftBackend)
 	}
 	started := time.Now()
 	submittedWindows := map[string]bool{}
@@ -198,6 +224,9 @@ func decodeForesightNativeDraftSpec(specJSON string) (foresightNativeDraftSpec, 
 	if strings.TrimSpace(spec.Task) != foresightDraftRunnerTask {
 		return foresightNativeDraftSpec{}, false
 	}
+	spec.ExecutorKind = strings.TrimSpace(spec.ExecutorKind)
+	spec.RunnerImage = strings.TrimSpace(spec.RunnerImage)
+	spec.DraftBackend = strings.TrimSpace(spec.DraftBackend)
 	spec.WorkGraphID = strings.TrimSpace(spec.WorkGraphID)
 	spec.WindowID = strings.TrimSpace(spec.WindowID)
 	spec.RoleID = firstNonEmptyString(strings.TrimSpace(spec.RoleID), "draft-worker-native")
@@ -230,6 +259,10 @@ func decodeForesightNativeHotSessionSpec(specJSON string, expectedTask string) (
 	if strings.TrimSpace(spec.Task) != expectedTask {
 		return foresightNativeHotSessionSpec{}, false
 	}
+	spec.ExecutorKind = strings.TrimSpace(spec.ExecutorKind)
+	spec.RunnerImage = strings.TrimSpace(spec.RunnerImage)
+	spec.DraftBackend = strings.TrimSpace(spec.DraftBackend)
+	spec.VerifierBackend = strings.TrimSpace(spec.VerifierBackend)
 	spec.RunID = strings.TrimSpace(spec.RunID)
 	spec.SessionID = strings.TrimSpace(spec.SessionID)
 	spec.WorkGraphID = strings.TrimSpace(spec.WorkGraphID)
@@ -239,6 +272,7 @@ func decodeForesightNativeHotSessionSpec(specJSON string, expectedTask string) (
 	spec.ParentPrefixHash = strings.TrimSpace(spec.ParentPrefixHash)
 	spec.ModelID = strings.TrimSpace(spec.ModelID)
 	spec.ModelHash = strings.TrimSpace(spec.ModelHash)
+	spec.ModelPath = strings.TrimSpace(spec.ModelPath)
 	spec.DrafterModelID = strings.TrimSpace(spec.DrafterModelID)
 	return spec, spec.RunID != "" && spec.WorkGraphID != ""
 }
@@ -283,9 +317,23 @@ func buildForesightNativeDraftPackets(spec foresightNativeDraftSpec) []map[strin
 }
 
 func processOptionalForesightNativeVerifier(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	acceptedLen, treeCID, ok := decodeForesightNativeVerifierSpec(work.SpecJSON)
+	acceptedLen, treeCID, backend, ok := decodeForesightNativeVerifierSpec(work.SpecJSON)
 	if !ok {
 		return false, nil, nil
+	}
+	if foresightNativeExternalRuntimeRequested(work, "", "", false) {
+		return false, nil, nil
+	}
+	switch foresightVerifierBackendKind(backend) {
+	case foresightVerifierBackendSGLang:
+		result := submitForesightNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, foresightNativeHotSessionSpec{
+			Task:            foresightVerifierSessionTask,
+			VerifierBackend: backend,
+		}, time.Now(), "native_sglang_non_hot_requires_hot_session")
+		return true, result, errNativeSGLangUnavailable
+	case foresightVerifierBackendBridge:
+	default:
+		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, backend, foresightVerifierSessionTask), fmt.Errorf("unsupported native foresight verifier backend: %s", backend)
 	}
 	started := time.Now()
 	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|%d", work.JobID, treeCID, acceptedLen))
@@ -328,6 +376,17 @@ func processOptionalForesightNativeVerifierHotSession(ctx context.Context, clien
 	spec, ok := decodeForesightNativeHotSessionSpec(work.SpecJSON, foresightVerifierHotSessionTask)
 	if !ok {
 		return false, nil, nil
+	}
+	if foresightNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
+		return false, nil, nil
+	}
+	switch foresightVerifierBackendKind(spec.VerifierBackend) {
+	case foresightVerifierBackendSGLang:
+		result, err := processForesightNativeSGLangVerifier(ctx, client, work, runtimeMgr, gpuDetected, spec)
+		return true, result, err
+	case foresightVerifierBackendBridge:
+	default:
+		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.VerifierBackend, foresightVerifierHotSessionTask), fmt.Errorf("unsupported native foresight verifier backend: %s", spec.VerifierBackend)
 	}
 	started := time.Now()
 	verifiedCommands := map[string]bool{}
@@ -432,14 +491,15 @@ func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Cl
 	return &runnerResultSnapshot{DurationMs: time.Since(started).Milliseconds(), ResultHashHex: resultHash, MeteringUnits: units, ExitCode: 0, Metadata: metadata}
 }
 
-func decodeForesightNativeVerifierSpec(specJSON string) (int, string, bool) {
+func decodeForesightNativeVerifierSpec(specJSON string) (int, string, string, bool) {
 	var spec map[string]any
 	if json.Unmarshal([]byte(strings.TrimSpace(specJSON)), &spec) != nil {
-		return 0, "", false
+		return 0, "", "", false
 	}
 	if strings.TrimSpace(stringValue(spec["task"])) != foresightVerifierSessionTask {
-		return 0, "", false
+		return 0, "", "", false
 	}
+	backend := strings.TrimSpace(stringValue(spec["verifier_backend"]))
 	tree := mapFromAny(spec["tree"])
 	branches := sliceFromAny(tree["branches"])
 	acceptedLen := 0
@@ -460,8 +520,71 @@ func decodeForesightNativeVerifierSpec(specJSON string) (int, string, bool) {
 	if treeCID == "" {
 		treeCID = "sha256:" + foresightFullHash(specJSON)
 	}
-	return acceptedLen, treeCID, true
+	return acceptedLen, treeCID, backend, true
 }
+
+func foresightNativeExternalRuntimeRequested(work *hub.WorkAssignment, executorKind string, runnerImage string, dockerRequired bool) bool {
+	if dockerRequired || strings.TrimSpace(runnerImage) != "" {
+		return true
+	}
+	kind := strings.TrimSpace(executorKind)
+	if kind != "" && !strings.EqualFold(kind, executorKindNativeReport) && !strings.EqualFold(kind, foresightNativeExecutor) {
+		return true
+	}
+	if work == nil {
+		return false
+	}
+	if workKind := strings.TrimSpace(work.ExecutorKind); workKind != "" && !strings.EqualFold(workKind, executorKindNativeReport) && !strings.EqualFold(workKind, foresightNativeExecutor) {
+		return true
+	}
+	image := strings.TrimSpace(work.Image)
+	return image != "" && !strings.EqualFold(image, executorKindNativeReport) && !strings.EqualFold(image, foresightNativeExecutor)
+}
+
+func foresightDraftBackendIsNativeBridge(backend string) bool {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	return backend == "" || backend == foresightDraftBackendNative || backend == "deterministic_native_bridge"
+}
+
+func foresightVerifierBackendKind(backend string) string {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	switch backend {
+	case "", foresightVerifierBackendBridge, "deterministic_native_bridge":
+		return foresightVerifierBackendBridge
+	case foresightVerifierBackendSGLang, "sglang":
+		return foresightVerifierBackendSGLang
+	default:
+		return backend
+	}
+}
+
+func submitForesightNativeUnsupportedReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, backend string, task string) *runnerResultSnapshot {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		backend = "unknown"
+	}
+	started := time.Now()
+	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|unsupported|%s", work.JobID, task, backend))
+	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
+		"executor":         foresightNativeExecutor,
+		"executor_kind":    foresightNativeExecutor,
+		"task":             task,
+		"docker_required":  false,
+		"runtime_mode":     "native_node_agent",
+		"backend":          backend,
+		"status":           "unavailable",
+		"execution_status": "unavailable",
+		"billing_status":   "not_billable",
+		"proof_status":     "native_backend_unavailable",
+		"error_code":       "native_backend_unavailable",
+		"exit_code":        1,
+		"duration_ms":      time.Since(started).Milliseconds(),
+	})
+	_ = submitReceiptWithRetry(ctx, client, hub.Receipt{JobID: work.JobID, ResultHashHex: resultHash, MeteringUnits: 0, Metadata: metadata})
+	return &runnerResultSnapshot{DurationMs: time.Since(started).Milliseconds(), ResultHashHex: resultHash, MeteringUnits: 0, ExitCode: 1, Metadata: metadata}
+}
+
+var errNativeSGLangUnavailable = errors.New("native_sglang_verifier_unavailable")
 
 func foresightAcceptedFromCommandTree(command hub.ForesightLiveLabSessionCommand) (int, string) {
 	tree := command.Tree
