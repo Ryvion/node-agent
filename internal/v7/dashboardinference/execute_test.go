@@ -33,6 +33,7 @@ type fakeSidecar struct {
 	partialGPUStatus    llamacpp.LlamaCppSidecarStatus
 	fallbackRestartPath string
 	startDelay          time.Duration
+	stops               int
 }
 
 func (f *fakeSidecar) Start(context.Context) llamacpp.LlamaCppSidecarStatus {
@@ -50,6 +51,11 @@ func (f *fakeSidecar) Status(context.Context) llamacpp.LlamaCppSidecarStatus {
 		f.status = next
 		return f.status
 	}
+	return f.status
+}
+
+func (f *fakeSidecar) Stop(context.Context) llamacpp.LlamaCppSidecarStatus {
+	f.stops++
 	return f.status
 }
 
@@ -168,6 +174,9 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	}
 	if client.reqs[0].Stream {
 		t.Fatal("completion request stream = true without return_text/text/stream flags, want false")
+	}
+	if sidecar.stops != 1 {
+		t.Fatalf("sidecar stops = %d, want idle cleanup when keep warm is disabled", sidecar.stops)
 	}
 	if client.reqs[0].ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
 		t.Fatalf("completion model = %q", client.reqs[0].ModelID)

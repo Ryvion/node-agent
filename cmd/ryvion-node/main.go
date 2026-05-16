@@ -3603,19 +3603,10 @@ func legacyNativeInferenceManagerEnabled(getenv func(string) string) bool {
 	case "0", "false", "no", "off", "disabled":
 		return false
 	}
-	// Default-on: the legacy inference.Manager owns native llama-server
-	// startup, the bundled binary install, model GGUF download, and the
-	// /health probe whose result feeds infMgr.Healthy(). The hub uses
-	// infMgr.Healthy() to gate cap:native_streaming and
-	// public-inference-ready, and the OpenAI-compatible streaming engine
-	// (executorKindNativeStreaming) executes through infMgr.
-	// The V7 llama.cpp sidecar runs on a different port (45910 vs 8081)
-	// and is purely opt-in via RYV_LLAMA_CPP_ENABLED=1 — it does not
-	// feed infMgr.Healthy() or replace the legacy /health signal, so
-	// disabling the legacy manager when V7 is enabled silently turns
-	// every node into fail-closed for streaming inference. Co-existence
-	// is safe; explicit RYV_NODE_LEGACY_NATIVE_INFERENCE=0 still opts out.
-	return true
+	// Idle-safe default: do not launch llama-server at OS startup. Consumer
+	// operator machines must stay usable until an explicit warm setting or
+	// an assigned inference job starts the model runtime.
+	return false
 }
 
 func mainWorkLoopSpecContext(specTask string) map[string]string {

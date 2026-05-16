@@ -70,6 +70,10 @@ type LlamaCppEnabler interface {
 	SetEnabled(bool) llamacpp.LlamaCppSidecarConfig
 }
 
+type LlamaCppStopper interface {
+	Stop(context.Context) llamacpp.LlamaCppSidecarStatus
+}
+
 type LlamaCppRunner struct {
 	Sidecar  LlamaCppSidecar
 	KeepWarm KeepWarmChecker
@@ -215,6 +219,7 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	preInferenceStart := time.Now()
 
 	sidecar := r.sidecar()
+	defer r.stopSidecarAfterRunIfIdle(context.Background(), sidecar)
 	status := r.ensureSidecarWith(runCtx, sidecar)
 	_, canSwitchModel := sidecar.(LlamaCppModelSwitcher)
 	if !sidecarModelMatches(status, spec.ModelID) {
@@ -330,6 +335,22 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	}
 	result.Speculative = specMeta
 	return result, nil
+}
+
+func (r LlamaCppRunner) stopSidecarAfterRunIfIdle(ctx context.Context, sidecar LlamaCppSidecar) {
+	if llamacpp.KeepWarmEnabledFromEnv(r.getenv()) {
+		return
+	}
+	stopper, ok := sidecar.(LlamaCppStopper)
+	if !ok || stopper == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_ = stopper.Stop(stopCtx)
 }
 
 func shouldStreamDashboardInference(spec Spec, status llamacpp.LlamaCppSidecarStatus, getenv func(string) string) bool {

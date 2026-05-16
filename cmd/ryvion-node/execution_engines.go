@@ -103,8 +103,15 @@ func assuranceClassForAssignment(work *hub.WorkAssignment) string {
 }
 
 func (streamingEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {
-	if execCtx.infMgr == nil || !execCtx.infMgr.Healthy() {
+	cleanupNative, readyErr := ensureNativeInferenceReadyForJob(ctx, execCtx.infMgr, os.Getenv)
+	if cleanupNative != nil {
+		defer cleanupNative()
+	}
+	if readyErr != nil {
 		err := fmt.Errorf("inference manager is not healthy")
+		if readyErr != nil {
+			err = readyErr
+		}
 		relayStreamingFailure(ctx, execCtx.client, work.JobID, err)
 		return nil, err
 	}
@@ -139,6 +146,62 @@ func (streamingEngine) Execute(ctx context.Context, work *hub.WorkAssignment, ex
 		MeteringUnits: 1,
 		Metadata:      metadata,
 	}, nil
+}
+
+func ensureNativeInferenceReadyForJob(ctx context.Context, infMgr *inference.Manager, getenv func(string) string) (func(), error) {
+	if infMgr == nil {
+		return nil, fmt.Errorf("inference manager is not available")
+	}
+	if infMgr.Healthy() {
+		return nil, nil
+	}
+	if !nativeInferenceJobLaunchEnabled(getenv) {
+		return nil, fmt.Errorf("native inference manager disabled")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- infMgr.Start(runCtx)
+	}()
+	cleanup := func() {
+		cancel()
+		infMgr.Stop()
+	}
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if infMgr.Healthy() {
+			return cleanup, nil
+		}
+		select {
+		case <-ctx.Done():
+			cleanup()
+			return nil, ctx.Err()
+		case err := <-errCh:
+			cleanup()
+			if err == nil || errors.Is(err, context.Canceled) {
+				err = fmt.Errorf("native inference manager stopped before becoming healthy")
+			}
+			return nil, err
+		case <-ticker.C:
+		}
+	}
+}
+
+func nativeInferenceJobLaunchEnabled(getenv func(string) string) bool {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	switch strings.ToLower(strings.TrimSpace(getenv(legacyNativeInferenceFlagEnv))) {
+	case "0", "false", "no", "off", "disabled":
+		return false
+	default:
+		return true
+	}
 }
 
 func (agentHostingEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {

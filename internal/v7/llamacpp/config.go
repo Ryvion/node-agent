@@ -58,7 +58,7 @@ func ResidencyKeeperConfigFromEnv() ResidencyKeeperConfig {
 
 func ResidencyKeeperConfigFromEnvWith(source ConfigSource) ResidencyKeeperConfig {
 	source = normalizeConfigSource(source)
-	enabled := envBoolDefault(source.Getenv(EnvKeepWarm), true)
+	enabled := envBoolDefault(source.Getenv(EnvKeepWarm), false)
 	if envBool(source.Getenv(EnvDisableModelWarm)) {
 		enabled = false
 	}

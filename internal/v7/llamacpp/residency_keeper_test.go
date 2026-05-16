@@ -214,14 +214,14 @@ func TestResidencyKeeperConfigFromEnvDefaults(t *testing.T) {
 	}
 }
 
-func TestResidencyKeeperConfigDefaultsToEnabledForProductWarmResidency(t *testing.T) {
+func TestResidencyKeeperConfigDefaultsToIdleNoWarmResidency(t *testing.T) {
 	t.Parallel()
 
 	cfg := ResidencyKeeperConfigFromEnvWith(ConfigSource{
 		Getenv: func(string) string { return "" },
 	})
-	if !cfg.Enabled {
-		t.Fatal("enabled = false, want product warm residency on by default")
+	if cfg.Enabled {
+		t.Fatal("enabled = true, want idle-safe warm residency off by default")
 	}
 }
 

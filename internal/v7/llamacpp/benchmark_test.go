@@ -258,8 +258,8 @@ func TestCompleteInternalBenchmarkPromptUsesFixedPromptAndFallback(t *testing.T)
 }
 
 func TestKeepWarmEnabledFromEnv(t *testing.T) {
-	if !KeepWarmEnabledFromEnv(func(string) string { return "" }) {
-		t.Fatal("KeepWarmEnabledFromEnv(empty) = false")
+	if KeepWarmEnabledFromEnv(func(string) string { return "" }) {
+		t.Fatal("KeepWarmEnabledFromEnv(empty) = true, want idle-safe false")
 	}
 	if !KeepWarmEnabledFromEnv(func(key string) string {
 		if key == EnvKeepWarm {

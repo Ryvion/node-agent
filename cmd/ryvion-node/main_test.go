@@ -1198,10 +1198,10 @@ func TestPublicAIOptInEnabled(t *testing.T) {
 	}
 }
 
-func TestLegacyNativeInferenceManagerDefaultsOnForHealthSignal(t *testing.T) {
+func TestLegacyNativeInferenceManagerDefaultsIdleSafe(t *testing.T) {
 	getenv := map[string]string{}
-	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
-		t.Fatal("expected legacy inference manager to default-on so infMgr.Healthy() reflects native readiness")
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to stay stopped by default")
 	}
 	getenv[legacyNativeInferenceFlagEnv] = "1"
 	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
@@ -1213,18 +1213,17 @@ func TestLegacyNativeInferenceManagerDefaultsOnForHealthSignal(t *testing.T) {
 	}
 }
 
-func TestLegacyNativeInferenceManagerStaysOnWhenV7Enabled(t *testing.T) {
-	// V7 dashboard inference being enabled (the default) must NOT silently
-	// disable the legacy inference manager — the V7 sidecar runs on a
-	// different port and is purely opt-in via RYV_LLAMA_CPP_ENABLED, so
-	// gating off the legacy manager would break public-inference-ready.
+func TestLegacyNativeInferenceManagerStaysIdleWhenV7Enabled(t *testing.T) {
+	// V7 dashboard inference availability must not imply boot-time model
+	// residency. The sidecar can be started by an actual job without keeping
+	// llama-server.exe resident immediately after login.
 	getenv := map[string]string{}
-	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
-		t.Fatal("expected legacy inference manager to remain on when V7 inference is enabled")
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to remain idle when V7 inference is enabled")
 	}
 	getenv[v7dashboardinference.DisableFlagEnv] = "1"
-	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
-		t.Fatal("expected legacy inference manager to remain on when V7 inference is disabled")
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to remain idle when V7 inference is disabled")
 	}
 }
 

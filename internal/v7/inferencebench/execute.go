@@ -35,6 +35,10 @@ type KeepWarmChecker interface {
 	CheckOnce(context.Context) llamacpp.LlamaCppSidecarStatus
 }
 
+type LlamaCppStopper interface {
+	Stop(context.Context) llamacpp.LlamaCppSidecarStatus
+}
+
 type LlamaCppBenchmarkRunner struct {
 	Sidecar  LlamaCppSidecar
 	KeepWarm KeepWarmChecker
@@ -159,7 +163,9 @@ func (r LlamaCppBenchmarkRunner) RunBackendInferenceBenchmark(ctx context.Contex
 		return failedExecutionResult(spec, "benchmark_context_unavailable"), nil
 	}
 
-	status := r.ensureSidecar(runCtx)
+	sidecar := r.sidecar()
+	defer r.stopSidecarAfterRunIfIdle(context.Background(), sidecar)
+	status := r.ensureSidecarWith(runCtx, sidecar)
 	if !status.Enabled || !status.Available || !status.Running || !status.Healthy {
 		return failedExecutionResult(spec, safeSidecarFailure(status)), nil
 	}
@@ -180,7 +186,10 @@ func (r LlamaCppBenchmarkRunner) RunBackendInferenceBenchmark(ctx context.Contex
 }
 
 func (r LlamaCppBenchmarkRunner) ensureSidecar(ctx context.Context) llamacpp.LlamaCppSidecarStatus {
-	sidecar := r.sidecar()
+	return r.ensureSidecarWith(ctx, r.sidecar())
+}
+
+func (r LlamaCppBenchmarkRunner) ensureSidecarWith(ctx context.Context, sidecar LlamaCppSidecar) llamacpp.LlamaCppSidecarStatus {
 	keepWarm := llamacpp.KeepWarmEnabledFromEnv(r.getenv())
 	if keepWarm {
 		if r.KeepWarm != nil {
@@ -196,6 +205,22 @@ func (r LlamaCppBenchmarkRunner) ensureSidecar(ctx context.Context) llamacpp.Lla
 		status = sidecar.Status(ctx)
 	}
 	return status
+}
+
+func (r LlamaCppBenchmarkRunner) stopSidecarAfterRunIfIdle(ctx context.Context, sidecar LlamaCppSidecar) {
+	if llamacpp.KeepWarmEnabledFromEnv(r.getenv()) {
+		return
+	}
+	stopper, ok := sidecar.(LlamaCppStopper)
+	if !ok || stopper == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_ = stopper.Stop(stopCtx)
 }
 
 func (r LlamaCppBenchmarkRunner) sidecar() LlamaCppSidecar {
