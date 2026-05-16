@@ -334,6 +334,25 @@ func (c *Client) SubmitForesightDraftPacket(ctx context.Context, windowID string
 	return out, err
 }
 
+func (c *Client) SubmitForesightDraftPacketBatch(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
+	windowID = strings.TrimSpace(windowID)
+	if windowID == "" {
+		return DraftPacketBatchDecision{}, fmt.Errorf("window_id required")
+	}
+	if len(packets) == 0 {
+		return DraftPacketBatchDecision{}, fmt.Errorf("draft packets required")
+	}
+	headers := map[string]string{
+		"X-Node-Token": c.NodeAuthToken(0),
+	}
+	if c.adminKey != "" {
+		headers["X-Admin-Key"] = c.adminKey
+	}
+	var out DraftPacketBatchDecision
+	err := c.postWithHeaders(ctx, "/v8/foresight/windows/"+url.PathEscape(windowID)+"/draft-packets/batch", map[string]any{"packets": packets}, &out, headers)
+	return out, err
+}
+
 type ForesightLiveLabSessionCommand struct {
 	SchemaVersion       string         `json:"schema_version"`
 	Command             string         `json:"command"`
@@ -1041,6 +1060,15 @@ type DraftPacketDecision struct {
 	Accepted      bool   `json:"accepted"`
 	Reason        string `json:"reason"`
 	PacketID      string `json:"packet_id"`
+}
+
+type DraftPacketBatchDecision struct {
+	SchemaVersion string                `json:"schema_version"`
+	WindowID      string                `json:"window_id"`
+	Attempted     int                   `json:"attempted"`
+	Accepted      int                   `json:"accepted"`
+	Rejected      int                   `json:"rejected"`
+	Decisions     []DraftPacketDecision `json:"decisions"`
 }
 
 type HealthReport struct {

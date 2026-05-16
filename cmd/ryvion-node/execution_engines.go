@@ -362,6 +362,7 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 
 func submitForesightDraftPackets(ctx context.Context, client interface {
 	SubmitForesightDraftPacket(context.Context, string, map[string]any) (hub.DraftPacketDecision, error)
+	SubmitForesightDraftPacketBatch(context.Context, string, []map[string]any) (hub.DraftPacketBatchDecision, error)
 }, packets []map[string]any) map[string]any {
 	summary := map[string]any{
 		"attempted": len(packets),
@@ -376,6 +377,25 @@ func submitForesightDraftPackets(ctx context.Context, client interface {
 	submitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	reasons := summary["reasons"].(map[string]int)
+	if windowID, ok := commonForesightWindowID(packets); ok {
+		decision, err := client.SubmitForesightDraftPacketBatch(submitCtx, windowID, packets)
+		if err == nil {
+			summary["accepted"] = decision.Accepted
+			summary["rejected"] = decision.Rejected
+			if decision.Attempted > 0 {
+				summary["attempted"] = decision.Attempted
+			}
+			for _, packetDecision := range decision.Decisions {
+				reason := strings.TrimSpace(packetDecision.Reason)
+				if reason == "" {
+					reason = "unknown"
+				}
+				reasons[reason]++
+			}
+			return summary
+		}
+		reasons["batch_submit_failed"]++
+	}
 	for _, packet := range packets {
 		windowID := stringValue(packet["window_id"])
 		decision, err := client.SubmitForesightDraftPacket(submitCtx, windowID, packet)
@@ -396,6 +416,24 @@ func submitForesightDraftPackets(ctx context.Context, client interface {
 		reasons[reason]++
 	}
 	return summary
+}
+
+func commonForesightWindowID(packets []map[string]any) (string, bool) {
+	var windowID string
+	for _, packet := range packets {
+		next := strings.TrimSpace(stringValue(packet["window_id"]))
+		if next == "" {
+			return "", false
+		}
+		if windowID == "" {
+			windowID = next
+			continue
+		}
+		if next != windowID {
+			return "", false
+		}
+	}
+	return windowID, windowID != ""
 }
 
 func managedOCIExecutionAborted(ctx context.Context, runErr error, result *runner.Result) bool {
