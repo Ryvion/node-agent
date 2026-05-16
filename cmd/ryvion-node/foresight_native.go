@@ -15,15 +15,16 @@ import (
 )
 
 const (
-	foresightDraftRunnerTask        = "draft_runner_v8"
-	foresightVerifierSessionTask    = "verifier_session_v8"
-	foresightDraftHotSessionTask    = "draft_runner_v8_hot_session"
-	foresightVerifierHotSessionTask = "verifier_session_v8_hot"
-	foresightNativeExecutor         = "native_foresight_v8"
-	foresightDraftBackendNative     = "native_bridge"
-	foresightVerifierBackendBridge  = "native_bridge"
-	foresightVerifierBackendSGLang  = "native_sglang"
-	defaultNativeDraftConfidenceBPS = int64(7600)
+	foresightDraftRunnerTask         = "draft_runner_v8"
+	foresightVerifierSessionTask     = "verifier_session_v8"
+	foresightDraftHotSessionTask     = "draft_runner_v8_hot_session"
+	foresightVerifierHotSessionTask  = "verifier_session_v8_hot"
+	foresightNativeExecutor          = "native_foresight_v8"
+	foresightDraftBackendNative      = "native_bridge"
+	foresightVerifierBackendBridge   = "native_bridge"
+	foresightVerifierBackendSGLang   = "native_sglang"
+	foresightVerifierBackendLlamaCpp = "native_llamacpp"
+	defaultNativeDraftConfidenceBPS  = int64(7600)
 )
 
 type foresightNativeDraftSpec struct {
@@ -384,6 +385,9 @@ func processOptionalForesightNativeVerifierHotSession(ctx context.Context, clien
 	case foresightVerifierBackendSGLang:
 		result, err := processForesightNativeSGLangVerifier(ctx, client, work, runtimeMgr, gpuDetected, spec)
 		return true, result, err
+	case foresightVerifierBackendLlamaCpp:
+		result, err := processForesightNativeLlamaCppVerifier(ctx, client, work, runtimeMgr, gpuDetected, spec)
+		return true, result, err
 	case foresightVerifierBackendBridge:
 	default:
 		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.VerifierBackend, foresightVerifierHotSessionTask), fmt.Errorf("unsupported native foresight verifier backend: %s", spec.VerifierBackend)
@@ -553,6 +557,8 @@ func foresightVerifierBackendKind(backend string) string {
 		return foresightVerifierBackendBridge
 	case foresightVerifierBackendSGLang, "sglang":
 		return foresightVerifierBackendSGLang
+	case foresightVerifierBackendLlamaCpp, "llamacpp", "llama.cpp", "llama_cpp", "llama-cpp":
+		return foresightVerifierBackendLlamaCpp
 	default:
 		return backend
 	}

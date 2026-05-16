@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Ryvion/node-agent/internal/hub"
+	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
 )
 
 func TestDecodeForesightNativeDraftSpecBuildsPackets(t *testing.T) {
@@ -110,6 +114,117 @@ func TestDecodeForesightNativeHotSessionSpecPreservesNativeSGLangFields(t *testi
 	}
 }
 
+func TestForesightVerifierBackendKindAcceptsNativeLlamaCpp(t *testing.T) {
+	for _, backend := range []string{"native_llamacpp", "llamacpp", "llama.cpp", "llama_cpp"} {
+		if got := foresightVerifierBackendKind(backend); got != foresightVerifierBackendLlamaCpp {
+			t.Fatalf("foresightVerifierBackendKind(%q) = %q, want %q", backend, got, foresightVerifierBackendLlamaCpp)
+		}
+	}
+}
+
+func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
+	sidecar := &fakeForesightLlamaCppSidecar{status: v7llamacpp.LlamaCppSidecarStatus{
+		Enabled:                true,
+		Available:              true,
+		Running:                true,
+		Healthy:                true,
+		BaseURL:                "http://127.0.0.1:45910",
+		ModelFilename:          "tinyllama.Q4_K_M.gguf",
+		Backend:                v7llamacpp.BackendName,
+		OpenAICompatible:       true,
+		SupportsTextGeneration: true,
+		SupportsStreaming:      true,
+	}}
+	client := &fakeForesightLlamaCppCompletionClient{result: v7llamacpp.CompletionResult{
+		Output:                   []byte("Verified local text."),
+		OutputBytes:              int64(len("Verified local text.")),
+		TokensGenerated:          4,
+		CompletionTokens:         4,
+		RequestedMaxTokens:       8,
+		FinishReason:             "stop",
+		RuntimeMeasurementStatus: v7llamacpp.RuntimeMeasurementStatusMeasured,
+		MetadataParseStatus:      v7llamacpp.MetadataParseStatusOK,
+		TotalTimeMs:              25,
+		Streamed:                 true,
+	}}
+	verifier := nativeLlamaCppVerifier{Sidecar: sidecar, Client: client}
+
+	result, err := verifier.VerifyWave(context.Background(), foresightNativeHotSessionSpec{
+		RunID:            "flab_llama",
+		SessionID:        "sess_llama",
+		WorkGraphID:      "wg_llama",
+		ModelID:          "tinyllama",
+		Prompt:           "Write one short sentence.",
+		ParentPrefixHash: "sha256:prefix",
+		MaxTokens:        8,
+	}, hub.ForesightLiveLabSessionCommand{
+		CommandID:   "cmd_1",
+		WindowID:    "win_llama",
+		WaveIndex:   1,
+		WorkGraphID: "wg_llama",
+		Tree: map[string]any{
+			"tree_cid": "sha256:tree",
+			"branches": []any{
+				map[string]any{"candidate_tokens": []any{float64(1), float64(2), float64(3), float64(4), float64(5)}},
+			},
+		},
+	}, 0)
+	if err != nil {
+		t.Fatalf("VerifyWave() error = %v, want nil", err)
+	}
+	if !sidecar.started {
+		t.Fatal("VerifyWave() did not start llama.cpp sidecar")
+	}
+	if len(client.requests) != 1 {
+		t.Fatalf("completion requests = %d, want 1", len(client.requests))
+	}
+	req := client.requests[0]
+	if req.BaseURL != "http://127.0.0.1:45910" || req.ModelID != "tinyllama" || !req.Stream {
+		t.Fatalf("completion request = %+v, want hot llama.cpp request", req)
+	}
+	if req.Prompt == "" || !strings.Contains(req.Prompt, "sha256:tree") || !strings.Contains(req.Prompt, "branch_count=1") {
+		t.Fatalf("completion prompt = %q, want verifier tree summary", req.Prompt)
+	}
+	if result.AcceptedLen != 4 || result.TreeCID != "sha256:tree" || result.AcceptedText != "Verified local text." || !result.AcceptedTextPublic {
+		t.Fatalf("verifier result = %+v, want measured llama.cpp acceptance", result)
+	}
+	if result.ProbeSummary["source"] != "native_llamacpp_verifier" ||
+		result.ProbeSummary["backend"] != v7llamacpp.BackendName ||
+		result.ProbeSummary["output_hash"] == "" {
+		t.Fatalf("probe summary = %#v, want llama.cpp measured metadata", result.ProbeSummary)
+	}
+	if encoded, _ := json.Marshal(result.ProbeSummary); strings.Contains(string(encoded), "Write one short sentence") || strings.Contains(string(encoded), "Verified local text") {
+		t.Fatalf("probe summary leaked raw prompt/output: %s", encoded)
+	}
+}
+
+func TestNativeLlamaCppVerifierUnavailableDoesNotUseDeterministicCPUFallback(t *testing.T) {
+	sidecar := &fakeForesightLlamaCppSidecar{status: v7llamacpp.LlamaCppSidecarStatus{
+		Enabled:   true,
+		Available: false,
+		Backend:   v7llamacpp.BackendName,
+		Reason:    "llama-server binary not detected",
+	}}
+	client := &fakeForesightLlamaCppCompletionClient{}
+	verifier := nativeLlamaCppVerifier{Sidecar: sidecar, Client: client}
+
+	_, err := verifier.VerifyWave(context.Background(), foresightNativeHotSessionSpec{
+		RunID:       "flab_llama",
+		WorkGraphID: "wg_llama",
+		ModelID:     "tinyllama",
+	}, hub.ForesightLiveLabSessionCommand{
+		CommandID: "cmd_1",
+		WindowID:  "win_llama",
+		Tree:      map[string]any{"tree_cid": "sha256:tree"},
+	}, 0)
+	if !errors.Is(err, errNativeLlamaCppUnavailable) {
+		t.Fatalf("VerifyWave() error = %v, want errNativeLlamaCppUnavailable", err)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("completion requests = %d, want 0 when llama.cpp unavailable", len(client.requests))
+	}
+}
+
 func TestForesightNativeExternalRuntimeRequestedSkipsManagedOCI(t *testing.T) {
 	work := &hub.WorkAssignment{
 		Image:        "ghcr.io/ryvion/sglang-verifier-runner-v8:0.1.0",
@@ -133,4 +248,32 @@ func TestResolveNativeSGLangVerifierCommandFromEnv(t *testing.T) {
 	if !command.Shell || command.Original == "" {
 		t.Fatalf("command = %+v, want shell command from env", command)
 	}
+}
+
+type fakeForesightLlamaCppSidecar struct {
+	status  v7llamacpp.LlamaCppSidecarStatus
+	started bool
+}
+
+func (f *fakeForesightLlamaCppSidecar) Start(context.Context) v7llamacpp.LlamaCppSidecarStatus {
+	f.started = true
+	return f.status
+}
+
+func (f *fakeForesightLlamaCppSidecar) Status(context.Context) v7llamacpp.LlamaCppSidecarStatus {
+	return f.status
+}
+
+type fakeForesightLlamaCppCompletionClient struct {
+	result   v7llamacpp.CompletionResult
+	err      error
+	requests []v7llamacpp.CompletionRequest
+}
+
+func (f *fakeForesightLlamaCppCompletionClient) Complete(_ context.Context, req v7llamacpp.CompletionRequest) (v7llamacpp.CompletionResult, error) {
+	f.requests = append(f.requests, req)
+	if f.err != nil {
+		return v7llamacpp.CompletionResult{}, f.err
+	}
+	return f.result, nil
 }
