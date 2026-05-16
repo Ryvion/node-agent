@@ -19,6 +19,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/v7/capability"
 	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
+	v7netprofile "github.com/Ryvion/node-agent/internal/v7/netprofile"
 )
 
 func TestRegisterSignsExpectedMessage(t *testing.T) {
@@ -453,6 +454,7 @@ func TestHeartbeatIncludesV7PayloadAndPreservesOldFields(t *testing.T) {
 			GPUUtil      float64         `json:"gpu_util"`
 			PowerWatts   float64         `json:"power_watts"`
 			GPUThrottled bool            `json:"gpu_throttled"`
+			Network      json.RawMessage `json:"network_profile"`
 			V7           json.RawMessage `json:"v7"`
 			Signature    []byte          `json:"signature"`
 		}
@@ -469,6 +471,21 @@ func TestHeartbeatIncludesV7PayloadAndPreservesOldFields(t *testing.T) {
 		}
 		if len(req.V7) == 0 {
 			handlerErr = fmt.Errorf("v7 payload missing")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var network struct {
+			RTTMsP95    float64 `json:"rtt_ms_p95"`
+			JitterMsP95 float64 `json:"jitter_ms_p95"`
+			SampleCount int     `json:"sample_count"`
+		}
+		if err := json.Unmarshal(req.Network, &network); err != nil {
+			handlerErr = fmt.Errorf("decode root network profile: %w", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if network.RTTMsP95 != 44 || network.JitterMsP95 != 3 || network.SampleCount != 2 {
+			handlerErr = fmt.Errorf("root network profile = %#v, want heartbeat RTT profile", network)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -513,7 +530,12 @@ func TestHeartbeatIncludesV7PayloadAndPreservesOldFields(t *testing.T) {
 		GPUUtil:      3.75,
 		PowerWatts:   4.5,
 		GPUThrottled: true,
-		V7Heartbeat:  v7Payload,
+		NetworkProfile: &v7netprofile.NetworkProfile{
+			RTTMsP95:    44,
+			JitterMsP95: 3,
+			SampleCount: 2,
+		},
+		V7Heartbeat: v7Payload,
 	}); err != nil {
 		t.Fatalf("heartbeat failed: %v", err)
 	}

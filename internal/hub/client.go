@@ -19,6 +19,7 @@ import (
 	"github.com/Ryvion/node-agent/internal/hw"
 	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
 	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
+	v7netprofile "github.com/Ryvion/node-agent/internal/v7/netprofile"
 )
 
 type Client struct {
@@ -145,6 +146,7 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (HeartbeatRespo
 		PowerWatts:     metrics.PowerWatts,
 		GPUThrottled:   metrics.GPUThrottled,
 		SystemTimezone: detectIANATimezone(),
+		NetworkProfile: metrics.NetworkProfile,
 		V7:             metrics.V7Heartbeat,
 	}
 	body.Signature = c.sign(
@@ -938,13 +940,14 @@ type Capabilities struct {
 }
 
 type Metrics struct {
-	TimestampMs  int64
-	CPUUtil      float64
-	MemUtil      float64
-	GPUUtil      float64
-	PowerWatts   float64
-	GPUThrottled bool // node is self-throttling due to operator GPU usage
-	V7Heartbeat  *v7heartbeat.V7HeartbeatPayload
+	TimestampMs    int64
+	CPUUtil        float64
+	MemUtil        float64
+	GPUUtil        float64
+	PowerWatts     float64
+	GPUThrottled   bool // node is self-throttling due to operator GPU usage
+	NetworkProfile *v7netprofile.NetworkProfile
+	V7Heartbeat    *v7heartbeat.V7HeartbeatPayload
 }
 
 type WorkAssignment struct {
@@ -1066,6 +1069,7 @@ type heartbeatRequest struct {
 	PowerWatts     float64                         `json:"power_watts"`
 	GPUThrottled   bool                            `json:"gpu_throttled"`
 	SystemTimezone string                          `json:"system_timezone,omitempty"`
+	NetworkProfile *v7netprofile.NetworkProfile    `json:"network_profile,omitempty"`
 	V7             *v7heartbeat.V7HeartbeatPayload `json:"v7,omitempty"`
 	Signature      []byte                          `json:"signature"`
 }

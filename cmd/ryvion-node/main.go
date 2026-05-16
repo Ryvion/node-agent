@@ -1146,6 +1146,7 @@ func sendHeartbeat(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) heartbeatSendResult {
 	started := time.Now()
 	recordHubRTTProbe(ctx, client)
+	networkProfile := currentHubNetworkProfile()
 	metrics := hw.SampleMetrics()
 
 	// Cache GPU utilization for the work loop's throttle check.
@@ -1170,13 +1171,14 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 	}
 
 	heartbeatMetrics := hub.Metrics{
-		TimestampMs:  time.Now().UnixMilli(),
-		CPUUtil:      metrics.CPUUtil,
-		MemUtil:      metrics.MemUtil,
-		GPUUtil:      metrics.GPUUtil,
-		PowerWatts:   metrics.PowerWatts,
-		GPUThrottled: throttled,
-		V7Heartbeat:  v7Payload,
+		TimestampMs:    time.Now().UnixMilli(),
+		CPUUtil:        metrics.CPUUtil,
+		MemUtil:        metrics.MemUtil,
+		GPUUtil:        metrics.GPUUtil,
+		PowerWatts:     metrics.PowerWatts,
+		GPUThrottled:   throttled,
+		NetworkProfile: networkProfile,
+		V7Heartbeat:    v7Payload,
 	}
 
 	heartbeat, err := client.Heartbeat(ctx, heartbeatMetrics)
