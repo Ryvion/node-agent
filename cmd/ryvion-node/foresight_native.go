@@ -10,7 +10,8 @@ import (
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	nodespec "github.com/Ryvion/ryvion-node/internal/inference/speculative"
-	contracttestbridge "github.com/Ryvion/ryvion-node/internal/inference/speculative/draft/contract_test_bridge"
+	draftbridge "github.com/Ryvion/ryvion-node/internal/inference/speculative/draft/contract_test_bridge"
+	contracttestverifier "github.com/Ryvion/ryvion-node/internal/inference/speculative/verify/contract_test_bridge"
 )
 
 const (
@@ -192,7 +193,7 @@ func decodeForesightNativeHotSessionSpec(specJSON string, expectedTask string) (
 }
 
 func buildForesightNativeDraftPackets(spec foresightNativeDraftSpec) []map[string]any {
-	return contracttestbridge.BuildPackets(spec)
+	return draftbridge.BuildPackets(spec)
 }
 
 func processOptionalForesightNativeVerifier(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
@@ -233,8 +234,12 @@ func processOptionalForesightNativeVerifier(ctx context.Context, client *hub.Cli
 				"tree_cid":     treeCID,
 			},
 			"probe_summary": map[string]any{
-				"confidence_bps": 8200,
-				"source":         "native_node_agent_contract_verifier",
+				"confidence_bps":   8200,
+				"source":           contracttestverifier.Source,
+				"backend":          contracttestverifier.Backend,
+				"production_valid": false,
+				"test_adapter":     true,
+				"billing_status":   "not_billable_contract_test",
 			},
 		},
 	})
@@ -297,33 +302,13 @@ func processOptionalForesightNativeVerifierHotSession(ctx context.Context, clien
 		case "verify_tree":
 			commandID := firstNonEmptyString(command.CommandID, fmt.Sprintf("%s:%s:%d", spec.RunID, command.WindowID, command.WaveIndex))
 			if !verifiedCommands[commandID] {
-				waveStarted := time.Now()
-				acceptedLen, treeCID := foresightAcceptedFromCommandTree(command)
-				text := foresightAcceptedTextForWave(spec.Prompt, command.WaveIndex, acceptedLen)
-				if text != "" {
-					acceptedText.WriteString(text)
-				}
-				result := hub.ForesightLiveLabVerifierResult{
-					JobID:              work.JobID,
-					WindowID:           command.WindowID,
-					WaveIndex:          command.WaveIndex,
-					AcceptedLen:        acceptedLen,
-					TreeCID:            treeCID,
-					DurationMs:         maxInt64Node(1, time.Since(waveStarted).Milliseconds()),
-					AcceptedText:       text,
-					AcceptedTextPublic: true,
-					EOS:                false,
-					ProbeSummary: map[string]any{
-						"confidence_bps": 8200,
-						"source":         "native_node_agent_hot_verifier",
-					},
-				}
-				if spec.MaxTokens > 0 && totalAccepted+acceptedLen >= spec.MaxTokens {
-					result.StopReason = "max_tokens"
-				}
+				result := contracttestverifier.VerifyWave(work.JobID, spec, command, totalAccepted)
 				if err := client.SubmitForesightLiveLabVerifierResult(ctx, spec.RunID, result); err == nil {
-					totalAccepted += acceptedLen
+					totalAccepted += result.AcceptedLen
 					waves++
+					if strings.TrimSpace(result.AcceptedText) != "" {
+						acceptedText.WriteString(result.AcceptedText)
+					}
 					verifiedCommands[commandID] = true
 				}
 			}
@@ -363,8 +348,12 @@ func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Cl
 				"hot_session_finalized": true,
 			},
 			"probe_summary": map[string]any{
-				"confidence_bps": 8200,
-				"source":         "native_node_agent_hot_verifier",
+				"confidence_bps":   8200,
+				"source":           contracttestverifier.Source,
+				"backend":          contracttestverifier.Backend,
+				"production_valid": false,
+				"test_adapter":     true,
+				"billing_status":   "not_billable_contract_test",
 			},
 		},
 	})
@@ -423,7 +412,7 @@ func foresightNativeExternalRuntimeRequested(work *hub.WorkAssignment, executorK
 }
 
 func foresightDraftBackendIsNativeBridge(backend string) bool {
-	return contracttestbridge.IsBackend(backend)
+	return draftbridge.IsBackend(backend)
 }
 
 func foresightVerifierBackendKind(backend string) string {
@@ -460,10 +449,6 @@ var errNativeSGLangUnavailable = errors.New("native_sglang_verifier_unavailable"
 
 func foresightAcceptedFromCommandTree(command hub.ForesightLiveLabSessionCommand) (int, string) {
 	return nodespec.AcceptedFromTree(command.Tree, command.CommandID)
-}
-
-func foresightAcceptedTextForWave(prompt string, wave int, acceptedLen int) string {
-	return nodespec.AcceptedTextForWave(prompt, wave, acceptedLen)
 }
 
 func foresightDeterministicTokens(seed string, branch int, horizon int) []int {
