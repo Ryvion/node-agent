@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
+	llamacppdemo "github.com/Ryvion/ryvion-node/internal/inference/speculative/verify/llamacpp_demo"
 	sglangverify "github.com/Ryvion/ryvion-node/internal/inference/speculative/verify/sglang"
 	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
@@ -170,7 +171,7 @@ func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
 		TotalTimeMs:              25,
 		Streamed:                 true,
 	}}
-	verifier := nativeLlamaCppVerifier{Sidecar: sidecar, Client: client}
+	verifier := llamacppdemo.Verifier{Sidecar: sidecar, Client: client}
 
 	result, err := verifier.VerifyWave(context.Background(), foresightNativeHotSessionSpec{
 		RunID:            "flab_llama",
@@ -260,9 +261,9 @@ func TestNativeLlamaCppLabStopReasonKeepsBackendStopSeparateFromLabStop(t *testi
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotReason, gotEOS := nativeLlamaCppLabStopReason(tt.completion)
+			gotReason, gotEOS := llamacppdemo.LabStopReason(tt.completion)
 			if gotReason != tt.wantReason || gotEOS != tt.wantEOS {
-				t.Fatalf("nativeLlamaCppLabStopReason() = %q/%v, want %q/%v", gotReason, gotEOS, tt.wantReason, tt.wantEOS)
+				t.Fatalf("llamacppdemo.LabStopReason() = %q/%v, want %q/%v", gotReason, gotEOS, tt.wantReason, tt.wantEOS)
 			}
 		})
 	}
@@ -276,7 +277,7 @@ func TestNativeLlamaCppVerifierUnavailableDoesNotUseDeterministicCPUFallback(t *
 		Reason:    "llama-server binary not detected",
 	}}
 	client := &fakeForesightLlamaCppCompletionClient{}
-	verifier := nativeLlamaCppVerifier{Sidecar: sidecar, Client: client}
+	verifier := llamacppdemo.Verifier{Sidecar: sidecar, Client: client}
 
 	_, err := verifier.VerifyWave(context.Background(), foresightNativeHotSessionSpec{
 		RunID:       "flab_llama",
