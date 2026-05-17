@@ -10,8 +10,8 @@ import (
 )
 
 type LiveLabDraftClient interface {
-	FetchForesightLiveLabDraftCommand(ctx context.Context, runID string, jobID string) (hub.ForesightLiveLabSessionCommand, error)
-	SubmitForesightDraftPacketBatch(ctx context.Context, windowID string, packets []map[string]any) (hub.DraftPacketBatchDecision, error)
+	FetchSpeculativeLiveLabDraftCommand(ctx context.Context, runID string, jobID string) (hub.SpeculativeLiveLabSessionCommand, error)
+	SubmitSpeculativeDraftPacketBatch(ctx context.Context, windowID string, packets []map[string]any) (hub.DraftPacketBatchDecision, error)
 }
 
 type HotSessionResult struct {
@@ -30,7 +30,7 @@ func RunHotSession(ctx context.Context, client LiveLabDraftClient, spec nodespec
 	defer ticker.Stop()
 
 	for {
-		command, err := client.FetchForesightLiveLabDraftCommand(ctx, spec.RunID, jobID)
+		command, err := client.FetchSpeculativeLiveLabDraftCommand(ctx, spec.RunID, jobID)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -62,7 +62,7 @@ func RunHotSession(ctx context.Context, client LiveLabDraftClient, spec nodespec
 					FirstPacketTimeoutMs: command.FirstPacketTimeout,
 				}
 				packets := BuildPackets(draftSpec)
-				summary, _ := client.SubmitForesightDraftPacketBatch(ctx, windowID, packets)
+				summary, _ := client.SubmitSpeculativeDraftPacketBatch(ctx, windowID, packets)
 				result.AcceptedPackets += summary.Accepted
 				result.RawPackets += len(packets)
 				result.Waves++

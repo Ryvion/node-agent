@@ -45,7 +45,7 @@ func IsVerifierSessionSpec(specJSON string) bool {
 		return true
 	}
 	task := strings.TrimSpace(stringFromMap(job, "task"))
-	return task == "verifier_session_v8" || task == "v8_verifier_session"
+	return task == "verifier_session"
 }
 
 func ExecuteVerifierSessionRPC(ctx context.Context, socketPath, specJSON string) (VerifierSessionExecution, error) {

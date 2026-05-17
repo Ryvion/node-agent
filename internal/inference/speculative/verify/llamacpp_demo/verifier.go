@@ -35,7 +35,7 @@ func NewVerifierFromEnv() Verifier {
 	}
 }
 
-func (v Verifier) VerifyWave(ctx context.Context, spec nodespec.HotSessionSpec, command hub.ForesightLiveLabSessionCommand, acceptedTokensTotal int) (hub.ForesightLiveLabVerifierResult, error) {
+func (v Verifier) VerifyWave(ctx context.Context, spec nodespec.HotSessionSpec, command hub.SpeculativeLiveLabSessionCommand, acceptedTokensTotal int) (hub.SpeculativeLiveLabVerifierResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -43,7 +43,7 @@ func (v Verifier) VerifyWave(ctx context.Context, spec nodespec.HotSessionSpec, 
 	sidecar := v.sidecar()
 	status := sidecar.Start(ctx)
 	if !StatusReady(status) {
-		return hub.ForesightLiveLabVerifierResult{}, ErrUnavailable
+		return hub.SpeculativeLiveLabVerifierResult{}, ErrUnavailable
 	}
 	acceptedLimit, treeCID := nodespec.AcceptedFromTree(command.Tree, command.CommandID)
 	remaining := 0
@@ -71,7 +71,7 @@ func (v Verifier) VerifyWave(ctx context.Context, spec nodespec.HotSessionSpec, 
 	}
 	completion, err := v.client().Complete(ctx, req)
 	if err != nil {
-		return hub.ForesightLiveLabVerifierResult{}, err
+		return hub.SpeculativeLiveLabVerifierResult{}, err
 	}
 	text := strings.TrimSpace(string(completion.Output))
 	tokensGenerated := int(completion.TokensGenerated)
@@ -87,7 +87,7 @@ func (v Verifier) VerifyWave(ctx context.Context, spec nodespec.HotSessionSpec, 
 		durationMs = maxInt64(1, time.Since(started).Milliseconds())
 	}
 	stopReason, eos := LabStopReason(completion)
-	result := hub.ForesightLiveLabVerifierResult{
+	result := hub.SpeculativeLiveLabVerifierResult{
 		WindowID:           command.WindowID,
 		WaveIndex:          command.WaveIndex,
 		AcceptedLen:        acceptedLen,
@@ -131,7 +131,7 @@ func SystemPrompt() string {
 	return "You are Ryvion's local llama.cpp verifier. Verify the speculative draft tree against the prompt and return only the accepted continuation text."
 }
 
-func VerifierPrompt(spec nodespec.HotSessionSpec, command hub.ForesightLiveLabSessionCommand, treeCID string, acceptedLimit int) string {
+func VerifierPrompt(spec nodespec.HotSessionSpec, command hub.SpeculativeLiveLabSessionCommand, treeCID string, acceptedLimit int) string {
 	branchCount := len(sliceFromAny(command.Tree["branches"]))
 	return strings.Join([]string{
 		"Verify this Ryvion speculative draft wave locally.",

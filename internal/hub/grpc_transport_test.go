@@ -252,11 +252,11 @@ func TestClientSubmitDraftPacketBatchUsesNodeGatewayStreamWhenAvailable(t *testi
 	})
 
 	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
-	decision, err := client.SubmitForesightDraftPacketBatch(context.Background(), "win-gateway", []map[string]any{
+	decision, err := client.SubmitSpeculativeDraftPacketBatch(context.Background(), "win-gateway", []map[string]any{
 		{"packet_id": "pkt-a", "candidate_tokens": []int{1, 2, 3}},
 	})
 	if err != nil {
-		t.Fatalf("SubmitForesightDraftPacketBatch() error = %v", err)
+		t.Fatalf("SubmitSpeculativeDraftPacketBatch() error = %v", err)
 	}
 	if decision.WindowID != "win-gateway" || decision.Accepted != 1 || len(decision.Decisions) != 1 || decision.Decisions[0].PacketID != "pkt-a" {
 		t.Fatalf("unexpected draft batch decision: %#v", decision)
@@ -272,7 +272,7 @@ func TestClientFetchLiveLabCommandUsesExperimentalGatewayStreamWhenAvailable(t *
 		t.Fatalf("GenerateKey() error = %v", err)
 	}
 	payload, err := structpb.NewStruct(map[string]any{
-		"schema_version":            "ryvion.foresight_live_lab.session_command.v1",
+		"schema_version":            "ryvion.speculative_live_lab.session_command.v1",
 		"run_id":                    "flab-gateway",
 		"job_id":                    "job-draft",
 		"role":                      "draft_worker",
@@ -295,7 +295,7 @@ func TestClientFetchLiveLabCommandUsesExperimentalGatewayStreamWhenAvailable(t *
 		t.Fatalf("command payload: %v", err)
 	}
 	fake := &fakeExperimentalLiveLabGatewayServer{liveLabCommand: &experimentsv1.LiveLabCommand{
-		SchemaVersion: "ryvion.foresight_live_lab.session_command.v1",
+		SchemaVersion: "ryvion.speculative_live_lab.session_command.v1",
 		RunId:         "flab-gateway",
 		JobId:         "job-draft",
 		Role:          "draft_worker",
@@ -318,9 +318,9 @@ func TestClientFetchLiveLabCommandUsesExperimentalGatewayStreamWhenAvailable(t *
 	})
 
 	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
-	command, err := client.FetchForesightLiveLabDraftCommand(context.Background(), "flab-gateway", "job-draft")
+	command, err := client.FetchSpeculativeLiveLabDraftCommand(context.Background(), "flab-gateway", "job-draft")
 	if err != nil {
-		t.Fatalf("FetchForesightLiveLabDraftCommand() error = %v", err)
+		t.Fatalf("FetchSpeculativeLiveLabDraftCommand() error = %v", err)
 	}
 	if command.Command != "generate_draft_packets" ||
 		command.RunID != "flab-gateway" ||
@@ -359,7 +359,7 @@ func TestClientSubmitLiveLabVerifierResultUsesExperimentalGatewayStreamWhenAvail
 	})
 
 	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
-	err = client.SubmitForesightLiveLabVerifierResult(context.Background(), "flab-gateway", ForesightLiveLabVerifierResult{
+	err = client.SubmitSpeculativeLiveLabVerifierResult(context.Background(), "flab-gateway", SpeculativeLiveLabVerifierResult{
 		JobID:              "job-verify",
 		WindowID:           "win-gateway",
 		WaveIndex:          1,
@@ -373,7 +373,7 @@ func TestClientSubmitLiveLabVerifierResultUsesExperimentalGatewayStreamWhenAvail
 		ProbeSummary:       map[string]any{"backend": "sglang"},
 	})
 	if err != nil {
-		t.Fatalf("SubmitForesightLiveLabVerifierResult() error = %v", err)
+		t.Fatalf("SubmitSpeculativeLiveLabVerifierResult() error = %v", err)
 	}
 	if fake.liveLabVerifierResult == nil ||
 		fake.liveLabVerifierResult.GetRunId() != "flab-gateway" ||
@@ -525,7 +525,7 @@ func (s *fakeExperimentalLiveLabGatewayServer) Connect(stream experimentsv1.Expe
 		command := s.liveLabCommand
 		if command == nil {
 			command = &experimentsv1.LiveLabCommand{
-				SchemaVersion: "ryvion.foresight_live_lab.session_command.v1",
+				SchemaVersion: "ryvion.speculative_live_lab.session_command.v1",
 				RunId:         request.GetRunId(),
 				JobId:         request.GetJobId(),
 				Role:          request.GetRole(),
@@ -552,7 +552,7 @@ func (s *fakeExperimentalLiveLabGatewayServer) Connect(stream experimentsv1.Expe
 			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
 			Payload: &experimentsv1.LiveLabHubToNode_VerifierResultAck{
 				VerifierResultAck: &experimentsv1.LiveLabVerifierResultAck{
-					SchemaVersion: "ryvion.foresight_live_lab.verifier_result_ack.v1",
+					SchemaVersion: "ryvion.speculative_live_lab.verifier_result_ack.v1",
 					Status:        status,
 					RunId:         result.GetRunId(),
 					WindowId:      result.GetWindowId(),

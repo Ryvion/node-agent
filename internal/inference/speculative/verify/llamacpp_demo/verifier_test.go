@@ -36,7 +36,7 @@ func TestVerifierVerifyWaveUsesMeasuredCompletion(t *testing.T) {
 		Prompt:           "Write one short sentence.",
 		ParentPrefixHash: "sha256:prefix",
 		MaxTokens:        8,
-	}, hub.ForesightLiveLabSessionCommand{
+	}, hub.SpeculativeLiveLabSessionCommand{
 		CommandID:   "cmd_1",
 		WindowID:    "win_llama",
 		WaveIndex:   1,
@@ -94,7 +94,7 @@ func TestVerifierUnavailableDoesNotUseSyntheticFallback(t *testing.T) {
 		RunID:       "flab_llama",
 		WorkGraphID: "wg_llama",
 		ModelID:     "tinyllama",
-	}, hub.ForesightLiveLabSessionCommand{
+	}, hub.SpeculativeLiveLabSessionCommand{
 		CommandID: "cmd_1",
 		WindowID:  "win_llama",
 		Tree:      map[string]any{"tree_cid": "sha256:tree"},

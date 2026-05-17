@@ -637,7 +637,7 @@ func TestSubmitReceiptSignsExpectedMessage(t *testing.T) {
 	}
 }
 
-func TestSubmitForesightDraftPacketUsesWindowEndpointAndAdminKey(t *testing.T) {
+func TestSubmitSpeculativeDraftPacketUsesWindowEndpointAndAdminKey(t *testing.T) {
 	var gotPath string
 	var gotAdmin string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -654,17 +654,17 @@ func TestSubmitForesightDraftPacketUsesWindowEndpointAndAdminKey(t *testing.T) {
 			t.Fatalf("body = %#v", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"schema_version":"ryvion.foresight.draft_packet_decision.v1","accepted":true,"reason":"accepted","packet_id":"pkt-client"}`))
+		_, _ = w.Write([]byte(`{"schema_version":"ryvion.speculative.draft_packet_decision.v1","accepted":true,"reason":"accepted","packet_id":"pkt-client"}`))
 	}))
 	defer ts.Close()
 
 	pub, priv := testKeyPair()
 	c := New(ts.URL, pub, priv, WithAdminKey("admin-secret"))
-	decision, err := c.SubmitForesightDraftPacket(context.Background(), "win-client", map[string]any{"packet_id": "pkt-client"})
+	decision, err := c.SubmitSpeculativeDraftPacket(context.Background(), "win-client", map[string]any{"packet_id": "pkt-client"})
 	if err != nil {
-		t.Fatalf("SubmitForesightDraftPacket() error = %v", err)
+		t.Fatalf("SubmitSpeculativeDraftPacket() error = %v", err)
 	}
-	if gotPath != "/v8/foresight/windows/win-client/draft-packets" {
+	if gotPath != "/api/v1/speculative/windows/win-client/draft-packets" {
 		t.Fatalf("path = %q", gotPath)
 	}
 	if gotAdmin != "admin-secret" {
@@ -675,7 +675,7 @@ func TestSubmitForesightDraftPacketUsesWindowEndpointAndAdminKey(t *testing.T) {
 	}
 }
 
-func TestSubmitForesightDraftPacketBatchUsesBatchEndpoint(t *testing.T) {
+func TestSubmitSpeculativeDraftPacketBatchUsesBatchEndpoint(t *testing.T) {
 	var gotPath string
 	var gotAdmin string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -693,20 +693,20 @@ func TestSubmitForesightDraftPacketBatchUsesBatchEndpoint(t *testing.T) {
 			t.Fatalf("body packets = %#v", body["packets"])
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"schema_version":"ryvion.foresight.draft_packet_batch_decision.v1","window_id":"win-client","attempted":2,"accepted":2,"rejected":0,"decisions":[{"accepted":true,"reason":"accepted","packet_id":"pkt-a"},{"accepted":true,"reason":"accepted","packet_id":"pkt-b"}]}`))
+		_, _ = w.Write([]byte(`{"schema_version":"ryvion.speculative.draft_packet_batch_decision.v1","window_id":"win-client","attempted":2,"accepted":2,"rejected":0,"decisions":[{"accepted":true,"reason":"accepted","packet_id":"pkt-a"},{"accepted":true,"reason":"accepted","packet_id":"pkt-b"}]}`))
 	}))
 	defer ts.Close()
 
 	pub, priv := testKeyPair()
 	c := New(ts.URL, pub, priv, WithAdminKey("admin-secret"))
-	decision, err := c.SubmitForesightDraftPacketBatch(context.Background(), "win-client", []map[string]any{
+	decision, err := c.SubmitSpeculativeDraftPacketBatch(context.Background(), "win-client", []map[string]any{
 		{"packet_id": "pkt-a"},
 		{"packet_id": "pkt-b"},
 	})
 	if err != nil {
-		t.Fatalf("SubmitForesightDraftPacketBatch() error = %v", err)
+		t.Fatalf("SubmitSpeculativeDraftPacketBatch() error = %v", err)
 	}
-	if gotPath != "/v8/foresight/windows/win-client/draft-packets/batch" {
+	if gotPath != "/api/v1/speculative/windows/win-client/draft-packets/batch" {
 		t.Fatalf("path = %q", gotPath)
 	}
 	if gotAdmin != "admin-secret" {
@@ -717,13 +717,13 @@ func TestSubmitForesightDraftPacketBatchUsesBatchEndpoint(t *testing.T) {
 	}
 }
 
-func TestSubmitForesightLiveLabVerifierResultRedactsAcceptedTextForHTTPFallback(t *testing.T) {
+func TestSubmitSpeculativeLiveLabVerifierResultRedactsAcceptedTextForHTTPFallback(t *testing.T) {
 	var body map[string]any
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
 		}
-		if r.URL.Path != "/api/v1/node/foresight/live-lab/runs/flab-client/verifier-results" {
+		if r.URL.Path != "/api/v1/node/speculative/live-lab/runs/flab-client/verifier-results" {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -735,7 +735,7 @@ func TestSubmitForesightLiveLabVerifierResultRedactsAcceptedTextForHTTPFallback(
 
 	pub, priv := testKeyPair()
 	client := New(ts.URL, pub, priv)
-	err := client.SubmitForesightLiveLabVerifierResult(context.Background(), "flab-client", ForesightLiveLabVerifierResult{
+	err := client.SubmitSpeculativeLiveLabVerifierResult(context.Background(), "flab-client", SpeculativeLiveLabVerifierResult{
 		JobID:              "job-verify",
 		WindowID:           "win-client",
 		WaveIndex:          1,
@@ -744,7 +744,7 @@ func TestSubmitForesightLiveLabVerifierResultRedactsAcceptedTextForHTTPFallback(
 		AcceptedTextPublic: true,
 	})
 	if err != nil {
-		t.Fatalf("SubmitForesightLiveLabVerifierResult() error = %v", err)
+		t.Fatalf("SubmitSpeculativeLiveLabVerifierResult() error = %v", err)
 	}
 	if body["accepted_text"] != nil {
 		t.Fatalf("HTTP fallback leaked accepted_text: %#v", body)

@@ -15,7 +15,7 @@ import (
 
 func TestDecodeSpeculativeNativeDraftSpecBuildsPackets(t *testing.T) {
 	specJSON := `{
-		"task":"draft_runner_v8",
+		"task":"draft_runner",
 		"draft_backend":"native_bridge",
 		"workgraph_id":"wg-live",
 		"window_id":"win-live",
@@ -63,7 +63,7 @@ func TestDecodeSpeculativeNativeDraftSpecBuildsPackets(t *testing.T) {
 
 func TestDecodeSpeculativeNativeVerifierSpecAcceptsTree(t *testing.T) {
 	specJSON := `{
-		"task":"verifier_session_v8",
+		"task":"verifier_session",
 		"tree":{
 			"tree_cid":"sha256:tree",
 			"branches":[
@@ -89,7 +89,7 @@ func TestDecodeSpeculativeNativeVerifierSpecAcceptsTree(t *testing.T) {
 
 func TestDecodeSpeculativeNativeHotSessionSpecPreservesNativeSGLangFields(t *testing.T) {
 	specJSON := `{
-		"task":"verifier_session_v8_hot",
+		"task":"verifier_session_hot",
 		"executor_kind":"native_report",
 		"docker_required":false,
 		"verifier_backend":"native_sglang",
@@ -181,7 +181,7 @@ func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
 		Prompt:           "Write one short sentence.",
 		ParentPrefixHash: "sha256:prefix",
 		MaxTokens:        8,
-	}, hub.ForesightLiveLabSessionCommand{
+	}, hub.SpeculativeLiveLabSessionCommand{
 		CommandID:   "cmd_1",
 		WindowID:    "win_llama",
 		WaveIndex:   1,
@@ -283,7 +283,7 @@ func TestNativeLlamaCppVerifierUnavailableDoesNotUseDeterministicCPUFallback(t *
 		RunID:       "flab_llama",
 		WorkGraphID: "wg_llama",
 		ModelID:     "tinyllama",
-	}, hub.ForesightLiveLabSessionCommand{
+	}, hub.SpeculativeLiveLabSessionCommand{
 		CommandID: "cmd_1",
 		WindowID:  "win_llama",
 		Tree:      map[string]any{"tree_cid": "sha256:tree"},

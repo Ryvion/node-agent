@@ -24,7 +24,7 @@ const (
 	speculativeVerifierBackendBridge   = nodespec.VerifierBackendBridge
 	speculativeVerifierBackendSGLang   = nodespec.VerifierBackendSGLang
 	speculativeVerifierBackendLlamaCpp = nodespec.VerifierBackendLlamaCpp
-	defaultNativeDraftConfidenceBPS  = nodespec.DefaultNativeDraftConfidenceBPS
+	defaultNativeDraftConfidenceBPS    = nodespec.DefaultNativeDraftConfidenceBPS
 )
 
 type speculativeNativeDraftSpec = nodespec.DraftSpec
@@ -366,7 +366,7 @@ func submitSpeculativeNativeUnsupportedReceipt(ctx context.Context, client *hub.
 
 var errNativeSGLangUnavailable = errors.New("native_sglang_verifier_unavailable")
 
-func speculativeAcceptedFromCommandTree(command hub.ForesightLiveLabSessionCommand) (int, string) {
+func speculativeAcceptedFromCommandTree(command hub.SpeculativeLiveLabSessionCommand) (int, string) {
 	return nodespec.AcceptedFromTree(command.Tree, command.CommandID)
 }
 

@@ -539,10 +539,10 @@ func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string
 	}, nil
 }
 
-func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, runID string, jobID string, role string) (ForesightLiveLabSessionCommand, error) {
+func (c *Client) fetchSpeculativeLiveLabSessionCommandGRPC(ctx context.Context, runID string, jobID string, role string) (SpeculativeLiveLabSessionCommand, error) {
 	client, err := c.experimentalLiveLabGatewayClient(ctx)
 	if err != nil {
-		return ForesightLiveLabSessionCommand{}, err
+		return SpeculativeLiveLabSessionCommand{}, err
 	}
 	ts := time.Now().UnixMilli()
 	pubHex := c.pubHex()
@@ -550,7 +550,7 @@ func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, ru
 	defer cancel()
 	stream, err := client.Connect(ctx)
 	if err != nil {
-		return ForesightLiveLabSessionCommand{}, err
+		return SpeculativeLiveLabSessionCommand{}, err
 	}
 	if err := stream.Send(&experimentsv1.LiveLabNodeToHub{
 		NodeId:          pubHex,
@@ -569,18 +569,18 @@ func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, ru
 			Signature: c.sign("node_auth", pubHex, strconv.FormatInt(ts, 10)),
 		},
 	}); err != nil {
-		return ForesightLiveLabSessionCommand{}, err
+		return SpeculativeLiveLabSessionCommand{}, err
 	}
 	resp, err := stream.Recv()
 	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
 		err = closeErr
 	}
 	if err != nil {
-		return ForesightLiveLabSessionCommand{}, err
+		return SpeculativeLiveLabSessionCommand{}, err
 	}
 	command := resp.GetCommand()
 	if command == nil {
-		return ForesightLiveLabSessionCommand{}, status.Error(codes.Internal, "live lab command missing")
+		return SpeculativeLiveLabSessionCommand{}, status.Error(codes.Internal, "live lab command missing")
 	}
 	payload := map[string]any{}
 	if command.GetPayload() != nil {
@@ -593,18 +593,18 @@ func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, ru
 	payload["command"] = command.GetCommand()
 	payload["command_id"] = command.GetCommandId()
 	payload["reason"] = command.GetReason()
-	var out ForesightLiveLabSessionCommand
+	var out SpeculativeLiveLabSessionCommand
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return ForesightLiveLabSessionCommand{}, err
+		return SpeculativeLiveLabSessionCommand{}, err
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return ForesightLiveLabSessionCommand{}, err
+		return SpeculativeLiveLabSessionCommand{}, err
 	}
 	return out, nil
 }
 
-func (c *Client) submitForesightLiveLabVerifierResultGRPC(ctx context.Context, runID string, result ForesightLiveLabVerifierResult) error {
+func (c *Client) submitSpeculativeLiveLabVerifierResultGRPC(ctx context.Context, runID string, result SpeculativeLiveLabVerifierResult) error {
 	client, err := c.experimentalLiveLabGatewayClient(ctx)
 	if err != nil {
 		return err

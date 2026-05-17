@@ -315,10 +315,6 @@ func (c *Client) SubmitReceipt(ctx context.Context, receipt Receipt) error {
 	return c.post(ctx, "/api/v1/node/receipt", body, nil)
 }
 
-func (c *Client) SubmitForesightDraftPacket(ctx context.Context, windowID string, packet map[string]any) (DraftPacketDecision, error) {
-	return c.SubmitSpeculativeDraftPacket(ctx, windowID, packet)
-}
-
 func (c *Client) SubmitSpeculativeDraftPacket(ctx context.Context, windowID string, packet map[string]any) (DraftPacketDecision, error) {
 	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {
@@ -349,12 +345,8 @@ func (c *Client) SubmitSpeculativeDraftPacket(ctx context.Context, windowID stri
 		headers["X-Admin-Key"] = c.adminKey
 	}
 	var out DraftPacketDecision
-	err := c.postWithHeaders(ctx, "/v8/foresight/windows/"+url.PathEscape(windowID)+"/draft-packets", packet, &out, headers)
+	err := c.postWithHeaders(ctx, "/api/v1/speculative/windows/"+url.PathEscape(windowID)+"/draft-packets", packet, &out, headers)
 	return out, err
-}
-
-func (c *Client) SubmitForesightDraftPacketBatch(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
-	return c.SubmitSpeculativeDraftPacketBatch(ctx, windowID, packets)
 }
 
 func (c *Client) SubmitSpeculativeDraftPacketBatch(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
@@ -377,11 +369,11 @@ func (c *Client) SubmitSpeculativeDraftPacketBatch(ctx context.Context, windowID
 		headers["X-Admin-Key"] = c.adminKey
 	}
 	var out DraftPacketBatchDecision
-	err := c.postWithHeaders(ctx, "/v8/foresight/windows/"+url.PathEscape(windowID)+"/draft-packets/batch", map[string]any{"packets": packets}, &out, headers)
+	err := c.postWithHeaders(ctx, "/api/v1/speculative/windows/"+url.PathEscape(windowID)+"/draft-packets/batch", map[string]any{"packets": packets}, &out, headers)
 	return out, err
 }
 
-type ForesightLiveLabSessionCommand struct {
+type SpeculativeLiveLabSessionCommand struct {
 	SchemaVersion       string         `json:"schema_version"`
 	Command             string         `json:"command"`
 	CommandID           string         `json:"command_id,omitempty"`
@@ -408,7 +400,7 @@ type ForesightLiveLabSessionCommand struct {
 	Tree                map[string]any `json:"tree,omitempty"`
 }
 
-type ForesightLiveLabVerifierResult struct {
+type SpeculativeLiveLabVerifierResult struct {
 	JobID              string         `json:"job_id"`
 	WindowID           string         `json:"window_id"`
 	WaveIndex          int            `json:"wave_index"`
@@ -423,56 +415,56 @@ type ForesightLiveLabVerifierResult struct {
 	ProbeSummary       map[string]any `json:"probe_summary,omitempty"`
 }
 
-func (c *Client) FetchForesightLiveLabDraftCommand(ctx context.Context, runID string, jobID string) (ForesightLiveLabSessionCommand, error) {
-	return c.fetchForesightLiveLabSessionCommand(ctx, runID, jobID, "draft-command")
+func (c *Client) FetchSpeculativeLiveLabDraftCommand(ctx context.Context, runID string, jobID string) (SpeculativeLiveLabSessionCommand, error) {
+	return c.fetchSpeculativeLiveLabSessionCommand(ctx, runID, jobID, "draft-command")
 }
 
-func (c *Client) FetchForesightLiveLabVerifierCommand(ctx context.Context, runID string, jobID string) (ForesightLiveLabSessionCommand, error) {
-	return c.fetchForesightLiveLabSessionCommand(ctx, runID, jobID, "verifier-command")
+func (c *Client) FetchSpeculativeLiveLabVerifierCommand(ctx context.Context, runID string, jobID string) (SpeculativeLiveLabSessionCommand, error) {
+	return c.fetchSpeculativeLiveLabSessionCommand(ctx, runID, jobID, "verifier-command")
 }
 
-func (c *Client) fetchForesightLiveLabSessionCommand(ctx context.Context, runID string, jobID string, commandPath string) (ForesightLiveLabSessionCommand, error) {
+func (c *Client) fetchSpeculativeLiveLabSessionCommand(ctx context.Context, runID string, jobID string, commandPath string) (SpeculativeLiveLabSessionCommand, error) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
-		return ForesightLiveLabSessionCommand{}, fmt.Errorf("run_id required")
+		return SpeculativeLiveLabSessionCommand{}, fmt.Errorf("run_id required")
 	}
 	if c.useGRPCTransport() {
 		role := "target_verifier"
 		if commandPath == "draft-command" {
 			role = "draft_worker"
 		}
-		if out, err := c.fetchForesightLiveLabSessionCommandGRPC(ctx, runID, jobID, role); err == nil || !c.shouldFallbackGRPC(err) {
+		if out, err := c.fetchSpeculativeLiveLabSessionCommandGRPC(ctx, runID, jobID, role); err == nil || !c.shouldFallbackGRPC(err) {
 			return out, err
 		}
 	}
-	u := "/api/v1/node/foresight/live-lab/runs/" + url.PathEscape(runID) + "/" + commandPath
+	u := "/api/v1/node/speculative/live-lab/runs/" + url.PathEscape(runID) + "/" + commandPath
 	if strings.TrimSpace(jobID) != "" {
 		u += "?job_id=" + url.QueryEscape(strings.TrimSpace(jobID))
 	}
 	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
-	var out ForesightLiveLabSessionCommand
+	var out SpeculativeLiveLabSessionCommand
 	if err := c.getWithHeaders(ctx, u, &out, headers); err != nil {
-		return ForesightLiveLabSessionCommand{}, err
+		return SpeculativeLiveLabSessionCommand{}, err
 	}
 	return out, nil
 }
 
-func (c *Client) SubmitForesightLiveLabVerifierResult(ctx context.Context, runID string, result ForesightLiveLabVerifierResult) error {
+func (c *Client) SubmitSpeculativeLiveLabVerifierResult(ctx context.Context, runID string, result SpeculativeLiveLabVerifierResult) error {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return fmt.Errorf("run_id required")
 	}
-	result = sanitizeForesightLiveLabVerifierResult(result)
+	result = sanitizeSpeculativeLiveLabVerifierResult(result)
 	if c.useGRPCTransport() {
-		if err := c.submitForesightLiveLabVerifierResultGRPC(ctx, runID, result); err == nil || !c.shouldFallbackGRPC(err) {
+		if err := c.submitSpeculativeLiveLabVerifierResultGRPC(ctx, runID, result); err == nil || !c.shouldFallbackGRPC(err) {
 			return err
 		}
 	}
 	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
-	return c.postWithHeaders(ctx, "/api/v1/node/foresight/live-lab/runs/"+url.PathEscape(runID)+"/verifier-results", result, nil, headers)
+	return c.postWithHeaders(ctx, "/api/v1/node/speculative/live-lab/runs/"+url.PathEscape(runID)+"/verifier-results", result, nil, headers)
 }
 
-func sanitizeForesightLiveLabVerifierResult(result ForesightLiveLabVerifierResult) ForesightLiveLabVerifierResult {
+func sanitizeSpeculativeLiveLabVerifierResult(result SpeculativeLiveLabVerifierResult) SpeculativeLiveLabVerifierResult {
 	if strings.TrimSpace(result.AcceptedText) != "" && strings.TrimSpace(result.AcceptedTextHash) == "" {
 		sum := sha256.Sum256([]byte(result.AcceptedText))
 		result.AcceptedTextHash = "sha256:" + hex.EncodeToString(sum[:])

@@ -11,8 +11,8 @@ import (
 )
 
 type LiveLabVerifierClient interface {
-	FetchForesightLiveLabVerifierCommand(ctx context.Context, runID string, jobID string) (hub.ForesightLiveLabSessionCommand, error)
-	SubmitForesightLiveLabVerifierResult(ctx context.Context, runID string, result hub.ForesightLiveLabVerifierResult) error
+	FetchSpeculativeLiveLabVerifierCommand(ctx context.Context, runID string, jobID string) (hub.SpeculativeLiveLabSessionCommand, error)
+	SubmitSpeculativeLiveLabVerifierResult(ctx context.Context, runID string, result hub.SpeculativeLiveLabVerifierResult) error
 }
 
 type HotSessionResult struct {
@@ -35,7 +35,7 @@ func RunHotSession(ctx context.Context, client LiveLabVerifierClient, socketPath
 	defer ticker.Stop()
 
 	for {
-		command, err := client.FetchForesightLiveLabVerifierCommand(ctx, spec.RunID, jobID)
+		command, err := client.FetchSpeculativeLiveLabVerifierCommand(ctx, spec.RunID, jobID)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -103,7 +103,7 @@ func RunHotSession(ctx context.Context, client LiveLabVerifierClient, socketPath
 				_, _ = RPC(ctx, socketPath, "rollback", map[string]any{"session_id": spec.SessionID, "branch_ids": acceptedReceipt["rollback_branch_ids"]})
 			}
 			durationMs := maxInt64(1, firstPositiveInt64(int64FromAny(acceptedReceipt["latency_ms"]), time.Since(waveStarted).Milliseconds()))
-			result := hub.ForesightLiveLabVerifierResult{
+			result := hub.SpeculativeLiveLabVerifierResult{
 				JobID:              jobID,
 				WindowID:           command.WindowID,
 				WaveIndex:          command.WaveIndex,
@@ -119,7 +119,7 @@ func RunHotSession(ctx context.Context, client LiveLabVerifierClient, socketPath
 			if spec.MaxTokens > 0 && state.TotalAccepted+acceptedLen >= spec.MaxTokens && result.StopReason == "" {
 				result.StopReason = "max_tokens"
 			}
-			if err := client.SubmitForesightLiveLabVerifierResult(ctx, spec.RunID, result); err != nil {
+			if err := client.SubmitSpeculativeLiveLabVerifierResult(ctx, spec.RunID, result); err != nil {
 				state.AcceptedText = acceptedText.String()
 				state.FinalReason = "result_submit_failed"
 				return state, err

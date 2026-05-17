@@ -4,7 +4,7 @@ import "testing"
 
 func TestDecodeDraftSpecCanonicalizesContractTestBridge(t *testing.T) {
 	specJSON := `{
-		"task":"draft_runner_v8",
+		"task":"draft_runner",
 		"draft_backend":"native_bridge",
 		"workgraph_id":"wg-live",
 		"window_id":"win-live",
@@ -32,7 +32,7 @@ func TestDecodeDraftSpecCanonicalizesContractTestBridge(t *testing.T) {
 
 func TestDecodeVerifierSpecAcceptsTree(t *testing.T) {
 	specJSON := `{
-		"task":"verifier_session_v8",
+		"task":"verifier_session",
 		"tree":{
 			"tree_cid":"sha256:tree",
 			"branches":[
@@ -58,7 +58,7 @@ func TestDecodeVerifierSpecAcceptsTree(t *testing.T) {
 
 func TestDecodeHotSessionSpecPreservesNativeSGLangFields(t *testing.T) {
 	specJSON := `{
-		"task":"verifier_session_v8_hot",
+		"task":"verifier_session_hot",
 		"executor_kind":"native_report",
 		"docker_required":false,
 		"verifier_backend":"native_sglang",

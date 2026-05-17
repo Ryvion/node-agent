@@ -16,7 +16,7 @@ func TestVerifyWaveBuildsNonBillableContractTestResult(t *testing.T) {
 		Prompt:           "Write one short sentence.",
 		ParentPrefixHash: "sha256:prefix",
 		MaxTokens:        16,
-	}, hub.ForesightLiveLabSessionCommand{
+	}, hub.SpeculativeLiveLabSessionCommand{
 		CommandID: "cmd-1",
 		WindowID:  "win-1",
 		WaveIndex: 1,
@@ -52,7 +52,7 @@ func TestVerifyWaveBuildsNonBillableContractTestResult(t *testing.T) {
 func TestVerifyWaveMarksMaxTokens(t *testing.T) {
 	result := VerifyWave("job-1", nodespec.HotSessionSpec{
 		MaxTokens: 4,
-	}, hub.ForesightLiveLabSessionCommand{
+	}, hub.SpeculativeLiveLabSessionCommand{
 		CommandID: "cmd-1",
 		WindowID:  "win-1",
 		WaveIndex: 1,

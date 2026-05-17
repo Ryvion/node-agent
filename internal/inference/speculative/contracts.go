@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	DraftRunnerTask        = "draft_runner_v8"
-	VerifierSessionTask    = "verifier_session_v8"
-	DraftHotSessionTask    = "draft_runner_v8_hot_session"
-	VerifierHotSessionTask = "verifier_session_v8_hot"
+	DraftRunnerTask        = "draft_runner"
+	VerifierSessionTask    = "verifier_session"
+	DraftHotSessionTask    = "draft_runner_hot_session"
+	VerifierHotSessionTask = "verifier_session_hot"
 
-	NativeExecutor = "native_foresight_v8"
+	NativeExecutor = "native_speculative"
 
 	DraftBackendNative      = "contract_test_bridge"
 	VerifierBackendBridge   = "contract_test_bridge"
@@ -199,7 +199,7 @@ func AcceptedFromTree(tree map[string]any, fallback string) (int, string) {
 }
 
 func AcceptedTextForWave(prompt string, wave int, acceptedLen int) string {
-	words := []string{"Ryvion", "Foresight", "Mesh", "keeps", "verifier", "sessions", "hot", "while", "draft", "tokens", "are", "checked", "and", "committed", "quickly."}
+	words := []string{"Ryvion", "keeps", "verifier", "sessions", "hot", "while", "draft", "tokens", "are", "checked", "and", "committed", "quickly."}
 	if strings.Contains(strings.ToLower(prompt), "assembly") {
 		words = []string{"Assembly", "work", "uses", "low-level", "instructions", "while", "Ryvion", "verifies", "draft", "branches", "quickly."}
 	}

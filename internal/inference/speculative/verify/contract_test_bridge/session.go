@@ -11,8 +11,8 @@ import (
 )
 
 type LiveLabVerifierClient interface {
-	FetchForesightLiveLabVerifierCommand(ctx context.Context, runID string, jobID string) (hub.ForesightLiveLabSessionCommand, error)
-	SubmitForesightLiveLabVerifierResult(ctx context.Context, runID string, result hub.ForesightLiveLabVerifierResult) error
+	FetchSpeculativeLiveLabVerifierCommand(ctx context.Context, runID string, jobID string) (hub.SpeculativeLiveLabSessionCommand, error)
+	SubmitSpeculativeLiveLabVerifierResult(ctx context.Context, runID string, result hub.SpeculativeLiveLabVerifierResult) error
 }
 
 type HotSessionResult struct {
@@ -33,7 +33,7 @@ func RunHotSession(ctx context.Context, client LiveLabVerifierClient, jobID stri
 	defer ticker.Stop()
 
 	for {
-		command, err := client.FetchForesightLiveLabVerifierCommand(ctx, spec.RunID, jobID)
+		command, err := client.FetchSpeculativeLiveLabVerifierCommand(ctx, spec.RunID, jobID)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -53,7 +53,7 @@ func RunHotSession(ctx context.Context, client LiveLabVerifierClient, jobID stri
 			commandID := firstString(command.CommandID, fmt.Sprintf("%s:%s:%d", spec.RunID, command.WindowID, command.WaveIndex))
 			if !verifiedCommands[commandID] {
 				result := VerifyWave(jobID, spec, command, state.TotalAccepted)
-				if err := client.SubmitForesightLiveLabVerifierResult(ctx, spec.RunID, result); err == nil {
+				if err := client.SubmitSpeculativeLiveLabVerifierResult(ctx, spec.RunID, result); err == nil {
 					state.TotalAccepted += result.AcceptedLen
 					state.Waves++
 					if strings.TrimSpace(result.AcceptedText) != "" {

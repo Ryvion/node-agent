@@ -12,11 +12,11 @@ const (
 	Source  = "contract_test_bridge_verifier"
 )
 
-func VerifyWave(jobID string, spec nodespec.HotSessionSpec, command hub.ForesightLiveLabSessionCommand, acceptedTokensTotal int) hub.ForesightLiveLabVerifierResult {
+func VerifyWave(jobID string, spec nodespec.HotSessionSpec, command hub.SpeculativeLiveLabSessionCommand, acceptedTokensTotal int) hub.SpeculativeLiveLabVerifierResult {
 	started := time.Now()
 	acceptedLen, treeCID := nodespec.AcceptedFromTree(command.Tree, command.CommandID)
 	text := nodespec.AcceptedTextForWave(spec.Prompt, command.WaveIndex, acceptedLen)
-	result := hub.ForesightLiveLabVerifierResult{
+	result := hub.SpeculativeLiveLabVerifierResult{
 		JobID:              jobID,
 		WindowID:           command.WindowID,
 		WaveIndex:          command.WaveIndex,
