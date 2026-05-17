@@ -12,11 +12,11 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
+	"github.com/Ryvion/ryvion-node/internal/sandbox"
 	"github.com/Ryvion/ryvion-node/internal/v7/capability"
-	"github.com/Ryvion/ryvion-node/internal/v7/sandbox"
 )
 
-const reportSchemaVersion = "v7.onboarding-report.v1"
+const reportSchemaVersion = "ryvion.node.onboarding_report.v1"
 
 type CheckStatus string
 
@@ -296,9 +296,9 @@ func checkCapabilityPassport(options CheckOptions, caps hw.CapSet, gpuDetected, 
 		},
 	})
 	if err != nil {
-		return hardErrorCheck("v7_capability_passport", "V7 capability passport", "capability passport is not buildable: "+cleanText(err.Error()))
+		return hardErrorCheck("capability_passport", "Capability passport", "capability passport is not buildable: "+cleanText(err.Error()))
 	}
-	return okCheck("v7_capability_passport", "V7 capability passport", "capability passport is buildable")
+	return okCheck("capability_passport", "Capability passport", "capability passport is buildable")
 }
 
 func checkSandboxPolicy() OnboardingCheck {

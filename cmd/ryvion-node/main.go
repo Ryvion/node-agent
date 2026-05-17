@@ -31,8 +31,11 @@ import (
 	modelprepare "github.com/Ryvion/ryvion-node/internal/models/prepare"
 	modelwarm "github.com/Ryvion/ryvion-node/internal/models/warm"
 	"github.com/Ryvion/ryvion-node/internal/nodekey"
+	onboarding "github.com/Ryvion/ryvion-node/internal/operator/onboarding"
+	proofrunner "github.com/Ryvion/ryvion-node/internal/receipts/proofrunner"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
+	sandbox "github.com/Ryvion/ryvion-node/internal/sandbox"
 	"github.com/Ryvion/ryvion-node/internal/update"
 	v7backendprobe "github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
 	v7capability "github.com/Ryvion/ryvion-node/internal/v7/capability"
@@ -43,9 +46,6 @@ import (
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
 	v7netprofile "github.com/Ryvion/ryvion-node/internal/v7/netprofile"
-	v7onboarding "github.com/Ryvion/ryvion-node/internal/v7/onboarding"
-	v7proofrunner "github.com/Ryvion/ryvion-node/internal/v7/proofrunner"
-	v7sandbox "github.com/Ryvion/ryvion-node/internal/v7/sandbox"
 	_ "github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
 	v7tensorplane "github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
@@ -528,13 +528,13 @@ func runDoctor(args []string) {
 	deviceType := fs.String("type", "", "Node device type (gpu|cpu|mobile|iot)")
 	_ = fs.Parse(args)
 
-	report := v7onboarding.RunBasicOnboardingChecksWithOptions(v7onboarding.CheckOptions{
+	report := onboarding.RunBasicOnboardingChecksWithOptions(onboarding.CheckOptions{
 		AgentVersion: version,
 		HubURL:       *hubURL,
 		DataDir:      *dataDir,
 		DeviceType:   *deviceType,
 	})
-	fmt.Println(v7onboarding.FormatOnboardingReport(report))
+	fmt.Println(onboarding.FormatOnboardingReport(report))
 	if report.HasHardErrors() {
 		os.Exit(1)
 	}
@@ -1423,7 +1423,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 		FilesystemIsolationPlanned: true,
 		NetworkIsolationSupported:  false,
 	}
-	sandboxPolicy := v7sandbox.DefaultSandboxPolicy()
+	sandboxPolicy := sandbox.DefaultSandboxPolicy()
 
 	payload, err := v7heartbeat.BuildV7HeartbeatPayload(v7heartbeat.BuildV7HeartbeatPayloadInput{
 		AgentVersion:         version,
@@ -3354,7 +3354,7 @@ func prepareReceiptForSubmission(receipt hub.Receipt) hub.Receipt {
 			finishedAt = startedAt
 		}
 
-		proof, err := v7proofrunner.BuildProofCarryingOutput(v7proofrunner.RunnerResultInput{
+		proof, err := proofrunner.BuildProofCarryingOutput(proofrunner.RunnerResultInput{
 			JobID: firstNonEmptyString(
 				strings.TrimSpace(receipt.JobID),
 				metadataString(metadata, "job_id"),
@@ -3450,7 +3450,7 @@ func metadataBytes(value any) ([]byte, bool) {
 	}
 }
 
-func fullV7ProofMetadata(proof v7proofrunner.ProofCarryingRunnerOutput) map[string]any {
+func fullV7ProofMetadata(proof proofrunner.ProofCarryingRunnerOutput) map[string]any {
 	return map[string]any{
 		"output_hash":           proof.OutputHash,
 		"output_bytes":          proof.OutputBytes,

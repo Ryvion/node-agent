@@ -1,6 +1,6 @@
 package evidence
 
-const SchemaVersionV1 = "v7.ryv3-evidence-payload.v1"
+const SchemaVersionV1 = "ryvion.node.evidence_payload.v1"
 
 type RYV3EvidencePayload struct {
 	SchemaVersion             string             `json:"schema_version"`

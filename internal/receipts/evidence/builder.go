@@ -3,7 +3,7 @@ package evidence
 import (
 	"strings"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/sandbox"
+	"github.com/Ryvion/ryvion-node/internal/sandbox"
 )
 
 type BuildEvidencePayloadInput struct {

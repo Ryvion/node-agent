@@ -2,7 +2,7 @@ package proofrunner
 
 import (
 	"github.com/Ryvion/ryvion-node/internal/artifacts/core"
-	"github.com/Ryvion/ryvion-node/internal/v7/evidence"
+	"github.com/Ryvion/ryvion-node/internal/receipts/evidence"
 )
 
 type RunnerResultInput struct {

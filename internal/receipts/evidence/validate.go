@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/localcas"
-	"github.com/Ryvion/ryvion-node/internal/v7/sandbox"
+	"github.com/Ryvion/ryvion-node/internal/sandbox"
+	"github.com/Ryvion/ryvion-node/internal/storage/localcas"
 )
 
 const (

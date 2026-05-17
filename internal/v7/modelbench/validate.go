@@ -6,7 +6,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/localcas"
+	"github.com/Ryvion/ryvion-node/internal/storage/localcas"
 )
 
 var (

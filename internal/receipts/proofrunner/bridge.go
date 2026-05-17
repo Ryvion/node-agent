@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/Ryvion/ryvion-node/internal/artifacts/core"
-	"github.com/Ryvion/ryvion-node/internal/v7/evidence"
-	"github.com/Ryvion/ryvion-node/internal/v7/localcas"
-	"github.com/Ryvion/ryvion-node/internal/v7/sandbox"
+	"github.com/Ryvion/ryvion-node/internal/receipts/evidence"
+	"github.com/Ryvion/ryvion-node/internal/sandbox"
+	"github.com/Ryvion/ryvion-node/internal/storage/localcas"
 )
 
 var ErrInvalidRunnerResult = errors.New("proofrunner: invalid runner result")

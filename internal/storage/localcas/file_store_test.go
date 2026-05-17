@@ -17,7 +17,7 @@ func TestFileCASPutGetRoundTrip(t *testing.T) {
 	metadata := ObjectMetadata{
 		Kind:   "runner-layer",
 		Source: "unit-test",
-		Labels: []string{"cache", "v7"},
+		Labels: []string{"cache", "node"},
 	}
 
 	id, err := store.PutBytes(ctx, data, metadata)

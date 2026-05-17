@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/Ryvion/ryvion-node/internal/artifacts/core"
-	"github.com/Ryvion/ryvion-node/internal/v7/evidence"
+	"github.com/Ryvion/ryvion-node/internal/receipts/evidence"
 )
 
 func TestBuildProofCarryingOutputValidRunnerResult(t *testing.T) {
