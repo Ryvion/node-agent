@@ -1,4 +1,4 @@
-package energyplane
+package usefulenergy
 
 import (
 	"testing"

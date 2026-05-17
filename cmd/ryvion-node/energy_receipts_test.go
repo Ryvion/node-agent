@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
-	v8energyplane "github.com/Ryvion/ryvion-node/internal/v8/energyplane"
+	usefulenergy "github.com/Ryvion/ryvion-node/internal/telemetry/usefulenergy"
 )
 
 func TestReceiptMetadataBaseIncludesJobScopedEnergyReceipt(t *testing.T) {
@@ -13,11 +13,11 @@ func TestReceiptMetadataBaseIncludesJobScopedEnergyReceipt(t *testing.T) {
 	t.Cleanup(func() { operatorRuntimeState = oldState })
 
 	start := time.Date(2026, 5, 15, 2, 30, 0, 0, time.UTC)
-	var acc v8energyplane.Accumulator
-	before := acc.RecordPower(start, 120, v8energyplane.TelemetryDeviceSensor, v8energyplane.SourceHeartbeatPower)
-	acc.RecordPower(start.Add(time.Minute), 120, v8energyplane.TelemetryDeviceSensor, v8energyplane.SourceHeartbeatPower)
+	var acc usefulenergy.Accumulator
+	before := acc.RecordPower(start, 120, usefulenergy.TelemetryDeviceSensor, usefulenergy.SourceHeartbeatPower)
+	acc.RecordPower(start.Add(time.Minute), 120, usefulenergy.TelemetryDeviceSensor, usefulenergy.SourceHeartbeatPower)
 	operatorRuntimeState = &operatorRuntime{
-		energyPlane: acc,
+		usefulEnergy: acc,
 		jobEnergyStarts: map[string]jobEnergyStart{
 			"job-energy": {
 				startedAt: start,
@@ -57,11 +57,11 @@ func TestReceiptMetadataBaseIncludesJobScopedEnergyReceipt(t *testing.T) {
 
 func TestBuildJobEnergyReceiptFallsBackToLastPowerEstimate(t *testing.T) {
 	start := time.Date(2026, 5, 15, 2, 30, 0, 0, time.UTC)
-	before := v8energyplane.Snapshot{
-		SchemaVersion:   v8energyplane.SchemaVersionV1,
-		Status:          v8energyplane.StatusMeasuring,
-		TelemetryTier:   v8energyplane.TelemetryDeviceSensor,
-		TelemetrySource: v8energyplane.SourceHeartbeatPower,
+	before := usefulenergy.Snapshot{
+		SchemaVersion:   usefulenergy.SchemaVersionV1,
+		Status:          usefulenergy.StatusMeasuring,
+		TelemetryTier:   usefulenergy.TelemetryDeviceSensor,
+		TelemetrySource: usefulenergy.SourceHeartbeatPower,
 		LastPowerWatts:  150,
 	}
 	after := before

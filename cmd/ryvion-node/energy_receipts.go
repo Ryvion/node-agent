@@ -5,14 +5,14 @@ import (
 	"time"
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
-	v8energyplane "github.com/Ryvion/ryvion-node/internal/v8/energyplane"
+	usefulenergy "github.com/Ryvion/ryvion-node/internal/telemetry/usefulenergy"
 )
 
 const energyReceiptSchemaVersionV1 = "ryvion.energy_receipt.v1"
 
 type jobEnergyStart struct {
 	startedAt time.Time
-	snapshot  v8energyplane.Snapshot
+	snapshot  usefulenergy.Snapshot
 }
 
 func jobEnergyReceiptMetadata(work *hub.WorkAssignment) map[string]any {
@@ -26,7 +26,7 @@ func jobEnergyReceiptMetadata(work *hub.WorkAssignment) map[string]any {
 
 	operatorRuntimeState.mu.RLock()
 	start, ok := operatorRuntimeState.jobEnergyStarts[jobID]
-	after := operatorRuntimeState.energyPlane.Snapshot()
+	after := operatorRuntimeState.usefulEnergy.Snapshot()
 	operatorRuntimeState.mu.RUnlock()
 	if !ok {
 		return nil
@@ -39,7 +39,7 @@ func jobEnergyReceiptMetadata(work *hub.WorkAssignment) map[string]any {
 	return meta
 }
 
-func buildJobEnergyReceiptMetadata(jobID string, roleType string, acceptedValue uint32, startedAt time.Time, before v8energyplane.Snapshot, completedAt time.Time, after v8energyplane.Snapshot) map[string]any {
+func buildJobEnergyReceiptMetadata(jobID string, roleType string, acceptedValue uint32, startedAt time.Time, before usefulenergy.Snapshot, completedAt time.Time, after usefulenergy.Snapshot) map[string]any {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
 		return nil
@@ -66,7 +66,7 @@ func buildJobEnergyReceiptMetadata(jobID string, roleType string, acceptedValue 
 	detail := "job-scoped energy delta unavailable; receipt is not useful-energy scoreable yet"
 	if energyWh > 0 {
 		status = "measured"
-		detail = "job energy delta measured from node EnergyPlane accumulator"
+		detail = "job energy delta measured from node UsefulEnergy accumulator"
 	} else if after.LastPowerWatts > 0 && duration > 0 {
 		energyWh = after.LastPowerWatts * duration.Hours()
 		status = "estimated"
@@ -113,10 +113,10 @@ func buildJobEnergyReceiptMetadata(jobID string, roleType string, acceptedValue 
 		"detail":                     detail,
 	}
 	if receipt["telemetry_tier"] == "" {
-		receipt["telemetry_tier"] = string(v8energyplane.TelemetryEstimatedTDP)
+		receipt["telemetry_tier"] = string(usefulenergy.TelemetryEstimatedTDP)
 	}
 	if receipt["source_schema_version"] == "" {
-		receipt["source_schema_version"] = v8energyplane.SchemaVersionV1
+		receipt["source_schema_version"] = usefulenergy.SchemaVersionV1
 	}
 	return receipt
 }

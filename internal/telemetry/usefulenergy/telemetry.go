@@ -1,4 +1,4 @@
-package energyplane
+package usefulenergy
 
 import (
 	"math"
@@ -10,7 +10,7 @@ type TelemetryStatus string
 type TelemetryTier string
 
 const (
-	SchemaVersionV1 = "ryvion.node.energyplane.v1"
+	SchemaVersionV1 = "ryvion.node.useful_energy.v1"
 
 	StatusUnavailable TelemetryStatus = "unavailable"
 	StatusMeasuring   TelemetryStatus = "measuring"

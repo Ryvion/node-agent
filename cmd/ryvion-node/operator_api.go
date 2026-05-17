@@ -21,6 +21,7 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/inference"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
+	usefulenergy "github.com/Ryvion/ryvion-node/internal/telemetry/usefulenergy"
 	v7backendprobe "github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
 	v7capabilityprofile "github.com/Ryvion/ryvion-node/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
@@ -38,7 +39,6 @@ import (
 	v7runtimeinventory "github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 	v7speculative "github.com/Ryvion/ryvion-node/internal/v7/speculative"
 	v7tensoraccess "github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
-	v8energyplane "github.com/Ryvion/ryvion-node/internal/v8/energyplane"
 )
 
 const defaultOperatorAPIPort = "45890"
@@ -72,7 +72,7 @@ type operatorRuntime struct {
 	heartbeatStatus      operatorHeartbeatStatus
 	latestVersion        string
 	lastMetrics          hw.Metrics
-	energyPlane          v8energyplane.Accumulator
+	usefulEnergy         usefulenergy.Accumulator
 	jobEnergyStarts      map[string]jobEnergyStart
 	lastHealthReport     hub.HealthReport
 	lastClaimAt          time.Time
@@ -146,7 +146,7 @@ type operatorStatusResponse struct {
 	SGLangSidecar        sglang.SGLangSidecarStatus                   `json:"sglang_sidecar"`
 	LlamaCPPBenchmark    llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
 	Metrics              operatorMetrics                              `json:"metrics"`
-	EnergyPlane          v8energyplane.Snapshot                       `json:"energy_plane"`
+	UsefulEnergy         usefulenergy.Snapshot                        `json:"useful_energy"`
 	EnergyPolicy         operatorEnergyPolicy                         `json:"energy_policy"`
 	CurrentJob           *operatorJob                                 `json:"current_job,omitempty"`
 	RecentJobs           []operatorJob                                `json:"recent_jobs"`
@@ -805,7 +805,7 @@ func (s *operatorRuntime) recordHeartbeat(metrics hw.Metrics, heartbeat hub.Hear
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastMetrics = metrics
-	s.energyPlane.RecordPower(time.Now(), metrics.PowerWatts, v8energyplane.TelemetryDeviceSensor, v8energyplane.SourceHeartbeatPower)
+	s.usefulEnergy.RecordPower(time.Now(), metrics.PowerWatts, usefulenergy.TelemetryDeviceSensor, usefulenergy.SourceHeartbeatPower)
 	if err != nil {
 		s.lastHeartbeatErr = strings.TrimSpace(err.Error())
 		return
@@ -905,7 +905,7 @@ func (s *operatorRuntime) startJob(work *hub.WorkAssignment) {
 		}
 		s.jobEnergyStarts[job.JobID] = jobEnergyStart{
 			startedAt: startedAt,
-			snapshot:  s.energyPlane.Snapshot(),
+			snapshot:  s.usefulEnergy.Snapshot(),
 		}
 	}
 }
@@ -1001,7 +1001,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	s.mu.RLock()
 	caps := s.caps
 	metrics := s.lastMetrics
-	energyPlane := s.energyPlane.Snapshot()
+	usefulEnergy := s.usefulEnergy.Snapshot()
 	registered := s.registered
 	registerErr := s.lastRegisterError
 	latestVersion := s.latestVersion
@@ -1174,7 +1174,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 			GPUUtil:    metrics.GPUUtil,
 			PowerWatts: metrics.PowerWatts,
 		},
-		EnergyPlane:          energyPlane,
+		UsefulEnergy:         usefulEnergy,
 		EnergyPolicy:         energyPolicy,
 		CurrentJob:           currentJob,
 		RecentJobs:           recent,
