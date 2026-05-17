@@ -12,6 +12,7 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/capabilities/passport"
 	"github.com/Ryvion/ryvion-node/internal/capabilities/profile"
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	"github.com/Ryvion/ryvion-node/internal/inference/speculative/capabilities"
 	"github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/models/lease"
 	"github.com/Ryvion/ryvion-node/internal/models/policy"
@@ -22,7 +23,6 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	"github.com/Ryvion/ryvion-node/internal/sandbox"
-	"github.com/Ryvion/ryvion-node/internal/v7/speculative"
 )
 
 const (

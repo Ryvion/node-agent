@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
+	"github.com/Ryvion/ryvion-node/internal/benchmarks/tensor"
 )
 
 func TestGetTensorAccessProviderDefaultsToNoopForRuntimeAccess(t *testing.T) {

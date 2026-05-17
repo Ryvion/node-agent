@@ -6,6 +6,7 @@ import (
 
 	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 	"github.com/Ryvion/ryvion-node/internal/inference/config"
+	"github.com/Ryvion/ryvion-node/internal/inference/speculative/capabilities"
 	"github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/models/policy"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
@@ -13,7 +14,6 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
-	"github.com/Ryvion/ryvion-node/internal/v7/speculative"
 )
 
 const (

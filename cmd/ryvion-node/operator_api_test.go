@@ -18,18 +18,18 @@ import (
 	"testing"
 	"time"
 
+	memorybench "github.com/Ryvion/ryvion-node/internal/benchmarks/memory"
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	inferencebench "github.com/Ryvion/ryvion-node/internal/inference/benchmark"
+	routedinference "github.com/Ryvion/ryvion-node/internal/inference/routed"
+	modelbench "github.com/Ryvion/ryvion-node/internal/models/benchmark"
 	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	kvprobe "github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
 	usefulenergy "github.com/Ryvion/ryvion-node/internal/telemetry/usefulenergy"
-	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
-	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
-	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
 )
 
 func TestAllowLocalOrigin(t *testing.T) {
@@ -135,17 +135,17 @@ func TestOperatorAPIModelBenchmarkEndpointReturnsUnavailableJSON(t *testing.T) {
 		t.Fatalf("operator benchmark response leaked raw prompt: %s", respBody)
 	}
 
-	var result v7modelbench.ModelBenchmarkResult
+	var result modelbench.ModelBenchmarkResult
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		t.Fatalf("decode response: %v\nbody: %s", err, respBody)
 	}
-	if result.ProofStatus != v7modelbench.ModelBenchmarkProofStatusUnavailable {
+	if result.ProofStatus != modelbench.ModelBenchmarkProofStatusUnavailable {
 		t.Fatalf("proof_status = %q, want unavailable; body=%s", result.ProofStatus, respBody)
 	}
 	if result.Metrics.ErrorCode == "" {
 		t.Fatalf("error_code empty; body=%s", respBody)
 	}
-	if err := v7modelbench.ValidateModelBenchmarkResult(result); err != nil {
+	if err := modelbench.ValidateModelBenchmarkResult(result); err != nil {
 		t.Fatalf("ValidateModelBenchmarkResult() error = %v", err)
 	}
 }
@@ -935,7 +935,7 @@ func TestOperatorAPILlamaCppBenchmarkEndpointRecordsSafeStatus(t *testing.T) {
 		publicKeyHex:      "abc123",
 		llamaCppSidecar:   testLlamaCppManagerForServer(t, llamaServer.URL),
 		llamaCppBenchmark: llamacpp.NewBenchmarkLocalStatus(),
-		v7MemoryBenchmark: v7memorybench.NewLocalStatus(),
+		v7MemoryBenchmark: memorybench.NewLocalStatus(),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -1534,7 +1534,7 @@ func TestOperatorStatusSnapshotRefreshesRuntimeReport(t *testing.T) {
 func TestOperatorStatusSnapshotIncludesV7MemoryBenchmarkStatus(t *testing.T) {
 	t.Parallel()
 
-	benchStatus := v7memorybench.NewLocalStatus()
+	benchStatus := memorybench.NewLocalStatus()
 	benchStatus.RecordSeen("job-bench-1", "request-bench-1")
 	benchStatus.RecordExecuted("job-bench-1")
 	benchStatus.RecordReceiptSubmitted("job-bench-1")
@@ -1552,7 +1552,7 @@ func TestOperatorStatusSnapshotIncludesV7MemoryBenchmarkStatus(t *testing.T) {
 		ResultHashHex: "hash",
 		MeteringUnits: 1,
 		Metadata: map[string]any{
-			v7memorybench.BenchmarkTask: map[string]any{
+			memorybench.BenchmarkTask: map[string]any{
 				"request_id":     "request-bench-1",
 				"weighted_value": []float64{1, 2, 3},
 				"proof_status":   "synthetic_measured",
@@ -1583,7 +1583,7 @@ func TestOperatorStatusSnapshotIncludesV7MemoryBenchmarkStatus(t *testing.T) {
 func TestOperatorStatusSnapshotIncludesV7InferenceBenchmarkStatus(t *testing.T) {
 	t.Parallel()
 
-	benchStatus := v7inferencebench.NewLocalStatus()
+	benchStatus := inferencebench.NewLocalStatus()
 	benchStatus.RecordSeen("job-infer-1")
 	benchStatus.RecordExecuted("job-infer-1")
 	benchStatus.RecordReceiptSubmitted("job-infer-1")
@@ -1615,7 +1615,7 @@ func TestOperatorStatusSnapshotIncludesV7InferenceBenchmarkStatus(t *testing.T) 
 func TestOperatorStatusSnapshotIncludesV7DashboardInferenceStatus(t *testing.T) {
 	t.Parallel()
 
-	dashboardStatus := v7dashboardinference.NewLocalStatus()
+	dashboardStatus := routedinference.NewLocalStatus()
 	dashboardStatus.RecordSeen("run-dashboard-1", "job-dashboard-1")
 	dashboardStatus.RecordExecuted("run-dashboard-1", "job-dashboard-1")
 	dashboardStatus.RecordReceiptSubmitted("run-dashboard-1", "job-dashboard-1")

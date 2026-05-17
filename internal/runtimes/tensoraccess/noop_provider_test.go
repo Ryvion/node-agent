@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
+	"github.com/Ryvion/ryvion-node/internal/benchmarks/tensor"
 )
 
 func TestNoopProviderReturnsUnsupportedCapabilityAndErrors(t *testing.T) {

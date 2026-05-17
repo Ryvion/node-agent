@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	memorybench "github.com/Ryvion/ryvion-node/internal/benchmarks/memory"
+	tensorbench "github.com/Ryvion/ryvion-node/internal/benchmarks/tensor"
 	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 	capabilityprofile "github.com/Ryvion/ryvion-node/internal/capabilities/profile"
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
@@ -24,17 +26,15 @@ import (
 	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
+	inferencebench "github.com/Ryvion/ryvion-node/internal/inference/benchmark"
+	routedinference "github.com/Ryvion/ryvion-node/internal/inference/routed"
+	modelbench "github.com/Ryvion/ryvion-node/internal/models/benchmark"
 	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
 	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	kvprobe "github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/update"
-	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
-	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
-	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7tensorplane "github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 
 // fakeClient implements a minimal receipt submitter that fails N times then succeeds.
@@ -1221,7 +1221,7 @@ func TestLegacyNativeInferenceManagerStaysIdleWhenV7Enabled(t *testing.T) {
 	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
 		t.Fatal("expected legacy inference manager to remain idle when V7 inference is enabled")
 	}
-	getenv[v7dashboardinference.DisableFlagEnv] = "1"
+	getenv[routedinference.DisableFlagEnv] = "1"
 	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
 		t.Fatal("expected legacy inference manager to remain idle when V7 inference is disabled")
 	}
@@ -1670,14 +1670,14 @@ func TestRuntimeWarmingHeuristicWindowsPodman(t *testing.T) {
 func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 	oldState := operatorRuntimeState
 	oldDiagnostics := workLoopDiagnostics
-	status := v7memorybench.NewLocalStatus()
+	status := memorybench.NewLocalStatus()
 	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
 	t.Cleanup(func() {
 		operatorRuntimeState = oldState
 		workLoopDiagnostics = oldDiagnostics
 	})
-	t.Setenv(v7memorybench.BenchmarkFlagEnv, "1")
+	t.Setenv(memorybench.BenchmarkFlagEnv, "1")
 
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -1705,8 +1705,8 @@ func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if _, ok := req.Metadata[v7memorybench.BenchmarkTask]; !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7memorybench.BenchmarkTask, req.Metadata)
+		if _, ok := req.Metadata[memorybench.BenchmarkTask]; !ok {
+			t.Errorf("receipt metadata missing %q: %+v", memorybench.BenchmarkTask, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -1715,7 +1715,7 @@ func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 	defer ts.Close()
 
 	spec := map[string]any{
-		"task":               v7memorybench.BenchmarkTask,
+		"task":               memorybench.BenchmarkTask,
 		"request_id":         "request-bench-local",
 		"job_id":             "job-bench-local",
 		"shard_id":           "shard-a",
@@ -1806,7 +1806,7 @@ func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
 	}
 	assertMainWorkLoopEventsChronological(t, workSnapshot.RecentEvents)
 	gapEvent := findMainWorkLoopEvent(workSnapshot.RecentEvents, "receipt_ready_to_submit_gap")
-	if gapEvent.SafeContext["gap_us"] == "" || gapEvent.SafeContext["job_id"] != "job-bench-local" || gapEvent.SafeContext["kind"] != "benchmark" || gapEvent.SafeContext["spec_task"] != v7memorybench.BenchmarkTask {
+	if gapEvent.SafeContext["gap_us"] == "" || gapEvent.SafeContext["job_id"] != "job-bench-local" || gapEvent.SafeContext["kind"] != "benchmark" || gapEvent.SafeContext["spec_task"] != memorybench.BenchmarkTask {
 		t.Fatalf("gap event safe context missing expected fields: %+v", gapEvent.SafeContext)
 	}
 	encodedWorkSnapshot, err := json.Marshal(workSnapshot)
@@ -1824,7 +1824,7 @@ func TestProcessOptionalV7MemoryBenchmarkFastPathSkipsRuntimeProbe(t *testing.T)
 	oldState := operatorRuntimeState
 	oldDiagnostics := workLoopDiagnostics
 	oldProbe := probeManagedRuntimeStatus
-	status := v7memorybench.NewLocalStatus()
+	status := memorybench.NewLocalStatus()
 	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
 	var probeCalls atomic.Int32
@@ -1847,7 +1847,7 @@ func TestProcessOptionalV7MemoryBenchmarkFastPathSkipsRuntimeProbe(t *testing.T)
 		workLoopDiagnostics = oldDiagnostics
 		probeManagedRuntimeStatus = oldProbe
 	})
-	t.Setenv(v7memorybench.BenchmarkFlagEnv, "1")
+	t.Setenv(memorybench.BenchmarkFlagEnv, "1")
 
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -1870,8 +1870,8 @@ func TestProcessOptionalV7MemoryBenchmarkFastPathSkipsRuntimeProbe(t *testing.T)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if _, ok := req.Metadata[v7memorybench.BenchmarkTask]; !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7memorybench.BenchmarkTask, req.Metadata)
+		if _, ok := req.Metadata[memorybench.BenchmarkTask]; !ok {
+			t.Errorf("receipt metadata missing %q: %+v", memorybench.BenchmarkTask, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -1932,14 +1932,14 @@ func TestProcessOptionalV7MemoryBenchmarkFastPathSkipsRuntimeProbe(t *testing.T)
 func TestProcessOptionalV7MemoryBenchmarkSubmitFailureRecordsDiagnostics(t *testing.T) {
 	oldState := operatorRuntimeState
 	oldDiagnostics := workLoopDiagnostics
-	status := v7memorybench.NewLocalStatus()
+	status := memorybench.NewLocalStatus()
 	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
 	t.Cleanup(func() {
 		operatorRuntimeState = oldState
 		workLoopDiagnostics = oldDiagnostics
 	})
-	t.Setenv(v7memorybench.BenchmarkFlagEnv, "1")
+	t.Setenv(memorybench.BenchmarkFlagEnv, "1")
 
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -1993,7 +1993,7 @@ func TestProcessOptionalV7MemoryBenchmarkSubmitFailureRecordsDiagnostics(t *test
 
 func TestProcessOptionalV7MemoryBenchmarkNormalJobDoesNotRecordStatus(t *testing.T) {
 	oldState := operatorRuntimeState
-	status := v7memorybench.NewLocalStatus()
+	status := memorybench.NewLocalStatus()
 	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
 	t.Cleanup(func() {
 		operatorRuntimeState = oldState
@@ -2013,15 +2013,15 @@ func TestProcessOptionalV7MemoryBenchmarkNormalJobDoesNotRecordStatus(t *testing
 	if result != nil {
 		t.Fatalf("result = %+v, want nil", result)
 	}
-	if snapshot := status.Snapshot(); snapshot.Counters != (v7memorybench.LocalStatusCounters{}) {
+	if snapshot := status.Snapshot(); snapshot.Counters != (memorybench.LocalStatusCounters{}) {
 		t.Fatalf("status counters changed for normal job: %+v", snapshot.Counters)
 	}
 }
 
 func TestProcessOptionalV7TensorPlaneBenchmarkFlagOffDoesNotHandle(t *testing.T) {
-	t.Setenv(v7tensorplane.BenchmarkFlagEnv, "")
+	t.Setenv(tensorbench.BenchmarkFlagEnv, "")
 	oldStatus := v7TensorPlaneBenchmarkStatus
-	status := v7tensorplane.NewLocalStatus()
+	status := tensorbench.NewLocalStatus()
 	v7TensorPlaneBenchmarkStatus = status
 	t.Cleanup(func() {
 		v7TensorPlaneBenchmarkStatus = oldStatus
@@ -2041,16 +2041,16 @@ func TestProcessOptionalV7TensorPlaneBenchmarkFlagOffDoesNotHandle(t *testing.T)
 	if result != nil {
 		t.Fatalf("result = %+v, want nil", result)
 	}
-	if snapshot := status.Snapshot(); snapshot.Counters != (v7tensorplane.LocalStatusCounters{}) {
+	if snapshot := status.Snapshot(); snapshot.Counters != (tensorbench.LocalStatusCounters{}) {
 		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
 	}
 }
 
 func TestProcessOptionalV7TensorPlaneBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
-	t.Setenv(v7tensorplane.BenchmarkFlagEnv, "1")
+	t.Setenv(tensorbench.BenchmarkFlagEnv, "1")
 	oldStatus := v7TensorPlaneBenchmarkStatus
 	oldDiagnostics := workLoopDiagnostics
-	status := v7tensorplane.NewLocalStatus()
+	status := tensorbench.NewLocalStatus()
 	v7TensorPlaneBenchmarkStatus = status
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
 	t.Cleanup(func() {
@@ -2090,18 +2090,18 @@ func TestProcessOptionalV7TensorPlaneBenchmarkSubmitsMeasuredReceipt(t *testing.
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata, ok := req.Metadata[v7tensorplane.BenchmarkTask].(map[string]any)
+		metadata, ok := req.Metadata[tensorbench.BenchmarkTask].(map[string]any)
 		if !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7tensorplane.BenchmarkTask, req.Metadata)
+			t.Errorf("receipt metadata missing %q: %+v", tensorbench.BenchmarkTask, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if metadata["proof_status"] != v7tensorplane.ProofStatusTensorPlaneMeasured {
+		if metadata["proof_status"] != tensorbench.ProofStatusTensorPlaneMeasured {
 			t.Errorf("proof_status = %v", metadata["proof_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if metadata["correctness_status"] != v7tensorplane.CorrectnessStatusMatched {
+		if metadata["correctness_status"] != tensorbench.CorrectnessStatusMatched {
 			t.Errorf("correctness_status = %v", metadata["correctness_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -2152,7 +2152,7 @@ func TestProcessOptionalV7TensorPlaneBenchmarkSubmitsMeasuredReceipt(t *testing.
 		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
 	}
 	workSnapshot := workLoopDiagnostics.Snapshot()
-	if workSnapshot.LastWorkSpecTask != v7tensorplane.BenchmarkTask {
+	if workSnapshot.LastWorkSpecTask != tensorbench.BenchmarkTask {
 		t.Fatalf("last work spec task = %q", workSnapshot.LastWorkSpecTask)
 	}
 	for _, name := range []string{"v7_fast_path_start", "v7_fast_path_receipt_ready", "v7_fast_path_submit_start", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end"} {
@@ -2163,10 +2163,10 @@ func TestProcessOptionalV7TensorPlaneBenchmarkSubmitsMeasuredReceipt(t *testing.
 }
 
 func TestProcessOptionalV7TensorPlaneBenchmarkSubmitFailureRecordsDiagnostics(t *testing.T) {
-	t.Setenv(v7tensorplane.BenchmarkFlagEnv, "1")
+	t.Setenv(tensorbench.BenchmarkFlagEnv, "1")
 	oldStatus := v7TensorPlaneBenchmarkStatus
 	oldDiagnostics := workLoopDiagnostics
-	status := v7tensorplane.NewLocalStatus()
+	status := tensorbench.NewLocalStatus()
 	v7TensorPlaneBenchmarkStatus = status
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
 	t.Cleanup(func() {
@@ -2211,13 +2211,13 @@ func TestProcessOptionalV7TensorPlaneBenchmarkSubmitFailureRecordsDiagnostics(t 
 }
 
 func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
-	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "")
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "")
 	oldStatus := v7ModelBenchmarkStatus
 	oldFactory := newV7ModelBenchmarkRunner
-	status := v7modelbench.NewLocalStatus()
+	status := modelbench.NewLocalStatus()
 	fakeRunner := &fakeModelBenchmarkRunner{result: testMeasuredModelBenchmarkResult()}
 	v7ModelBenchmarkStatus = status
-	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) v7modelbench.ModelBenchmarkRunner {
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) modelbench.ModelBenchmarkRunner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2242,7 +2242,7 @@ func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
 	if fakeRunner.calls != 0 {
 		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
 	}
-	if snapshot := status.Snapshot(); snapshot.Counters != (v7modelbench.LocalStatusCounters{}) {
+	if snapshot := status.Snapshot(); snapshot.Counters != (modelbench.LocalStatusCounters{}) {
 		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
 	}
 }
@@ -2288,13 +2288,13 @@ func TestProcessOptionalV7LlamaCppBackendBenchmarkFlagOffDoesNotHandle(t *testin
 }
 
 func TestProcessOptionalV7BackendInferenceBenchmarkFlagOffDoesNotHandle(t *testing.T) {
-	t.Setenv(v7inferencebench.BenchmarkFlagEnv, "")
+	t.Setenv(inferencebench.BenchmarkFlagEnv, "")
 	oldFactory := newV7BackendInferenceBenchmarkRunner
 	oldStatus := v7InferenceBenchmarkStatus
-	status := v7inferencebench.NewLocalStatus()
+	status := inferencebench.NewLocalStatus()
 	v7InferenceBenchmarkStatus = status
-	fakeRunner := &fakeBackendInferenceBenchmarkRunner{result: testBackendInferenceBenchmarkResult(v7inferencebench.ProofStatusMeasured)}
-	newV7BackendInferenceBenchmarkRunner = func() v7inferencebench.BenchmarkRunner {
+	fakeRunner := &fakeBackendInferenceBenchmarkRunner{result: testBackendInferenceBenchmarkResult(inferencebench.ProofStatusMeasured)}
+	newV7BackendInferenceBenchmarkRunner = func() inferencebench.BenchmarkRunner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2319,21 +2319,21 @@ func TestProcessOptionalV7BackendInferenceBenchmarkFlagOffDoesNotHandle(t *testi
 	if fakeRunner.calls != 0 {
 		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
 	}
-	if snapshot := status.Snapshot(); snapshot.Counters != (v7inferencebench.LocalStatusCounters{}) {
+	if snapshot := status.Snapshot(); snapshot.Counters != (inferencebench.LocalStatusCounters{}) {
 		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
 	}
 }
 
 func TestProcessOptionalV7BackendInferenceBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
-	t.Setenv(v7inferencebench.BenchmarkFlagEnv, "1")
+	t.Setenv(inferencebench.BenchmarkFlagEnv, "1")
 	oldFactory := newV7BackendInferenceBenchmarkRunner
 	oldStatus := v7InferenceBenchmarkStatus
 	oldDiagnostics := workLoopDiagnostics
-	status := v7inferencebench.NewLocalStatus()
-	fakeRunner := &fakeBackendInferenceBenchmarkRunner{result: testBackendInferenceBenchmarkResult(v7inferencebench.ProofStatusMeasured)}
+	status := inferencebench.NewLocalStatus()
+	fakeRunner := &fakeBackendInferenceBenchmarkRunner{result: testBackendInferenceBenchmarkResult(inferencebench.ProofStatusMeasured)}
 	v7InferenceBenchmarkStatus = status
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
-	newV7BackendInferenceBenchmarkRunner = func() v7inferencebench.BenchmarkRunner {
+	newV7BackendInferenceBenchmarkRunner = func() inferencebench.BenchmarkRunner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2374,13 +2374,13 @@ func TestProcessOptionalV7BackendInferenceBenchmarkSubmitsMeasuredReceipt(t *tes
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata, ok := req.Metadata[v7inferencebench.BenchmarkTask].(map[string]any)
+		metadata, ok := req.Metadata[inferencebench.BenchmarkTask].(map[string]any)
 		if !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7inferencebench.BenchmarkTask, req.Metadata)
+			t.Errorf("receipt metadata missing %q: %+v", inferencebench.BenchmarkTask, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if metadata["proof_status"] != v7inferencebench.ProofStatusMeasured {
+		if metadata["proof_status"] != inferencebench.ProofStatusMeasured {
 			t.Errorf("proof_status = %v", metadata["proof_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -2456,15 +2456,15 @@ func TestProcessOptionalV7BackendInferenceBenchmarkSubmitsMeasuredReceipt(t *tes
 }
 
 func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T) {
-	t.Setenv(v7dashboardinference.FlagEnv, "1")
+	t.Setenv(routedinference.FlagEnv, "1")
 	oldFactory := newV7DashboardInferenceRunner
 	oldStatus := v7DashboardInferenceStatus
 	oldDiagnostics := workLoopDiagnostics
-	status := v7dashboardinference.NewLocalStatus()
-	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(v7dashboardinference.ProofStatusMeasured)}
+	status := routedinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(routedinference.ProofStatusMeasured)}
 	v7DashboardInferenceStatus = status
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
-	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2505,13 +2505,13 @@ func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata, ok := req.Metadata[v7dashboardinference.Task].(map[string]any)
+		metadata, ok := req.Metadata[routedinference.Task].(map[string]any)
 		if !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7dashboardinference.Task, req.Metadata)
+			t.Errorf("receipt metadata missing %q: %+v", routedinference.Task, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if metadata["proof_status"] != v7dashboardinference.ProofStatusMeasured {
+		if metadata["proof_status"] != routedinference.ProofStatusMeasured {
 			t.Errorf("proof_status = %v", metadata["proof_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -2589,19 +2589,19 @@ func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T)
 }
 
 func TestProcessOptionalV7DashboardInferenceSubmitsOptInGeneratedText(t *testing.T) {
-	t.Setenv(v7dashboardinference.FlagEnv, "1")
-	t.Setenv(v7dashboardinference.TextOutputFlagEnv, "1")
+	t.Setenv(routedinference.FlagEnv, "1")
+	t.Setenv(routedinference.TextOutputFlagEnv, "1")
 	oldFactory := newV7DashboardInferenceRunner
 	oldStatus := v7DashboardInferenceStatus
 	oldDiagnostics := workLoopDiagnostics
-	status := v7dashboardinference.NewLocalStatus()
-	result := testDashboardInferenceResult(v7dashboardinference.ProofStatusMeasured)
-	result.Spec = v7dashboardinference.Spec{}
+	status := routedinference.NewLocalStatus()
+	result := testDashboardInferenceResult(routedinference.ProofStatusMeasured)
+	result.Spec = routedinference.Spec{}
 	result.GeneratedText = "Ryvion routes AI work to warm, ready nodes."
 	fakeRunner := &fakeDashboardInferenceRunner{result: result}
 	v7DashboardInferenceStatus = status
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
-	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2625,9 +2625,9 @@ func TestProcessOptionalV7DashboardInferenceSubmitsOptInGeneratedText(t *testing
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata, ok := req.Metadata[v7dashboardinference.Task].(map[string]any)
+		metadata, ok := req.Metadata[routedinference.Task].(map[string]any)
 		if !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7dashboardinference.Task, req.Metadata)
+			t.Errorf("receipt metadata missing %q: %+v", routedinference.Task, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -2673,18 +2673,18 @@ func TestProcessOptionalV7DashboardInferenceSubmitsOptInGeneratedText(t *testing
 }
 
 func TestProcessOptionalV7DashboardInferenceSendsProgressBeforeReceipt(t *testing.T) {
-	t.Setenv(v7dashboardinference.FlagEnv, "1")
-	t.Setenv(v7dashboardinference.TextOutputFlagEnv, "1")
-	t.Setenv(v7dashboardinference.StreamingFlagEnv, "1")
+	t.Setenv(routedinference.FlagEnv, "1")
+	t.Setenv(routedinference.TextOutputFlagEnv, "1")
+	t.Setenv(routedinference.StreamingFlagEnv, "1")
 	oldFactory := newV7DashboardInferenceRunner
 	oldStatus := v7DashboardInferenceStatus
 	oldDiagnostics := workLoopDiagnostics
-	status := v7dashboardinference.NewLocalStatus()
+	status := routedinference.NewLocalStatus()
 	generated := "Ryvion streams"
 	fakeRunner := &fakeDashboardInferenceProgressRunner{generated: generated}
 	v7DashboardInferenceStatus = status
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
-	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2744,7 +2744,7 @@ func TestProcessOptionalV7DashboardInferenceSendsProgressBeforeReceipt(t *testin
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			metadata := req.Metadata[v7dashboardinference.Task].(map[string]any)
+			metadata := req.Metadata[routedinference.Task].(map[string]any)
 			if metadata["generated_text"] != generated {
 				t.Errorf("receipt generated_text = %#v, want %q", metadata["generated_text"], generated)
 				w.WriteHeader(http.StatusBadRequest)
@@ -2777,15 +2777,15 @@ func TestProcessOptionalV7DashboardInferenceSendsProgressBeforeReceipt(t *testin
 }
 
 func TestProcessOptionalV7DashboardInferenceRecordsRejectedCounter(t *testing.T) {
-	t.Setenv(v7dashboardinference.FlagEnv, "1")
+	t.Setenv(routedinference.FlagEnv, "1")
 	oldFactory := newV7DashboardInferenceRunner
 	oldStatus := v7DashboardInferenceStatus
 	oldDiagnostics := workLoopDiagnostics
-	status := v7dashboardinference.NewLocalStatus()
-	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(v7dashboardinference.ProofStatusRejected)}
+	status := routedinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(routedinference.ProofStatusRejected)}
 	v7DashboardInferenceStatus = status
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
-	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2835,15 +2835,15 @@ func TestProcessOptionalV7DashboardInferenceRecordsRejectedCounter(t *testing.T)
 }
 
 func TestProcessOptionalV7DashboardInferenceRecordsReceiptFailureCounter(t *testing.T) {
-	t.Setenv(v7dashboardinference.FlagEnv, "1")
+	t.Setenv(routedinference.FlagEnv, "1")
 	oldFactory := newV7DashboardInferenceRunner
 	oldStatus := v7DashboardInferenceStatus
 	oldDiagnostics := workLoopDiagnostics
-	status := v7dashboardinference.NewLocalStatus()
-	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(v7dashboardinference.ProofStatusMeasured)}
+	status := routedinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(routedinference.ProofStatusMeasured)}
 	v7DashboardInferenceStatus = status
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
-	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -3023,13 +3023,13 @@ func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *test
 }
 
 func TestProcessOptionalV7ModelBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
-	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
 	oldStatus := v7ModelBenchmarkStatus
 	oldFactory := newV7ModelBenchmarkRunner
-	status := v7modelbench.NewLocalStatus()
+	status := modelbench.NewLocalStatus()
 	fakeRunner := &fakeModelBenchmarkRunner{result: testMeasuredModelBenchmarkResult()}
 	v7ModelBenchmarkStatus = status
-	newV7ModelBenchmarkRunner = func(_ *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, gpuDetected bool) modelbench.ModelBenchmarkRunner {
 		if !gpuDetected {
 			t.Fatal("gpuDetected = false, want true")
 		}
@@ -3072,13 +3072,13 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata, ok := req.Metadata[v7modelbench.ModelBenchmarkTask].(map[string]any)
+		metadata, ok := req.Metadata[modelbench.ModelBenchmarkTask].(map[string]any)
 		if !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7modelbench.ModelBenchmarkTask, req.Metadata)
+			t.Errorf("receipt metadata missing %q: %+v", modelbench.ModelBenchmarkTask, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if metadata["proof_status"] != string(v7modelbench.ModelBenchmarkProofStatusMeasured) {
+		if metadata["proof_status"] != string(modelbench.ModelBenchmarkProofStatusMeasured) {
 			t.Errorf("proof_status = %v", metadata["proof_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -3135,13 +3135,13 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
 }
 
 func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableReceipt(t *testing.T) {
-	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
 	oldStatus := v7ModelBenchmarkStatus
 	oldFactory := newV7ModelBenchmarkRunner
-	status := v7modelbench.NewLocalStatus()
+	status := modelbench.NewLocalStatus()
 	fakeRunner := &fakeModelBenchmarkRunner{result: testUnavailableModelBenchmarkResult()}
 	v7ModelBenchmarkStatus = status
-	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) v7modelbench.ModelBenchmarkRunner {
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) modelbench.ModelBenchmarkRunner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -3162,8 +3162,8 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableReceipt(t *testing.T) 
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata := req.Metadata[v7modelbench.ModelBenchmarkTask].(map[string]any)
-		if metadata["proof_status"] != string(v7modelbench.ModelBenchmarkProofStatusUnavailable) {
+		metadata := req.Metadata[modelbench.ModelBenchmarkTask].(map[string]any)
+		if metadata["proof_status"] != string(modelbench.ModelBenchmarkProofStatusUnavailable) {
 			t.Errorf("proof_status = %v", metadata["proof_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -3204,19 +3204,19 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableReceipt(t *testing.T) 
 }
 
 func TestProcessOptionalV7ModelBenchmarkSubmitsSeriesReceipt(t *testing.T) {
-	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
 	oldStatus := v7ModelBenchmarkStatus
 	oldFactory := newV7ModelBenchmarkRunner
-	status := v7modelbench.NewLocalStatus()
+	status := modelbench.NewLocalStatus()
 	fakeRunner := &fakeModelBenchmarkRunner{
-		results: []v7modelbench.ModelBenchmarkResult{
+		results: []modelbench.ModelBenchmarkResult{
 			testMeasuredModelBenchmarkSeriesResult(9_999, 10_999, 99, 99),
 			testMeasuredModelBenchmarkSeriesResult(100, 1_100, 11, 10),
 			testMeasuredModelBenchmarkSeriesResult(200, 1_200, 11, 9.17),
 		},
 	}
 	v7ModelBenchmarkStatus = status
-	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) v7modelbench.ModelBenchmarkRunner {
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) modelbench.ModelBenchmarkRunner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -3251,13 +3251,13 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsSeriesReceipt(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata, ok := req.Metadata[v7modelbench.ModelBenchmarkSeriesTask].(map[string]any)
+		metadata, ok := req.Metadata[modelbench.ModelBenchmarkSeriesTask].(map[string]any)
 		if !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7modelbench.ModelBenchmarkSeriesTask, req.Metadata)
+			t.Errorf("receipt metadata missing %q: %+v", modelbench.ModelBenchmarkSeriesTask, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if metadata["proof_status"] != v7modelbench.ModelBenchmarkSeriesProofStatusMeasured {
+		if metadata["proof_status"] != modelbench.ModelBenchmarkSeriesProofStatusMeasured {
 			t.Errorf("proof_status = %v", metadata["proof_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -3317,18 +3317,18 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsSeriesReceipt(t *testing.T) {
 }
 
 func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableSeriesReceipt(t *testing.T) {
-	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
 	oldStatus := v7ModelBenchmarkStatus
 	oldFactory := newV7ModelBenchmarkRunner
-	status := v7modelbench.NewLocalStatus()
+	status := modelbench.NewLocalStatus()
 	fakeRunner := &fakeModelBenchmarkRunner{
-		results: []v7modelbench.ModelBenchmarkResult{
+		results: []modelbench.ModelBenchmarkResult{
 			testUnavailableModelBenchmarkSeriesResult(),
 			testUnavailableModelBenchmarkSeriesResult(),
 		},
 	}
 	v7ModelBenchmarkStatus = status
-	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) v7modelbench.ModelBenchmarkRunner {
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) modelbench.ModelBenchmarkRunner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -3349,8 +3349,8 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableSeriesReceipt(t *testi
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata := req.Metadata[v7modelbench.ModelBenchmarkSeriesTask].(map[string]any)
-		if metadata["proof_status"] != v7modelbench.ModelBenchmarkSeriesProofStatusUnavailable {
+		metadata := req.Metadata[modelbench.ModelBenchmarkSeriesTask].(map[string]any)
+		if metadata["proof_status"] != modelbench.ModelBenchmarkSeriesProofStatusUnavailable {
 			t.Errorf("proof_status = %v", metadata["proof_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -3397,12 +3397,12 @@ func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableSeriesReceipt(t *testi
 
 func TestProcessOptionalV7ModelBenchmarkNormalJobDoesNotRecordStatus(t *testing.T) {
 	oldStatus := v7ModelBenchmarkStatus
-	status := v7modelbench.NewLocalStatus()
+	status := modelbench.NewLocalStatus()
 	v7ModelBenchmarkStatus = status
 	t.Cleanup(func() {
 		v7ModelBenchmarkStatus = oldStatus
 	})
-	t.Setenv(v7modelbench.ModelBenchmarkFlagEnv, "1")
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
 
 	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), nil, &hub.WorkAssignment{
 		JobID:    "job-normal",
@@ -3418,7 +3418,7 @@ func TestProcessOptionalV7ModelBenchmarkNormalJobDoesNotRecordStatus(t *testing.
 	if result != nil {
 		t.Fatalf("result = %+v, want nil", result)
 	}
-	if snapshot := status.Snapshot(); snapshot.Counters != (v7modelbench.LocalStatusCounters{}) {
+	if snapshot := status.Snapshot(); snapshot.Counters != (modelbench.LocalStatusCounters{}) {
 		t.Fatalf("status counters changed for normal job: %+v", snapshot.Counters)
 	}
 }
@@ -3500,25 +3500,25 @@ func testLlamaCppBackendBenchmarkSnapshot(proofStatus string) llamacpp.Benchmark
 }
 
 type fakeBackendInferenceBenchmarkRunner struct {
-	result v7inferencebench.BenchmarkExecutionResult
+	result inferencebench.BenchmarkExecutionResult
 	err    error
-	specs  []v7inferencebench.BenchmarkSpec
+	specs  []inferencebench.BenchmarkSpec
 	calls  int
 }
 
-func (f *fakeBackendInferenceBenchmarkRunner) RunBackendInferenceBenchmark(_ context.Context, spec v7inferencebench.BenchmarkSpec) (v7inferencebench.BenchmarkExecutionResult, error) {
+func (f *fakeBackendInferenceBenchmarkRunner) RunBackendInferenceBenchmark(_ context.Context, spec inferencebench.BenchmarkSpec) (inferencebench.BenchmarkExecutionResult, error) {
 	f.calls++
 	f.specs = append(f.specs, spec)
 	if f.err != nil {
-		return v7inferencebench.BenchmarkExecutionResult{}, f.err
+		return inferencebench.BenchmarkExecutionResult{}, f.err
 	}
 	return f.result, nil
 }
 
 func testBackendInferenceBenchmarkSpecJSON(t *testing.T) string {
 	t.Helper()
-	spec := v7inferencebench.BenchmarkSpec{
-		Task:            v7inferencebench.BenchmarkTask,
+	spec := inferencebench.BenchmarkSpec{
+		Task:            inferencebench.BenchmarkTask,
 		RequestID:       "request-backend-inference-local",
 		BenchmarkID:     "benchmark-backend-inference-local",
 		JobID:           "job-backend-inference-local",
@@ -3526,7 +3526,7 @@ func testBackendInferenceBenchmarkSpecJSON(t *testing.T) string {
 		ModelID:         "tinyllama.Q4_K_M.gguf",
 		TargetNodeID:    "node-backend-inference-local",
 		PromptHash:      llamacpp.HashBenchmarkPrompt(),
-		PromptProfileID: v7inferencebench.BenchmarkPromptProfileID,
+		PromptProfileID: inferencebench.BenchmarkPromptProfileID,
 		MaxTokens:       16,
 		TimeoutMs:       30_000,
 		CreatedAtUnixMs: 1_800_000_000_123,
@@ -3538,9 +3538,9 @@ func testBackendInferenceBenchmarkSpecJSON(t *testing.T) string {
 	return string(encoded)
 }
 
-func testBackendInferenceBenchmarkResult(proofStatus string) v7inferencebench.BenchmarkExecutionResult {
-	spec := v7inferencebench.BenchmarkSpec{
-		Task:            v7inferencebench.BenchmarkTask,
+func testBackendInferenceBenchmarkResult(proofStatus string) inferencebench.BenchmarkExecutionResult {
+	spec := inferencebench.BenchmarkSpec{
+		Task:            inferencebench.BenchmarkTask,
 		RequestID:       "request-backend-inference-local",
 		BenchmarkID:     "benchmark-backend-inference-local",
 		JobID:           "job-backend-inference-local",
@@ -3548,12 +3548,12 @@ func testBackendInferenceBenchmarkResult(proofStatus string) v7inferencebench.Be
 		ModelID:         "tinyllama.Q4_K_M.gguf",
 		TargetNodeID:    "node-backend-inference-local",
 		PromptHash:      llamacpp.HashBenchmarkPrompt(),
-		PromptProfileID: v7inferencebench.BenchmarkPromptProfileID,
+		PromptProfileID: inferencebench.BenchmarkPromptProfileID,
 		MaxTokens:       16,
 		TimeoutMs:       30_000,
 		CreatedAtUnixMs: 1_800_000_000_123,
 	}
-	result := v7inferencebench.BenchmarkExecutionResult{
+	result := inferencebench.BenchmarkExecutionResult{
 		Spec:            spec,
 		Backend:         llamacpp.BackendName,
 		ModelID:         "tinyllama.Q4_K_M.gguf",
@@ -3568,7 +3568,7 @@ func testBackendInferenceBenchmarkResult(proofStatus string) v7inferencebench.Be
 		EndToEndTPS:     17.143,
 		ProofStatus:     proofStatus,
 	}
-	if proofStatus != v7inferencebench.ProofStatusMeasured {
+	if proofStatus != inferencebench.ProofStatusMeasured {
 		result.OutputHash = ""
 		result.OutputBytes = 0
 		result.TokensGenerated = 0
@@ -3582,17 +3582,17 @@ func testBackendInferenceBenchmarkResult(proofStatus string) v7inferencebench.Be
 }
 
 type fakeDashboardInferenceRunner struct {
-	result v7dashboardinference.ExecutionResult
+	result routedinference.ExecutionResult
 	err    error
-	specs  []v7dashboardinference.Spec
+	specs  []routedinference.Spec
 	calls  int
 }
 
-func (f *fakeDashboardInferenceRunner) RunDashboardInference(_ context.Context, spec v7dashboardinference.Spec) (v7dashboardinference.ExecutionResult, error) {
+func (f *fakeDashboardInferenceRunner) RunDashboardInference(_ context.Context, spec routedinference.Spec) (routedinference.ExecutionResult, error) {
 	f.calls++
 	f.specs = append(f.specs, spec)
 	if f.err != nil {
-		return v7dashboardinference.ExecutionResult{}, f.err
+		return routedinference.ExecutionResult{}, f.err
 	}
 	result := f.result
 	if result.Spec.Task == "" {
@@ -3606,47 +3606,47 @@ type fakeDashboardInferenceProgressRunner struct {
 	calls     int
 }
 
-func (f *fakeDashboardInferenceProgressRunner) RunDashboardInference(ctx context.Context, spec v7dashboardinference.Spec) (v7dashboardinference.ExecutionResult, error) {
+func (f *fakeDashboardInferenceProgressRunner) RunDashboardInference(ctx context.Context, spec routedinference.Spec) (routedinference.ExecutionResult, error) {
 	return f.RunDashboardInferenceWithProgress(ctx, spec, nil)
 }
 
-func (f *fakeDashboardInferenceProgressRunner) RunDashboardInferenceWithProgress(ctx context.Context, spec v7dashboardinference.Spec, progress v7dashboardinference.ProgressSender) (v7dashboardinference.ExecutionResult, error) {
+func (f *fakeDashboardInferenceProgressRunner) RunDashboardInferenceWithProgress(ctx context.Context, spec routedinference.Spec, progress routedinference.ProgressSender) (routedinference.ExecutionResult, error) {
 	f.calls++
 	if progress != nil {
-		if err := progress.SendDashboardInferenceProgress(ctx, v7dashboardinference.ProgressBatch{
+		if err := progress.SendDashboardInferenceProgress(ctx, routedinference.ProgressBatch{
 			RunID:    spec.RunID,
 			JobID:    spec.JobID,
 			NodeID:   spec.TargetNodeID,
 			SeqStart: 1,
-			Chunks: []v7dashboardinference.ProgressChunk{
+			Chunks: []routedinference.ProgressChunk{
 				{Seq: 1, Type: "delta", Text: "Ryvion"},
 				{Seq: 2, Type: "delta", Text: " streams"},
 			},
 		}); err != nil {
-			return v7dashboardinference.ExecutionResult{}, err
+			return routedinference.ExecutionResult{}, err
 		}
 	}
 	output := []byte(f.generated)
-	return v7dashboardinference.ExecutionResult{
+	return routedinference.ExecutionResult{
 		Spec:            spec,
 		Backend:         spec.Backend,
 		ModelID:         spec.ModelID,
-		OutputHash:      v7dashboardinference.HashOutput(spec.JobID, output),
+		OutputHash:      routedinference.HashOutput(spec.JobID, output),
 		OutputBytes:     int64(len(output)),
 		TokensGenerated: 2,
 		TTFTMs:          100,
 		TotalTimeMs:     300,
 		DecodeTPS:       10,
 		EndToEndTPS:     6.667,
-		ProofStatus:     v7dashboardinference.ProofStatusMeasured,
+		ProofStatus:     routedinference.ProofStatusMeasured,
 		GeneratedText:   f.generated,
 	}, nil
 }
 
 func testDashboardInferenceSpecJSON(t *testing.T) string {
 	t.Helper()
-	spec := v7dashboardinference.Spec{
-		Task:            v7dashboardinference.Task,
+	spec := routedinference.Spec{
+		Task:            routedinference.Task,
 		RequestID:       "dashboardinfer_request",
 		RunID:           "dashboardinfer_run",
 		JobID:           "v7dashboardinfer_job",
@@ -3666,8 +3666,8 @@ func testDashboardInferenceSpecJSON(t *testing.T) string {
 
 func testDashboardInferenceTextSpecJSON(t *testing.T) string {
 	t.Helper()
-	spec := v7dashboardinference.Spec{
-		Task:            v7dashboardinference.Task,
+	spec := routedinference.Spec{
+		Task:            routedinference.Task,
 		RequestID:       "dashboardinfer_request",
 		RunID:           "dashboardinfer_run",
 		JobID:           "v7dashboardinfer_job",
@@ -3688,9 +3688,9 @@ func testDashboardInferenceTextSpecJSON(t *testing.T) string {
 	return string(encoded)
 }
 
-func testDashboardInferenceResult(proofStatus string) v7dashboardinference.ExecutionResult {
-	spec := v7dashboardinference.Spec{
-		Task:            v7dashboardinference.Task,
+func testDashboardInferenceResult(proofStatus string) routedinference.ExecutionResult {
+	spec := routedinference.Spec{
+		Task:            routedinference.Task,
 		RequestID:       "dashboardinfer_request",
 		RunID:           "dashboardinfer_run",
 		JobID:           "v7dashboardinfer_job",
@@ -3701,7 +3701,7 @@ func testDashboardInferenceResult(proofStatus string) v7dashboardinference.Execu
 		Stream:          true,
 		CreatedAtUnixMs: 1_800_000_000_123,
 	}
-	result := v7dashboardinference.ExecutionResult{
+	result := routedinference.ExecutionResult{
 		Spec:            spec,
 		Backend:         llamacpp.BackendName,
 		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
@@ -3714,8 +3714,8 @@ func testDashboardInferenceResult(proofStatus string) v7dashboardinference.Execu
 		EndToEndTPS:     12.5,
 		ProofStatus:     proofStatus,
 	}
-	if proofStatus != v7dashboardinference.ProofStatusMeasured {
-		result.OutputHash = v7dashboardinference.HashOutput(spec.JobID, nil)
+	if proofStatus != routedinference.ProofStatusMeasured {
+		result.OutputHash = routedinference.HashOutput(spec.JobID, nil)
 		result.OutputBytes = 0
 		result.TokensGenerated = 0
 		result.TTFTMs = 0
@@ -3728,14 +3728,14 @@ func testDashboardInferenceResult(proofStatus string) v7dashboardinference.Execu
 }
 
 type fakeModelBenchmarkRunner struct {
-	result  v7modelbench.ModelBenchmarkResult
-	results []v7modelbench.ModelBenchmarkResult
+	result  modelbench.ModelBenchmarkResult
+	results []modelbench.ModelBenchmarkResult
 	err     error
 	errs    []error
 	calls   int
 }
 
-func (f *fakeModelBenchmarkRunner) RunModelBenchmark(_ context.Context, _ v7modelbench.ModelBenchmarkSpec) (v7modelbench.ModelBenchmarkResult, error) {
+func (f *fakeModelBenchmarkRunner) RunModelBenchmark(_ context.Context, _ modelbench.ModelBenchmarkSpec) (modelbench.ModelBenchmarkResult, error) {
 	index := f.calls
 	f.calls++
 	result := f.result
@@ -3751,8 +3751,8 @@ func (f *fakeModelBenchmarkRunner) RunModelBenchmark(_ context.Context, _ v7mode
 
 func testModelBenchmarkSpecJSON(t *testing.T) string {
 	t.Helper()
-	spec := v7modelbench.ModelBenchmarkSpec{
-		Task:            v7modelbench.ModelBenchmarkTask,
+	spec := modelbench.ModelBenchmarkSpec{
+		Task:            modelbench.ModelBenchmarkTask,
 		RequestID:       "request-modelbench-local",
 		JobID:           "job-modelbench-local",
 		ModelID:         "ryvion-llama-3.2-3b",
@@ -3770,67 +3770,67 @@ func testModelBenchmarkSpecJSON(t *testing.T) string {
 	return string(encoded)
 }
 
-func testMeasuredModelBenchmarkResult() v7modelbench.ModelBenchmarkResult {
-	return v7modelbench.ModelBenchmarkResult{
+func testMeasuredModelBenchmarkResult() modelbench.ModelBenchmarkResult {
+	return modelbench.ModelBenchmarkResult{
 		RequestID:  "request-modelbench-local",
 		JobID:      "job-modelbench-local",
 		ModelID:    "ryvion-llama-3.2-3b",
 		PromptHash: testSHA256ObjectID("prompt"),
-		RuntimeInfo: v7modelbench.ModelBenchmarkRuntimeInfo{
+		RuntimeInfo: modelbench.ModelBenchmarkRuntimeInfo{
 			AgentVersion:             "test",
 			OS:                       "darwin",
 			Arch:                     "arm64",
 			NativeInferenceSupported: true,
 			NativeInferenceReady:     true,
-			RuntimeKind:              v7modelbench.ModelBenchmarkRuntimeKindNativeLocal,
+			RuntimeKind:              modelbench.ModelBenchmarkRuntimeKindNativeLocal,
 			ModelID:                  "ryvion-llama-3.2-3b",
 			ModelLoaded:              true,
 			GPUDetected:              true,
 			GPUModel:                 "test-gpu",
 		},
-		Metrics: v7modelbench.ModelBenchmarkMetrics{
+		Metrics: modelbench.ModelBenchmarkMetrics{
 			StartedAtUnixMs:    1_800_000_000_123,
 			FinishedAtUnixMs:   1_800_000_001_357,
 			WallTimeMs:         1234,
 			TimeToFirstTokenMs: 200,
 			TokensGenerated:    16,
 			TokensPerSecond:    12.3,
-			ModelLoadState:     v7modelbench.ModelBenchmarkModelLoadStateLoaded,
+			ModelLoadState:     modelbench.ModelBenchmarkModelLoadStateLoaded,
 		},
 		OutputHash:  testSHA256ObjectID("secret completion text"),
 		OutputBytes: int64(len("secret completion text")),
-		ProofStatus: v7modelbench.ModelBenchmarkProofStatusMeasured,
+		ProofStatus: modelbench.ModelBenchmarkProofStatusMeasured,
 	}
 }
 
-func testUnavailableModelBenchmarkResult() v7modelbench.ModelBenchmarkResult {
+func testUnavailableModelBenchmarkResult() modelbench.ModelBenchmarkResult {
 	result := testMeasuredModelBenchmarkResult()
 	result.RuntimeInfo.NativeInferenceReady = false
 	result.RuntimeInfo.ModelLoaded = false
 	result.Metrics.TimeToFirstTokenMs = 0
 	result.Metrics.TokensGenerated = 0
 	result.Metrics.TokensPerSecond = 0
-	result.Metrics.ModelLoadState = v7modelbench.ModelBenchmarkModelLoadStateUnavailable
+	result.Metrics.ModelLoadState = modelbench.ModelBenchmarkModelLoadStateUnavailable
 	result.Metrics.ErrorCode = "native_model_unavailable"
 	result.OutputHash = ""
 	result.OutputBytes = 0
-	result.ProofStatus = v7modelbench.ModelBenchmarkProofStatusUnavailable
+	result.ProofStatus = modelbench.ModelBenchmarkProofStatusUnavailable
 	return result
 }
 
 func testModelBenchmarkSeriesSpecJSON(t *testing.T, warmupRuns int, measuredRuns int) string {
 	t.Helper()
-	profile, err := v7modelbench.GetBenchmarkPromptProfile(string(v7modelbench.BenchmarkPromptProfileLongDecodeProbe))
+	profile, err := modelbench.GetBenchmarkPromptProfile(string(modelbench.BenchmarkPromptProfileLongDecodeProbe))
 	if err != nil {
 		t.Fatalf("GetBenchmarkPromptProfile() error = %v", err)
 	}
 	spec := map[string]any{
-		"task":               v7modelbench.ModelBenchmarkSeriesTask,
+		"task":               modelbench.ModelBenchmarkSeriesTask,
 		"request_id":         "request-modelbench-series-local",
 		"job_id":             "job-modelbench-series-local",
 		"model_id":           "ryvion-llama-3.2-3b",
 		"prompt_profile_id":  string(profile.ID),
-		"prompt_hash":        v7modelbench.BenchmarkPromptHash(profile),
+		"prompt_hash":        modelbench.BenchmarkPromptHash(profile),
 		"max_tokens":         32,
 		"timeout_ms":         30_000,
 		"warmup_runs":        warmupRuns,
@@ -3844,12 +3844,12 @@ func testModelBenchmarkSeriesSpecJSON(t *testing.T, warmupRuns int, measuredRuns
 	return string(encoded)
 }
 
-func testMeasuredModelBenchmarkSeriesResult(ttftMs int64, wallMs int64, tokens int64, tps float64) v7modelbench.ModelBenchmarkResult {
-	profile, _ := v7modelbench.GetBenchmarkPromptProfile(string(v7modelbench.BenchmarkPromptProfileLongDecodeProbe))
+func testMeasuredModelBenchmarkSeriesResult(ttftMs int64, wallMs int64, tokens int64, tps float64) modelbench.ModelBenchmarkResult {
+	profile, _ := modelbench.GetBenchmarkPromptProfile(string(modelbench.BenchmarkPromptProfileLongDecodeProbe))
 	result := testMeasuredModelBenchmarkResult()
 	result.RequestID = "request-modelbench-series-local"
 	result.JobID = "job-modelbench-series-local"
-	result.PromptHash = v7modelbench.BenchmarkPromptHash(profile)
+	result.PromptHash = modelbench.BenchmarkPromptHash(profile)
 	result.Metrics.TimeToFirstTokenMs = ttftMs
 	result.Metrics.WallTimeMs = wallMs
 	result.Metrics.TokensGenerated = tokens
@@ -3859,18 +3859,18 @@ func testMeasuredModelBenchmarkSeriesResult(ttftMs int64, wallMs int64, tokens i
 	return result
 }
 
-func testUnavailableModelBenchmarkSeriesResult() v7modelbench.ModelBenchmarkResult {
+func testUnavailableModelBenchmarkSeriesResult() modelbench.ModelBenchmarkResult {
 	result := testMeasuredModelBenchmarkSeriesResult(0, 25, 0, 0)
 	result.RuntimeInfo.NativeInferenceReady = false
 	result.RuntimeInfo.ModelLoaded = false
 	result.Metrics.TimeToFirstTokenMs = 0
 	result.Metrics.TokensGenerated = 0
 	result.Metrics.TokensPerSecond = 0
-	result.Metrics.ModelLoadState = v7modelbench.ModelBenchmarkModelLoadStateUnavailable
+	result.Metrics.ModelLoadState = modelbench.ModelBenchmarkModelLoadStateUnavailable
 	result.Metrics.ErrorCode = "native_runtime_unavailable"
 	result.OutputHash = ""
 	result.OutputBytes = 0
-	result.ProofStatus = v7modelbench.ModelBenchmarkProofStatusUnavailable
+	result.ProofStatus = modelbench.ModelBenchmarkProofStatusUnavailable
 	return result
 }
 
@@ -3935,12 +3935,12 @@ func assertMainWorkLoopEventsChronological(t *testing.T, events []diagnostics.Wo
 func testV7TensorPlaneBenchmarkSpecJSON(t *testing.T, jobID, requestID string) string {
 	t.Helper()
 	spec := map[string]any{
-		"task":               v7tensorplane.BenchmarkTask,
+		"task":               tensorbench.BenchmarkTask,
 		"request_id":         requestID,
 		"job_id":             jobID,
 		"model_id":           "model-fixture",
 		"layer_index":        2,
-		"dtype":              string(v7tensorplane.TensorDTypeFloat32),
+		"dtype":              string(tensorbench.TensorDTypeFloat32),
 		"tokens":             8,
 		"head_dim":           4,
 		"value_dim":          3,
@@ -3960,7 +3960,7 @@ func testV7TensorPlaneBenchmarkSpecJSON(t *testing.T, jobID, requestID string) s
 func testV7MemoryBenchmarkSpecJSON(t *testing.T, jobID, requestID string) string {
 	t.Helper()
 	spec := map[string]any{
-		"task":               v7memorybench.BenchmarkTask,
+		"task":               memorybench.BenchmarkTask,
 		"request_id":         requestID,
 		"job_id":             jobID,
 		"shard_id":           "shard-a",

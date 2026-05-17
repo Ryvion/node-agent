@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Ryvion/ryvion-node/internal/benchmarks/tensor"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
-	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 
 func TestProviderBackedTensorPlaneProbeDemoComputesMatchedResult(t *testing.T) {

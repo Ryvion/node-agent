@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
+	"github.com/Ryvion/ryvion-node/internal/benchmarks/tensor"
 )
 
 const defaultTensorPlaneDemoModelID = "tensorplane-demo-fixture"

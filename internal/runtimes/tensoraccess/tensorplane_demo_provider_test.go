@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
+	"github.com/Ryvion/ryvion-node/internal/benchmarks/tensor"
 )
 
 func TestTensorPlaneDemoProviderReturnsDeterministicPageAndQuery(t *testing.T) {

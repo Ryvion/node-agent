@@ -18,8 +18,8 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/capabilities/passport"
 	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	routedinference "github.com/Ryvion/ryvion-node/internal/inference/routed"
 	netprofile "github.com/Ryvion/ryvion-node/internal/network/profile"
-	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
 )
 
 func TestRegisterSignsExpectedMessage(t *testing.T) {
@@ -782,12 +782,12 @@ func TestSendDashboardInferenceProgressPostsChunkBatch(t *testing.T) {
 			return
 		}
 		var req struct {
-			RunID        string                               `json:"run_id"`
-			JobID        string                               `json:"job_id"`
-			NodeID       string                               `json:"node_id"`
-			PublicKeyHex string                               `json:"public_key_hex"`
-			SeqStart     int64                                `json:"seq_start"`
-			Chunks       []v7dashboardinference.ProgressChunk `json:"chunks"`
+			RunID        string                          `json:"run_id"`
+			JobID        string                          `json:"job_id"`
+			NodeID       string                          `json:"node_id"`
+			PublicKeyHex string                          `json:"public_key_hex"`
+			SeqStart     int64                           `json:"seq_start"`
+			Chunks       []routedinference.ProgressChunk `json:"chunks"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			setHandlerErr(fmt.Errorf("decode request: %w", err))
@@ -810,11 +810,11 @@ func TestSendDashboardInferenceProgressPostsChunkBatch(t *testing.T) {
 	defer ts.Close()
 
 	c := New(ts.URL, pub, priv)
-	err := c.SendDashboardInferenceProgress(context.Background(), v7dashboardinference.ProgressBatch{
+	err := c.SendDashboardInferenceProgress(context.Background(), routedinference.ProgressBatch{
 		RunID:    "run_1",
 		JobID:    "job_1",
 		SeqStart: 1,
-		Chunks: []v7dashboardinference.ProgressChunk{
+		Chunks: []routedinference.ProgressChunk{
 			{Seq: 1, Type: "delta", Text: "Ryvion"},
 			{Seq: 2, Type: "delta", Text: " streams"},
 		},

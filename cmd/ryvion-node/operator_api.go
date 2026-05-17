@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	memorybench "github.com/Ryvion/ryvion-node/internal/benchmarks/memory"
 	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 	capabilityprofile "github.com/Ryvion/ryvion-node/internal/capabilities/profile"
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
@@ -22,7 +23,11 @@ import (
 	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
+	inferencebench "github.com/Ryvion/ryvion-node/internal/inference/benchmark"
 	inferenceconfig "github.com/Ryvion/ryvion-node/internal/inference/config"
+	routedinference "github.com/Ryvion/ryvion-node/internal/inference/routed"
+	speccap "github.com/Ryvion/ryvion-node/internal/inference/speculative/capabilities"
+	modelbench "github.com/Ryvion/ryvion-node/internal/models/benchmark"
 	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
 	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 	modelprepare "github.com/Ryvion/ryvion-node/internal/models/prepare"
@@ -34,11 +39,6 @@ import (
 	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
 	tensoraccess "github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	usefulenergy "github.com/Ryvion/ryvion-node/internal/telemetry/usefulenergy"
-	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
-	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
-	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7speculative "github.com/Ryvion/ryvion-node/internal/v7/speculative"
 )
 
 const defaultOperatorAPIPort = "45890"
@@ -83,10 +83,10 @@ type operatorRuntime struct {
 	recentJobs           []operatorJob
 	infMgr               *inference.Manager
 	runtimeMgr           *runtimeManager
-	v7MemoryBenchmark    *v7memorybench.LocalStatus
+	v7MemoryBenchmark    *memorybench.LocalStatus
 	v7BackendBenchmark   *llamacpp.BackendBenchmarkLocalStatus
-	v7InferenceBenchmark *v7inferencebench.LocalStatus
-	v7DashboardInference *v7dashboardinference.LocalStatus
+	v7InferenceBenchmark *inferencebench.LocalStatus
+	v7DashboardInference *routedinference.LocalStatus
 	v7ModelPrepare       *modelprepare.LocalStatus
 	v7ModelWarm          *modelwarm.LocalStatus
 	llamaCppSidecar      *llamacpp.Manager
@@ -141,7 +141,7 @@ type operatorStatusResponse struct {
 	BackendProbes        backendprobe.Probes                          `json:"backend_probes"`
 	BackendRuntimes      llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
 	CapabilityProfile    capabilityprofile.Profile                    `json:"capability_profile"`
-	SpeculativeProfiles  []v7speculative.Profile                      `json:"speculative_profiles"`
+	SpeculativeProfiles  []speccap.Profile                            `json:"speculative_profiles"`
 	LlamaCPPSidecar      llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
 	SGLangSidecar        sglang.SGLangSidecarStatus                   `json:"sglang_sidecar"`
 	LlamaCPPBenchmark    llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
@@ -154,10 +154,10 @@ type operatorStatusResponse struct {
 	LastClaimError       string                                       `json:"last_claim_error,omitempty"`
 	LastPayoutAt         time.Time                                    `json:"last_payout_at,omitempty"`
 	LastPayoutError      string                                       `json:"last_payout_error,omitempty"`
-	V7MemoryBenchmark    v7memorybench.LocalStatusSnapshot            `json:"v7_memory_benchmark"`
+	V7MemoryBenchmark    memorybench.LocalStatusSnapshot              `json:"v7_memory_benchmark"`
 	V7BackendBenchmark   llamacpp.BackendBenchmarkLocalStatusSnapshot `json:"v7_backend_benchmark"`
-	V7InferenceBenchmark v7inferencebench.LocalStatusSnapshot         `json:"v7_inference_benchmark"`
-	V7DashboardInference v7dashboardinference.LocalStatusSnapshot     `json:"v7_dashboard_inference"`
+	V7InferenceBenchmark inferencebench.LocalStatusSnapshot           `json:"v7_inference_benchmark"`
+	V7DashboardInference routedinference.LocalStatusSnapshot          `json:"v7_dashboard_inference"`
 	V7ModelPrepare       modelprepare.LocalStatusSnapshot             `json:"v7_model_prepare"`
 	V7ModelWarm          modelwarm.LocalStatusSnapshot                `json:"v7_model_warm"`
 	WorkLoop             diagnostics.WorkLoopSnapshot                 `json:"work_loop"`
@@ -330,10 +330,10 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		caps:                 caps,
 		client:               client,
 		recentJobs:           make([]operatorJob, 0, 20),
-		v7MemoryBenchmark:    v7memorybench.NewLocalStatus(),
+		v7MemoryBenchmark:    memorybench.NewLocalStatus(),
 		v7BackendBenchmark:   llamacpp.NewBackendBenchmarkLocalStatus(),
-		v7InferenceBenchmark: v7inferencebench.NewLocalStatus(),
-		v7DashboardInference: v7dashboardinference.NewLocalStatus(),
+		v7InferenceBenchmark: inferencebench.NewLocalStatus(),
+		v7DashboardInference: routedinference.NewLocalStatus(),
 		v7ModelPrepare:       modelprepare.NewLocalStatus(),
 		v7ModelWarm:          modelwarm.NewLocalStatus(),
 		llamaCppSidecar:      llamaCppSidecar,
@@ -404,7 +404,7 @@ func (s *operatorRuntime) setRuntimeManager(runtimeMgr *runtimeManager) {
 	s.runtimeMgr = runtimeMgr
 }
 
-func (s *operatorRuntime) memoryBenchmarkStatus() *v7memorybench.LocalStatus {
+func (s *operatorRuntime) memoryBenchmarkStatus() *memorybench.LocalStatus {
 	if s == nil {
 		return nil
 	}
@@ -418,12 +418,12 @@ func (s *operatorRuntime) memoryBenchmarkStatus() *v7memorybench.LocalStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.v7MemoryBenchmark == nil {
-		s.v7MemoryBenchmark = v7memorybench.NewLocalStatus()
+		s.v7MemoryBenchmark = memorybench.NewLocalStatus()
 	}
 	return s.v7MemoryBenchmark
 }
 
-func (s *operatorRuntime) inferenceBenchmarkStatus() *v7inferencebench.LocalStatus {
+func (s *operatorRuntime) inferenceBenchmarkStatus() *inferencebench.LocalStatus {
 	if s == nil {
 		return nil
 	}
@@ -437,12 +437,12 @@ func (s *operatorRuntime) inferenceBenchmarkStatus() *v7inferencebench.LocalStat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.v7InferenceBenchmark == nil {
-		s.v7InferenceBenchmark = v7inferencebench.NewLocalStatus()
+		s.v7InferenceBenchmark = inferencebench.NewLocalStatus()
 	}
 	return s.v7InferenceBenchmark
 }
 
-func (s *operatorRuntime) dashboardInferenceStatus() *v7dashboardinference.LocalStatus {
+func (s *operatorRuntime) dashboardInferenceStatus() *routedinference.LocalStatus {
 	if s == nil {
 		return nil
 	}
@@ -456,7 +456,7 @@ func (s *operatorRuntime) dashboardInferenceStatus() *v7dashboardinference.Local
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.v7DashboardInference == nil {
-		s.v7DashboardInference = v7dashboardinference.NewLocalStatus()
+		s.v7DashboardInference = routedinference.NewLocalStatus()
 	}
 	return s.v7DashboardInference
 }
@@ -947,7 +947,7 @@ func (s *operatorRuntime) finishJob(work *hub.WorkAssignment, result *runnerResu
 		job.MeteringUnits = result.MeteringUnits
 		job.BlobURL = result.BlobURL
 		job.DeliveryObject = result.ObjectKey
-		job.ReceiptMeta = v7memorybench.SanitizeLocalReceiptMetadata(result.Metadata)
+		job.ReceiptMeta = memorybench.SanitizeLocalReceiptMetadata(result.Metadata)
 		if result.ExitCode != 0 && job.Status == "completed" {
 			job.Status = "failed"
 		}
@@ -1034,7 +1034,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	s.mu.RUnlock()
 
 	report = freshOperatorHealthReport(caps, infMgr, runtimeMgr, report)
-	var memoryBenchmarkSnapshot v7memorybench.LocalStatusSnapshot
+	var memoryBenchmarkSnapshot memorybench.LocalStatusSnapshot
 	if memoryBenchmarkStatus != nil {
 		memoryBenchmarkSnapshot = memoryBenchmarkStatus.Snapshot()
 	}
@@ -1042,11 +1042,11 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	if backendBenchmarkStatus != nil {
 		backendBenchmarkSnapshot = backendBenchmarkStatus.Snapshot()
 	}
-	var inferenceBenchmarkSnapshot v7inferencebench.LocalStatusSnapshot
+	var inferenceBenchmarkSnapshot inferencebench.LocalStatusSnapshot
 	if inferenceBenchmarkStatus != nil {
 		inferenceBenchmarkSnapshot = inferenceBenchmarkStatus.Snapshot()
 	}
-	var dashboardInferenceSnapshot v7dashboardinference.LocalStatusSnapshot
+	var dashboardInferenceSnapshot routedinference.LocalStatusSnapshot
 	if dashboardInferenceStatus != nil {
 		dashboardInferenceSnapshot = dashboardInferenceStatus.Snapshot()
 	}
@@ -1342,7 +1342,7 @@ func ggufBackendTextGenerationAvailable(backendProbes backendprobe.Probes, backe
 		(backendProbes.LlamaCPP.Available && backendProbes.LlamaCPP.SupportsTextGeneration)
 }
 
-func buildCapabilityProfileStatus(hardware capshardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory runtimeinventory.Inventory, speculativeDecoding *v7speculative.DecodingCapability, kvCapability *kvprobe.Capability, tensorAccess tensoraccess.TensorAccessCapability) capabilityprofile.Profile {
+func buildCapabilityProfileStatus(hardware capshardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory runtimeinventory.Inventory, speculativeDecoding *speccap.DecodingCapability, kvCapability *kvprobe.Capability, tensorAccess tensoraccess.TensorAccessCapability) capabilityprofile.Profile {
 	return capabilityprofile.BuildProfile(capabilityprofile.BuildInput{
 		Hardware:            hardware,
 		Policy:              policy,
@@ -1357,8 +1357,8 @@ func buildCapabilityProfileStatus(hardware capshardware.CapacityInventory, polic
 	})
 }
 
-func buildSpeculativeReportStatus(hardware capshardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory runtimeinventory.Inventory) v7speculative.Report {
-	return v7speculative.BuildReport(v7speculative.BuildInput{
+func buildSpeculativeReportStatus(hardware capshardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory runtimeinventory.Inventory) speccap.Report {
+	return speccap.BuildReport(speccap.BuildInput{
 		Hardware:         hardware,
 		Policy:           policy,
 		ModelCache:       modelCache,
@@ -1603,12 +1603,12 @@ func buildV7HeartbeatPreviewResponse(nodeID string, payload heartbeat.V7Heartbea
 	}
 }
 
-func (s *operatorRuntime) runV7ModelBenchmark(ctx context.Context, modelID string, maxTokens int, timeoutMs int64) (v7modelbench.ModelBenchmarkResult, error) {
+func (s *operatorRuntime) runV7ModelBenchmark(ctx context.Context, modelID string, maxTokens int, timeoutMs int64) (modelbench.ModelBenchmarkResult, error) {
 	if maxTokens < 0 {
-		return v7modelbench.ModelBenchmarkResult{}, fmt.Errorf("max_tokens must be non-negative")
+		return modelbench.ModelBenchmarkResult{}, fmt.Errorf("max_tokens must be non-negative")
 	}
 	if timeoutMs < 0 {
-		return v7modelbench.ModelBenchmarkResult{}, fmt.Errorf("timeout_ms must be non-negative")
+		return modelbench.ModelBenchmarkResult{}, fmt.Errorf("timeout_ms must be non-negative")
 	}
 
 	s.mu.RLock()
@@ -1618,7 +1618,7 @@ func (s *operatorRuntime) runV7ModelBenchmark(ctx context.Context, modelID strin
 	s.mu.RUnlock()
 
 	gpuDetected := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
-	runner := v7modelbench.NativeInferenceModelBenchmarkRunner{
+	runner := modelbench.NativeInferenceModelBenchmarkRunner{
 		Native:           infMgr,
 		AgentVersion:     agentVersion,
 		OS:               runtime.GOOS,
@@ -1627,7 +1627,7 @@ func (s *operatorRuntime) runV7ModelBenchmark(ctx context.Context, modelID strin
 		GPUModel:         caps.GPUModel,
 		RuntimeAvailable: inference.NativeRuntimeAvailable,
 	}
-	return v7modelbench.RunModelBenchmarkSelfTest(ctx, runner, v7modelbench.ModelBenchmarkSelfTestConfig{
+	return modelbench.RunModelBenchmarkSelfTest(ctx, runner, modelbench.ModelBenchmarkSelfTestConfig{
 		ModelID:   modelID,
 		MaxTokens: maxTokens,
 		TimeoutMs: timeoutMs,
@@ -1902,7 +1902,7 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		}
 		result, err := state.runV7ModelBenchmark(runCtx, body.ModelID, body.MaxTokens, body.TimeoutMs)
 		if err != nil {
-			if result.ProofStatus != "" && v7modelbench.ValidateModelBenchmarkResult(result) == nil {
+			if result.ProofStatus != "" && modelbench.ValidateModelBenchmarkResult(result) == nil {
 				writeJSON(w, http.StatusOK, result)
 				return
 			}
@@ -2016,7 +2016,7 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      time.Duration(v7modelbench.MaxModelBenchmarkTimeoutMs+5_000) * time.Millisecond,
+		WriteTimeout:      time.Duration(modelbench.MaxModelBenchmarkTimeoutMs+5_000) * time.Millisecond,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}

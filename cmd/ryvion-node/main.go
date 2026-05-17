@@ -23,6 +23,8 @@ import (
 	"time"
 
 	artifact "github.com/Ryvion/ryvion-node/internal/artifacts/core"
+	memorybench "github.com/Ryvion/ryvion-node/internal/benchmarks/memory"
+	tensorbench "github.com/Ryvion/ryvion-node/internal/benchmarks/tensor"
 	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 	capability "github.com/Ryvion/ryvion-node/internal/capabilities/passport"
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
@@ -30,6 +32,9 @@ import (
 	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
+	inferencebench "github.com/Ryvion/ryvion-node/internal/inference/benchmark"
+	routedinference "github.com/Ryvion/ryvion-node/internal/inference/routed"
+	modelbench "github.com/Ryvion/ryvion-node/internal/models/benchmark"
 	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 	modelprepare "github.com/Ryvion/ryvion-node/internal/models/prepare"
 	modelwarm "github.com/Ryvion/ryvion-node/internal/models/warm"
@@ -43,11 +48,6 @@ import (
 	_ "github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	sandbox "github.com/Ryvion/ryvion-node/internal/sandbox"
 	"github.com/Ryvion/ryvion-node/internal/update"
-	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
-	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
-	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7tensorplane "github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 
 // Set via -ldflags at build time.
@@ -258,15 +258,15 @@ const (
 
 var (
 	workLoopDiagnostics          = diagnostics.NewWorkLoopDiagnostics()
-	v7ModelBenchmarkStatus       = v7modelbench.NewLocalStatus()
-	v7TensorPlaneBenchmarkStatus = v7tensorplane.NewLocalStatus()
+	v7ModelBenchmarkStatus       = modelbench.NewLocalStatus()
+	v7TensorPlaneBenchmarkStatus = tensorbench.NewLocalStatus()
 	v7BackendBenchmarkStatus     = llamacpp.NewBackendBenchmarkLocalStatus()
-	v7InferenceBenchmarkStatus   = v7inferencebench.NewLocalStatus()
-	v7DashboardInferenceStatus   = v7dashboardinference.NewLocalStatus()
+	v7InferenceBenchmarkStatus   = inferencebench.NewLocalStatus()
+	v7DashboardInferenceStatus   = routedinference.NewLocalStatus()
 	v7ModelPrepareStatus         = modelprepare.NewLocalStatus()
 	v7ModelWarmStatus            = modelwarm.NewLocalStatus()
-	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
-		return v7modelbench.NativeInferenceModelBenchmarkRunner{
+	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) modelbench.ModelBenchmarkRunner {
+		return modelbench.NativeInferenceModelBenchmarkRunner{
 			Native:           infMgr,
 			AgentVersion:     version,
 			OS:               runtime.GOOS,
@@ -285,28 +285,28 @@ var (
 			Client:  llamacpp.OpenAIClient{},
 		}
 	}
-	newV7BackendInferenceBenchmarkRunner = func() v7inferencebench.BenchmarkRunner {
-		var sidecar v7inferencebench.LlamaCppSidecar = llamacpp.NewManagerFromEnv()
-		var keepWarm v7inferencebench.KeepWarmChecker
+	newV7BackendInferenceBenchmarkRunner = func() inferencebench.BenchmarkRunner {
+		var sidecar inferencebench.LlamaCppSidecar = llamacpp.NewManagerFromEnv()
+		var keepWarm inferencebench.KeepWarmChecker
 		if operatorRuntimeState != nil {
 			sidecar = operatorRuntimeState.llamaCppManager()
 			keepWarm = operatorRuntimeState.llamaCppResidencyKeeper()
 		}
-		return v7inferencebench.LlamaCppBenchmarkRunner{
+		return inferencebench.LlamaCppBenchmarkRunner{
 			Sidecar:  sidecar,
 			KeepWarm: keepWarm,
 			Client:   llamacpp.OpenAIClient{},
 			Getenv:   os.Getenv,
 		}
 	}
-	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
-		var sidecar v7dashboardinference.LlamaCppSidecar = llamacpp.NewManagerFromEnv()
-		var keepWarm v7dashboardinference.KeepWarmChecker
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
+		var sidecar routedinference.LlamaCppSidecar = llamacpp.NewManagerFromEnv()
+		var keepWarm routedinference.KeepWarmChecker
 		if operatorRuntimeState != nil {
 			sidecar = operatorRuntimeState.llamaCppManager()
 			keepWarm = operatorRuntimeState.llamaCppResidencyKeeper()
 		}
-		return v7dashboardinference.LlamaCppRunner{
+		return routedinference.LlamaCppRunner{
 			Sidecar:  sidecar,
 			KeepWarm: keepWarm,
 			Client:   llamacpp.OpenAIClient{},
@@ -542,7 +542,7 @@ func runDoctor(args []string) {
 }
 
 func runMemoryBenchSelfTest(args []string) {
-	defaults := v7memorybench.DefaultMemoryBenchSelfTestConfig()
+	defaults := memorybench.DefaultMemoryBenchSelfTestConfig()
 	fs := flag.NewFlagSet("memorybench-selftest", flag.ExitOnError)
 	tokenCount := fs.Int("tokens", defaults.TokenCount, "Synthetic token count")
 	valueDim := fs.Int("dim", defaults.ValueDim, "Synthetic attention value dimension")
@@ -550,7 +550,7 @@ func runMemoryBenchSelfTest(args []string) {
 	jsonOutput := fs.Bool("json", false, "Print JSON output")
 	_ = fs.Parse(args)
 
-	result, err := v7memorybench.RunMemoryBenchSelfTest(v7memorybench.MemoryBenchSelfTestConfig{
+	result, err := memorybench.RunMemoryBenchSelfTest(memorybench.MemoryBenchSelfTestConfig{
 		Seed:       *seed,
 		TokenCount: *tokenCount,
 		ValueDim:   *valueDim,
@@ -559,7 +559,7 @@ func runMemoryBenchSelfTest(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(v7memorybench.FormatMemoryBenchSelfTestResult(result, *jsonOutput))
+	fmt.Println(memorybench.FormatMemoryBenchSelfTestResult(result, *jsonOutput))
 	os.Exit(0)
 }
 
@@ -577,7 +577,7 @@ func runModelBenchSelfTest(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(v7modelbench.FormatModelBenchmarkSelfTestResult(result, jsonOutput))
+	fmt.Println(modelbench.FormatModelBenchmarkSelfTestResult(result, jsonOutput))
 	os.Exit(0)
 }
 
@@ -590,12 +590,12 @@ func runTensorPlaneSelfTest(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	result, err := v7tensorplane.RunTensorPlaneProbe(config)
+	result, err := tensorbench.RunTensorPlaneProbe(config)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(v7tensorplane.FormatTensorPlaneProbeResult(result, jsonOutput))
+	fmt.Println(tensorbench.FormatTensorPlaneProbeResult(result, jsonOutput))
 	os.Exit(0)
 }
 
@@ -608,17 +608,17 @@ func runTensorPlaneProviderSelfTest(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	result, err := v7tensorplane.RunProviderBackedTensorPlaneProbe(context.Background(), req)
+	result, err := tensorbench.RunProviderBackedTensorPlaneProbe(context.Background(), req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(v7tensorplane.FormatProviderBackedTensorPlaneProbeResult(result, jsonOutput))
+	fmt.Println(tensorbench.FormatProviderBackedTensorPlaneProbeResult(result, jsonOutput))
 	os.Exit(0)
 }
 
-func parseModelBenchSelfTestFlags(args []string) (v7modelbench.ModelBenchmarkSelfTestConfig, bool, error) {
-	defaults := v7modelbench.DefaultModelBenchmarkSelfTestConfig()
+func parseModelBenchSelfTestFlags(args []string) (modelbench.ModelBenchmarkSelfTestConfig, bool, error) {
+	defaults := modelbench.DefaultModelBenchmarkSelfTestConfig()
 	fs := flag.NewFlagSet("modelbench-selftest", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	modelID := fs.String("model", defaults.ModelID, "Native model ID")
@@ -626,13 +626,13 @@ func parseModelBenchSelfTestFlags(args []string) (v7modelbench.ModelBenchmarkSel
 	timeoutRaw := fs.String("timeout", fmt.Sprintf("%dms", defaults.TimeoutMs), "Benchmark timeout as duration or milliseconds")
 	jsonOutput := fs.Bool("json", false, "Print JSON output")
 	if err := fs.Parse(args); err != nil {
-		return v7modelbench.ModelBenchmarkSelfTestConfig{}, false, err
+		return modelbench.ModelBenchmarkSelfTestConfig{}, false, err
 	}
 	timeoutMs, err := parseModelBenchTimeoutMs(*timeoutRaw)
 	if err != nil {
-		return v7modelbench.ModelBenchmarkSelfTestConfig{}, false, err
+		return modelbench.ModelBenchmarkSelfTestConfig{}, false, err
 	}
-	return v7modelbench.ModelBenchmarkSelfTestConfig{
+	return modelbench.ModelBenchmarkSelfTestConfig{
 		ModelID:   *modelID,
 		MaxTokens: *maxTokens,
 		TimeoutMs: timeoutMs,
@@ -695,8 +695,8 @@ func parseLlamaCppBenchTimeoutMs(raw string) (int64, error) {
 	return duration.Milliseconds(), nil
 }
 
-func parseTensorPlaneSelfTestFlags(args []string) (v7tensorplane.TensorPlaneProbeConfig, bool, error) {
-	defaults := v7tensorplane.DefaultTensorPlaneProbeConfig()
+func parseTensorPlaneSelfTestFlags(args []string) (tensorbench.TensorPlaneProbeConfig, bool, error) {
+	defaults := tensorbench.DefaultTensorPlaneProbeConfig()
 	fs := flag.NewFlagSet("tensorplane-selftest", flag.ContinueOnError)
 	tokens := fs.Int("tokens", defaults.Tokens, "Tensor page token count")
 	headDim := fs.Int("head-dim", defaults.HeadDim, "Tensor page key/query head dimension")
@@ -707,21 +707,21 @@ func parseTensorPlaneSelfTestFlags(args []string) (v7tensorplane.TensorPlaneProb
 	writeFixture := fs.String("write-fixture", "", "Write deterministic fixture JSON to path")
 	readFixture := fs.String("read-fixture", "", "Read fixture JSON from path")
 	if err := fs.Parse(args); err != nil {
-		return v7tensorplane.TensorPlaneProbeConfig{}, false, err
+		return tensorbench.TensorPlaneProbeConfig{}, false, err
 	}
-	return v7tensorplane.TensorPlaneProbeConfig{
+	return tensorbench.TensorPlaneProbeConfig{
 		Tokens:           *tokens,
 		HeadDim:          *headDim,
 		ValueDim:         *valueDim,
-		DType:            v7tensorplane.TensorDType(*dtype),
+		DType:            tensorbench.TensorDType(*dtype),
 		Seed:             *seed,
 		WriteFixturePath: *writeFixture,
 		ReadFixturePath:  *readFixture,
 	}, *jsonOutput, nil
 }
 
-func parseTensorPlaneProviderSelfTestFlags(args []string) (v7tensorplane.ProviderBackedProbeRequest, bool, error) {
-	defaults := v7tensorplane.DefaultProviderBackedProbeRequest()
+func parseTensorPlaneProviderSelfTestFlags(args []string) (tensorbench.ProviderBackedProbeRequest, bool, error) {
+	defaults := tensorbench.DefaultProviderBackedProbeRequest()
 	fs := flag.NewFlagSet("tensorplane-provider-selftest", flag.ContinueOnError)
 	provider := fs.String("provider", defaults.Provider, "Tensor access provider (noop|tensorplane_demo)")
 	modelID := fs.String("model", defaults.ModelID, "Tensor access model ID")
@@ -733,13 +733,13 @@ func parseTensorPlaneProviderSelfTestFlags(args []string) (v7tensorplane.Provide
 	seed := fs.Int64("seed", defaults.Seed, "Deterministic provider seed")
 	jsonOutput := fs.Bool("json", false, "Print JSON output")
 	if err := fs.Parse(args); err != nil {
-		return v7tensorplane.ProviderBackedProbeRequest{}, false, err
+		return tensorbench.ProviderBackedProbeRequest{}, false, err
 	}
-	return v7tensorplane.ProviderBackedProbeRequest{
+	return tensorbench.ProviderBackedProbeRequest{
 		Provider:   *provider,
 		ModelID:    *modelID,
 		LayerIndex: *layerIndex,
-		DType:      v7tensorplane.TensorDType(*dtype),
+		DType:      tensorbench.TensorDType(*dtype),
 		Tokens:     *tokens,
 		HeadDim:    *headDim,
 		ValueDim:   *valueDim,
@@ -750,7 +750,7 @@ func parseTensorPlaneProviderSelfTestFlags(args []string) (v7tensorplane.Provide
 func parseModelBenchTimeoutMs(raw string) (int64, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return v7modelbench.DefaultModelBenchmarkSelfTestConfig().TimeoutMs, nil
+		return modelbench.DefaultModelBenchmarkSelfTestConfig().TimeoutMs, nil
 	}
 	if ms, err := strconv.ParseInt(raw, 10, 64); err == nil {
 		if ms <= 0 {
@@ -768,7 +768,7 @@ func parseModelBenchTimeoutMs(raw string) (int64, error) {
 	return duration.Milliseconds(), nil
 }
 
-func runModelBenchSelfTestViaOperatorAPI(ctx context.Context, config v7modelbench.ModelBenchmarkSelfTestConfig, port string) (v7modelbench.ModelBenchmarkResult, error) {
+func runModelBenchSelfTestViaOperatorAPI(ctx context.Context, config modelbench.ModelBenchmarkSelfTestConfig, port string) (modelbench.ModelBenchmarkResult, error) {
 	body, err := json.Marshal(struct {
 		ModelID   string `json:"model_id"`
 		MaxTokens int    `json:"max_tokens"`
@@ -779,7 +779,7 @@ func runModelBenchSelfTestViaOperatorAPI(ctx context.Context, config v7modelbenc
 		TimeoutMs: config.TimeoutMs,
 	})
 	if err != nil {
-		return v7modelbench.ModelBenchmarkResult{}, err
+		return modelbench.ModelBenchmarkResult{}, err
 	}
 
 	url := fmt.Sprintf("http://127.0.0.1:%s/api/v1/operator/v7/model-benchmark/run", strings.TrimSpace(port))
@@ -789,11 +789,11 @@ func runModelBenchSelfTestViaOperatorAPI(ctx context.Context, config v7modelbenc
 		if resp, doErr := http.DefaultClient.Do(req); doErr == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				var result v7modelbench.ModelBenchmarkResult
+				var result modelbench.ModelBenchmarkResult
 				if decodeErr := json.NewDecoder(resp.Body).Decode(&result); decodeErr != nil {
-					return v7modelbench.ModelBenchmarkResult{}, decodeErr
+					return modelbench.ModelBenchmarkResult{}, decodeErr
 				}
-				if validationErr := v7modelbench.ValidateModelBenchmarkResult(result); validationErr != nil {
+				if validationErr := modelbench.ValidateModelBenchmarkResult(result); validationErr != nil {
 					return result, validationErr
 				}
 				return result, nil
@@ -802,11 +802,11 @@ func runModelBenchSelfTestViaOperatorAPI(ctx context.Context, config v7modelbenc
 		}
 	}
 
-	runner := v7modelbench.NativeInferenceModelBenchmarkRunner{
+	runner := modelbench.NativeInferenceModelBenchmarkRunner{
 		AgentVersion:     version,
 		RuntimeAvailable: inference.NativeRuntimeAvailable,
 	}
-	return v7modelbench.RunModelBenchmarkSelfTest(ctx, runner, config)
+	return modelbench.RunModelBenchmarkSelfTest(ctx, runner, config)
 }
 
 // runNode contains all node logic. Called from console mode directly
@@ -1849,13 +1849,13 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 }
 
 func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	identity, isBenchmark := v7memorybench.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	identity, isBenchmark := memorybench.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
 	if isBenchmark && operatorRuntimeState != nil {
 		operatorRuntimeState.recordV7MemoryBenchmarkSeen(statusJobID, identity.RequestID)
 	}
 
-	benchmarkEnabled := isBenchmark && v7memorybench.BenchmarkEnabledFromEnv(os.Getenv)
+	benchmarkEnabled := isBenchmark && memorybench.BenchmarkEnabledFromEnv(os.Getenv)
 	executionStarted := time.Now()
 	if benchmarkEnabled {
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
@@ -1863,9 +1863,9 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	}
 	restoreReceiptRecorder := func() {}
 	if benchmarkEnabled {
-		restoreReceiptRecorder = v7memorybench.SetReceiptSubstepEventRecorder(workLoopDiagnostics)
+		restoreReceiptRecorder = memorybench.SetReceiptSubstepEventRecorder(workLoopDiagnostics)
 	}
-	receipt, receiptBuildTimings, handled, err := v7memorybench.ExecuteBenchmarkAssignmentWithReceiptTimings(ctx, work.SpecJSON, v7memorybench.ExecuteOptions{
+	receipt, receiptBuildTimings, handled, err := memorybench.ExecuteBenchmarkAssignmentWithReceiptTimings(ctx, work.SpecJSON, memorybench.ExecuteOptions{
 		Getenv: os.Getenv,
 	})
 	restoreReceiptRecorder()
@@ -1879,12 +1879,12 @@ func processOptionalV7MemoryBenchmark(ctx context.Context, client *hub.Client, w
 	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7MemoryBenchmarkWorkLoopEventContextFromReceipt(work.SpecJSON, receipt, receiptTimings))
 	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
 	extra := map[string]any{
-		"executor":      v7memorybench.BenchmarkTask,
-		"executor_kind": v7memorybench.BenchmarkTask,
-		"task":          v7memorybench.BenchmarkTask,
+		"executor":      memorybench.BenchmarkTask,
+		"executor_kind": memorybench.BenchmarkTask,
+		"task":          memorybench.BenchmarkTask,
 	}
 	if err != nil {
-		receipt = v7memorybench.BuildBenchmarkRejectionReceipt(work.JobID, err)
+		receipt = memorybench.BuildBenchmarkRejectionReceipt(work.JobID, err)
 		extra["exit_code"] = 1
 		extra["error"] = "v7 memory benchmark rejected"
 	} else {
@@ -1990,7 +1990,7 @@ func nonProbingRuntimeReceiptMetadata(runtimeMgr *runtimeManager) map[string]any
 	}
 }
 
-func workLoopReceiptTimingsFromMemorybench(receiptTimings v7memorybench.ReceiptBuildTimings) diagnostics.ReceiptBuildTimings {
+func workLoopReceiptTimingsFromMemorybench(receiptTimings memorybench.ReceiptBuildTimings) diagnostics.ReceiptBuildTimings {
 	return diagnostics.ReceiptBuildTimings{
 		MetadataBuildUs:     receiptTimings.MetadataBuildUs,
 		MetadataStructUs:    receiptTimings.MetadataStructUs,
@@ -2008,7 +2008,7 @@ func workLoopReceiptTimingsFromMemorybench(receiptTimings v7memorybench.ReceiptB
 
 func v7MemoryBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {
 	context := map[string]string{
-		"spec_task": v7memorybench.BenchmarkTask,
+		"spec_task": memorybench.BenchmarkTask,
 	}
 	var spec struct {
 		Task       string `json:"task"`
@@ -2018,8 +2018,8 @@ func v7MemoryBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]s
 	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
 		return context
 	}
-	if strings.TrimSpace(spec.Task) == v7memorybench.BenchmarkTask {
-		context["spec_task"] = v7memorybench.BenchmarkTask
+	if strings.TrimSpace(spec.Task) == memorybench.BenchmarkTask {
+		context["spec_task"] = memorybench.BenchmarkTask
 	}
 	if spec.TokenCount > 0 {
 		context["token_count"] = strconv.Itoa(spec.TokenCount)
@@ -2030,14 +2030,14 @@ func v7MemoryBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]s
 	return context
 }
 
-func v7MemoryBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v7memorybench.BenchmarkReceipt, timings diagnostics.ReceiptBuildTimings) map[string]string {
+func v7MemoryBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt memorybench.BenchmarkReceipt, timings diagnostics.ReceiptBuildTimings) map[string]string {
 	context := v7MemoryBenchmarkWorkLoopEventContextFromSpec(specJSON)
 	putWorkLoopInt64Context(context, "metadata_total_us", timings.MetadataTotalUs)
 	putWorkLoopInt64Context(context, "metadata_gap_us", timings.MetadataGapUs)
 	if bodyBytes := v7MemoryBenchmarkReceiptBodyBytes(receipt.Metadata); bodyBytes > 0 {
 		putWorkLoopInt64Context(context, "receipt_body_bytes", bodyBytes)
 	}
-	if taskMetadata, ok := receipt.Metadata[v7memorybench.BenchmarkTask].(map[string]any); ok {
+	if taskMetadata, ok := receipt.Metadata[memorybench.BenchmarkTask].(map[string]any); ok {
 		putWorkLoopAnyIntContext(context, "token_count", taskMetadata["token_count"])
 		putWorkLoopAnyIntContext(context, "value_dim", taskMetadata["value_dim"])
 		if weightedValue, ok := taskMetadata["weighted_value"].([]float64); ok {
@@ -2048,7 +2048,7 @@ func v7MemoryBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v
 }
 
 func v7MemoryBenchmarkReceiptBodyBytes(metadata map[string]any) int64 {
-	taskMetadata, ok := metadata[v7memorybench.BenchmarkTask].(map[string]any)
+	taskMetadata, ok := metadata[memorybench.BenchmarkTask].(map[string]any)
 	if !ok {
 		return 0
 	}
@@ -2092,9 +2092,9 @@ func workLoopAnyInt64(value any) int64 {
 }
 
 func processOptionalV7TensorPlaneBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	identity, isBenchmark := v7tensorplane.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	identity, isBenchmark := tensorbench.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
-	benchmarkEnabled := isBenchmark && v7tensorplane.BenchmarkEnabledFromEnv(os.Getenv)
+	benchmarkEnabled := isBenchmark && tensorbench.BenchmarkEnabledFromEnv(os.Getenv)
 	if benchmarkEnabled && v7TensorPlaneBenchmarkStatus != nil {
 		v7TensorPlaneBenchmarkStatus.RecordSeen(statusJobID)
 	}
@@ -2104,7 +2104,7 @@ func processOptionalV7TensorPlaneBenchmark(ctx context.Context, client *hub.Clie
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
 		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
 	}
-	receipt, handled, err := v7tensorplane.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, v7tensorplane.ExecuteOptions{
+	receipt, handled, err := tensorbench.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, tensorbench.ExecuteOptions{
 		Getenv: os.Getenv,
 	})
 	if !handled {
@@ -2119,12 +2119,12 @@ func processOptionalV7TensorPlaneBenchmark(ctx context.Context, client *hub.Clie
 	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
 	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
 	extra := map[string]any{
-		"executor":      v7tensorplane.BenchmarkTask,
-		"executor_kind": v7tensorplane.BenchmarkTask,
-		"task":          v7tensorplane.BenchmarkTask,
+		"executor":      tensorbench.BenchmarkTask,
+		"executor_kind": tensorbench.BenchmarkTask,
+		"task":          tensorbench.BenchmarkTask,
 	}
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		receipt = v7tensorplane.BuildBenchmarkRejectionReceipt(work.JobID, err)
+		receipt = tensorbench.BuildBenchmarkRejectionReceipt(work.JobID, err)
 	}
 	exitCode := 0
 	if err != nil {
@@ -2197,7 +2197,7 @@ func processOptionalV7TensorPlaneBenchmark(ctx context.Context, client *hub.Clie
 
 func v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {
 	context := map[string]string{
-		"spec_task": v7tensorplane.BenchmarkTask,
+		"spec_task": tensorbench.BenchmarkTask,
 	}
 	var spec struct {
 		Task     string `json:"task"`
@@ -2208,8 +2208,8 @@ func v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[str
 	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
 		return context
 	}
-	if strings.TrimSpace(spec.Task) == v7tensorplane.BenchmarkTask {
-		context["spec_task"] = v7tensorplane.BenchmarkTask
+	if strings.TrimSpace(spec.Task) == tensorbench.BenchmarkTask {
+		context["spec_task"] = tensorbench.BenchmarkTask
 	}
 	if spec.Tokens > 0 {
 		context["tokens"] = strconv.Itoa(spec.Tokens)
@@ -2223,9 +2223,9 @@ func v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[str
 	return context
 }
 
-func v7TensorPlaneBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v7tensorplane.BenchmarkReceipt) map[string]string {
+func v7TensorPlaneBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt tensorbench.BenchmarkReceipt) map[string]string {
 	context := v7TensorPlaneBenchmarkWorkLoopEventContextFromSpec(specJSON)
-	if taskMetadata, ok := receipt.Metadata[v7tensorplane.BenchmarkTask].(map[string]any); ok {
+	if taskMetadata, ok := receipt.Metadata[tensorbench.BenchmarkTask].(map[string]any); ok {
 		putWorkLoopAnyIntContext(context, "tokens", taskMetadata["tokens"])
 		putWorkLoopAnyIntContext(context, "head_dim", taskMetadata["head_dim"])
 		putWorkLoopAnyIntContext(context, "value_dim", taskMetadata["value_dim"])
@@ -2664,7 +2664,7 @@ func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromReceipt(specJSON string, 
 	return context
 }
 
-func currentV7DashboardInferenceStatus() *v7dashboardinference.LocalStatus {
+func currentV7DashboardInferenceStatus() *routedinference.LocalStatus {
 	if operatorRuntimeState != nil {
 		return operatorRuntimeState.dashboardInferenceStatus()
 	}
@@ -2672,7 +2672,7 @@ func currentV7DashboardInferenceStatus() *v7dashboardinference.LocalStatus {
 }
 
 func processOptionalV7DashboardInference(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	identity, isDashboardInference := v7dashboardinference.AssignmentIdentityFromJSON(work.SpecJSON)
+	identity, isDashboardInference := routedinference.AssignmentIdentityFromJSON(work.SpecJSON)
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
 	statusRunID := identity.RunID
 	status := currentV7DashboardInferenceStatus()
@@ -2681,7 +2681,7 @@ func processOptionalV7DashboardInference(ctx context.Context, client *hub.Client
 	}
 
 	runner := newV7DashboardInferenceRunner()
-	var progress v7dashboardinference.ProgressSender
+	var progress routedinference.ProgressSender
 	if client != nil {
 		progress = client
 	}
@@ -2690,7 +2690,7 @@ func processOptionalV7DashboardInference(ctx context.Context, client *hub.Client
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
 		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7DashboardInferenceWorkLoopEventContextFromSpec(work.SpecJSON))
 	}
-	receipt, handled, err := v7dashboardinference.ExecuteAssignment(ctx, work.SpecJSON, v7dashboardinference.ExecuteOptions{
+	receipt, handled, err := routedinference.ExecuteAssignment(ctx, work.SpecJSON, routedinference.ExecuteOptions{
 		Getenv:   os.Getenv,
 		Runner:   runner,
 		Progress: progress,
@@ -2707,15 +2707,15 @@ func processOptionalV7DashboardInference(ctx context.Context, client *hub.Client
 	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7DashboardInferenceWorkLoopEventContextFromSpec(work.SpecJSON))
 	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
 	extra := map[string]any{
-		"executor":      v7dashboardinference.Task,
-		"executor_kind": v7dashboardinference.Task,
-		"task":          v7dashboardinference.Task,
+		"executor":      routedinference.Task,
+		"executor_kind": routedinference.Task,
+		"task":          routedinference.Task,
 	}
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		receipt = v7dashboardinference.BuildRejectionReceiptFromIdentity(identity, err)
+		receipt = routedinference.BuildRejectionReceiptFromIdentity(identity, err)
 	}
-	proofStatus := v7dashboardinference.ReceiptProofStatus(receipt)
-	measured := proofStatus == v7dashboardinference.ProofStatusMeasured
+	proofStatus := routedinference.ReceiptProofStatus(receipt)
+	measured := proofStatus == routedinference.ProofStatusMeasured
 	recordErr := err
 	if !measured && recordErr == nil {
 		recordErr = v7DashboardInferenceRejectionError(receipt)
@@ -2800,7 +2800,7 @@ func processOptionalV7DashboardInference(ctx context.Context, client *hub.Client
 
 func v7DashboardInferenceWorkLoopEventContextFromSpec(specJSON string) map[string]string {
 	context := map[string]string{
-		"spec_task": v7dashboardinference.Task,
+		"spec_task": routedinference.Task,
 	}
 	var spec struct {
 		Task      string `json:"task"`
@@ -2812,8 +2812,8 @@ func v7DashboardInferenceWorkLoopEventContextFromSpec(specJSON string) map[strin
 	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
 		return context
 	}
-	if strings.TrimSpace(spec.Task) == v7dashboardinference.Task {
-		context["spec_task"] = v7dashboardinference.Task
+	if strings.TrimSpace(spec.Task) == routedinference.Task {
+		context["spec_task"] = routedinference.Task
 	}
 	if runID := strings.TrimSpace(spec.RunID); runID != "" {
 		context["run_id"] = runID
@@ -2830,9 +2830,9 @@ func v7DashboardInferenceWorkLoopEventContextFromSpec(specJSON string) map[strin
 	return context
 }
 
-func v7DashboardInferenceWorkLoopEventContextFromReceipt(specJSON string, receipt v7dashboardinference.Receipt) map[string]string {
+func v7DashboardInferenceWorkLoopEventContextFromReceipt(specJSON string, receipt routedinference.Receipt) map[string]string {
 	context := v7DashboardInferenceWorkLoopEventContextFromSpec(specJSON)
-	if taskMetadata, ok := receipt.Metadata[v7dashboardinference.Task].(map[string]any); ok {
+	if taskMetadata, ok := receipt.Metadata[routedinference.Task].(map[string]any); ok {
 		putWorkLoopAnyIntContext(context, "tokens_generated", taskMetadata["tokens_generated"])
 		putWorkLoopAnyIntContext(context, "ttft_ms", taskMetadata["ttft_ms"])
 		putWorkLoopAnyIntContext(context, "total_time_ms", taskMetadata["total_time_ms"])
@@ -2843,9 +2843,9 @@ func v7DashboardInferenceWorkLoopEventContextFromReceipt(specJSON string, receip
 	return context
 }
 
-func v7DashboardInferenceRejectionError(receipt v7dashboardinference.Receipt) error {
+func v7DashboardInferenceRejectionError(receipt routedinference.Receipt) error {
 	code := "dashboard_inference_rejected"
-	if taskMetadata, ok := receipt.Metadata[v7dashboardinference.Task].(map[string]any); ok {
+	if taskMetadata, ok := receipt.Metadata[routedinference.Task].(map[string]any); ok {
 		if value, ok := taskMetadata["error_code"].(string); ok && strings.TrimSpace(value) != "" {
 			code = strings.TrimSpace(value)
 		}
@@ -2853,7 +2853,7 @@ func v7DashboardInferenceRejectionError(receipt v7dashboardinference.Receipt) er
 	return fmt.Errorf("%s", code)
 }
 
-func currentV7BackendInferenceBenchmarkStatus() *v7inferencebench.LocalStatus {
+func currentV7BackendInferenceBenchmarkStatus() *inferencebench.LocalStatus {
 	if operatorRuntimeState != nil {
 		return operatorRuntimeState.inferenceBenchmarkStatus()
 	}
@@ -2861,9 +2861,9 @@ func currentV7BackendInferenceBenchmarkStatus() *v7inferencebench.LocalStatus {
 }
 
 func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	identity, isBenchmark := v7inferencebench.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	identity, isBenchmark := inferencebench.BenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
-	benchmarkEnabled := isBenchmark && v7inferencebench.BenchmarkEnabledFromEnv(os.Getenv)
+	benchmarkEnabled := isBenchmark && inferencebench.BenchmarkEnabledFromEnv(os.Getenv)
 	status := currentV7BackendInferenceBenchmarkStatus()
 	if benchmarkEnabled && status != nil {
 		status.RecordSeen(statusJobID)
@@ -2875,7 +2875,7 @@ func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
 		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
 	}
-	receipt, handled, err := v7inferencebench.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, v7inferencebench.ExecuteOptions{
+	receipt, handled, err := inferencebench.ExecuteBenchmarkAssignment(ctx, work.SpecJSON, inferencebench.ExecuteOptions{
 		Getenv: os.Getenv,
 		Runner: runner,
 	})
@@ -2891,12 +2891,12 @@ func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub
 	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
 	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
 	extra := map[string]any{
-		"executor":      v7inferencebench.BenchmarkTask,
-		"executor_kind": v7inferencebench.BenchmarkTask,
-		"task":          v7inferencebench.BenchmarkTask,
+		"executor":      inferencebench.BenchmarkTask,
+		"executor_kind": inferencebench.BenchmarkTask,
+		"task":          inferencebench.BenchmarkTask,
 	}
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		receipt = v7inferencebench.BuildBenchmarkRejectionReceipt(statusJobID, err)
+		receipt = inferencebench.BuildBenchmarkRejectionReceipt(statusJobID, err)
 	}
 	exitCode := 0
 	if err != nil {
@@ -2969,7 +2969,7 @@ func processOptionalV7BackendInferenceBenchmark(ctx context.Context, client *hub
 
 func v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {
 	context := map[string]string{
-		"spec_task": v7inferencebench.BenchmarkTask,
+		"spec_task": inferencebench.BenchmarkTask,
 	}
 	var spec struct {
 		Task      string `json:"task"`
@@ -2980,8 +2980,8 @@ func v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(specJSON string) ma
 	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
 		return context
 	}
-	if strings.TrimSpace(spec.Task) == v7inferencebench.BenchmarkTask {
-		context["spec_task"] = v7inferencebench.BenchmarkTask
+	if strings.TrimSpace(spec.Task) == inferencebench.BenchmarkTask {
+		context["spec_task"] = inferencebench.BenchmarkTask
 	}
 	if backend := strings.TrimSpace(spec.Backend); backend != "" {
 		context["backend"] = backend
@@ -2995,9 +2995,9 @@ func v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(specJSON string) ma
 	return context
 }
 
-func v7BackendInferenceBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v7inferencebench.BenchmarkReceipt) map[string]string {
+func v7BackendInferenceBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt inferencebench.BenchmarkReceipt) map[string]string {
 	context := v7BackendInferenceBenchmarkWorkLoopEventContextFromSpec(specJSON)
-	if taskMetadata, ok := receipt.Metadata[v7inferencebench.BenchmarkTask].(map[string]any); ok {
+	if taskMetadata, ok := receipt.Metadata[inferencebench.BenchmarkTask].(map[string]any); ok {
 		putWorkLoopAnyIntContext(context, "tokens_generated", taskMetadata["tokens_generated"])
 		putWorkLoopAnyIntContext(context, "p50_ttft_ms", taskMetadata["p50_ttft_ms"])
 		putWorkLoopAnyIntContext(context, "p95_ttft_ms", taskMetadata["p95_ttft_ms"])
@@ -3009,29 +3009,29 @@ func v7BackendInferenceBenchmarkWorkLoopEventContextFromReceipt(specJSON string,
 }
 
 func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, infMgr *inference.Manager, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	identity, isBenchmark := v7modelbench.ModelBenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
-	taskName := v7modelbench.ModelBenchmarkTask
+	identity, isBenchmark := modelbench.ModelBenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	taskName := modelbench.ModelBenchmarkTask
 	if !isBenchmark {
-		if seriesIdentity, isSeriesBenchmark := v7modelbench.ModelBenchmarkSeriesAssignmentIdentityFromJSON(work.SpecJSON); isSeriesBenchmark {
+		if seriesIdentity, isSeriesBenchmark := modelbench.ModelBenchmarkSeriesAssignmentIdentityFromJSON(work.SpecJSON); isSeriesBenchmark {
 			identity = seriesIdentity
 			isBenchmark = true
-			taskName = v7modelbench.ModelBenchmarkSeriesTask
+			taskName = modelbench.ModelBenchmarkSeriesTask
 		}
 	}
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
-	if isBenchmark && v7modelbench.ModelBenchmarkEnabledFromEnv(os.Getenv) && v7ModelBenchmarkStatus != nil {
+	if isBenchmark && modelbench.ModelBenchmarkEnabledFromEnv(os.Getenv) && v7ModelBenchmarkStatus != nil {
 		v7ModelBenchmarkStatus.RecordSeen(statusJobID, identity.RequestID)
 	}
 
 	runner := newV7ModelBenchmarkRunner(infMgr, gpuDetected)
 	executionStarted := time.Now()
-	if isBenchmark && v7modelbench.ModelBenchmarkEnabledFromEnv(os.Getenv) {
+	if isBenchmark && modelbench.ModelBenchmarkEnabledFromEnv(os.Getenv) {
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
 		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, mainWorkLoopSpecContext(taskName))
 	}
-	receipt, handled, err := v7modelbench.ExecuteModelBenchmarkAssignment(ctx, work.SpecJSON, runner, os.Getenv)
+	receipt, handled, err := modelbench.ExecuteModelBenchmarkAssignment(ctx, work.SpecJSON, runner, os.Getenv)
 	if !handled {
-		receipt, handled, err = v7modelbench.ExecuteModelBenchmarkSeriesAssignment(ctx, work.SpecJSON, runner, os.Getenv)
+		receipt, handled, err = modelbench.ExecuteModelBenchmarkSeriesAssignment(ctx, work.SpecJSON, runner, os.Getenv)
 	}
 	if !handled {
 		return false, nil, nil
@@ -3050,17 +3050,17 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 		"task":          taskName,
 	}
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		if taskName == v7modelbench.ModelBenchmarkSeriesTask {
-			receipt = v7modelbench.BuildModelBenchmarkSeriesRejectionReceipt(work.JobID, err)
+		if taskName == modelbench.ModelBenchmarkSeriesTask {
+			receipt = modelbench.BuildModelBenchmarkSeriesRejectionReceipt(work.JobID, err)
 		} else {
-			receipt = v7modelbench.BuildModelBenchmarkRejectionReceipt(work.JobID, err)
+			receipt = modelbench.BuildModelBenchmarkRejectionReceipt(work.JobID, err)
 		}
 	}
 	exitCode := 0
 	if err != nil {
 		exitCode = 1
 		extra["exit_code"] = 1
-		if taskName == v7modelbench.ModelBenchmarkSeriesTask {
+		if taskName == modelbench.ModelBenchmarkSeriesTask {
 			extra["error"] = "v7 model benchmark series failed"
 		} else {
 			extra["error"] = "v7 model benchmark failed"

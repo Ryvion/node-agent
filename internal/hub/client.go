@@ -18,8 +18,8 @@ import (
 
 	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	routedinference "github.com/Ryvion/ryvion-node/internal/inference/routed"
 	netprofile "github.com/Ryvion/ryvion-node/internal/network/profile"
-	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
 )
 
 type Client struct {
@@ -865,7 +865,7 @@ func (c *Client) StreamInference(ctx context.Context, jobID string, body io.Read
 	return nil
 }
 
-func (c *Client) SendDashboardInferenceProgress(ctx context.Context, batch v7dashboardinference.ProgressBatch) error {
+func (c *Client) SendDashboardInferenceProgress(ctx context.Context, batch routedinference.ProgressBatch) error {
 	if len(batch.Chunks) == 0 {
 		return nil
 	}
@@ -880,7 +880,7 @@ func (c *Client) SendDashboardInferenceProgress(ctx context.Context, batch v7das
 		NodeID:       nodeID,
 		PublicKeyHex: pubHex,
 		SeqStart:     batch.SeqStart,
-		Chunks:       append([]v7dashboardinference.ProgressChunk(nil), batch.Chunks...),
+		Chunks:       append([]routedinference.ProgressChunk(nil), batch.Chunks...),
 	}
 	if c.useGRPCTransport() {
 		if err := c.sendDashboardInferenceProgressGRPC(ctx, body); err == nil || !c.shouldFallbackGRPC(err) {
@@ -1219,12 +1219,12 @@ type receiptRequest struct {
 }
 
 type dashboardInferenceProgressRequest struct {
-	RunID        string                               `json:"run_id,omitempty"`
-	JobID        string                               `json:"job_id,omitempty"`
-	NodeID       string                               `json:"node_id,omitempty"`
-	PublicKeyHex string                               `json:"public_key_hex,omitempty"`
-	SeqStart     int64                                `json:"seq_start"`
-	Chunks       []v7dashboardinference.ProgressChunk `json:"chunks"`
+	RunID        string                          `json:"run_id,omitempty"`
+	JobID        string                          `json:"job_id,omitempty"`
+	NodeID       string                          `json:"node_id,omitempty"`
+	PublicKeyHex string                          `json:"public_key_hex,omitempty"`
+	SeqStart     int64                           `json:"seq_start"`
+	Chunks       []routedinference.ProgressChunk `json:"chunks"`
 }
 
 type payoutRequest struct {

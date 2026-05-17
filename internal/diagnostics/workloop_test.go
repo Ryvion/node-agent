@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
+	memorybench "github.com/Ryvion/ryvion-node/internal/benchmarks/memory"
 )
 
 func TestWorkLoopDiagnosticsRecordsCounters(t *testing.T) {
@@ -512,8 +512,8 @@ func TestWorkLoopDiagnosticsConcurrentEventWrites(t *testing.T) {
 }
 
 func TestMemoryBenchReceiptEmitsSubstepEvents(t *testing.T) {
-	spec := v7memorybench.BenchmarkSpec{
-		Task:            v7memorybench.BenchmarkTask,
+	spec := memorybench.BenchmarkSpec{
+		Task:            memorybench.BenchmarkTask,
 		RequestID:       "request-substeps",
 		JobID:           "job-substeps",
 		ShardID:         "shard-a",
@@ -522,21 +522,21 @@ func TestMemoryBenchReceiptEmitsSubstepEvents(t *testing.T) {
 		ValueDim:        2,
 		CreatedAtUnixMs: 1_800_000_000_123,
 	}
-	request := v7memorybench.GenerateSyntheticAttentionRequest(spec.Seed, spec.ShardID, spec.TokenCount, spec.ValueDim)
+	request := memorybench.GenerateSyntheticAttentionRequest(spec.Seed, spec.ShardID, spec.TokenCount, spec.ValueDim)
 	request.RequestID = spec.RequestID
 	request.JobID = spec.JobID
 	request.ShardID = spec.ShardID
 	request.CreatedAtUnixMs = spec.CreatedAtUnixMs
-	response, err := v7memorybench.ComputePartialAttentionSummary(request)
+	response, err := memorybench.ComputePartialAttentionSummary(request)
 	if err != nil {
 		t.Fatalf("ComputePartialAttentionSummary() error = %v", err)
 	}
 
 	recorder := &receiptSubstepCapture{}
-	restore := v7memorybench.SetReceiptSubstepEventRecorder(recorder)
+	restore := memorybench.SetReceiptSubstepEventRecorder(recorder)
 	defer restore()
 
-	if _, _, err := v7memorybench.BuildBenchmarkReceiptWithTimings(spec, response); err != nil {
+	if _, _, err := memorybench.BuildBenchmarkReceiptWithTimings(spec, response); err != nil {
 		t.Fatalf("BuildBenchmarkReceiptWithTimings() error = %v", err)
 	}
 
@@ -561,8 +561,8 @@ func TestMemoryBenchReceiptEmitsSubstepEvents(t *testing.T) {
 		if event.Name != wantName {
 			t.Fatalf("event[%d].name = %q, want %q; events=%+v", i, event.Name, wantName, recorder.events)
 		}
-		if event.JobID != spec.JobID || event.Kind != v7memorybench.BenchmarkTask {
-			t.Fatalf("event[%d] identity = %q/%q, want %q/%q", i, event.JobID, event.Kind, spec.JobID, v7memorybench.BenchmarkTask)
+		if event.JobID != spec.JobID || event.Kind != memorybench.BenchmarkTask {
+			t.Fatalf("event[%d] identity = %q/%q, want %q/%q", i, event.JobID, event.Kind, spec.JobID, memorybench.BenchmarkTask)
 		}
 	}
 	lastContext := recorder.events[len(recorder.events)-1].SafeContext
