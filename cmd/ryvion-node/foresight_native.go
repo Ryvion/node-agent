@@ -337,6 +337,7 @@ func processOptionalForesightNativeVerifierHotSession(ctx context.Context, clien
 
 func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, accepted int, waves int, acceptedText string, reason string) *runnerResultSnapshot {
 	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|verify_hot|%d|%d|%s", work.JobID, spec.RunID, accepted, waves, reason))
+	acceptedTextHash := foresightAcceptedTextHash(acceptedText)
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
 		"executor":        foresightNativeExecutor,
 		"executor_kind":   foresightNativeExecutor,
@@ -355,8 +356,8 @@ func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Cl
 			"duration_ms": time.Since(started).Milliseconds(),
 			"accepted_token_receipt": map[string]any{
 				"accepted_len":          accepted,
-				"accepted_text":         acceptedText,
-				"accepted_text_public":  strings.TrimSpace(acceptedText) != "",
+				"accepted_text_hash":    acceptedTextHash,
+				"accepted_text_public":  false,
 				"tree_cid":              "sha256:" + foresightFullHash(fmt.Sprintf("%s|%s|final_tree", work.JobID, spec.RunID)),
 				"hot_session_finalized": true,
 			},
@@ -373,6 +374,29 @@ func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Cl
 	receipt := hub.Receipt{JobID: work.JobID, ResultHashHex: resultHash, MeteringUnits: units, Metadata: metadata}
 	_ = submitReceiptWithRetry(ctx, client, receipt)
 	return &runnerResultSnapshot{DurationMs: time.Since(started).Milliseconds(), ResultHashHex: resultHash, MeteringUnits: units, ExitCode: 0, Metadata: metadata}
+}
+
+func foresightAcceptedTextHash(acceptedText string) string {
+	if strings.TrimSpace(acceptedText) == "" {
+		return ""
+	}
+	return "sha256:" + sha256Hex([]byte(acceptedText))
+}
+
+func redactForesightAcceptedTextReceipt(receipt map[string]any) string {
+	if len(receipt) == 0 {
+		return ""
+	}
+	hash := strings.TrimSpace(stringValue(receipt["accepted_text_hash"]))
+	if text := strings.TrimSpace(stringValue(receipt["accepted_text"])); text != "" && hash == "" {
+		hash = foresightAcceptedTextHash(text)
+	}
+	delete(receipt, "accepted_text")
+	receipt["accepted_text_public"] = false
+	if hash != "" {
+		receipt["accepted_text_hash"] = hash
+	}
+	return hash
 }
 
 func decodeForesightNativeVerifierSpec(specJSON string) (int, string, string, bool) {

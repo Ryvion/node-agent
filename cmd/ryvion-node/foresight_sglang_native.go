@@ -371,6 +371,10 @@ func submitForesightNativeSGLangFinalReceipt(ctx context.Context, client *hub.Cl
 	if accepted <= 0 {
 		accepted = intFromAny(verifierReceipt["accepted_len"])
 	}
+	acceptedTextHash := redactForesightAcceptedTextReceipt(verifierReceipt)
+	if acceptedTextHash == "" {
+		acceptedTextHash = foresightAcceptedTextHash(acceptedText)
+	}
 	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|native_sglang|%d|%d|%s", work.JobID, spec.RunID, accepted, waves, reason))
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
 		"executor":         nativeSGLangVerifierExecutor,
@@ -393,8 +397,8 @@ func submitForesightNativeSGLangFinalReceipt(ctx context.Context, client *hub.Cl
 			"probe_summary":          probeSummary,
 		},
 	})
-	if strings.TrimSpace(acceptedText) != "" {
-		metadata["accepted_text"] = acceptedText
+	if acceptedTextHash != "" {
+		metadata["accepted_text_hash"] = acceptedTextHash
 	}
 	_ = submitReceiptWithRetry(ctx, client, hub.Receipt{JobID: work.JobID, ResultHashHex: resultHash, MeteringUnits: uint64(maxIntNode(0, accepted)), Metadata: metadata})
 	return &runnerResultSnapshot{DurationMs: time.Since(started).Milliseconds(), ResultHashHex: resultHash, MeteringUnits: uint64(maxIntNode(0, accepted)), ExitCode: 0, Metadata: metadata}

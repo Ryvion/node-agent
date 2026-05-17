@@ -122,6 +122,28 @@ func TestForesightVerifierBackendKindAcceptsNativeLlamaCpp(t *testing.T) {
 	}
 }
 
+func TestRedactForesightAcceptedTextReceiptKeepsOnlyHash(t *testing.T) {
+	receipt := map[string]any{
+		"accepted_len":         3,
+		"accepted_text":        "private verifier text",
+		"accepted_text_public": true,
+	}
+	hash := redactForesightAcceptedTextReceipt(receipt)
+	if hash == "" || receipt["accepted_text_hash"] != hash {
+		t.Fatalf("redacted hash = %q receipt=%#v, want stable hash", hash, receipt)
+	}
+	if _, ok := receipt["accepted_text"]; ok {
+		t.Fatalf("accepted_text was not redacted: %#v", receipt)
+	}
+	if receipt["accepted_text_public"] != false {
+		t.Fatalf("accepted_text_public = %#v, want false", receipt["accepted_text_public"])
+	}
+	encoded, _ := json.Marshal(receipt)
+	if strings.Contains(string(encoded), "private verifier text") {
+		t.Fatalf("redacted receipt leaked raw accepted text: %s", encoded)
+	}
+}
+
 func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
 	sidecar := &fakeForesightLlamaCppSidecar{status: v7llamacpp.LlamaCppSidecarStatus{
 		Enabled:                true,

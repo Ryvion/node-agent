@@ -717,6 +717,44 @@ func TestSubmitForesightDraftPacketBatchUsesBatchEndpoint(t *testing.T) {
 	}
 }
 
+func TestSubmitForesightLiveLabVerifierResultRedactsAcceptedTextForHTTPFallback(t *testing.T) {
+	var body map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1/node/foresight/live-lab/runs/flab-client/verifier-results" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	pub, priv := testKeyPair()
+	client := New(ts.URL, pub, priv)
+	err := client.SubmitForesightLiveLabVerifierResult(context.Background(), "flab-client", ForesightLiveLabVerifierResult{
+		JobID:              "job-verify",
+		WindowID:           "win-client",
+		WaveIndex:          1,
+		AcceptedLen:        2,
+		AcceptedText:       "private accepted text",
+		AcceptedTextPublic: true,
+	})
+	if err != nil {
+		t.Fatalf("SubmitForesightLiveLabVerifierResult() error = %v", err)
+	}
+	if body["accepted_text"] != nil {
+		t.Fatalf("HTTP fallback leaked accepted_text: %#v", body)
+	}
+	sum := sha256.Sum256([]byte("private accepted text"))
+	if body["accepted_text_hash"] != "sha256:"+hex.EncodeToString(sum[:]) {
+		t.Fatalf("accepted_text_hash = %#v, want hash", body["accepted_text_hash"])
+	}
+}
+
 func TestSendDashboardInferenceProgressPostsChunkBatch(t *testing.T) {
 	pub, priv := testKeyPair()
 	pubHex := hex.EncodeToString(pub)

@@ -614,6 +614,9 @@ func (c *Client) submitForesightLiveLabVerifierResultGRPC(ctx context.Context, r
 		}
 	}
 	acceptedTextHash := ""
+	if strings.TrimSpace(result.AcceptedTextHash) != "" {
+		acceptedTextHash = strings.TrimSpace(result.AcceptedTextHash)
+	}
 	if strings.TrimSpace(result.AcceptedText) != "" {
 		sum := sha256.Sum256([]byte(result.AcceptedText))
 		acceptedTextHash = "sha256:" + hex.EncodeToString(sum[:])

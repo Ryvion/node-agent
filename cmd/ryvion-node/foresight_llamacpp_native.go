@@ -299,9 +299,8 @@ func submitForesightNativeLlamaCppFinalReceipt(ctx context.Context, client *hub.
 			"duration_ms": time.Since(started).Milliseconds(),
 			"accepted_token_receipt": map[string]any{
 				"accepted_len":          accepted,
-				"accepted_text":         acceptedText,
-				"accepted_text_public":  strings.TrimSpace(acceptedText) != "",
 				"accepted_text_hash":    outputHash,
+				"accepted_text_public":  false,
 				"tree_cid":              "sha256:" + foresightFullHash(fmt.Sprintf("%s|%s|llamacpp_demo_final_tree", work.JobID, spec.RunID)),
 				"hot_session_finalized": true,
 			},

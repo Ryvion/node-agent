@@ -408,6 +408,7 @@ type ForesightLiveLabVerifierResult struct {
 	TreeCID            string         `json:"tree_cid,omitempty"`
 	DurationMs         int64          `json:"duration_ms,omitempty"`
 	AcceptedText       string         `json:"accepted_text,omitempty"`
+	AcceptedTextHash   string         `json:"accepted_text_hash,omitempty"`
 	AcceptedTextPublic bool           `json:"accepted_text_public,omitempty"`
 	EOS                bool           `json:"eos,omitempty"`
 	StopReason         string         `json:"stop_reason,omitempty"`
@@ -453,6 +454,7 @@ func (c *Client) SubmitForesightLiveLabVerifierResult(ctx context.Context, runID
 	if runID == "" {
 		return fmt.Errorf("run_id required")
 	}
+	result = sanitizeForesightLiveLabVerifierResult(result)
 	if c.useGRPCTransport() {
 		if err := c.submitForesightLiveLabVerifierResultGRPC(ctx, runID, result); err == nil || !c.shouldFallbackGRPC(err) {
 			return err
@@ -460,6 +462,15 @@ func (c *Client) SubmitForesightLiveLabVerifierResult(ctx context.Context, runID
 	}
 	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
 	return c.postWithHeaders(ctx, "/api/v1/node/foresight/live-lab/runs/"+url.PathEscape(runID)+"/verifier-results", result, nil, headers)
+}
+
+func sanitizeForesightLiveLabVerifierResult(result ForesightLiveLabVerifierResult) ForesightLiveLabVerifierResult {
+	if strings.TrimSpace(result.AcceptedText) != "" && strings.TrimSpace(result.AcceptedTextHash) == "" {
+		sum := sha256.Sum256([]byte(result.AcceptedText))
+		result.AcceptedTextHash = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	result.AcceptedText = ""
+	return result
 }
 
 func (c *Client) SavePayout(ctx context.Context, stripeConnectID, currency string) error {
