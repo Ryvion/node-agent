@@ -129,45 +129,6 @@ func DecodeHotSessionSpec(specJSON string, expectedTask string) (HotSessionSpec,
 	return spec, spec.RunID != "" && spec.WorkGraphID != ""
 }
 
-func BuildDraftPackets(spec DraftSpec) []map[string]any {
-	count := spec.BranchCount
-	if count <= 0 {
-		count = 1
-	}
-	packets := make([]map[string]any, 0, count)
-	seed := strings.Join([]string{
-		spec.WorkGraphID,
-		spec.WindowID,
-		spec.ParentPrefixHash,
-		spec.DrafterModelID,
-		PromptDigest(spec.Prompt),
-	}, "|")
-	for branch := 0; branch < count; branch++ {
-		confidence := DefaultNativeDraftConfidenceBPS - int64(branch*250)
-		if confidence < 4000 {
-			confidence = 4000
-		}
-		tokens := DeterministicTokens(seed, branch, spec.Horizon)
-		packetID := "pkt_native_" + shortHash(fmt.Sprintf("%s|%d|%v", spec.WindowID, branch, tokens))
-		packets = append(packets, map[string]any{
-			"packet_id":          packetID,
-			"window_id":          spec.WindowID,
-			"workgraph_id":       spec.WorkGraphID,
-			"role_id":            spec.RoleID,
-			"node_id":            spec.NodeID,
-			"parent_prefix_hash": spec.ParentPrefixHash,
-			"candidate_tokens":   tokens,
-			"model_hash":         spec.ModelHash,
-			"drafter_model_id":   firstNonEmpty(spec.DrafterModelID, "native-node-agent-drafter"),
-			"horizon":            len(tokens),
-			"confidence_bps":     confidence,
-			"deadline_ms":        spec.DeadlineMs,
-			"energy_mwh":         1,
-		})
-	}
-	return packets
-}
-
 func DecodeVerifierSpec(specJSON string) (int, string, string, bool) {
 	var spec map[string]any
 	if json.Unmarshal([]byte(strings.TrimSpace(specJSON)), &spec) != nil {
@@ -302,14 +263,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func shortHash(value string) string {
-	hash := FullHash(value)
-	if len(hash) > 12 {
-		return hash[:12]
-	}
-	return hash
 }
 
 func maxInt(left int, right int) int {

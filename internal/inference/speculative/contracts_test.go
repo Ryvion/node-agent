@@ -1,11 +1,8 @@
 package speculative
 
-import (
-	"encoding/json"
-	"testing"
-)
+import "testing"
 
-func TestDecodeDraftSpecBuildsPackets(t *testing.T) {
+func TestDecodeDraftSpecCanonicalizesContractTestBridge(t *testing.T) {
 	specJSON := `{
 		"task":"draft_runner_v8",
 		"draft_backend":"native_bridge",
@@ -28,28 +25,8 @@ func TestDecodeDraftSpecBuildsPackets(t *testing.T) {
 	if spec.DraftBackend != DraftBackendNative {
 		t.Fatalf("DraftBackend = %q, want %q", spec.DraftBackend, DraftBackendNative)
 	}
-	packets := BuildDraftPackets(spec)
-	if len(packets) != 3 {
-		t.Fatalf("len(packets) = %d, want 3", len(packets))
-	}
-	seen := map[string]bool{}
-	for _, packet := range packets {
-		if packet["window_id"] != "win-live" || packet["workgraph_id"] != "wg-live" ||
-			packet["role_id"] != "draft-worker-live" ||
-			packet["parent_prefix_hash"] != "sha256:prefix" ||
-			packet["model_hash"] != "sha256:model" {
-			t.Fatalf("packet identity fields = %#v", packet)
-		}
-		tokens, ok := packet["candidate_tokens"].([]int)
-		if !ok || len(tokens) != 4 {
-			t.Fatalf("candidate_tokens = %#v, want 4 ints", packet["candidate_tokens"])
-		}
-		encoded, _ := json.Marshal(tokens)
-		key := string(encoded)
-		if seen[key] {
-			t.Fatalf("duplicate token branch %s", key)
-		}
-		seen[key] = true
+	if spec.NodeID != "node-drafter" || spec.Horizon != 4 || spec.BranchCount != 3 {
+		t.Fatalf("decoded spec = %+v, want normalized draft contract fields", spec)
 	}
 }
 

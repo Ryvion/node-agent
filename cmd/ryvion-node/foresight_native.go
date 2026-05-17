@@ -10,6 +10,7 @@ import (
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	nodespec "github.com/Ryvion/ryvion-node/internal/inference/speculative"
+	contracttestbridge "github.com/Ryvion/ryvion-node/internal/inference/speculative/draft/contract_test_bridge"
 )
 
 const (
@@ -191,7 +192,7 @@ func decodeForesightNativeHotSessionSpec(specJSON string, expectedTask string) (
 }
 
 func buildForesightNativeDraftPackets(spec foresightNativeDraftSpec) []map[string]any {
-	return nodespec.BuildDraftPackets(spec)
+	return contracttestbridge.BuildPackets(spec)
 }
 
 func processOptionalForesightNativeVerifier(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
@@ -422,7 +423,7 @@ func foresightNativeExternalRuntimeRequested(work *hub.WorkAssignment, executorK
 }
 
 func foresightDraftBackendIsNativeBridge(backend string) bool {
-	return nodespec.DraftBackendIsNativeBridge(backend)
+	return contracttestbridge.IsBackend(backend)
 }
 
 func foresightVerifierBackendKind(backend string) string {
