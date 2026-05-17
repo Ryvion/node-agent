@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
+	sglangverify "github.com/Ryvion/ryvion-node/internal/inference/speculative/verify/sglang"
 	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
 
@@ -310,9 +311,9 @@ func TestForesightNativeExternalRuntimeRequestedSkipsManagedOCI(t *testing.T) {
 
 func TestResolveNativeSGLangVerifierCommandFromEnv(t *testing.T) {
 	t.Setenv("RYV_SGLANG_VERIFIER_CMD", "python /opt/ryvion/sglang-verifier/run.py")
-	command, ok := resolveNativeSGLangVerifierCommand()
+	command, ok := sglangverify.ResolveVerifierCommand()
 	if !ok {
-		t.Fatal("resolveNativeSGLangVerifierCommand ok = false")
+		t.Fatal("ResolveVerifierCommand ok = false")
 	}
 	if !command.Shell || command.Original == "" {
 		t.Fatalf("command = %+v, want shell command from env", command)
