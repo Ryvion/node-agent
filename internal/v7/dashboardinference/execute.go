@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Ryvion/ryvion-node/internal/models/cache"
+	"github.com/Ryvion/ryvion-node/internal/models/policy"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	"github.com/Ryvion/ryvion-node/internal/v7/modelcache"
-	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
 )
 
 const (

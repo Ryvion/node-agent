@@ -22,15 +22,18 @@ import (
 	"syscall"
 	"time"
 
+	artifact "github.com/Ryvion/ryvion-node/internal/artifacts/core"
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
+	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
+	modelprepare "github.com/Ryvion/ryvion-node/internal/models/prepare"
+	modelwarm "github.com/Ryvion/ryvion-node/internal/models/warm"
 	"github.com/Ryvion/ryvion-node/internal/nodekey"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/update"
-	v7artifact "github.com/Ryvion/ryvion-node/internal/v7/artifact"
 	v7backendprobe "github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
 	v7capability "github.com/Ryvion/ryvion-node/internal/v7/capability"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
@@ -39,9 +42,6 @@ import (
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7modelpolicy "github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
-	v7modelprepare "github.com/Ryvion/ryvion-node/internal/v7/modelprepare"
-	v7modelwarm "github.com/Ryvion/ryvion-node/internal/v7/modelwarm"
 	v7netprofile "github.com/Ryvion/ryvion-node/internal/v7/netprofile"
 	v7onboarding "github.com/Ryvion/ryvion-node/internal/v7/onboarding"
 	v7proofrunner "github.com/Ryvion/ryvion-node/internal/v7/proofrunner"
@@ -263,8 +263,8 @@ var (
 	v7BackendBenchmarkStatus     = llamacpp.NewBackendBenchmarkLocalStatus()
 	v7InferenceBenchmarkStatus   = v7inferencebench.NewLocalStatus()
 	v7DashboardInferenceStatus   = v7dashboardinference.NewLocalStatus()
-	v7ModelPrepareStatus         = v7modelprepare.NewLocalStatus()
-	v7ModelWarmStatus            = v7modelwarm.NewLocalStatus()
+	v7ModelPrepareStatus         = modelprepare.NewLocalStatus()
+	v7ModelWarmStatus            = modelwarm.NewLocalStatus()
 	newV7ModelBenchmarkRunner    = func(infMgr *inference.Manager, gpuDetected bool) v7modelbench.ModelBenchmarkRunner {
 		return v7modelbench.NativeInferenceModelBenchmarkRunner{
 			Native:           infMgr,
@@ -316,11 +316,11 @@ var (
 	}
 )
 
-func buildDashboardInferencePolicy(getenv func(string) string, detectHardware func(string) v7hardware.CapacityInventory) v7modelpolicy.Policy {
+func buildDashboardInferencePolicy(getenv func(string) string, detectHardware func(string) v7hardware.CapacityInventory) modelpolicy.Policy {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	basePolicy := v7modelpolicy.FromConfigSource(v7modelpolicy.ConfigSource{Getenv: getenv})
+	basePolicy := modelpolicy.FromConfigSource(modelpolicy.ConfigSource{Getenv: getenv})
 	if detectHardware == nil {
 		detectHardware = buildHardwareCapacityStatus
 	}
@@ -2240,7 +2240,7 @@ func v7TensorPlaneBenchmarkWorkLoopEventContextFromReceipt(specJSON string, rece
 	return context
 }
 
-func currentV7ModelWarmStatus() *v7modelwarm.LocalStatus {
+func currentV7ModelWarmStatus() *modelwarm.LocalStatus {
 	if operatorRuntimeState != nil {
 		return operatorRuntimeState.modelWarmStatus()
 	}
@@ -2248,7 +2248,7 @@ func currentV7ModelWarmStatus() *v7modelwarm.LocalStatus {
 }
 
 func processOptionalV7ModelWarm(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	identity, isWarm := v7modelwarm.WarmAssignmentIdentityFromJSON(work.SpecJSON)
+	identity, isWarm := modelwarm.WarmAssignmentIdentityFromJSON(work.SpecJSON)
 	if !isWarm {
 		return false, nil, nil
 	}
@@ -2258,18 +2258,18 @@ func processOptionalV7ModelWarm(ctx context.Context, client *hub.Client, work *h
 	}
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
 	executionStarted := time.Now()
-	if v7modelwarm.WarmEnabledFromEnv(os.Getenv) {
+	if modelwarm.WarmEnabledFromEnv(os.Getenv) {
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
 		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7ModelWarmWorkLoopEventContextFromSpec(work.SpecJSON))
 	}
 
-	var manager v7modelwarm.LlamaCppManager
+	var manager modelwarm.LlamaCppManager
 	if operatorRuntimeState != nil {
 		manager = operatorRuntimeState.llamaCppManager()
 	}
-	warmOptions := v7modelwarm.ExecuteOptions{
+	warmOptions := modelwarm.ExecuteOptions{
 		Getenv:          os.Getenv,
-		Policy:          v7modelpolicy.FromEnv(),
+		Policy:          modelpolicy.FromEnv(),
 		LlamaCppManager: manager,
 	}
 	if manager != nil {
@@ -2278,21 +2278,21 @@ func processOptionalV7ModelWarm(ctx context.Context, client *hub.Client, work *h
 			Client:  llamacpp.OpenAIClient{},
 		}
 	}
-	receipt, handled, err := v7modelwarm.ExecuteWarmAssignment(ctx, work.SpecJSON, warmOptions)
+	receipt, handled, err := modelwarm.ExecuteWarmAssignment(ctx, work.SpecJSON, warmOptions)
 	if !handled {
 		return false, nil, nil
 	}
 	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		receipt = v7modelwarm.BuildWarmRejectionReceiptFromIdentity(identity, err)
+		receipt = modelwarm.BuildWarmRejectionReceiptFromIdentity(identity, err)
 	}
 
 	receiptBuildStarted := time.Now()
 	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7ModelWarmWorkLoopEventContextFromSpec(work.SpecJSON))
 	extra := map[string]any{
-		"executor":      v7modelwarm.WarmTask,
-		"executor_kind": v7modelwarm.WarmTask,
-		"task":          v7modelwarm.WarmTask,
+		"executor":      modelwarm.WarmTask,
+		"executor_kind": modelwarm.WarmTask,
+		"task":          modelwarm.WarmTask,
 	}
 	warmed := v7ModelWarmReceiptWarmed(receipt)
 	recordErr := err
@@ -2377,25 +2377,25 @@ func processOptionalV7ModelWarm(ctx context.Context, client *hub.Client, work *h
 	return true, snapshot, recordErr
 }
 
-func benchmarkSidecarFromWarmManager(manager v7modelwarm.LlamaCppManager) llamacpp.BenchmarkSidecar {
+func benchmarkSidecarFromWarmManager(manager modelwarm.LlamaCppManager) llamacpp.BenchmarkSidecar {
 	if sidecar, ok := manager.(llamacpp.BenchmarkSidecar); ok && sidecar != nil {
 		return sidecar
 	}
 	return llamacpp.NewManagerFromEnv()
 }
 
-func v7ModelWarmReceiptWarmed(receipt v7modelwarm.WarmReceipt) bool {
-	if taskMetadata, ok := receipt.Metadata[v7modelwarm.WarmTask].(map[string]any); ok {
+func v7ModelWarmReceiptWarmed(receipt modelwarm.WarmReceipt) bool {
+	if taskMetadata, ok := receipt.Metadata[modelwarm.WarmTask].(map[string]any); ok {
 		proofStatus, _ := taskMetadata["proof_status"].(string)
 		warm, _ := taskMetadata["warm"].(bool)
-		return warm && strings.TrimSpace(proofStatus) == v7modelwarm.ProofStatusModelWarmed
+		return warm && strings.TrimSpace(proofStatus) == modelwarm.ProofStatusModelWarmed
 	}
 	return false
 }
 
-func v7ModelWarmRejectionError(receipt v7modelwarm.WarmReceipt) error {
+func v7ModelWarmRejectionError(receipt modelwarm.WarmReceipt) error {
 	code := "model_warm_failed"
-	if taskMetadata, ok := receipt.Metadata[v7modelwarm.WarmTask].(map[string]any); ok {
+	if taskMetadata, ok := receipt.Metadata[modelwarm.WarmTask].(map[string]any); ok {
 		if value, ok := taskMetadata["error_code"].(string); ok && strings.TrimSpace(value) != "" {
 			code = strings.TrimSpace(value)
 		}
@@ -2405,7 +2405,7 @@ func v7ModelWarmRejectionError(receipt v7modelwarm.WarmReceipt) error {
 
 func v7ModelWarmWorkLoopEventContextFromSpec(specJSON string) map[string]string {
 	context := map[string]string{
-		"spec_task": v7modelwarm.WarmTask,
+		"spec_task": modelwarm.WarmTask,
 	}
 	var spec struct {
 		Task                  string `json:"task"`
@@ -2417,8 +2417,8 @@ func v7ModelWarmWorkLoopEventContextFromSpec(specJSON string) map[string]string 
 	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
 		return context
 	}
-	if strings.TrimSpace(spec.Task) == v7modelwarm.WarmTask {
-		context["spec_task"] = v7modelwarm.WarmTask
+	if strings.TrimSpace(spec.Task) == modelwarm.WarmTask {
+		context["spec_task"] = modelwarm.WarmTask
 	}
 	if warmID := strings.TrimSpace(spec.WarmID); warmID != "" {
 		context["warm_id"] = warmID
@@ -2433,9 +2433,9 @@ func v7ModelWarmWorkLoopEventContextFromSpec(specJSON string) map[string]string 
 	return context
 }
 
-func v7ModelWarmWorkLoopEventContextFromReceipt(specJSON string, receipt v7modelwarm.WarmReceipt) map[string]string {
+func v7ModelWarmWorkLoopEventContextFromReceipt(specJSON string, receipt modelwarm.WarmReceipt) map[string]string {
 	context := v7ModelWarmWorkLoopEventContextFromSpec(specJSON)
-	if taskMetadata, ok := receipt.Metadata[v7modelwarm.WarmTask].(map[string]any); ok {
+	if taskMetadata, ok := receipt.Metadata[modelwarm.WarmTask].(map[string]any); ok {
 		if warm, ok := taskMetadata["warm"].(bool); ok {
 			context["warm"] = strconv.FormatBool(warm)
 		}
@@ -3129,7 +3129,7 @@ func processOptionalV7ModelBenchmark(ctx context.Context, client *hub.Client, wo
 	return true, snapshot, err
 }
 
-func currentV7ModelPrepareStatus() *v7modelprepare.LocalStatus {
+func currentV7ModelPrepareStatus() *modelprepare.LocalStatus {
 	if operatorRuntimeState != nil {
 		return operatorRuntimeState.modelPrepareStatus()
 	}
@@ -3137,7 +3137,7 @@ func currentV7ModelPrepareStatus() *v7modelprepare.LocalStatus {
 }
 
 func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	identity, isPrepare := v7modelprepare.PrepareAssignmentIdentityFromJSON(work.SpecJSON)
+	identity, isPrepare := modelprepare.PrepareAssignmentIdentityFromJSON(work.SpecJSON)
 	if !isPrepare {
 		return false, nil, nil
 	}
@@ -3148,17 +3148,17 @@ func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
 	executionStarted := time.Now()
 	workLoopDiagnostics.RecordExecutionStart(statusJobID)
-	workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, mainWorkLoopSpecContext(v7modelprepare.PrepareTask))
+	workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, mainWorkLoopSpecContext(modelprepare.PrepareTask))
 
-	var manager v7modelprepare.LlamaCppManager
+	var manager modelprepare.LlamaCppManager
 	if operatorRuntimeState != nil {
 		manager = operatorRuntimeState.llamaCppManager()
 	} else {
 		manager = llamacpp.NewManagerFromEnv()
 	}
-	receipt, handled, err := v7modelprepare.ExecutePrepareAssignment(ctx, work.SpecJSON, v7modelprepare.ExecuteOptions{
+	receipt, handled, err := modelprepare.ExecutePrepareAssignment(ctx, work.SpecJSON, modelprepare.ExecuteOptions{
 		Getenv:          os.Getenv,
-		Policy:          v7modelpolicy.FromEnv(),
+		Policy:          modelpolicy.FromEnv(),
 		LlamaCppManager: manager,
 		BenchmarkRunner: llamacpp.BenchmarkRunner{
 			Sidecar: manager,
@@ -3170,14 +3170,14 @@ func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work
 	}
 	workLoopDiagnostics.RecordExecutionEnd(time.Since(executionStarted), err)
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		receipt = v7modelprepare.BuildPrepareRejectionReceiptFromIdentity(identity, err)
+		receipt = modelprepare.BuildPrepareRejectionReceiptFromIdentity(identity, err)
 	}
 	receiptBuildStarted := time.Now()
-	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, mainWorkLoopSpecContext(v7modelprepare.PrepareTask))
+	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, mainWorkLoopSpecContext(modelprepare.PrepareTask))
 	extra := map[string]any{
-		"executor":      v7modelprepare.PrepareTask,
-		"executor_kind": v7modelprepare.PrepareTask,
-		"task":          v7modelprepare.PrepareTask,
+		"executor":      modelprepare.PrepareTask,
+		"executor_kind": modelprepare.PrepareTask,
+		"task":          modelprepare.PrepareTask,
 	}
 	exitCode := 0
 	if err != nil {
@@ -3201,7 +3201,7 @@ func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work
 		Metadata:      metadata,
 	}
 	workLoopDiagnostics.RecordReceiptBuild(time.Since(receiptBuildStarted))
-	receiptContext := mainWorkLoopSpecContext(v7modelprepare.PrepareTask)
+	receiptContext := mainWorkLoopSpecContext(modelprepare.PrepareTask)
 	workLoopDiagnostics.RecordEvent("pre_submit_block_end", hubReceipt.JobID, work.Kind, receiptContext)
 	workLoopDiagnostics.RecordEvent("v7_fast_path_receipt_ready", hubReceipt.JobID, work.Kind, receiptContext)
 	workLoopDiagnostics.RecordReceiptReady(hubReceipt.JobID, work.Kind, time.Now(), receiptContext)
@@ -3620,7 +3620,7 @@ func mainWorkLoopSpecContext(specTask string) map[string]string {
 	return map[string]string{"spec_task": specTask}
 }
 
-func v7ProofArtifactKind(metadata map[string]any) v7artifact.ArtifactKind {
+func v7ProofArtifactKind(metadata map[string]any) artifact.ArtifactKind {
 	kind := strings.ToLower(firstNonEmptyString(
 		metadataString(metadata, "artifact_kind"),
 		metadataString(metadata, "artifact_mime"),
@@ -3628,21 +3628,21 @@ func v7ProofArtifactKind(metadata map[string]any) v7artifact.ArtifactKind {
 	))
 	switch kind {
 	case "result_json", "json", "application/json":
-		return v7artifact.ArtifactKindResultJSON
+		return artifact.ArtifactKindResultJSON
 	case "image", "image/png", "image/jpeg", "image/webp":
-		return v7artifact.ArtifactKindImage
+		return artifact.ArtifactKindImage
 	case "text", "text/plain":
-		return v7artifact.ArtifactKindText
+		return artifact.ArtifactKindText
 	case "model_delta":
-		return v7artifact.ArtifactKindModelDelta
+		return artifact.ArtifactKindModelDelta
 	case "evidence_bundle":
-		return v7artifact.ArtifactKindEvidenceBundle
+		return artifact.ArtifactKindEvidenceBundle
 	case "runner_log":
-		return v7artifact.ArtifactKindRunnerLog
+		return artifact.ArtifactKindRunnerLog
 	case "", "generic_blob", "application/octet-stream":
-		return v7artifact.ArtifactKindGenericBlob
+		return artifact.ArtifactKindGenericBlob
 	default:
-		return v7artifact.ArtifactKind(kind)
+		return artifact.ArtifactKind(kind)
 	}
 }
 

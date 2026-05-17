@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/artifact"
+	"github.com/Ryvion/ryvion-node/internal/artifacts/core"
 	"github.com/Ryvion/ryvion-node/internal/v7/evidence"
 )
 

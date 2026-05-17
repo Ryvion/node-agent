@@ -20,6 +20,7 @@ import (
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
@@ -29,7 +30,6 @@ import (
 	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7modelcache "github.com/Ryvion/ryvion-node/internal/v7/modelcache"
 )
 
 func TestAllowLocalOrigin(t *testing.T) {
@@ -537,7 +537,7 @@ func TestOperatorAPIStatusEndpointIncludesExtraModelDirs(t *testing.T) {
 	if status.ModelCache.CacheDir != cacheDir {
 		t.Fatalf("model_cache.cache_dir = %q, want %q", status.ModelCache.CacheDir, cacheDir)
 	}
-	byID := map[string]v7modelcache.Model{}
+	byID := map[string]modelcache.Model{}
 	for _, model := range status.ModelCache.Models {
 		byID[model.ModelID] = model
 	}

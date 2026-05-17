@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/artifact"
+	"github.com/Ryvion/ryvion-node/internal/artifacts/core"
 	"github.com/Ryvion/ryvion-node/internal/v7/evidence"
 	"github.com/Ryvion/ryvion-node/internal/v7/localcas"
 	"github.com/Ryvion/ryvion-node/internal/v7/sandbox"

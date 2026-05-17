@@ -19,6 +19,10 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
+	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
+	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
+	modelprepare "github.com/Ryvion/ryvion-node/internal/models/prepare"
+	modelwarm "github.com/Ryvion/ryvion-node/internal/models/warm"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
 	usefulenergy "github.com/Ryvion/ryvion-node/internal/telemetry/usefulenergy"
@@ -32,10 +36,6 @@ import (
 	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7modelcache "github.com/Ryvion/ryvion-node/internal/v7/modelcache"
-	v7modelpolicy "github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
-	v7modelprepare "github.com/Ryvion/ryvion-node/internal/v7/modelprepare"
-	v7modelwarm "github.com/Ryvion/ryvion-node/internal/v7/modelwarm"
 	v7runtimeinventory "github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 	v7speculative "github.com/Ryvion/ryvion-node/internal/v7/speculative"
 	v7tensoraccess "github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
@@ -87,8 +87,8 @@ type operatorRuntime struct {
 	v7BackendBenchmark   *llamacpp.BackendBenchmarkLocalStatus
 	v7InferenceBenchmark *v7inferencebench.LocalStatus
 	v7DashboardInference *v7dashboardinference.LocalStatus
-	v7ModelPrepare       *v7modelprepare.LocalStatus
-	v7ModelWarm          *v7modelwarm.LocalStatus
+	v7ModelPrepare       *modelprepare.LocalStatus
+	v7ModelWarm          *modelwarm.LocalStatus
 	llamaCppSidecar      *llamacpp.Manager
 	llamaCppKeeper       *llamacpp.ResidencyKeeper
 	llamaCppBenchmark    *llamacpp.BenchmarkLocalStatus
@@ -136,8 +136,8 @@ type operatorStatusResponse struct {
 	TensorAccess         v7tensoraccess.TensorAccessCapability        `json:"tensor_access"`
 	RuntimeInventory     v7runtimeinventory.Inventory                 `json:"runtime_inventory"`
 	HardwareCapacity     v7hardware.CapacityInventory                 `json:"hardware_capacity"`
-	ModelPolicy          v7modelpolicy.Status                         `json:"model_policy"`
-	ModelCache           v7modelcache.Status                          `json:"model_cache"`
+	ModelPolicy          modelpolicy.Status                           `json:"model_policy"`
+	ModelCache           modelcache.Status                            `json:"model_cache"`
 	BackendProbes        v7backendprobe.Probes                        `json:"backend_probes"`
 	BackendRuntimes      llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
 	CapabilityProfile    v7capabilityprofile.Profile                  `json:"capability_profile"`
@@ -158,8 +158,8 @@ type operatorStatusResponse struct {
 	V7BackendBenchmark   llamacpp.BackendBenchmarkLocalStatusSnapshot `json:"v7_backend_benchmark"`
 	V7InferenceBenchmark v7inferencebench.LocalStatusSnapshot         `json:"v7_inference_benchmark"`
 	V7DashboardInference v7dashboardinference.LocalStatusSnapshot     `json:"v7_dashboard_inference"`
-	V7ModelPrepare       v7modelprepare.LocalStatusSnapshot           `json:"v7_model_prepare"`
-	V7ModelWarm          v7modelwarm.LocalStatusSnapshot              `json:"v7_model_warm"`
+	V7ModelPrepare       modelprepare.LocalStatusSnapshot             `json:"v7_model_prepare"`
+	V7ModelWarm          modelwarm.LocalStatusSnapshot                `json:"v7_model_warm"`
 	WorkLoop             diagnostics.WorkLoopSnapshot                 `json:"work_loop"`
 }
 
@@ -334,8 +334,8 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		v7BackendBenchmark:   llamacpp.NewBackendBenchmarkLocalStatus(),
 		v7InferenceBenchmark: v7inferencebench.NewLocalStatus(),
 		v7DashboardInference: v7dashboardinference.NewLocalStatus(),
-		v7ModelPrepare:       v7modelprepare.NewLocalStatus(),
-		v7ModelWarm:          v7modelwarm.NewLocalStatus(),
+		v7ModelPrepare:       modelprepare.NewLocalStatus(),
+		v7ModelWarm:          modelwarm.NewLocalStatus(),
 		llamaCppSidecar:      llamaCppSidecar,
 		llamaCppKeeper:       llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
 		llamaCppBenchmark:    llamacpp.NewBenchmarkLocalStatus(),
@@ -521,7 +521,7 @@ func (s *operatorRuntime) sglangManager() *sglang.Manager {
 	return s.sglangSidecar
 }
 
-func (s *operatorRuntime) modelPrepareStatus() *v7modelprepare.LocalStatus {
+func (s *operatorRuntime) modelPrepareStatus() *modelprepare.LocalStatus {
 	if s == nil {
 		return nil
 	}
@@ -535,12 +535,12 @@ func (s *operatorRuntime) modelPrepareStatus() *v7modelprepare.LocalStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.v7ModelPrepare == nil {
-		s.v7ModelPrepare = v7modelprepare.NewLocalStatus()
+		s.v7ModelPrepare = modelprepare.NewLocalStatus()
 	}
 	return s.v7ModelPrepare
 }
 
-func (s *operatorRuntime) modelWarmStatus() *v7modelwarm.LocalStatus {
+func (s *operatorRuntime) modelWarmStatus() *modelwarm.LocalStatus {
 	if s == nil {
 		return nil
 	}
@@ -554,7 +554,7 @@ func (s *operatorRuntime) modelWarmStatus() *v7modelwarm.LocalStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.v7ModelWarm == nil {
-		s.v7ModelWarm = v7modelwarm.NewLocalStatus()
+		s.v7ModelWarm = modelwarm.NewLocalStatus()
 	}
 	return s.v7ModelWarm
 }
@@ -1050,11 +1050,11 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	if dashboardInferenceStatus != nil {
 		dashboardInferenceSnapshot = dashboardInferenceStatus.Snapshot()
 	}
-	var modelPrepareSnapshot v7modelprepare.LocalStatusSnapshot
+	var modelPrepareSnapshot modelprepare.LocalStatusSnapshot
 	if modelPrepareStatus != nil {
 		modelPrepareSnapshot = modelPrepareStatus.Snapshot()
 	}
-	var modelWarmSnapshot v7modelwarm.LocalStatusSnapshot
+	var modelWarmSnapshot modelwarm.LocalStatusSnapshot
 	if modelWarmStatus != nil {
 		modelWarmSnapshot = modelWarmStatus.Snapshot()
 	}
@@ -1259,12 +1259,12 @@ func buildRuntimeInventoryStatus(runtimeInfo operatorRuntimeInfo, capability v7t
 	}, runtimeInventoryBackendDetector())
 }
 
-func buildModelPolicyStatus() v7modelpolicy.Status {
-	return v7modelpolicy.StatusFromEnv()
+func buildModelPolicyStatus() modelpolicy.Status {
+	return modelpolicy.StatusFromEnv()
 }
 
-func buildDerivedModelPolicyStatus(policy v7modelpolicy.Status, hardware v7hardware.CapacityInventory) v7modelpolicy.Status {
-	return v7modelpolicy.BuildDerivedPolicy(v7modelpolicy.DerivedPolicyInput{
+func buildDerivedModelPolicyStatus(policy modelpolicy.Status, hardware v7hardware.CapacityInventory) modelpolicy.Status {
+	return modelpolicy.BuildDerivedPolicy(modelpolicy.DerivedPolicyInput{
 		BasePolicy: policy,
 		Hardware:   hardware,
 	})
@@ -1274,8 +1274,8 @@ func buildHardwareCapacityStatus(modelCacheDir string) v7hardware.CapacityInvent
 	return v7hardware.DetectInventory(modelCacheDir)
 }
 
-func buildModelCacheStatus(policy v7modelpolicy.Status) v7modelcache.Status {
-	return v7modelcache.BuildStatusFromDirs(modelCacheScanDirs(policy.CacheDir, os.Getenv))
+func buildModelCacheStatus(policy modelpolicy.Status) modelcache.Status {
+	return modelcache.BuildStatusFromDirs(modelCacheScanDirs(policy.CacheDir, os.Getenv))
 }
 
 func modelCacheScanDirs(primary string, getenv func(string) string) []string {
@@ -1313,8 +1313,8 @@ func modelCacheScanDirs(primary string, getenv func(string) string) []string {
 	return dirs
 }
 
-func buildModelCacheRuntimeStatus(modelCache v7modelcache.Status, policy v7modelpolicy.Status, hardware v7hardware.CapacityInventory, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes) v7modelcache.Status {
-	return v7modelcache.AnnotateRuntimeStatus(v7modelcache.RuntimeAnnotationInput{
+func buildModelCacheRuntimeStatus(modelCache modelcache.Status, policy modelpolicy.Status, hardware v7hardware.CapacityInventory, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes) modelcache.Status {
+	return modelcache.AnnotateRuntimeStatus(modelcache.RuntimeAnnotationInput{
 		Status:                         modelCache,
 		Policy:                         policy,
 		HardwareCapacityAvailable:      hardwareCapacityAvailable(hardware),
@@ -1342,7 +1342,7 @@ func ggufBackendTextGenerationAvailable(backendProbes v7backendprobe.Probes, bac
 		(backendProbes.LlamaCPP.Available && backendProbes.LlamaCPP.SupportsTextGeneration)
 }
 
-func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory, speculativeDecoding *v7speculative.DecodingCapability, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {
+func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory, speculativeDecoding *v7speculative.DecodingCapability, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {
 	return v7capabilityprofile.BuildProfile(v7capabilityprofile.BuildInput{
 		Hardware:            hardware,
 		Policy:              policy,
@@ -1357,7 +1357,7 @@ func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy 
 	})
 }
 
-func buildSpeculativeReportStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory) v7speculative.Report {
+func buildSpeculativeReportStatus(hardware v7hardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory) v7speculative.Report {
 	return v7speculative.BuildReport(v7speculative.BuildInput{
 		Hardware:         hardware,
 		Policy:           policy,

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/modellease"
+	"github.com/Ryvion/ryvion-node/internal/models/lease"
 )
 
 var (

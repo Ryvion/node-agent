@@ -21,6 +21,8 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
+	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
+	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/update"
@@ -32,8 +34,6 @@ import (
 	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7modelcache "github.com/Ryvion/ryvion-node/internal/v7/modelcache"
-	v7modelpolicy "github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
 	v7tensorplane "github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 
@@ -232,7 +232,7 @@ func TestBuildDashboardInferencePolicyUsesDerivedHardwarePolicy(t *testing.T) {
 	cacheDir := t.TempDir()
 	const gib = uint64(1024 * 1024 * 1024)
 	policy := buildDashboardInferencePolicy(func(key string) string {
-		if key == v7modelpolicy.EnvModelCacheDir {
+		if key == modelpolicy.EnvModelCacheDir {
 			return cacheDir
 		}
 		return ""
@@ -254,7 +254,7 @@ func TestBuildDashboardInferencePolicyUsesDerivedHardwarePolicy(t *testing.T) {
 		})
 	})
 
-	decision := v7modelpolicy.EvaluateRuntimeRequest(policy, v7modelpolicy.RuntimeRequest{
+	decision := modelpolicy.EvaluateRuntimeRequest(policy, modelpolicy.RuntimeRequest{
 		ModelID:                "phi-4-Q4_K_M.gguf",
 		Family:                 "phi",
 		ModelSizeBytes:         9 * gib,
@@ -561,8 +561,8 @@ func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
 
 func TestSummarizeV7HeartbeatPayloadCountsOnlyRealInventoryModels(t *testing.T) {
 	payload := &v7heartbeat.V7HeartbeatPayload{
-		ModelCache: v7modelcache.Status{
-			Models: []v7modelcache.Model{
+		ModelCache: modelcache.Status{
+			Models: []modelcache.Model{
 				{ModelID: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", Filename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
 				{ModelID: "phi-4-Q5_K_M.gguf", Filename: "phi-4-Q5_K_M.gguf"},
 			},

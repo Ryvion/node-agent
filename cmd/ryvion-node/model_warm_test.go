@@ -14,12 +14,12 @@ import (
 
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
 	"github.com/Ryvion/ryvion-node/internal/hub"
+	modelwarm "github.com/Ryvion/ryvion-node/internal/models/warm"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	v7modelwarm "github.com/Ryvion/ryvion-node/internal/v7/modelwarm"
 )
 
 func TestProcessOptionalV7ModelWarmSubmitsReceiptForWarmRuntime(t *testing.T) {
-	t.Setenv(v7modelwarm.WarmFlagEnv, "1")
+	t.Setenv(modelwarm.WarmFlagEnv, "1")
 	cacheDir := t.TempDir()
 	t.Setenv("RYV_MODEL_CACHE_DIR", cacheDir)
 	modelPath := filepath.Join(cacheDir, "phi-4-Q4_K_M.gguf")
@@ -39,7 +39,7 @@ func TestProcessOptionalV7ModelWarmSubmitsReceiptForWarmRuntime(t *testing.T) {
 
 	oldState := operatorRuntimeState
 	oldDiagnostics := workLoopDiagnostics
-	status := v7modelwarm.NewLocalStatus()
+	status := modelwarm.NewLocalStatus()
 	operatorRuntimeState = &operatorRuntime{
 		version:           "test",
 		hubURL:            "https://api.ryvion.ai",
@@ -84,9 +84,9 @@ func TestProcessOptionalV7ModelWarmSubmitsReceiptForWarmRuntime(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata, ok := req.Metadata[v7modelwarm.WarmTask].(map[string]any)
+		metadata, ok := req.Metadata[modelwarm.WarmTask].(map[string]any)
 		if !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7modelwarm.WarmTask, req.Metadata)
+			t.Errorf("receipt metadata missing %q: %+v", modelwarm.WarmTask, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -95,7 +95,7 @@ func TestProcessOptionalV7ModelWarmSubmitsReceiptForWarmRuntime(t *testing.T) {
 			metadata["backend"] != "llama.cpp" ||
 			metadata["model_path"] != modelPath ||
 			metadata["warm"] != true ||
-			metadata["proof_status"] != v7modelwarm.ProofStatusModelWarmed {
+			metadata["proof_status"] != modelwarm.ProofStatusModelWarmed {
 			t.Errorf("warm metadata = %+v", metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -149,8 +149,8 @@ func TestProcessOptionalV7ModelWarmSubmitsReceiptForWarmRuntime(t *testing.T) {
 
 func testModelWarmSpecJSON(t *testing.T) string {
 	t.Helper()
-	spec := v7modelwarm.WarmSpec{
-		Task:                  v7modelwarm.WarmTask,
+	spec := modelwarm.WarmSpec{
+		Task:                  modelwarm.WarmTask,
 		RequestID:             "request-local",
 		WarmID:                "warm-local",
 		JobID:                 "job-warm-local",

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
+	"github.com/Ryvion/ryvion-node/internal/models/policy"
 )
 
 func TestScanDetectsGGUFModels(t *testing.T) {

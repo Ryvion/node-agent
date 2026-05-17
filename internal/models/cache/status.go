@@ -3,7 +3,7 @@ package modelcache
 import (
 	"strings"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
+	"github.com/Ryvion/ryvion-node/internal/models/policy"
 )
 
 const canonicalTinyLlamaDrafterModelID = "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
