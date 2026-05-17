@@ -3,12 +3,12 @@ package main
 import (
 	"testing"
 
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
 
 func TestLlamaCppBenchmarkAccelerationModeReportsMetal(t *testing.T) {
-	cfg := v7llamacpp.LlamaCppSidecarConfig{GPULayers: 99}
+	cfg := llamacpp.LlamaCppSidecarConfig{GPULayers: 99}
 	hardware := v7hardware.CapacityInventory{
 		GPUDetected:    true,
 		GPUVendor:      v7hardware.GPUVendorApple,
@@ -22,7 +22,7 @@ func TestLlamaCppBenchmarkAccelerationModeReportsMetal(t *testing.T) {
 }
 
 func TestLlamaCppBenchmarkAccelerationModeHonorsExplicitCPU(t *testing.T) {
-	cfg := v7llamacpp.LlamaCppSidecarConfig{GPULayers: 0}
+	cfg := llamacpp.LlamaCppSidecarConfig{GPULayers: 0}
 	hardware := v7hardware.CapacityInventory{
 		GPUDetected:    true,
 		GPUVendor:      v7hardware.GPUVendorApple,

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
 	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
 	"github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
-	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/v7/modelcache"
 	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
 	"github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"

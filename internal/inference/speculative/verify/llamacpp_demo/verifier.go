@@ -11,7 +11,7 @@ import (
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	nodespec "github.com/Ryvion/ryvion-node/internal/inference/speculative"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 )
 
 const Executor = "llamacpp_demo_verifier"
@@ -19,19 +19,19 @@ const Executor = "llamacpp_demo_verifier"
 var ErrUnavailable = errors.New("llamacpp_demo_verifier_unavailable")
 
 type Sidecar interface {
-	Start(context.Context) v7llamacpp.LlamaCppSidecarStatus
-	Status(context.Context) v7llamacpp.LlamaCppSidecarStatus
+	Start(context.Context) llamacpp.LlamaCppSidecarStatus
+	Status(context.Context) llamacpp.LlamaCppSidecarStatus
 }
 
 type Verifier struct {
 	Sidecar Sidecar
-	Client  v7llamacpp.CompletionClient
+	Client  llamacpp.CompletionClient
 }
 
 func NewVerifierFromEnv() Verifier {
 	return Verifier{
-		Sidecar: v7llamacpp.NewManagerFromEnv(),
-		Client:  v7llamacpp.OpenAIClient{},
+		Sidecar: llamacpp.NewManagerFromEnv(),
+		Client:  llamacpp.OpenAIClient{},
 	}
 }
 
@@ -60,9 +60,9 @@ func (v Verifier) VerifyWave(ctx context.Context, spec nodespec.HotSessionSpec, 
 	if maxTokens <= 0 {
 		maxTokens = 1
 	}
-	req := v7llamacpp.CompletionRequest{
+	req := llamacpp.CompletionRequest{
 		BaseURL:      status.BaseURL,
-		ModelID:      firstNonEmpty(spec.ModelID, status.ModelFilename, v7llamacpp.BackendName),
+		ModelID:      firstNonEmpty(spec.ModelID, status.ModelFilename, llamacpp.BackendName),
 		SystemPrompt: SystemPrompt(),
 		Prompt:       VerifierPrompt(spec, command, treeCID, acceptedLimit),
 		MaxTokens:    maxTokens,
@@ -105,7 +105,7 @@ func (v Verifier) VerifyWave(ctx context.Context, spec nodespec.HotSessionSpec, 
 	return result, nil
 }
 
-func (v Verifier) Status(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
+func (v Verifier) Status(ctx context.Context) llamacpp.LlamaCppSidecarStatus {
 	return v.sidecar().Status(ctx)
 }
 
@@ -113,17 +113,17 @@ func (v Verifier) sidecar() Sidecar {
 	if v.Sidecar != nil {
 		return v.Sidecar
 	}
-	return v7llamacpp.NewManagerFromEnv()
+	return llamacpp.NewManagerFromEnv()
 }
 
-func (v Verifier) client() v7llamacpp.CompletionClient {
+func (v Verifier) client() llamacpp.CompletionClient {
 	if v.Client != nil {
 		return v.Client
 	}
-	return v7llamacpp.OpenAIClient{}
+	return llamacpp.OpenAIClient{}
 }
 
-func StatusReady(status v7llamacpp.LlamaCppSidecarStatus) bool {
+func StatusReady(status llamacpp.LlamaCppSidecarStatus) bool {
 	return status.Enabled && status.Available && status.Running && status.Healthy && status.BaseURL != "" && status.SupportsTextGeneration
 }
 
@@ -148,10 +148,10 @@ func VerifierPrompt(spec nodespec.HotSessionSpec, command hub.ForesightLiveLabSe
 	}, "\n")
 }
 
-func ProbeSummary(status v7llamacpp.LlamaCppSidecarStatus, req v7llamacpp.CompletionRequest, completion v7llamacpp.CompletionResult, durationMs int64) map[string]any {
+func ProbeSummary(status llamacpp.LlamaCppSidecarStatus, req llamacpp.CompletionRequest, completion llamacpp.CompletionResult, durationMs int64) map[string]any {
 	return map[string]any{
 		"source":                     Executor,
-		"backend":                    v7llamacpp.BackendName,
+		"backend":                    llamacpp.BackendName,
 		"runtime_mode":               "native_node_agent",
 		"model_id":                   req.ModelID,
 		"model_filename":             status.ModelFilename,
@@ -172,17 +172,17 @@ func ProbeSummary(status v7llamacpp.LlamaCppSidecarStatus, req v7llamacpp.Comple
 	}
 }
 
-func LabStopReason(completion v7llamacpp.CompletionResult) (string, bool) {
+func LabStopReason(completion llamacpp.CompletionResult) (string, bool) {
 	if completion.MaxTokensReached {
 		return "max_tokens", false
 	}
 	for _, value := range []string{completion.FinishReason, completion.BackendStopReason, completion.BackendFinishReason} {
 		switch strings.ToLower(strings.TrimSpace(value)) {
-		case v7llamacpp.FinishReasonLength, v7llamacpp.FinishReasonMaxTokens, "limit", "stopped_limit", "token_limit", "context_length", "max_new_tokens", "max_token", "max_tokens_reached":
+		case llamacpp.FinishReasonLength, llamacpp.FinishReasonMaxTokens, "limit", "stopped_limit", "token_limit", "context_length", "max_new_tokens", "max_token", "max_tokens_reached":
 			return "max_tokens", false
-		case v7llamacpp.FinishReasonTimeout, "timed_out", "deadline", "deadline_exceeded":
+		case llamacpp.FinishReasonTimeout, "timed_out", "deadline", "deadline_exceeded":
 			return "timeout", false
-		case v7llamacpp.FinishReasonError:
+		case llamacpp.FinishReasonError:
 			return "llamacpp_demo_completion_error", false
 		case "eos", "stopped_eos", "end_of_sequence", "end-of-sequence", "end_of_text", "eos_token":
 			return "eos", true
@@ -191,7 +191,7 @@ func LabStopReason(completion v7llamacpp.CompletionResult) (string, bool) {
 	return "", false
 }
 
-func UnavailableCode(status v7llamacpp.LlamaCppSidecarStatus) string {
+func UnavailableCode(status llamacpp.LlamaCppSidecarStatus) string {
 	switch {
 	case !status.Enabled:
 		return "llamacpp_demo_disabled"

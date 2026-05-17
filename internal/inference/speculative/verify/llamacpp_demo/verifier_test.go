@@ -9,20 +9,20 @@ import (
 
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	nodespec "github.com/Ryvion/ryvion-node/internal/inference/speculative"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 )
 
 func TestVerifierVerifyWaveUsesMeasuredCompletion(t *testing.T) {
 	sidecar := &fakeSidecar{status: readyStatus()}
-	client := &fakeCompletionClient{result: v7llamacpp.CompletionResult{
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
 		Output:                   []byte("Verified local text."),
 		OutputBytes:              int64(len("Verified local text.")),
 		TokensGenerated:          4,
 		CompletionTokens:         4,
 		RequestedMaxTokens:       8,
 		FinishReason:             "stop",
-		RuntimeMeasurementStatus: v7llamacpp.RuntimeMeasurementStatusMeasured,
-		MetadataParseStatus:      v7llamacpp.MetadataParseStatusOK,
+		RuntimeMeasurementStatus: llamacpp.RuntimeMeasurementStatusMeasured,
+		MetadataParseStatus:      llamacpp.MetadataParseStatusOK,
 		TotalTimeMs:              25,
 		Streamed:                 true,
 	}}
@@ -71,7 +71,7 @@ func TestVerifierVerifyWaveUsesMeasuredCompletion(t *testing.T) {
 		t.Fatalf("verifier result stop = %q eos=%v, want non-terminal finish_reason=stop", result.StopReason, result.EOS)
 	}
 	if result.ProbeSummary["source"] != Executor ||
-		result.ProbeSummary["backend"] != v7llamacpp.BackendName ||
+		result.ProbeSummary["backend"] != llamacpp.BackendName ||
 		result.ProbeSummary["output_hash"] == "" {
 		t.Fatalf("probe summary = %#v, want llama.cpp measured metadata", result.ProbeSummary)
 	}
@@ -81,10 +81,10 @@ func TestVerifierVerifyWaveUsesMeasuredCompletion(t *testing.T) {
 }
 
 func TestVerifierUnavailableDoesNotUseSyntheticFallback(t *testing.T) {
-	sidecar := &fakeSidecar{status: v7llamacpp.LlamaCppSidecarStatus{
+	sidecar := &fakeSidecar{status: llamacpp.LlamaCppSidecarStatus{
 		Enabled:   true,
 		Available: false,
-		Backend:   v7llamacpp.BackendName,
+		Backend:   llamacpp.BackendName,
 		Reason:    "llama-server binary not detected",
 	}}
 	client := &fakeCompletionClient{}
@@ -110,33 +110,33 @@ func TestVerifierUnavailableDoesNotUseSyntheticFallback(t *testing.T) {
 func TestLabStopReason(t *testing.T) {
 	tests := []struct {
 		name       string
-		completion v7llamacpp.CompletionResult
+		completion llamacpp.CompletionResult
 		wantReason string
 		wantEOS    bool
 	}{
 		{
 			name:       "backend stop is not lab eos",
-			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonStop},
+			completion: llamacpp.CompletionResult{FinishReason: llamacpp.FinishReasonStop},
 		},
 		{
 			name:       "length maps to max tokens",
-			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonLength},
+			completion: llamacpp.CompletionResult{FinishReason: llamacpp.FinishReasonLength},
 			wantReason: "max_tokens",
 		},
 		{
 			name:       "max tokens flag wins",
-			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonStop, MaxTokensReached: true},
+			completion: llamacpp.CompletionResult{FinishReason: llamacpp.FinishReasonStop, MaxTokensReached: true},
 			wantReason: "max_tokens",
 		},
 		{
 			name:       "explicit eos remains terminal",
-			completion: v7llamacpp.CompletionResult{BackendStopReason: "eos"},
+			completion: llamacpp.CompletionResult{BackendStopReason: "eos"},
 			wantReason: "eos",
 			wantEOS:    true,
 		},
 		{
 			name:       "timeout remains terminal",
-			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonTimeout},
+			completion: llamacpp.CompletionResult{FinishReason: llamacpp.FinishReasonTimeout},
 			wantReason: "timeout",
 		},
 	}
@@ -151,15 +151,15 @@ func TestLabStopReason(t *testing.T) {
 	}
 }
 
-func readyStatus() v7llamacpp.LlamaCppSidecarStatus {
-	return v7llamacpp.LlamaCppSidecarStatus{
+func readyStatus() llamacpp.LlamaCppSidecarStatus {
+	return llamacpp.LlamaCppSidecarStatus{
 		Enabled:                true,
 		Available:              true,
 		Running:                true,
 		Healthy:                true,
 		BaseURL:                "http://127.0.0.1:45910",
 		ModelFilename:          "tinyllama.Q4_K_M.gguf",
-		Backend:                v7llamacpp.BackendName,
+		Backend:                llamacpp.BackendName,
 		OpenAICompatible:       true,
 		SupportsTextGeneration: true,
 		SupportsStreaming:      true,
@@ -167,29 +167,29 @@ func readyStatus() v7llamacpp.LlamaCppSidecarStatus {
 }
 
 type fakeSidecar struct {
-	status  v7llamacpp.LlamaCppSidecarStatus
+	status  llamacpp.LlamaCppSidecarStatus
 	started bool
 }
 
-func (f *fakeSidecar) Start(context.Context) v7llamacpp.LlamaCppSidecarStatus {
+func (f *fakeSidecar) Start(context.Context) llamacpp.LlamaCppSidecarStatus {
 	f.started = true
 	return f.status
 }
 
-func (f *fakeSidecar) Status(context.Context) v7llamacpp.LlamaCppSidecarStatus {
+func (f *fakeSidecar) Status(context.Context) llamacpp.LlamaCppSidecarStatus {
 	return f.status
 }
 
 type fakeCompletionClient struct {
-	result   v7llamacpp.CompletionResult
+	result   llamacpp.CompletionResult
 	err      error
-	requests []v7llamacpp.CompletionRequest
+	requests []llamacpp.CompletionRequest
 }
 
-func (f *fakeCompletionClient) Complete(_ context.Context, req v7llamacpp.CompletionRequest) (v7llamacpp.CompletionResult, error) {
+func (f *fakeCompletionClient) Complete(_ context.Context, req llamacpp.CompletionRequest) (llamacpp.CompletionResult, error) {
 	f.requests = append(f.requests, req)
 	if f.err != nil {
-		return v7llamacpp.CompletionResult{}, f.err
+		return llamacpp.CompletionResult{}, f.err
 	}
 	return f.result, nil
 }

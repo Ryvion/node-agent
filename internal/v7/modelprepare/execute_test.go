@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/v7/modelcache"
 	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
 )

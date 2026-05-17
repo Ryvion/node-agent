@@ -305,7 +305,7 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 		metadata = annotateManagedOCIAbortReceipt(ctx, metadata, runErr, result)
 	}
 	if !aborted && len(result.DraftPackets) > 0 {
-		metadata["draft_packet_submission"] = submitForesightDraftPackets(ctx, execCtx.client, result.DraftPackets)
+		metadata["draft_packet_submission"] = submitSpeculativeDraftPackets(ctx, execCtx.client, result.DraftPackets)
 	}
 	if strings.TrimSpace(result.OutputPath) != "" {
 		uploadRes, uploadErr := blob.Upload(ctx, execCtx.client, work.JobID, result.OutputPath)
@@ -368,9 +368,9 @@ func usesVerifierSessionRunnerImage(image string) bool {
 		strings.Contains(image, "verifier-runner-v8")
 }
 
-func submitForesightDraftPackets(ctx context.Context, client interface {
-	SubmitForesightDraftPacket(context.Context, string, map[string]any) (hub.DraftPacketDecision, error)
-	SubmitForesightDraftPacketBatch(context.Context, string, []map[string]any) (hub.DraftPacketBatchDecision, error)
+func submitSpeculativeDraftPackets(ctx context.Context, client interface {
+	SubmitSpeculativeDraftPacket(context.Context, string, map[string]any) (hub.DraftPacketDecision, error)
+	SubmitSpeculativeDraftPacketBatch(context.Context, string, []map[string]any) (hub.DraftPacketBatchDecision, error)
 }, packets []map[string]any) map[string]any {
 	summary := map[string]any{
 		"attempted": len(packets),
@@ -385,8 +385,8 @@ func submitForesightDraftPackets(ctx context.Context, client interface {
 	submitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	reasons := summary["reasons"].(map[string]int)
-	if windowID, ok := commonForesightWindowID(packets); ok {
-		decision, err := client.SubmitForesightDraftPacketBatch(submitCtx, windowID, packets)
+	if windowID, ok := commonSpeculativeWindowID(packets); ok {
+		decision, err := client.SubmitSpeculativeDraftPacketBatch(submitCtx, windowID, packets)
 		if err == nil {
 			summary["accepted"] = decision.Accepted
 			summary["rejected"] = decision.Rejected
@@ -406,7 +406,7 @@ func submitForesightDraftPackets(ctx context.Context, client interface {
 	}
 	for _, packet := range packets {
 		windowID := stringValue(packet["window_id"])
-		decision, err := client.SubmitForesightDraftPacket(submitCtx, windowID, packet)
+		decision, err := client.SubmitSpeculativeDraftPacket(submitCtx, windowID, packet)
 		if err != nil {
 			summary["failed"] = summary["failed"].(int) + 1
 			reasons["submit_failed"]++
@@ -426,7 +426,7 @@ func submitForesightDraftPackets(ctx context.Context, client interface {
 	return summary
 }
 
-func commonForesightWindowID(packets []map[string]any) (string, bool) {
+func commonSpeculativeWindowID(packets []map[string]any) (string, bool) {
 	var windowID string
 	for _, packet := range packets {
 		next := strings.TrimSpace(stringValue(packet["window_id"]))

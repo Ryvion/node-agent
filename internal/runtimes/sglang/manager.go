@@ -17,7 +17,7 @@ import (
 	"time"
 
 	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 )
 
 const (
@@ -359,11 +359,11 @@ func (m *Manager) statusLocked() SGLangSidecarStatus {
 	}
 }
 
-func BuildBackendRuntime(status SGLangSidecarStatus, hardware v7hardware.CapacityInventory) v7llamacpp.BackendRuntimeStatus {
+func BuildBackendRuntime(status SGLangSidecarStatus, hardware v7hardware.CapacityInventory) llamacpp.BackendRuntimeStatus {
 	hardware = v7hardware.NormalizeInventory(hardware)
 	status.Backend = firstNonEmptyRuntimeText(status.Backend, BackendName)
 	modelFilename := firstNonEmptyRuntimeText(status.ModelFilename, modelIDFromPath(status.ModelPath))
-	runtimeStatus := v7llamacpp.BackendRuntimeStatus{
+	runtimeStatus := llamacpp.BackendRuntimeStatus{
 		Enabled:                  status.Enabled,
 		Available:                status.Available,
 		Running:                  status.Running,
@@ -391,7 +391,7 @@ func BuildBackendRuntime(status SGLangSidecarStatus, hardware v7hardware.Capacit
 		GPUComputeCapability:     hardware.ComputeCapability,
 		Launch:                   mapLaunchConfig(status.Launch),
 	}
-	return v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{SGLang: runtimeStatus}).SGLang
+	return llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{SGLang: runtimeStatus}).SGLang
 }
 
 func buildServerArgs(cfg SGLangSidecarConfig) []string {
@@ -489,12 +489,12 @@ func normalizeLaunchConfig(launch *LaunchConfig) *LaunchConfig {
 	return &out
 }
 
-func mapLaunchConfig(launch *LaunchConfig) *v7llamacpp.LlamaCppLaunchConfig {
+func mapLaunchConfig(launch *LaunchConfig) *llamacpp.LlamaCppLaunchConfig {
 	normalized := normalizeLaunchConfig(launch)
 	if normalized == nil {
 		return nil
 	}
-	return &v7llamacpp.LlamaCppLaunchConfig{
+	return &llamacpp.LlamaCppLaunchConfig{
 		Mode:           normalized.Mode,
 		Managed:        normalized.Managed,
 		Attached:       normalized.Attached,

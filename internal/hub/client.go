@@ -316,6 +316,10 @@ func (c *Client) SubmitReceipt(ctx context.Context, receipt Receipt) error {
 }
 
 func (c *Client) SubmitForesightDraftPacket(ctx context.Context, windowID string, packet map[string]any) (DraftPacketDecision, error) {
+	return c.SubmitSpeculativeDraftPacket(ctx, windowID, packet)
+}
+
+func (c *Client) SubmitSpeculativeDraftPacket(ctx context.Context, windowID string, packet map[string]any) (DraftPacketDecision, error) {
 	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {
 		return DraftPacketDecision{}, fmt.Errorf("window_id required")
@@ -350,6 +354,10 @@ func (c *Client) SubmitForesightDraftPacket(ctx context.Context, windowID string
 }
 
 func (c *Client) SubmitForesightDraftPacketBatch(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
+	return c.SubmitSpeculativeDraftPacketBatch(ctx, windowID, packets)
+}
+
+func (c *Client) SubmitSpeculativeDraftPacketBatch(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
 	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {
 		return DraftPacketBatchDecision{}, fmt.Errorf("window_id required")

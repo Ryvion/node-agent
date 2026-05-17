@@ -81,7 +81,7 @@ func TestBuildHealthReportAdvertisesResidueSwarmBuilderWithoutDraftWorker(t *tes
 	for _, want := range []string{
 		"role:residue_swarm_builder",
 		"cap:residue_swarm_builder:1",
-		"foresight:proposal_window:ready:1",
+		"speculative:proposal_window:ready:1",
 	} {
 		if !strings.Contains(report.Message, want) {
 			t.Fatalf("expected health report to contain %q, got %s", want, report.Message)
@@ -133,7 +133,7 @@ func TestWorldGridRoleStatusTokensAdvertiseOnlySafeAsyncAndCellBoundaries(t *tes
 		"role:stream_segment_worker",
 		"cap:worldgrid_stream_segment_worker:1",
 		"role:future_branch_proposer",
-		"cap:worldgrid_npc_foresight:1",
+		"cap:worldgrid_npc_speculative:1",
 		"worldgrid_async:1",
 	} {
 		if !strings.Contains(tokens, want) {

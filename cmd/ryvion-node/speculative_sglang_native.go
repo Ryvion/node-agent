@@ -16,17 +16,17 @@ import (
 
 const nativeSGLangVerifierExecutor = "native_sglang_verifier"
 
-func processForesightNativeSGLangVerifier(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec) (*runnerResultSnapshot, error) {
+func processSpeculativeNativeSGLangVerifier(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec speculativeNativeHotSessionSpec) (*runnerResultSnapshot, error) {
 	started := time.Now()
 	commandSpec, ok := sglangverify.ResolveVerifierCommand()
 	if !ok {
-		result := submitForesightNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_bridge_unavailable")
+		result := submitSpeculativeNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_bridge_unavailable")
 		return result, errNativeSGLangUnavailable
 	}
 
 	workDir, err := os.MkdirTemp("", "ryv_sglang_verifier_*")
 	if err != nil {
-		result := submitForesightNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_workdir_failed")
+		result := submitSpeculativeNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_workdir_failed")
 		return result, err
 	}
 	defer os.RemoveAll(workDir)
@@ -34,7 +34,7 @@ func processForesightNativeSGLangVerifier(ctx context.Context, client *hub.Clien
 	socketPath := filepath.Join(workDir, "verifier_session.sock")
 	jobPayload := nativeSGLangJobPayload(work, spec)
 	if err := writeJSONFile(filepath.Join(workDir, "job.json"), jobPayload); err != nil {
-		result := submitForesightNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_job_write_failed")
+		result := submitSpeculativeNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_job_write_failed")
 		return result, err
 	}
 
@@ -51,13 +51,13 @@ func processForesightNativeSGLangVerifier(ctx context.Context, client *hub.Clien
 		cmd.Env = append(cmd.Env, "RYV_MODEL_PATH="+spec.ModelPath)
 	}
 	if err := cmd.Start(); err != nil {
-		result := submitForesightNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_start_failed")
+		result := submitSpeculativeNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_start_failed")
 		return result, err
 	}
 	defer sglangverify.StopCommand(cmd)
 
 	if err := sglangverify.WaitForSocket(ctx, socketPath, 30*time.Second); err != nil {
-		result := submitForesightNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_socket_timeout")
+		result := submitSpeculativeNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, "native_sglang_socket_timeout")
 		return result, err
 	}
 
@@ -67,24 +67,24 @@ func processForesightNativeSGLangVerifier(ctx context.Context, client *hub.Clien
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			receiptCtx = context.Background()
 		}
-		result := submitForesightNativeSGLangFinalReceipt(receiptCtx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
+		result := submitSpeculativeNativeSGLangFinalReceipt(receiptCtx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
 		return result, err
 	}
-	result := submitForesightNativeSGLangFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
+	result := submitSpeculativeNativeSGLangFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
 	return result, nil
 }
 
-func nativeSGLangJobPayload(work *hub.WorkAssignment, spec foresightNativeHotSessionSpec) map[string]any {
+func nativeSGLangJobPayload(work *hub.WorkAssignment, spec speculativeNativeHotSessionSpec) map[string]any {
 	return map[string]any{
 		"schema_version":    "ryvion.native_sglang_verifier_job.v1",
-		"task":              firstNonEmptyString(spec.Task, foresightVerifierHotSessionTask),
+		"task":              firstNonEmptyString(spec.Task, speculativeVerifierHotSessionTask),
 		"job_id":            work.JobID,
 		"workgraph_id":      spec.WorkGraphID,
 		"session_id":        spec.SessionID,
 		"model_id":          spec.ModelID,
 		"model_hash":        spec.ModelHash,
 		"model_path":        spec.ModelPath,
-		"verifier_backend":  foresightVerifierBackendSGLang,
+		"verifier_backend":  speculativeVerifierBackendSGLang,
 		"network":           "offline",
 		"docker_required":   false,
 		"runner_contract":   "VerifierSessionContract.v8",
@@ -94,7 +94,7 @@ func nativeSGLangJobPayload(work *hub.WorkAssignment, spec foresightNativeHotSes
 	}
 }
 
-func nativeSGLangSessionPayload(spec foresightNativeHotSessionSpec) map[string]any {
+func nativeSGLangSessionPayload(spec speculativeNativeHotSessionSpec) map[string]any {
 	return map[string]any{
 		"session_id":   spec.SessionID,
 		"workgraph_id": spec.WorkGraphID,
@@ -106,15 +106,15 @@ func nativeSGLangSessionPayload(spec foresightNativeHotSessionSpec) map[string]a
 	}
 }
 
-func submitForesightNativeSGLangUnavailableReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, errorCode string) *runnerResultSnapshot {
-	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|%s", work.JobID, foresightVerifierBackendSGLang, errorCode))
+func submitSpeculativeNativeSGLangUnavailableReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec speculativeNativeHotSessionSpec, started time.Time, errorCode string) *runnerResultSnapshot {
+	resultHash := speculativeFullHash(fmt.Sprintf("%s|%s|%s", work.JobID, speculativeVerifierBackendSGLang, errorCode))
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
 		"executor":              nativeSGLangVerifierExecutor,
 		"executor_kind":         nativeSGLangVerifierExecutor,
-		"task":                  firstNonEmptyString(spec.Task, foresightVerifierHotSessionTask),
+		"task":                  firstNonEmptyString(spec.Task, speculativeVerifierHotSessionTask),
 		"docker_required":       false,
 		"runtime_mode":          "native_node_agent",
-		"verifier_backend":      foresightVerifierBackendSGLang,
+		"verifier_backend":      speculativeVerifierBackendSGLang,
 		"status":                "unavailable",
 		"execution_status":      "unavailable",
 		"billing_status":        "not_billable",
@@ -129,7 +129,7 @@ func submitForesightNativeSGLangUnavailableReceipt(ctx context.Context, client *
 	return &runnerResultSnapshot{DurationMs: time.Since(started).Milliseconds(), ResultHashHex: resultHash, MeteringUnits: 0, ExitCode: 1, Metadata: metadata}
 }
 
-func submitForesightNativeSGLangFinalReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, workDir string, accepted int, waves int, acceptedText string, reason string) *runnerResultSnapshot {
+func submitSpeculativeNativeSGLangFinalReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec speculativeNativeHotSessionSpec, started time.Time, workDir string, accepted int, waves int, acceptedText string, reason string) *runnerResultSnapshot {
 	verifierReceipt := readJSONMap(filepath.Join(workDir, "verifier_session_receipt.json"))
 	if len(verifierReceipt) == 0 {
 		verifierReceipt = readJSONMap(filepath.Join(workDir, "verifier_session_receipt.partial.json"))
@@ -141,18 +141,18 @@ func submitForesightNativeSGLangFinalReceipt(ctx context.Context, client *hub.Cl
 	if accepted <= 0 {
 		accepted = intFromAny(verifierReceipt["accepted_len"])
 	}
-	acceptedTextHash := redactForesightAcceptedTextReceipt(verifierReceipt)
+	acceptedTextHash := redactSpeculativeAcceptedTextReceipt(verifierReceipt)
 	if acceptedTextHash == "" {
-		acceptedTextHash = foresightAcceptedTextHash(acceptedText)
+		acceptedTextHash = speculativeAcceptedTextHash(acceptedText)
 	}
-	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|native_sglang|%d|%d|%s", work.JobID, spec.RunID, accepted, waves, reason))
+	resultHash := speculativeFullHash(fmt.Sprintf("%s|%s|native_sglang|%d|%d|%s", work.JobID, spec.RunID, accepted, waves, reason))
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
 		"executor":         nativeSGLangVerifierExecutor,
 		"executor_kind":    nativeSGLangVerifierExecutor,
-		"task":             firstNonEmptyString(spec.Task, foresightVerifierHotSessionTask),
+		"task":             firstNonEmptyString(spec.Task, speculativeVerifierHotSessionTask),
 		"docker_required":  false,
 		"runtime_mode":     "native_node_agent",
-		"verifier_backend": foresightVerifierBackendSGLang,
+		"verifier_backend": speculativeVerifierBackendSGLang,
 		"session_mode":     "hot",
 		"run_id":           spec.RunID,
 		"session_id":       spec.SessionID,

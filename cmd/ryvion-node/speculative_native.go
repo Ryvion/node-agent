@@ -15,53 +15,53 @@ import (
 )
 
 const (
-	foresightDraftRunnerTask         = nodespec.DraftRunnerTask
-	foresightVerifierSessionTask     = nodespec.VerifierSessionTask
-	foresightDraftHotSessionTask     = nodespec.DraftHotSessionTask
-	foresightVerifierHotSessionTask  = nodespec.VerifierHotSessionTask
-	foresightNativeExecutor          = nodespec.NativeExecutor
-	foresightDraftBackendNative      = nodespec.DraftBackendNative
-	foresightVerifierBackendBridge   = nodespec.VerifierBackendBridge
-	foresightVerifierBackendSGLang   = nodespec.VerifierBackendSGLang
-	foresightVerifierBackendLlamaCpp = nodespec.VerifierBackendLlamaCpp
+	speculativeDraftRunnerTask         = nodespec.DraftRunnerTask
+	speculativeVerifierSessionTask     = nodespec.VerifierSessionTask
+	speculativeDraftHotSessionTask     = nodespec.DraftHotSessionTask
+	speculativeVerifierHotSessionTask  = nodespec.VerifierHotSessionTask
+	speculativeNativeExecutor          = nodespec.NativeExecutor
+	speculativeDraftBackendNative      = nodespec.DraftBackendNative
+	speculativeVerifierBackendBridge   = nodespec.VerifierBackendBridge
+	speculativeVerifierBackendSGLang   = nodespec.VerifierBackendSGLang
+	speculativeVerifierBackendLlamaCpp = nodespec.VerifierBackendLlamaCpp
 	defaultNativeDraftConfidenceBPS  = nodespec.DefaultNativeDraftConfidenceBPS
 )
 
-type foresightNativeDraftSpec = nodespec.DraftSpec
-type foresightNativeHotSessionSpec = nodespec.HotSessionSpec
+type speculativeNativeDraftSpec = nodespec.DraftSpec
+type speculativeNativeHotSessionSpec = nodespec.HotSessionSpec
 
-func processOptionalForesightNativeDraft(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	spec, ok := decodeForesightNativeDraftSpec(work.SpecJSON)
+func processOptionalSpeculativeNativeDraft(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	spec, ok := decodeSpeculativeNativeDraftSpec(work.SpecJSON)
 	if !ok {
 		return false, nil, nil
 	}
-	if foresightNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
+	if speculativeNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
 		return false, nil, nil
 	}
-	if !foresightDraftBackendIsNativeBridge(spec.DraftBackend) {
-		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.DraftBackend, foresightDraftRunnerTask), fmt.Errorf("unsupported native foresight draft backend: %s", spec.DraftBackend)
+	if !speculativeDraftBackendIsNativeBridge(spec.DraftBackend) {
+		return true, submitSpeculativeNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.DraftBackend, speculativeDraftRunnerTask), fmt.Errorf("unsupported native speculative draft backend: %s", spec.DraftBackend)
 	}
 	started := time.Now()
-	packets := buildForesightNativeDraftPackets(spec)
-	summary := submitForesightDraftPackets(ctx, client, packets)
+	packets := buildSpeculativeNativeDraftPackets(spec)
+	summary := submitSpeculativeDraftPackets(ctx, client, packets)
 	accepted := intFromAny(summary["accepted"])
 	failed := intFromAny(summary["failed"])
 	rejected := intFromAny(summary["rejected"])
-	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|%d|%d|%d", work.JobID, spec.WindowID, len(packets), accepted, rejected))
+	resultHash := speculativeFullHash(fmt.Sprintf("%s|%s|%d|%d|%d", work.JobID, spec.WindowID, len(packets), accepted, rejected))
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
-		"executor":                foresightNativeExecutor,
-		"executor_kind":           foresightNativeExecutor,
-		"task":                    foresightDraftRunnerTask,
+		"executor":                speculativeNativeExecutor,
+		"executor_kind":           speculativeNativeExecutor,
+		"task":                    speculativeDraftRunnerTask,
 		"docker_required":         false,
 		"runtime_mode":            "native_node_agent",
-		"draft_generation_mode":   foresightDraftBackendNative,
+		"draft_generation_mode":   speculativeDraftBackendNative,
 		"production_valid":        false,
 		"test_adapter":            true,
 		"billing_status":          "not_billable_contract_test",
 		"window_id":               spec.WindowID,
 		"workgraph_id":            spec.WorkGraphID,
 		"branch_count":            len(packets),
-		"horizon":                 normalizedForesightHorizon(spec.Horizon),
+		"horizon":                 normalizedSpeculativeHorizon(spec.Horizon),
 		"draft_packet_submission": summary,
 		"duration_ms":             time.Since(started).Milliseconds(),
 		"exit_code":               0,
@@ -75,7 +75,7 @@ func processOptionalForesightNativeDraft(ctx context.Context, client *hub.Client
 	}
 	err := submitReceiptWithRetry(ctx, client, receipt)
 	if err == nil && accepted == 0 {
-		err = fmt.Errorf("native foresight draft submitted no accepted packets: failed=%d rejected=%d", failed, rejected)
+		err = fmt.Errorf("native speculative draft submitted no accepted packets: failed=%d rejected=%d", failed, rejected)
 	}
 	return true, &runnerResultSnapshot{
 		DurationMs:    time.Since(started).Milliseconds(),
@@ -86,36 +86,36 @@ func processOptionalForesightNativeDraft(ctx context.Context, client *hub.Client
 	}, err
 }
 
-func processOptionalForesightNativeDraftHotSession(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	spec, ok := decodeForesightNativeHotSessionSpec(work.SpecJSON, foresightDraftHotSessionTask)
+func processOptionalSpeculativeNativeDraftHotSession(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	spec, ok := decodeSpeculativeNativeHotSessionSpec(work.SpecJSON, speculativeDraftHotSessionTask)
 	if !ok {
 		return false, nil, nil
 	}
-	if foresightNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
+	if speculativeNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
 		return false, nil, nil
 	}
-	if !foresightDraftBackendIsNativeBridge(spec.DraftBackend) {
-		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.DraftBackend, foresightDraftHotSessionTask), fmt.Errorf("unsupported native foresight draft backend: %s", spec.DraftBackend)
+	if !speculativeDraftBackendIsNativeBridge(spec.DraftBackend) {
+		return true, submitSpeculativeNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.DraftBackend, speculativeDraftHotSessionTask), fmt.Errorf("unsupported native speculative draft backend: %s", spec.DraftBackend)
 	}
 	started := time.Now()
 	session, err := draftbridge.RunHotSession(ctx, client, spec, work.JobID, 100*time.Millisecond)
 	if err != nil {
 		return true, nil, err
 	}
-	result := submitForesightNativeHotDraftReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, session.AcceptedPackets, session.RawPackets, session.Waves)
+	result := submitSpeculativeNativeHotDraftReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, session.AcceptedPackets, session.RawPackets, session.Waves)
 	return true, result, nil
 }
 
-func submitForesightNativeHotDraftReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, accepted int, raw int, waves int) *runnerResultSnapshot {
-	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|draft_hot|%d|%d|%d", work.JobID, spec.RunID, accepted, raw, waves))
+func submitSpeculativeNativeHotDraftReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec speculativeNativeHotSessionSpec, started time.Time, accepted int, raw int, waves int) *runnerResultSnapshot {
+	resultHash := speculativeFullHash(fmt.Sprintf("%s|%s|draft_hot|%d|%d|%d", work.JobID, spec.RunID, accepted, raw, waves))
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
-		"executor":               foresightNativeExecutor,
-		"executor_kind":          foresightNativeExecutor,
-		"task":                   foresightDraftHotSessionTask,
+		"executor":               speculativeNativeExecutor,
+		"executor_kind":          speculativeNativeExecutor,
+		"task":                   speculativeDraftHotSessionTask,
 		"docker_required":        false,
 		"runtime_mode":           "native_node_agent",
 		"session_mode":           "hot",
-		"draft_generation_mode":  foresightDraftBackendNative,
+		"draft_generation_mode":  speculativeDraftBackendNative,
 		"production_valid":       false,
 		"test_adapter":           true,
 		"billing_status":         "not_billable_contract_test",
@@ -137,43 +137,43 @@ func submitForesightNativeHotDraftReceipt(ctx context.Context, client *hub.Clien
 	return &runnerResultSnapshot{DurationMs: time.Since(started).Milliseconds(), ResultHashHex: resultHash, MeteringUnits: units, ExitCode: 0, Metadata: metadata}
 }
 
-func decodeForesightNativeDraftSpec(specJSON string) (foresightNativeDraftSpec, bool) {
+func decodeSpeculativeNativeDraftSpec(specJSON string) (speculativeNativeDraftSpec, bool) {
 	return nodespec.DecodeDraftSpec(specJSON)
 }
 
-func decodeForesightNativeHotSessionSpec(specJSON string, expectedTask string) (foresightNativeHotSessionSpec, bool) {
+func decodeSpeculativeNativeHotSessionSpec(specJSON string, expectedTask string) (speculativeNativeHotSessionSpec, bool) {
 	return nodespec.DecodeHotSessionSpec(specJSON, expectedTask)
 }
 
-func buildForesightNativeDraftPackets(spec foresightNativeDraftSpec) []map[string]any {
+func buildSpeculativeNativeDraftPackets(spec speculativeNativeDraftSpec) []map[string]any {
 	return draftbridge.BuildPackets(spec)
 }
 
-func processOptionalForesightNativeVerifier(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	acceptedLen, treeCID, backend, ok := decodeForesightNativeVerifierSpec(work.SpecJSON)
+func processOptionalSpeculativeNativeVerifier(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	acceptedLen, treeCID, backend, ok := decodeSpeculativeNativeVerifierSpec(work.SpecJSON)
 	if !ok {
 		return false, nil, nil
 	}
-	if foresightNativeExternalRuntimeRequested(work, "", "", false) {
+	if speculativeNativeExternalRuntimeRequested(work, "", "", false) {
 		return false, nil, nil
 	}
-	switch foresightVerifierBackendKind(backend) {
-	case foresightVerifierBackendSGLang:
-		result := submitForesightNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, foresightNativeHotSessionSpec{
-			Task:            foresightVerifierSessionTask,
+	switch speculativeVerifierBackendKind(backend) {
+	case speculativeVerifierBackendSGLang:
+		result := submitSpeculativeNativeSGLangUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, speculativeNativeHotSessionSpec{
+			Task:            speculativeVerifierSessionTask,
 			VerifierBackend: backend,
 		}, time.Now(), "native_sglang_non_hot_requires_hot_session")
 		return true, result, errNativeSGLangUnavailable
-	case foresightVerifierBackendBridge:
+	case speculativeVerifierBackendBridge:
 	default:
-		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, backend, foresightVerifierSessionTask), fmt.Errorf("unsupported native foresight verifier backend: %s", backend)
+		return true, submitSpeculativeNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, backend, speculativeVerifierSessionTask), fmt.Errorf("unsupported native speculative verifier backend: %s", backend)
 	}
 	started := time.Now()
-	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|%d", work.JobID, treeCID, acceptedLen))
+	resultHash := speculativeFullHash(fmt.Sprintf("%s|%s|%d", work.JobID, treeCID, acceptedLen))
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
-		"executor":         foresightNativeExecutor,
-		"executor_kind":    foresightNativeExecutor,
-		"task":             foresightVerifierSessionTask,
+		"executor":         speculativeNativeExecutor,
+		"executor_kind":    speculativeNativeExecutor,
+		"task":             speculativeVerifierSessionTask,
 		"docker_required":  false,
 		"runtime_mode":     "native_node_agent",
 		"production_valid": false,
@@ -212,41 +212,41 @@ func processOptionalForesightNativeVerifier(ctx context.Context, client *hub.Cli
 	}, err
 }
 
-func processOptionalForesightNativeVerifierHotSession(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	spec, ok := decodeForesightNativeHotSessionSpec(work.SpecJSON, foresightVerifierHotSessionTask)
+func processOptionalSpeculativeNativeVerifierHotSession(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
+	spec, ok := decodeSpeculativeNativeHotSessionSpec(work.SpecJSON, speculativeVerifierHotSessionTask)
 	if !ok {
 		return false, nil, nil
 	}
-	if foresightNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
+	if speculativeNativeExternalRuntimeRequested(work, spec.ExecutorKind, spec.RunnerImage, spec.DockerRequired) {
 		return false, nil, nil
 	}
-	switch foresightVerifierBackendKind(spec.VerifierBackend) {
-	case foresightVerifierBackendSGLang:
-		result, err := processForesightNativeSGLangVerifier(ctx, client, work, runtimeMgr, gpuDetected, spec)
+	switch speculativeVerifierBackendKind(spec.VerifierBackend) {
+	case speculativeVerifierBackendSGLang:
+		result, err := processSpeculativeNativeSGLangVerifier(ctx, client, work, runtimeMgr, gpuDetected, spec)
 		return true, result, err
-	case foresightVerifierBackendLlamaCpp:
-		result, err := processForesightNativeLlamaCppVerifier(ctx, client, work, runtimeMgr, gpuDetected, spec)
+	case speculativeVerifierBackendLlamaCpp:
+		result, err := processSpeculativeNativeLlamaCppVerifier(ctx, client, work, runtimeMgr, gpuDetected, spec)
 		return true, result, err
-	case foresightVerifierBackendBridge:
+	case speculativeVerifierBackendBridge:
 	default:
-		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.VerifierBackend, foresightVerifierHotSessionTask), fmt.Errorf("unsupported native foresight verifier backend: %s", spec.VerifierBackend)
+		return true, submitSpeculativeNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.VerifierBackend, speculativeVerifierHotSessionTask), fmt.Errorf("unsupported native speculative verifier backend: %s", spec.VerifierBackend)
 	}
 	started := time.Now()
 	session, err := contracttestverifier.RunHotSession(ctx, client, work.JobID, spec, 100*time.Millisecond)
 	if err != nil {
 		return true, nil, err
 	}
-	result := submitForesightNativeHotVerifierReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
+	result := submitSpeculativeNativeHotVerifierReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
 	return true, result, nil
 }
 
-func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, accepted int, waves int, acceptedText string, reason string) *runnerResultSnapshot {
-	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|verify_hot|%d|%d|%s", work.JobID, spec.RunID, accepted, waves, reason))
-	acceptedTextHash := foresightAcceptedTextHash(acceptedText)
+func submitSpeculativeNativeHotVerifierReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec speculativeNativeHotSessionSpec, started time.Time, accepted int, waves int, acceptedText string, reason string) *runnerResultSnapshot {
+	resultHash := speculativeFullHash(fmt.Sprintf("%s|%s|verify_hot|%d|%d|%s", work.JobID, spec.RunID, accepted, waves, reason))
+	acceptedTextHash := speculativeAcceptedTextHash(acceptedText)
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
-		"executor":        foresightNativeExecutor,
-		"executor_kind":   foresightNativeExecutor,
-		"task":            foresightVerifierHotSessionTask,
+		"executor":        speculativeNativeExecutor,
+		"executor_kind":   speculativeNativeExecutor,
+		"task":            speculativeVerifierHotSessionTask,
 		"docker_required": false,
 		"runtime_mode":    "native_node_agent",
 		"session_mode":    "hot",
@@ -263,7 +263,7 @@ func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Cl
 				"accepted_len":          accepted,
 				"accepted_text_hash":    acceptedTextHash,
 				"accepted_text_public":  false,
-				"tree_cid":              "sha256:" + foresightFullHash(fmt.Sprintf("%s|%s|final_tree", work.JobID, spec.RunID)),
+				"tree_cid":              "sha256:" + speculativeFullHash(fmt.Sprintf("%s|%s|final_tree", work.JobID, spec.RunID)),
 				"hot_session_finalized": true,
 			},
 			"probe_summary": map[string]any{
@@ -285,20 +285,20 @@ func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Cl
 	return &runnerResultSnapshot{DurationMs: time.Since(started).Milliseconds(), ResultHashHex: resultHash, MeteringUnits: units, ExitCode: 0, Metadata: metadata}
 }
 
-func foresightAcceptedTextHash(acceptedText string) string {
+func speculativeAcceptedTextHash(acceptedText string) string {
 	if strings.TrimSpace(acceptedText) == "" {
 		return ""
 	}
 	return "sha256:" + sha256Hex([]byte(acceptedText))
 }
 
-func redactForesightAcceptedTextReceipt(receipt map[string]any) string {
+func redactSpeculativeAcceptedTextReceipt(receipt map[string]any) string {
 	if len(receipt) == 0 {
 		return ""
 	}
 	hash := strings.TrimSpace(stringValue(receipt["accepted_text_hash"]))
 	if text := strings.TrimSpace(stringValue(receipt["accepted_text"])); text != "" && hash == "" {
-		hash = foresightAcceptedTextHash(text)
+		hash = speculativeAcceptedTextHash(text)
 	}
 	delete(receipt, "accepted_text")
 	receipt["accepted_text_public"] = false
@@ -308,46 +308,46 @@ func redactForesightAcceptedTextReceipt(receipt map[string]any) string {
 	return hash
 }
 
-func decodeForesightNativeVerifierSpec(specJSON string) (int, string, string, bool) {
+func decodeSpeculativeNativeVerifierSpec(specJSON string) (int, string, string, bool) {
 	return nodespec.DecodeVerifierSpec(specJSON)
 }
 
-func foresightNativeExternalRuntimeRequested(work *hub.WorkAssignment, executorKind string, runnerImage string, dockerRequired bool) bool {
+func speculativeNativeExternalRuntimeRequested(work *hub.WorkAssignment, executorKind string, runnerImage string, dockerRequired bool) bool {
 	if dockerRequired || strings.TrimSpace(runnerImage) != "" {
 		return true
 	}
 	kind := strings.TrimSpace(executorKind)
-	if kind != "" && !strings.EqualFold(kind, executorKindNativeReport) && !strings.EqualFold(kind, foresightNativeExecutor) {
+	if kind != "" && !strings.EqualFold(kind, executorKindNativeReport) && !strings.EqualFold(kind, speculativeNativeExecutor) {
 		return true
 	}
 	if work == nil {
 		return false
 	}
-	if workKind := strings.TrimSpace(work.ExecutorKind); workKind != "" && !strings.EqualFold(workKind, executorKindNativeReport) && !strings.EqualFold(workKind, foresightNativeExecutor) {
+	if workKind := strings.TrimSpace(work.ExecutorKind); workKind != "" && !strings.EqualFold(workKind, executorKindNativeReport) && !strings.EqualFold(workKind, speculativeNativeExecutor) {
 		return true
 	}
 	image := strings.TrimSpace(work.Image)
-	return image != "" && !strings.EqualFold(image, executorKindNativeReport) && !strings.EqualFold(image, foresightNativeExecutor)
+	return image != "" && !strings.EqualFold(image, executorKindNativeReport) && !strings.EqualFold(image, speculativeNativeExecutor)
 }
 
-func foresightDraftBackendIsNativeBridge(backend string) bool {
+func speculativeDraftBackendIsNativeBridge(backend string) bool {
 	return draftbridge.IsBackend(backend)
 }
 
-func foresightVerifierBackendKind(backend string) string {
+func speculativeVerifierBackendKind(backend string) string {
 	return nodespec.VerifierBackendKind(backend)
 }
 
-func submitForesightNativeUnsupportedReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, backend string, task string) *runnerResultSnapshot {
+func submitSpeculativeNativeUnsupportedReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, backend string, task string) *runnerResultSnapshot {
 	backend = strings.TrimSpace(backend)
 	if backend == "" {
 		backend = "unknown"
 	}
 	started := time.Now()
-	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|unsupported|%s", work.JobID, task, backend))
+	resultHash := speculativeFullHash(fmt.Sprintf("%s|%s|unsupported|%s", work.JobID, task, backend))
 	metadata := receiptMetadataBase(work, safeRuntimeReceiptMetadata(runtimeMgr, gpuDetected), map[string]any{
-		"executor":         foresightNativeExecutor,
-		"executor_kind":    foresightNativeExecutor,
+		"executor":         speculativeNativeExecutor,
+		"executor_kind":    speculativeNativeExecutor,
 		"task":             task,
 		"docker_required":  false,
 		"runtime_mode":     "native_node_agent",
@@ -366,23 +366,23 @@ func submitForesightNativeUnsupportedReceipt(ctx context.Context, client *hub.Cl
 
 var errNativeSGLangUnavailable = errors.New("native_sglang_verifier_unavailable")
 
-func foresightAcceptedFromCommandTree(command hub.ForesightLiveLabSessionCommand) (int, string) {
+func speculativeAcceptedFromCommandTree(command hub.ForesightLiveLabSessionCommand) (int, string) {
 	return nodespec.AcceptedFromTree(command.Tree, command.CommandID)
 }
 
-func foresightDeterministicTokens(seed string, branch int, horizon int) []int {
+func speculativeDeterministicTokens(seed string, branch int, horizon int) []int {
 	return nodespec.DeterministicTokens(seed, branch, horizon)
 }
 
-func normalizedForesightHorizon(horizon int) int {
+func normalizedSpeculativeHorizon(horizon int) int {
 	return nodespec.NormalizeHorizon(horizon)
 }
 
-func foresightPromptDigest(prompt string) string {
+func speculativePromptDigest(prompt string) string {
 	return nodespec.PromptDigest(prompt)
 }
 
-func foresightFullHash(value string) string {
+func speculativeFullHash(value string) string {
 	return nodespec.FullHash(value)
 }
 

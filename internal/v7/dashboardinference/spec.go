@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
-	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
 
 const (

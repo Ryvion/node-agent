@@ -14,7 +14,7 @@ import (
 
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
 	"github.com/Ryvion/ryvion-node/internal/hub"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	v7modelwarm "github.com/Ryvion/ryvion-node/internal/v7/modelwarm"
 )
 
@@ -48,7 +48,7 @@ func TestProcessOptionalV7ModelWarmSubmitsReceiptForWarmRuntime(t *testing.T) {
 		v7ModelWarm:       status,
 		llamaCppSidecar:   testLlamaCppManagerForServerModel(t, llamaServer.URL, modelPath),
 		llamaCppKeeper:    nil,
-		llamaCppBenchmark: v7llamacpp.NewBenchmarkLocalStatus(),
+		llamaCppBenchmark: llamacpp.NewBenchmarkLocalStatus(),
 	}
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
 	t.Cleanup(func() {

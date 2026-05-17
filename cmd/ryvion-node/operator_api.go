@@ -19,6 +19,8 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
+	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
 	v7backendprobe "github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
 	v7capabilityprofile "github.com/Ryvion/ryvion-node/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
@@ -27,7 +29,6 @@ import (
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
 	v7inferenceconfig "github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
 	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
 	v7modelcache "github.com/Ryvion/ryvion-node/internal/v7/modelcache"
@@ -35,7 +36,6 @@ import (
 	v7modelprepare "github.com/Ryvion/ryvion-node/internal/v7/modelprepare"
 	v7modelwarm "github.com/Ryvion/ryvion-node/internal/v7/modelwarm"
 	v7runtimeinventory "github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
-	v7sglang "github.com/Ryvion/ryvion-node/internal/v7/sglang"
 	v7speculative "github.com/Ryvion/ryvion-node/internal/v7/speculative"
 	v7tensoraccess "github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
 	v8energyplane "github.com/Ryvion/ryvion-node/internal/v8/energyplane"
@@ -84,15 +84,15 @@ type operatorRuntime struct {
 	infMgr               *inference.Manager
 	runtimeMgr           *runtimeManager
 	v7MemoryBenchmark    *v7memorybench.LocalStatus
-	v7BackendBenchmark   *v7llamacpp.BackendBenchmarkLocalStatus
+	v7BackendBenchmark   *llamacpp.BackendBenchmarkLocalStatus
 	v7InferenceBenchmark *v7inferencebench.LocalStatus
 	v7DashboardInference *v7dashboardinference.LocalStatus
 	v7ModelPrepare       *v7modelprepare.LocalStatus
 	v7ModelWarm          *v7modelwarm.LocalStatus
-	llamaCppSidecar      *v7llamacpp.Manager
-	llamaCppKeeper       *v7llamacpp.ResidencyKeeper
-	llamaCppBenchmark    *v7llamacpp.BenchmarkLocalStatus
-	sglangSidecar        *v7sglang.Manager
+	llamaCppSidecar      *llamacpp.Manager
+	llamaCppKeeper       *llamacpp.ResidencyKeeper
+	llamaCppBenchmark    *llamacpp.BenchmarkLocalStatus
+	sglangSidecar        *sglang.Manager
 }
 
 type operatorJob struct {
@@ -115,52 +115,52 @@ type operatorJob struct {
 }
 
 type operatorStatusResponse struct {
-	Version              string                                         `json:"version"`
-	AgentVersion         string                                         `json:"agent_version"`
-	NodeID               string                                         `json:"node_id"`
-	OS                   string                                         `json:"os"`
-	Arch                 string                                         `json:"arch"`
-	HubURL               string                                         `json:"hub_url"`
-	PublicKeyHex         string                                         `json:"public_key_hex"`
-	DeviceType           string                                         `json:"device_type"`
-	DeclaredCountry      string                                         `json:"declared_country,omitempty"`
-	VerifiedCountry      string                                         `json:"verified_country,omitempty"`
-	Registered           bool                                           `json:"registered"`
-	RegisterError        string                                         `json:"register_error,omitempty"`
-	LatestVersion        string                                         `json:"latest_version,omitempty"`
-	LastHeartbeatAt      time.Time                                      `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatErr     string                                         `json:"last_heartbeat_error,omitempty"`
-	Heartbeat            operatorHeartbeatStatus                        `json:"heartbeat"`
-	Machine              operatorMachine                                `json:"machine"`
-	Runtime              operatorRuntimeInfo                            `json:"runtime"`
-	TensorAccess         v7tensoraccess.TensorAccessCapability          `json:"tensor_access"`
-	RuntimeInventory     v7runtimeinventory.Inventory                   `json:"runtime_inventory"`
-	HardwareCapacity     v7hardware.CapacityInventory                   `json:"hardware_capacity"`
-	ModelPolicy          v7modelpolicy.Status                           `json:"model_policy"`
-	ModelCache           v7modelcache.Status                            `json:"model_cache"`
-	BackendProbes        v7backendprobe.Probes                          `json:"backend_probes"`
-	BackendRuntimes      v7llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
-	CapabilityProfile    v7capabilityprofile.Profile                    `json:"capability_profile"`
-	SpeculativeProfiles  []v7speculative.Profile                        `json:"speculative_profiles"`
-	LlamaCPPSidecar      v7llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
-	SGLangSidecar        v7sglang.SGLangSidecarStatus                   `json:"sglang_sidecar"`
-	LlamaCPPBenchmark    v7llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
-	Metrics              operatorMetrics                                `json:"metrics"`
-	EnergyPlane          v8energyplane.Snapshot                         `json:"energy_plane"`
-	EnergyPolicy         operatorEnergyPolicy                           `json:"energy_policy"`
-	CurrentJob           *operatorJob                                   `json:"current_job,omitempty"`
-	RecentJobs           []operatorJob                                  `json:"recent_jobs"`
-	LastClaimAt          time.Time                                      `json:"last_claim_at,omitempty"`
-	LastClaimError       string                                         `json:"last_claim_error,omitempty"`
-	LastPayoutAt         time.Time                                      `json:"last_payout_at,omitempty"`
-	LastPayoutError      string                                         `json:"last_payout_error,omitempty"`
-	V7MemoryBenchmark    v7memorybench.LocalStatusSnapshot              `json:"v7_memory_benchmark"`
-	V7BackendBenchmark   v7llamacpp.BackendBenchmarkLocalStatusSnapshot `json:"v7_backend_benchmark"`
-	V7InferenceBenchmark v7inferencebench.LocalStatusSnapshot           `json:"v7_inference_benchmark"`
-	V7DashboardInference v7dashboardinference.LocalStatusSnapshot       `json:"v7_dashboard_inference"`
-	V7ModelPrepare       v7modelprepare.LocalStatusSnapshot             `json:"v7_model_prepare"`
-	V7ModelWarm          v7modelwarm.LocalStatusSnapshot                `json:"v7_model_warm"`
-	WorkLoop             diagnostics.WorkLoopSnapshot                   `json:"work_loop"`
+	Version              string                                       `json:"version"`
+	AgentVersion         string                                       `json:"agent_version"`
+	NodeID               string                                       `json:"node_id"`
+	OS                   string                                       `json:"os"`
+	Arch                 string                                       `json:"arch"`
+	HubURL               string                                       `json:"hub_url"`
+	PublicKeyHex         string                                       `json:"public_key_hex"`
+	DeviceType           string                                       `json:"device_type"`
+	DeclaredCountry      string                                       `json:"declared_country,omitempty"`
+	VerifiedCountry      string                                       `json:"verified_country,omitempty"`
+	Registered           bool                                         `json:"registered"`
+	RegisterError        string                                       `json:"register_error,omitempty"`
+	LatestVersion        string                                       `json:"latest_version,omitempty"`
+	LastHeartbeatAt      time.Time                                    `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatErr     string                                       `json:"last_heartbeat_error,omitempty"`
+	Heartbeat            operatorHeartbeatStatus                      `json:"heartbeat"`
+	Machine              operatorMachine                              `json:"machine"`
+	Runtime              operatorRuntimeInfo                          `json:"runtime"`
+	TensorAccess         v7tensoraccess.TensorAccessCapability        `json:"tensor_access"`
+	RuntimeInventory     v7runtimeinventory.Inventory                 `json:"runtime_inventory"`
+	HardwareCapacity     v7hardware.CapacityInventory                 `json:"hardware_capacity"`
+	ModelPolicy          v7modelpolicy.Status                         `json:"model_policy"`
+	ModelCache           v7modelcache.Status                          `json:"model_cache"`
+	BackendProbes        v7backendprobe.Probes                        `json:"backend_probes"`
+	BackendRuntimes      llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
+	CapabilityProfile    v7capabilityprofile.Profile                  `json:"capability_profile"`
+	SpeculativeProfiles  []v7speculative.Profile                      `json:"speculative_profiles"`
+	LlamaCPPSidecar      llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
+	SGLangSidecar        sglang.SGLangSidecarStatus                   `json:"sglang_sidecar"`
+	LlamaCPPBenchmark    llamacpp.BenchmarkStatusSnapshot             `json:"llama_cpp_benchmark"`
+	Metrics              operatorMetrics                              `json:"metrics"`
+	EnergyPlane          v8energyplane.Snapshot                       `json:"energy_plane"`
+	EnergyPolicy         operatorEnergyPolicy                         `json:"energy_policy"`
+	CurrentJob           *operatorJob                                 `json:"current_job,omitempty"`
+	RecentJobs           []operatorJob                                `json:"recent_jobs"`
+	LastClaimAt          time.Time                                    `json:"last_claim_at,omitempty"`
+	LastClaimError       string                                       `json:"last_claim_error,omitempty"`
+	LastPayoutAt         time.Time                                    `json:"last_payout_at,omitempty"`
+	LastPayoutError      string                                       `json:"last_payout_error,omitempty"`
+	V7MemoryBenchmark    v7memorybench.LocalStatusSnapshot            `json:"v7_memory_benchmark"`
+	V7BackendBenchmark   llamacpp.BackendBenchmarkLocalStatusSnapshot `json:"v7_backend_benchmark"`
+	V7InferenceBenchmark v7inferencebench.LocalStatusSnapshot         `json:"v7_inference_benchmark"`
+	V7DashboardInference v7dashboardinference.LocalStatusSnapshot     `json:"v7_dashboard_inference"`
+	V7ModelPrepare       v7modelprepare.LocalStatusSnapshot           `json:"v7_model_prepare"`
+	V7ModelWarm          v7modelwarm.LocalStatusSnapshot              `json:"v7_model_warm"`
+	WorkLoop             diagnostics.WorkLoopSnapshot                 `json:"work_loop"`
 }
 
 type operatorHeartbeatStatus struct {
@@ -319,7 +319,7 @@ type logRing struct {
 }
 
 func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, publicAIOptIn bool, caps hw.CapSet, client *hub.Client) *operatorRuntime {
-	llamaCppSidecar := v7llamacpp.NewManagerFromEnv()
+	llamaCppSidecar := llamacpp.NewManagerFromEnv()
 	return &operatorRuntime{
 		version:              strings.TrimSpace(version),
 		hubURL:               strings.TrimSpace(hubURL),
@@ -331,15 +331,15 @@ func newOperatorRuntime(version, hubURL, deviceType, declaredCountry string, pub
 		client:               client,
 		recentJobs:           make([]operatorJob, 0, 20),
 		v7MemoryBenchmark:    v7memorybench.NewLocalStatus(),
-		v7BackendBenchmark:   v7llamacpp.NewBackendBenchmarkLocalStatus(),
+		v7BackendBenchmark:   llamacpp.NewBackendBenchmarkLocalStatus(),
 		v7InferenceBenchmark: v7inferencebench.NewLocalStatus(),
 		v7DashboardInference: v7dashboardinference.NewLocalStatus(),
 		v7ModelPrepare:       v7modelprepare.NewLocalStatus(),
 		v7ModelWarm:          v7modelwarm.NewLocalStatus(),
 		llamaCppSidecar:      llamaCppSidecar,
-		llamaCppKeeper:       v7llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
-		llamaCppBenchmark:    v7llamacpp.NewBenchmarkLocalStatus(),
-		sglangSidecar:        v7sglang.NewManagerFromEnv(),
+		llamaCppKeeper:       llamacpp.NewResidencyKeeperFromEnv(llamaCppSidecar),
+		llamaCppBenchmark:    llamacpp.NewBenchmarkLocalStatus(),
+		sglangSidecar:        sglang.NewManagerFromEnv(),
 	}
 }
 
@@ -461,9 +461,9 @@ func (s *operatorRuntime) dashboardInferenceStatus() *v7dashboardinference.Local
 	return s.v7DashboardInference
 }
 
-func (s *operatorRuntime) llamaCppManager() *v7llamacpp.Manager {
+func (s *operatorRuntime) llamaCppManager() *llamacpp.Manager {
 	if s == nil {
-		return v7llamacpp.NewManagerFromEnv()
+		return llamacpp.NewManagerFromEnv()
 	}
 	s.mu.RLock()
 	manager := s.llamaCppSidecar
@@ -475,12 +475,12 @@ func (s *operatorRuntime) llamaCppManager() *v7llamacpp.Manager {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.llamaCppSidecar == nil {
-		s.llamaCppSidecar = v7llamacpp.NewManagerFromEnv()
+		s.llamaCppSidecar = llamacpp.NewManagerFromEnv()
 	}
 	return s.llamaCppSidecar
 }
 
-func (s *operatorRuntime) llamaCppResidencyKeeper() *v7llamacpp.ResidencyKeeper {
+func (s *operatorRuntime) llamaCppResidencyKeeper() *llamacpp.ResidencyKeeper {
 	if s == nil {
 		return nil
 	}
@@ -494,17 +494,17 @@ func (s *operatorRuntime) llamaCppResidencyKeeper() *v7llamacpp.ResidencyKeeper 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.llamaCppSidecar == nil {
-		s.llamaCppSidecar = v7llamacpp.NewManagerFromEnv()
+		s.llamaCppSidecar = llamacpp.NewManagerFromEnv()
 	}
 	if s.llamaCppKeeper == nil {
-		s.llamaCppKeeper = v7llamacpp.NewResidencyKeeperFromEnv(s.llamaCppSidecar)
+		s.llamaCppKeeper = llamacpp.NewResidencyKeeperFromEnv(s.llamaCppSidecar)
 	}
 	return s.llamaCppKeeper
 }
 
-func (s *operatorRuntime) sglangManager() *v7sglang.Manager {
+func (s *operatorRuntime) sglangManager() *sglang.Manager {
 	if s == nil {
-		return v7sglang.NewManagerFromEnv()
+		return sglang.NewManagerFromEnv()
 	}
 	s.mu.RLock()
 	manager := s.sglangSidecar
@@ -516,7 +516,7 @@ func (s *operatorRuntime) sglangManager() *v7sglang.Manager {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sglangSidecar == nil {
-		s.sglangSidecar = v7sglang.NewManagerFromEnv()
+		s.sglangSidecar = sglang.NewManagerFromEnv()
 	}
 	return s.sglangSidecar
 }
@@ -559,7 +559,7 @@ func (s *operatorRuntime) modelWarmStatus() *v7modelwarm.LocalStatus {
 	return s.v7ModelWarm
 }
 
-func (s *operatorRuntime) backendBenchmarkStatus() *v7llamacpp.BackendBenchmarkLocalStatus {
+func (s *operatorRuntime) backendBenchmarkStatus() *llamacpp.BackendBenchmarkLocalStatus {
 	if s == nil {
 		return nil
 	}
@@ -573,14 +573,14 @@ func (s *operatorRuntime) backendBenchmarkStatus() *v7llamacpp.BackendBenchmarkL
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.v7BackendBenchmark == nil {
-		s.v7BackendBenchmark = v7llamacpp.NewBackendBenchmarkLocalStatus()
+		s.v7BackendBenchmark = llamacpp.NewBackendBenchmarkLocalStatus()
 	}
 	return s.v7BackendBenchmark
 }
 
-func (s *operatorRuntime) llamaCppBenchmarkStore() *v7llamacpp.BenchmarkLocalStatus {
+func (s *operatorRuntime) llamaCppBenchmarkStore() *llamacpp.BenchmarkLocalStatus {
 	if s == nil {
-		return v7llamacpp.NewBenchmarkLocalStatus()
+		return llamacpp.NewBenchmarkLocalStatus()
 	}
 	s.mu.RLock()
 	status := s.llamaCppBenchmark
@@ -592,27 +592,27 @@ func (s *operatorRuntime) llamaCppBenchmarkStore() *v7llamacpp.BenchmarkLocalSta
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.llamaCppBenchmark == nil {
-		s.llamaCppBenchmark = v7llamacpp.NewBenchmarkLocalStatus()
+		s.llamaCppBenchmark = llamacpp.NewBenchmarkLocalStatus()
 	}
 	return s.llamaCppBenchmark
 }
 
-func (s *operatorRuntime) llamaCppBenchmarkSnapshot() v7llamacpp.BenchmarkStatusSnapshot {
+func (s *operatorRuntime) llamaCppBenchmarkSnapshot() llamacpp.BenchmarkStatusSnapshot {
 	return s.llamaCppBenchmarkStore().Snapshot()
 }
 
-func (s *operatorRuntime) llamaCppSidecarStatus(ctx context.Context) v7llamacpp.LlamaCppSidecarStatus {
+func (s *operatorRuntime) llamaCppSidecarStatus(ctx context.Context) llamacpp.LlamaCppSidecarStatus {
 	return s.llamaCppManager().Status(ctx)
 }
 
-func (s *operatorRuntime) llamaCppSidecarStatusView(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
-	return v7llamacpp.BuildLlamaCppSidecarStatusView(s.llamaCppSidecarStatus(ctx), s.llamaCppResidencyKeeperStatus())
+func (s *operatorRuntime) llamaCppSidecarStatusView(ctx context.Context) llamacpp.LlamaCppSidecarStatusView {
+	return llamacpp.BuildLlamaCppSidecarStatusView(s.llamaCppSidecarStatus(ctx), s.llamaCppResidencyKeeperStatus())
 }
 
-func (s *operatorRuntime) llamaCppResidencyKeeperStatus() v7llamacpp.ResidencyKeeperStatus {
+func (s *operatorRuntime) llamaCppResidencyKeeperStatus() llamacpp.ResidencyKeeperStatus {
 	keeper := s.llamaCppResidencyKeeper()
 	if keeper == nil {
-		return v7llamacpp.ResidencyKeeperStatus{}
+		return llamacpp.ResidencyKeeperStatus{}
 	}
 	return keeper.Snapshot()
 }
@@ -623,11 +623,11 @@ func (s *operatorRuntime) startLlamaCppResidencyKeeper(ctx context.Context) {
 	}
 }
 
-func (s *operatorRuntime) sglangSidecarStatus(ctx context.Context) v7sglang.SGLangSidecarStatus {
+func (s *operatorRuntime) sglangSidecarStatus(ctx context.Context) sglang.SGLangSidecarStatus {
 	return s.sglangManager().Status(ctx)
 }
 
-func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) v7llamacpp.BackendRuntimes {
+func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) llamacpp.BackendRuntimes {
 	baseModelPolicy := buildModelPolicyStatus()
 	hardwareCapacity := buildHardwareCapacityStatus(baseModelPolicy.CacheDir)
 	runtimeInfo := operatorRuntimeInfo{}
@@ -643,40 +643,40 @@ func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) v7llamacpp.
 		runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, tensorAccess, infMgr)
 		return buildBackendRuntimesStatus(s.llamaCppSidecarStatus(ctx), s.sglangSidecarStatus(ctx), runtimeInventory, hardwareCapacity)
 	}
-	return buildBackendRuntimesStatus(v7llamacpp.LlamaCppSidecarStatus{}, v7sglang.SGLangSidecarStatus{}, v7runtimeinventory.Inventory{}, hardwareCapacity)
+	return buildBackendRuntimesStatus(llamacpp.LlamaCppSidecarStatus{}, sglang.SGLangSidecarStatus{}, v7runtimeinventory.Inventory{}, hardwareCapacity)
 }
 
-func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
+func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) llamacpp.LlamaCppSidecarStatusView {
 	status := s.llamaCppManager().Start(ctx)
-	return v7llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
+	return llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
 }
 
-func (s *operatorRuntime) stopLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
+func (s *operatorRuntime) stopLlamaCppSidecar(ctx context.Context) llamacpp.LlamaCppSidecarStatusView {
 	status := s.llamaCppManager().Stop(ctx)
-	return v7llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
+	return llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
 }
 
-func (s *operatorRuntime) restartLlamaCppSidecar(ctx context.Context) v7llamacpp.LlamaCppSidecarStatusView {
+func (s *operatorRuntime) restartLlamaCppSidecar(ctx context.Context) llamacpp.LlamaCppSidecarStatusView {
 	status := s.llamaCppManager().Restart(ctx)
-	return v7llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
+	return llamacpp.BuildLlamaCppSidecarStatusView(status, s.llamaCppResidencyKeeperStatus())
 }
 
-func (s *operatorRuntime) startSGLangSidecar(ctx context.Context) v7sglang.SGLangSidecarStatus {
+func (s *operatorRuntime) startSGLangSidecar(ctx context.Context) sglang.SGLangSidecarStatus {
 	return s.sglangManager().Start(ctx)
 }
 
-func (s *operatorRuntime) stopSGLangSidecar(ctx context.Context) v7sglang.SGLangSidecarStatus {
+func (s *operatorRuntime) stopSGLangSidecar(ctx context.Context) sglang.SGLangSidecarStatus {
 	return s.sglangManager().Stop(ctx)
 }
 
-func (s *operatorRuntime) restartSGLangSidecar(ctx context.Context) v7sglang.SGLangSidecarStatus {
+func (s *operatorRuntime) restartSGLangSidecar(ctx context.Context) sglang.SGLangSidecarStatus {
 	return s.sglangManager().Restart(ctx)
 }
 
-func (s *operatorRuntime) runLlamaCppBenchmark(ctx context.Context, config v7llamacpp.BenchmarkConfig) v7llamacpp.BenchmarkStatusSnapshot {
-	runner := v7llamacpp.BenchmarkRunner{
+func (s *operatorRuntime) runLlamaCppBenchmark(ctx context.Context, config llamacpp.BenchmarkConfig) llamacpp.BenchmarkStatusSnapshot {
+	runner := llamacpp.BenchmarkRunner{
 		Sidecar: s.llamaCppManager(),
-		Client:  v7llamacpp.OpenAIClient{},
+		Client:  llamacpp.OpenAIClient{},
 	}
 	snapshot := runner.Run(ctx, config)
 	s.llamaCppBenchmarkStore().Record(snapshot)
@@ -1038,7 +1038,7 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	if memoryBenchmarkStatus != nil {
 		memoryBenchmarkSnapshot = memoryBenchmarkStatus.Snapshot()
 	}
-	var backendBenchmarkSnapshot v7llamacpp.BackendBenchmarkLocalStatusSnapshot
+	var backendBenchmarkSnapshot llamacpp.BackendBenchmarkLocalStatusSnapshot
 	if backendBenchmarkStatus != nil {
 		backendBenchmarkSnapshot = backendBenchmarkStatus.Snapshot()
 	}
@@ -1313,7 +1313,7 @@ func modelCacheScanDirs(primary string, getenv func(string) string) []string {
 	return dirs
 }
 
-func buildModelCacheRuntimeStatus(modelCache v7modelcache.Status, policy v7modelpolicy.Status, hardware v7hardware.CapacityInventory, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes) v7modelcache.Status {
+func buildModelCacheRuntimeStatus(modelCache v7modelcache.Status, policy v7modelpolicy.Status, hardware v7hardware.CapacityInventory, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes) v7modelcache.Status {
 	return v7modelcache.AnnotateRuntimeStatus(v7modelcache.RuntimeAnnotationInput{
 		Status:                         modelCache,
 		Policy:                         policy,
@@ -1323,10 +1323,10 @@ func buildModelCacheRuntimeStatus(modelCache v7modelcache.Status, policy v7model
 	})
 }
 
-func buildBackendRuntimesStatus(llamaStatus v7llamacpp.LlamaCppSidecarStatus, sglangStatus v7sglang.SGLangSidecarStatus, runtimeInventory v7runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) v7llamacpp.BackendRuntimes {
-	runtimes := v7llamacpp.BuildBackendRuntimes(llamaStatus)
-	runtimes.SGLang = v7sglang.BuildBackendRuntime(sglangStatus, hardware)
-	return v7llamacpp.EnrichBackendRuntimes(runtimes, runtimeInventory, hardware)
+func buildBackendRuntimesStatus(llamaStatus llamacpp.LlamaCppSidecarStatus, sglangStatus sglang.SGLangSidecarStatus, runtimeInventory v7runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) llamacpp.BackendRuntimes {
+	runtimes := llamacpp.BuildBackendRuntimes(llamaStatus)
+	runtimes.SGLang = sglang.BuildBackendRuntime(sglangStatus, hardware)
+	return llamacpp.EnrichBackendRuntimes(runtimes, runtimeInventory, hardware)
 }
 
 func hardwareCapacityAvailable(hardware v7hardware.CapacityInventory) bool {
@@ -1337,12 +1337,12 @@ func hardwareCapacityAvailable(hardware v7hardware.CapacityInventory) bool {
 		hardware.SystemRAMBytes > 0
 }
 
-func ggufBackendTextGenerationAvailable(backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes) bool {
+func ggufBackendTextGenerationAvailable(backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes) bool {
 	return (backendRuntimes.LlamaCPP.Available && backendRuntimes.LlamaCPP.SupportsTextGeneration) ||
 		(backendProbes.LlamaCPP.Available && backendProbes.LlamaCPP.SupportsTextGeneration)
 }
 
-func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory, speculativeDecoding *v7speculative.DecodingCapability, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {
+func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory, speculativeDecoding *v7speculative.DecodingCapability, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {
 	return v7capabilityprofile.BuildProfile(v7capabilityprofile.BuildInput{
 		Hardware:            hardware,
 		Policy:              policy,
@@ -1357,7 +1357,7 @@ func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy 
 	})
 }
 
-func buildSpeculativeReportStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes v7llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory) v7speculative.Report {
+func buildSpeculativeReportStatus(hardware v7hardware.CapacityInventory, policy v7modelpolicy.Status, modelCache v7modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory) v7speculative.Report {
 	return v7speculative.BuildReport(v7speculative.BuildInput{
 		Hardware:         hardware,
 		Policy:           policy,
@@ -1747,7 +1747,7 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		writeJSON(w, http.StatusOK, state.restartSGLangSidecar(r.Context()))
 	})
 	mux.HandleFunc("POST /api/v1/operator/llamacpp/benchmark", func(w http.ResponseWriter, r *http.Request) {
-		if !v7llamacpp.BenchmarkEnabledFromEnv(os.Getenv) {
+		if !llamacpp.BenchmarkEnabledFromEnv(os.Getenv) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "llamacpp_benchmark_disabled"})
 			return
 		}
@@ -1765,7 +1765,7 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
 			return
 		}
-		config := v7llamacpp.DefaultBenchmarkConfig()
+		config := llamacpp.DefaultBenchmarkConfig()
 		config.ModelID = body.ModelID
 		if body.MaxTokens != 0 {
 			config.MaxTokens = body.MaxTokens
@@ -1785,11 +1785,11 @@ func startOperatorAPIServer(ctx context.Context, state *operatorRuntime, port st
 		if body.WarmupRuns != 0 {
 			config.WarmupRuns = body.WarmupRuns
 		}
-		if err := v7llamacpp.ValidateBenchmarkConfig(config); err != nil {
+		if err := llamacpp.ValidateBenchmarkConfig(config); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_benchmark_config"})
 			return
 		}
-		config = v7llamacpp.NormalizeBenchmarkConfig(config)
+		config = llamacpp.NormalizeBenchmarkConfig(config)
 		runCtx := r.Context()
 		if config.TimeoutMs > 0 {
 			var cancel context.CancelFunc

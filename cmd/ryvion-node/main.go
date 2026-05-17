@@ -28,6 +28,7 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/inference"
 	"github.com/Ryvion/ryvion-node/internal/nodekey"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/update"
 	v7artifact "github.com/Ryvion/ryvion-node/internal/v7/artifact"
 	v7backendprobe "github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
@@ -36,7 +37,6 @@ import (
 	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
 	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
 	v7modelpolicy "github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
@@ -260,7 +260,7 @@ var (
 	workLoopDiagnostics          = diagnostics.NewWorkLoopDiagnostics()
 	v7ModelBenchmarkStatus       = v7modelbench.NewLocalStatus()
 	v7TensorPlaneBenchmarkStatus = v7tensorplane.NewLocalStatus()
-	v7BackendBenchmarkStatus     = v7llamacpp.NewBackendBenchmarkLocalStatus()
+	v7BackendBenchmarkStatus     = llamacpp.NewBackendBenchmarkLocalStatus()
 	v7InferenceBenchmarkStatus   = v7inferencebench.NewLocalStatus()
 	v7DashboardInferenceStatus   = v7dashboardinference.NewLocalStatus()
 	v7ModelPrepareStatus         = v7modelprepare.NewLocalStatus()
@@ -275,18 +275,18 @@ var (
 			RuntimeAvailable: inference.NativeRuntimeAvailable,
 		}
 	}
-	newV7LlamaCppBackendBenchmarkRunner = func() v7llamacpp.BackendBenchmarkRunner {
-		sidecar := v7llamacpp.BenchmarkSidecar(v7llamacpp.NewManagerFromEnv())
+	newV7LlamaCppBackendBenchmarkRunner = func() llamacpp.BackendBenchmarkRunner {
+		sidecar := llamacpp.BenchmarkSidecar(llamacpp.NewManagerFromEnv())
 		if operatorRuntimeState != nil {
 			sidecar = operatorRuntimeState.llamaCppManager()
 		}
-		return v7llamacpp.BenchmarkRunner{
+		return llamacpp.BenchmarkRunner{
 			Sidecar: sidecar,
-			Client:  v7llamacpp.OpenAIClient{},
+			Client:  llamacpp.OpenAIClient{},
 		}
 	}
 	newV7BackendInferenceBenchmarkRunner = func() v7inferencebench.BenchmarkRunner {
-		var sidecar v7inferencebench.LlamaCppSidecar = v7llamacpp.NewManagerFromEnv()
+		var sidecar v7inferencebench.LlamaCppSidecar = llamacpp.NewManagerFromEnv()
 		var keepWarm v7inferencebench.KeepWarmChecker
 		if operatorRuntimeState != nil {
 			sidecar = operatorRuntimeState.llamaCppManager()
@@ -295,12 +295,12 @@ var (
 		return v7inferencebench.LlamaCppBenchmarkRunner{
 			Sidecar:  sidecar,
 			KeepWarm: keepWarm,
-			Client:   v7llamacpp.OpenAIClient{},
+			Client:   llamacpp.OpenAIClient{},
 			Getenv:   os.Getenv,
 		}
 	}
 	newV7DashboardInferenceRunner = func() v7dashboardinference.Runner {
-		var sidecar v7dashboardinference.LlamaCppSidecar = v7llamacpp.NewManagerFromEnv()
+		var sidecar v7dashboardinference.LlamaCppSidecar = llamacpp.NewManagerFromEnv()
 		var keepWarm v7dashboardinference.KeepWarmChecker
 		if operatorRuntimeState != nil {
 			sidecar = operatorRuntimeState.llamaCppManager()
@@ -309,7 +309,7 @@ var (
 		return v7dashboardinference.LlamaCppRunner{
 			Sidecar:  sidecar,
 			KeepWarm: keepWarm,
-			Client:   v7llamacpp.OpenAIClient{},
+			Client:   llamacpp.OpenAIClient{},
 			Getenv:   os.Getenv,
 			Policy:   buildDashboardInferencePolicy(os.Getenv, buildHardwareCapacityStatus),
 		}
@@ -503,19 +503,19 @@ func runLlamaCppBench(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	if !v7llamacpp.BenchmarkEnabledFromEnv(os.Getenv) {
-		fmt.Fprintf(os.Stderr, "%s=1 required for llama.cpp benchmark\n", v7llamacpp.EnvBenchmark)
+	if !llamacpp.BenchmarkEnabledFromEnv(os.Getenv) {
+		fmt.Fprintf(os.Stderr, "%s=1 required for llama.cpp benchmark\n", llamacpp.EnvBenchmark)
 		os.Exit(2)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.TimeoutMs)*time.Millisecond)
 	defer cancel()
-	runner := v7llamacpp.BenchmarkRunner{
-		Sidecar: v7llamacpp.NewManagerFromEnv(),
-		Client:  v7llamacpp.OpenAIClient{},
+	runner := llamacpp.BenchmarkRunner{
+		Sidecar: llamacpp.NewManagerFromEnv(),
+		Client:  llamacpp.OpenAIClient{},
 	}
 	snapshot := runner.Run(ctx, config)
-	fmt.Println(v7llamacpp.FormatBenchmarkStatus(snapshot, jsonOutput))
-	if snapshot.Status != v7llamacpp.BenchmarkStatusCompleted {
+	fmt.Println(llamacpp.FormatBenchmarkStatus(snapshot, jsonOutput))
+	if snapshot.Status != llamacpp.BenchmarkStatusCompleted {
 		os.Exit(1)
 	}
 	os.Exit(0)
@@ -639,8 +639,8 @@ func parseModelBenchSelfTestFlags(args []string) (v7modelbench.ModelBenchmarkSel
 	}, *jsonOutput, nil
 }
 
-func parseLlamaCppBenchFlags(args []string) (v7llamacpp.BenchmarkConfig, bool, error) {
-	defaults := v7llamacpp.DefaultBenchmarkConfig()
+func parseLlamaCppBenchFlags(args []string) (llamacpp.BenchmarkConfig, bool, error) {
+	defaults := llamacpp.DefaultBenchmarkConfig()
 	fs := flag.NewFlagSet("llamacpp-bench", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	modelID := fs.String("model", defaults.ModelID, "llama.cpp model ID or model filename")
@@ -650,16 +650,16 @@ func parseLlamaCppBenchFlags(args []string) (v7llamacpp.BenchmarkConfig, bool, e
 	timeoutRaw := fs.String("timeout", fmt.Sprintf("%dms", defaults.TimeoutMs), "Benchmark timeout as duration or milliseconds")
 	jsonOutput := fs.Bool("json", false, "Print JSON output")
 	if err := fs.Parse(args); err != nil {
-		return v7llamacpp.BenchmarkConfig{}, false, err
+		return llamacpp.BenchmarkConfig{}, false, err
 	}
 	if fs.NArg() != 0 {
-		return v7llamacpp.BenchmarkConfig{}, false, fmt.Errorf("usage: ryvion-node llamacpp-bench --json --max-tokens 32 --runs 3")
+		return llamacpp.BenchmarkConfig{}, false, fmt.Errorf("usage: ryvion-node llamacpp-bench --json --max-tokens 32 --runs 3")
 	}
 	timeoutMs, err := parseLlamaCppBenchTimeoutMs(*timeoutRaw)
 	if err != nil {
-		return v7llamacpp.BenchmarkConfig{}, false, err
+		return llamacpp.BenchmarkConfig{}, false, err
 	}
-	config := v7llamacpp.BenchmarkConfig{
+	config := llamacpp.BenchmarkConfig{
 		ModelID:      *modelID,
 		MaxTokens:    *maxTokens,
 		Temperature:  0,
@@ -668,16 +668,16 @@ func parseLlamaCppBenchFlags(args []string) (v7llamacpp.BenchmarkConfig, bool, e
 		MeasuredRuns: *runs,
 		WarmupRuns:   *warmups,
 	}
-	if err := v7llamacpp.ValidateBenchmarkConfig(config); err != nil {
-		return v7llamacpp.BenchmarkConfig{}, false, err
+	if err := llamacpp.ValidateBenchmarkConfig(config); err != nil {
+		return llamacpp.BenchmarkConfig{}, false, err
 	}
-	return v7llamacpp.NormalizeBenchmarkConfig(config), *jsonOutput, nil
+	return llamacpp.NormalizeBenchmarkConfig(config), *jsonOutput, nil
 }
 
 func parseLlamaCppBenchTimeoutMs(raw string) (int64, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return v7llamacpp.DefaultBenchmarkConfig().TimeoutMs, nil
+		return llamacpp.DefaultBenchmarkConfig().TimeoutMs, nil
 	}
 	if ms, err := strconv.ParseInt(raw, 10, 64); err == nil {
 		if ms <= 0 {
@@ -1301,7 +1301,7 @@ func summarizeV7HeartbeatPayload(payload *v7heartbeat.V7HeartbeatPayload) operat
 		addBackend(candidate.Backend, candidate.Detected)
 	}
 	if payload.RuntimeInventory.CandidateBackends.LlamaCPPDetected || payload.BackendProbes.LlamaCPP.Available {
-		addBackend(v7llamacpp.BackendName, true)
+		addBackend(llamacpp.BackendName, true)
 	}
 	if payload.RuntimeInventory.CandidateBackends.TensorRTLLMDetected {
 		addBackend("tensorrt_llm", true)
@@ -1349,7 +1349,7 @@ func heartbeatV7SnapshotConfirmationError(summary operatorHeartbeatResponseSumma
 	return nil
 }
 
-func heartbeatRuntimeAvailable(runtime v7llamacpp.BackendRuntimeStatus) bool {
+func heartbeatRuntimeAvailable(runtime llamacpp.BackendRuntimeStatus) bool {
 	return runtime.Available ||
 		runtime.Running ||
 		runtime.Healthy ||
@@ -1358,10 +1358,10 @@ func heartbeatRuntimeAvailable(runtime v7llamacpp.BackendRuntimeStatus) bool {
 }
 
 func buildOptionalV7HeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) *v7heartbeat.V7HeartbeatPayload {
-	return buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{}))
+	return buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}))
 }
 
-func buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes v7llamacpp.BackendRuntimes) *v7heartbeat.V7HeartbeatPayload {
+func buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes llamacpp.BackendRuntimes) *v7heartbeat.V7HeartbeatPayload {
 	if !v7heartbeat.V7HeartbeatEnabledFromEnv() {
 		return nil
 	}
@@ -1374,10 +1374,10 @@ func buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey string, ca
 }
 
 func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) (*v7heartbeat.V7HeartbeatPayload, error) {
-	return buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{}))
+	return buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}))
 }
 
-func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes v7llamacpp.BackendRuntimes) (*v7heartbeat.V7HeartbeatPayload, error) {
+func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes llamacpp.BackendRuntimes) (*v7heartbeat.V7HeartbeatPayload, error) {
 	gpuDetected := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
 	nativeSupported := inference.NativeRuntimeAvailable()
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
@@ -1407,7 +1407,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 	hardwareCapacity := buildHardwareCapacityStatus(baseModelPolicy.CacheDir)
 	modelPolicy := buildDerivedModelPolicyStatus(baseModelPolicy, hardwareCapacity)
 	backendProbes := buildBackendProbeStatus()
-	backendRuntimes = v7llamacpp.EnrichBackendRuntimes(backendRuntimes, runtimeInventory, hardwareCapacity)
+	backendRuntimes = llamacpp.EnrichBackendRuntimes(backendRuntimes, runtimeInventory, hardwareCapacity)
 	modelCache := buildModelCacheRuntimeStatus(buildModelCacheStatus(modelPolicy), modelPolicy, hardwareCapacity, backendProbes, backendRuntimes)
 	speculativeReport := buildSpeculativeReportStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory)
 	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory, &speculativeReport.SpeculativeDecoding, &kvCapability, tensorAccess)
@@ -1471,16 +1471,16 @@ func currentHubNetworkProfile() *v7netprofile.NetworkProfile {
 	return &profile
 }
 
-func buildCurrentBackendRuntimes(ctx context.Context) v7llamacpp.BackendRuntimes {
+func buildCurrentBackendRuntimes(ctx context.Context) llamacpp.BackendRuntimes {
 	if operatorRuntimeState != nil {
 		return operatorRuntimeState.backendRuntimesStatus(ctx)
 	}
 	return buildStandaloneBackendRuntimes(ctx)
 }
 
-func buildStandaloneBackendRuntimes(ctx context.Context) v7llamacpp.BackendRuntimes {
+func buildStandaloneBackendRuntimes(ctx context.Context) llamacpp.BackendRuntimes {
 	_ = ctx
-	return v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{})
+	return llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{})
 }
 
 func v7RuntimeManifestHash(runtimeMgr *runtimeManager) string {
@@ -1710,11 +1710,11 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
-	if handled, result, runErr := processOptionalForesightNativeDraftHotSession(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+	if handled, result, runErr := processOptionalSpeculativeNativeDraftHotSession(runCtx, client, work, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
-			slog.Warn("Foresight native hot draft session failed", "job_id", work.JobID, "error", runErr)
+			slog.Warn("Speculative native hot draft session failed", "job_id", work.JobID, "error", runErr)
 		} else if result != nil {
-			slog.Info("Foresight native hot draft session completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+			slog.Info("Speculative native hot draft session completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
 		}
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.finishJob(work, result, runErr)
@@ -1722,11 +1722,11 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
-	if handled, result, runErr := processOptionalForesightNativeVerifierHotSession(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+	if handled, result, runErr := processOptionalSpeculativeNativeVerifierHotSession(runCtx, client, work, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
-			slog.Warn("Foresight native hot verifier session failed", "job_id", work.JobID, "error", runErr)
+			slog.Warn("Speculative native hot verifier session failed", "job_id", work.JobID, "error", runErr)
 		} else if result != nil {
-			slog.Info("Foresight native hot verifier session completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+			slog.Info("Speculative native hot verifier session completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
 		}
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.finishJob(work, result, runErr)
@@ -1734,11 +1734,11 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
-	if handled, result, runErr := processOptionalForesightNativeDraft(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+	if handled, result, runErr := processOptionalSpeculativeNativeDraft(runCtx, client, work, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
-			slog.Warn("Foresight native draft execution failed", "job_id", work.JobID, "error", runErr)
+			slog.Warn("Speculative native draft execution failed", "job_id", work.JobID, "error", runErr)
 		} else if result != nil {
-			slog.Info("Foresight native draft completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+			slog.Info("Speculative native draft completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
 		}
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.finishJob(work, result, runErr)
@@ -1746,11 +1746,11 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 		return
 	}
 
-	if handled, result, runErr := processOptionalForesightNativeVerifier(runCtx, client, work, runtimeMgr, gpuDetected); handled {
+	if handled, result, runErr := processOptionalSpeculativeNativeVerifier(runCtx, client, work, runtimeMgr, gpuDetected); handled {
 		if runErr != nil {
-			slog.Warn("Foresight native verifier execution failed", "job_id", work.JobID, "error", runErr)
+			slog.Warn("Speculative native verifier execution failed", "job_id", work.JobID, "error", runErr)
 		} else if result != nil {
-			slog.Info("Foresight native verifier completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
+			slog.Info("Speculative native verifier completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
 		}
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.finishJob(work, result, runErr)
@@ -2273,9 +2273,9 @@ func processOptionalV7ModelWarm(ctx context.Context, client *hub.Client, work *h
 		LlamaCppManager: manager,
 	}
 	if manager != nil {
-		warmOptions.BenchmarkRunner = v7llamacpp.BenchmarkRunner{
+		warmOptions.BenchmarkRunner = llamacpp.BenchmarkRunner{
 			Sidecar: benchmarkSidecarFromWarmManager(manager),
-			Client:  v7llamacpp.OpenAIClient{},
+			Client:  llamacpp.OpenAIClient{},
 		}
 	}
 	receipt, handled, err := v7modelwarm.ExecuteWarmAssignment(ctx, work.SpecJSON, warmOptions)
@@ -2377,11 +2377,11 @@ func processOptionalV7ModelWarm(ctx context.Context, client *hub.Client, work *h
 	return true, snapshot, recordErr
 }
 
-func benchmarkSidecarFromWarmManager(manager v7modelwarm.LlamaCppManager) v7llamacpp.BenchmarkSidecar {
-	if sidecar, ok := manager.(v7llamacpp.BenchmarkSidecar); ok && sidecar != nil {
+func benchmarkSidecarFromWarmManager(manager v7modelwarm.LlamaCppManager) llamacpp.BenchmarkSidecar {
+	if sidecar, ok := manager.(llamacpp.BenchmarkSidecar); ok && sidecar != nil {
 		return sidecar
 	}
-	return v7llamacpp.NewManagerFromEnv()
+	return llamacpp.NewManagerFromEnv()
 }
 
 func v7ModelWarmReceiptWarmed(receipt v7modelwarm.WarmReceipt) bool {
@@ -2446,15 +2446,15 @@ func v7ModelWarmWorkLoopEventContextFromReceipt(specJSON string, receipt v7model
 	return context
 }
 
-func currentV7BackendBenchmarkStatus() *v7llamacpp.BackendBenchmarkLocalStatus {
+func currentV7BackendBenchmarkStatus() *llamacpp.BackendBenchmarkLocalStatus {
 	if operatorRuntimeState != nil {
 		return operatorRuntimeState.backendBenchmarkStatus()
 	}
 	return v7BackendBenchmarkStatus
 }
 
-func currentV7LlamaCppBackendBenchmarkProfile(ctx context.Context, client *hub.Client) v7llamacpp.BackendBenchmarkProfile {
-	cfg := v7llamacpp.ConfigFromEnv()
+func currentV7LlamaCppBackendBenchmarkProfile(ctx context.Context, client *hub.Client) llamacpp.BackendBenchmarkProfile {
+	cfg := llamacpp.ConfigFromEnv()
 	if operatorRuntimeState != nil {
 		cfg = operatorRuntimeState.llamaCppManager().Config()
 	}
@@ -2465,7 +2465,7 @@ func currentV7LlamaCppBackendBenchmarkProfile(ctx context.Context, client *hub.C
 	if client != nil {
 		nodeID = client.PublicKeyHex()
 	}
-	return v7llamacpp.BackendBenchmarkProfile{
+	return llamacpp.BackendBenchmarkProfile{
 		NodeID:              nodeID,
 		Acceleration:        llamaCppBenchmarkAccelerationMode(cfg, hardware),
 		Warm:                runtimes.LlamaCPP.Warm,
@@ -2474,7 +2474,7 @@ func currentV7LlamaCppBackendBenchmarkProfile(ctx context.Context, client *hub.C
 	}
 }
 
-func llamaCppBenchmarkAccelerationMode(cfg v7llamacpp.LlamaCppSidecarConfig, hardware v7hardware.CapacityInventory) string {
+func llamaCppBenchmarkAccelerationMode(cfg llamacpp.LlamaCppSidecarConfig, hardware v7hardware.CapacityInventory) string {
 	if !llamaCppConfigUsesGPU(cfg) {
 		return "cpu"
 	}
@@ -2493,7 +2493,7 @@ func llamaCppBenchmarkAccelerationMode(cfg v7llamacpp.LlamaCppSidecarConfig, har
 	}
 }
 
-func llamaCppConfigUsesGPU(cfg v7llamacpp.LlamaCppSidecarConfig) bool {
+func llamaCppConfigUsesGPU(cfg llamacpp.LlamaCppSidecarConfig) bool {
 	if cfg.GPULayers > 0 {
 		return true
 	}
@@ -2516,9 +2516,9 @@ func llamaCppConfigUsesGPU(cfg v7llamacpp.LlamaCppSidecarConfig) bool {
 }
 
 func processOptionalV7LlamaCppBackendBenchmark(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool) (bool, *runnerResultSnapshot, error) {
-	identity, isBenchmark := v7llamacpp.BackendBenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
+	identity, isBenchmark := llamacpp.BackendBenchmarkAssignmentIdentityFromJSON(work.SpecJSON)
 	statusJobID := firstNonEmptyString(work.JobID, identity.JobID)
-	benchmarkEnabled := isBenchmark && v7llamacpp.BackendBenchmarkEnabledFromEnv(os.Getenv)
+	benchmarkEnabled := isBenchmark && llamacpp.BackendBenchmarkEnabledFromEnv(os.Getenv)
 	status := currentV7BackendBenchmarkStatus()
 	if benchmarkEnabled && status != nil {
 		status.RecordSeen(statusJobID)
@@ -2530,7 +2530,7 @@ func processOptionalV7LlamaCppBackendBenchmark(ctx context.Context, client *hub.
 		workLoopDiagnostics.RecordExecutionStart(statusJobID)
 		workLoopDiagnostics.RecordEvent("v7_fast_path_start", statusJobID, work.Kind, v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
 	}
-	receipt, handled, err := v7llamacpp.ExecuteBackendBenchmarkAssignment(ctx, work.SpecJSON, v7llamacpp.ExecuteBackendBenchmarkOptions{
+	receipt, handled, err := llamacpp.ExecuteBackendBenchmarkAssignment(ctx, work.SpecJSON, llamacpp.ExecuteBackendBenchmarkOptions{
 		Getenv:  os.Getenv,
 		Runner:  runner,
 		Profile: currentV7LlamaCppBackendBenchmarkProfile(ctx, client),
@@ -2547,12 +2547,12 @@ func processOptionalV7LlamaCppBackendBenchmark(ctx context.Context, client *hub.
 	workLoopDiagnostics.RecordEvent("pre_submit_block_start", firstNonEmptyString(receipt.JobID, statusJobID), work.Kind, v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(work.SpecJSON))
 	runtimeMeta := v7BenchmarkFastPathRuntimeMetadata(runtimeMgr, gpuDetected)
 	extra := map[string]any{
-		"executor":      v7llamacpp.BackendBenchmarkTask,
-		"executor_kind": v7llamacpp.BackendBenchmarkTask,
-		"task":          v7llamacpp.BackendBenchmarkTask,
+		"executor":      llamacpp.BackendBenchmarkTask,
+		"executor_kind": llamacpp.BackendBenchmarkTask,
+		"task":          llamacpp.BackendBenchmarkTask,
 	}
 	if strings.TrimSpace(receipt.ResultHashHex) == "" {
-		receipt = v7llamacpp.BuildBackendBenchmarkRejectionReceipt(work.JobID, err)
+		receipt = llamacpp.BuildBackendBenchmarkRejectionReceipt(work.JobID, err)
 	}
 	exitCode := 0
 	if err != nil {
@@ -2625,7 +2625,7 @@ func processOptionalV7LlamaCppBackendBenchmark(ctx context.Context, client *hub.
 
 func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(specJSON string) map[string]string {
 	context := map[string]string{
-		"spec_task": v7llamacpp.BackendBenchmarkTask,
+		"spec_task": llamacpp.BackendBenchmarkTask,
 	}
 	var spec struct {
 		Task         string `json:"task"`
@@ -2636,8 +2636,8 @@ func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(specJSON string) map
 	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
 		return context
 	}
-	if strings.TrimSpace(spec.Task) == v7llamacpp.BackendBenchmarkTask {
-		context["spec_task"] = v7llamacpp.BackendBenchmarkTask
+	if strings.TrimSpace(spec.Task) == llamacpp.BackendBenchmarkTask {
+		context["spec_task"] = llamacpp.BackendBenchmarkTask
 	}
 	if backend := strings.TrimSpace(spec.Backend); backend != "" {
 		context["backend"] = backend
@@ -2651,9 +2651,9 @@ func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(specJSON string) map
 	return context
 }
 
-func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt v7llamacpp.BackendBenchmarkReceipt) map[string]string {
+func v7LlamaCppBackendBenchmarkWorkLoopEventContextFromReceipt(specJSON string, receipt llamacpp.BackendBenchmarkReceipt) map[string]string {
 	context := v7LlamaCppBackendBenchmarkWorkLoopEventContextFromSpec(specJSON)
-	if taskMetadata, ok := receipt.Metadata[v7llamacpp.BackendBenchmarkTask].(map[string]any); ok {
+	if taskMetadata, ok := receipt.Metadata[llamacpp.BackendBenchmarkTask].(map[string]any); ok {
 		putWorkLoopAnyIntContext(context, "warmup_runs", taskMetadata["warmup_runs"])
 		putWorkLoopAnyIntContext(context, "measured_runs", taskMetadata["measured_runs"])
 		putWorkLoopAnyIntContext(context, "p50_ttft_ms", taskMetadata["p50_ttft_ms"])
@@ -3154,15 +3154,15 @@ func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work
 	if operatorRuntimeState != nil {
 		manager = operatorRuntimeState.llamaCppManager()
 	} else {
-		manager = v7llamacpp.NewManagerFromEnv()
+		manager = llamacpp.NewManagerFromEnv()
 	}
 	receipt, handled, err := v7modelprepare.ExecutePrepareAssignment(ctx, work.SpecJSON, v7modelprepare.ExecuteOptions{
 		Getenv:          os.Getenv,
 		Policy:          v7modelpolicy.FromEnv(),
 		LlamaCppManager: manager,
-		BenchmarkRunner: v7llamacpp.BenchmarkRunner{
+		BenchmarkRunner: llamacpp.BenchmarkRunner{
 			Sidecar: manager,
-			Client:  v7llamacpp.OpenAIClient{},
+			Client:  llamacpp.OpenAIClient{},
 		},
 	})
 	if !handled {
@@ -3850,7 +3850,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	} else {
 		parts = append(parts, "public-inference-ready:0")
 	}
-	parts = append(parts, foresightRoleStatusTokens(caps, diskGB, publicInferenceReady)...)
+	parts = append(parts, speculativeRoleStatusTokens(caps, diskGB, publicInferenceReady)...)
 	parts = append(parts, smartShardingStatusTokens(caps, diskGB, publicInferenceReady)...)
 	parts = append(parts, worldGridRoleStatusTokens(caps, ffmpegOK, spatialReady)...)
 
@@ -3862,17 +3862,17 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	}
 }
 
-func foresightRoleStatusTokens(caps hw.CapSet, diskGB uint64, publicInferenceReady bool) []string {
+func speculativeRoleStatusTokens(caps hw.CapSet, diskGB uint64, publicInferenceReady bool) []string {
 	tokens := []string{}
 	residueReady := caps.CPUCores >= 2 || strings.TrimSpace(caps.CPUModel) != ""
 	if residueReady {
 		tokens = append(tokens,
 			"role:residue_swarm_builder",
 			"cap:residue_swarm_builder:1",
-			"foresight:proposal_window:ready:1",
+			"speculative:proposal_window:ready:1",
 		)
 	} else {
-		tokens = append(tokens, "cap:residue_swarm_builder:0", "foresight:proposal_window:ready:0")
+		tokens = append(tokens, "cap:residue_swarm_builder:0", "speculative:proposal_window:ready:0")
 	}
 	if publicInferenceReady {
 		tokens = append(tokens, "role:draft_worker", "cap:draft_worker:1")
@@ -3927,9 +3927,9 @@ func worldGridRoleStatusTokens(caps hw.CapSet, ffmpegOK bool, spatialReady bool)
 		tokens = append(tokens, "cap:worldgrid_stream_segment_worker:0")
 	}
 	if npcReady {
-		tokens = append(tokens, "role:future_branch_proposer", "cap:worldgrid_npc_foresight:1")
+		tokens = append(tokens, "role:future_branch_proposer", "cap:worldgrid_npc_speculative:1")
 	} else {
-		tokens = append(tokens, "cap:worldgrid_npc_foresight:0")
+		tokens = append(tokens, "cap:worldgrid_npc_speculative:0")
 	}
 	if spatialReady {
 		tokens = append(tokens, "role:stage_worker", "cap:worldgrid_spatial_worker:1")

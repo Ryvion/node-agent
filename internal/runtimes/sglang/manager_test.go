@@ -14,7 +14,7 @@ import (
 	"time"
 
 	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 )
 
@@ -284,4 +284,4 @@ func (c errorHealthClient) Do(*http.Request) (*http.Response, error) {
 	return nil, c.err
 }
 
-var _ = v7llamacpp.BackendRuntimeStatus{}
+var _ = llamacpp.BackendRuntimeStatus{}

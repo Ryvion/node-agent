@@ -22,6 +22,7 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/update"
 	v7capabilityprofile "github.com/Ryvion/ryvion-node/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
@@ -29,7 +30,6 @@ import (
 	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
 	v7modelcache "github.com/Ryvion/ryvion-node/internal/v7/modelcache"
@@ -478,7 +478,7 @@ func TestBuildOptionalV7HeartbeatPayloadDefaultsOnAndHonorsExplicitOff(t *testin
 		payload.HardwareCapacity.ThermalRisk == "" {
 		t.Fatalf("hardware_capacity missing safe status fields: %+v", payload.HardwareCapacity)
 	}
-	expectedBackendRuntimes := v7llamacpp.EnrichBackendRuntimes(v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{}), expectedRuntimeInventory, payload.HardwareCapacity)
+	expectedBackendRuntimes := llamacpp.EnrichBackendRuntimes(llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}), expectedRuntimeInventory, payload.HardwareCapacity)
 	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
 		t.Fatalf("backend_runtimes = %+v, want default local builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
 	}
@@ -519,7 +519,7 @@ func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
 		CPUCores: 4,
 		RAMBytes: 8 * 1024 * 1024 * 1024,
 	}
-	backendRuntimes := v7llamacpp.BuildBackendRuntimes(v7llamacpp.LlamaCppSidecarStatus{
+	backendRuntimes := llamacpp.BuildBackendRuntimes(llamacpp.LlamaCppSidecarStatus{
 		Enabled:                true,
 		Available:              true,
 		Running:                true,
@@ -530,7 +530,7 @@ func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
 		ModelSizeBytes:         2019377696,
 		ModelFamilyHint:        "llama",
 		QuantizationHint:       "Q4_K_M",
-		Backend:                v7llamacpp.BackendName,
+		Backend:                llamacpp.BackendName,
 		OpenAICompatible:       true,
 		SupportsTextGeneration: true,
 		SupportsStreaming:      true,
@@ -540,7 +540,7 @@ func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
 	if payload == nil {
 		t.Fatal("payload = nil, want V7 payload")
 	}
-	expectedBackendRuntimes := v7llamacpp.EnrichBackendRuntimes(backendRuntimes, payload.RuntimeInventory, payload.HardwareCapacity)
+	expectedBackendRuntimes := llamacpp.EnrichBackendRuntimes(backendRuntimes, payload.RuntimeInventory, payload.HardwareCapacity)
 	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
 		t.Fatalf("backend_runtimes = %+v, want local builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
 	}
@@ -580,9 +580,9 @@ func TestSummarizeV7HeartbeatPayloadCountsOnlyRealInventoryModels(t *testing.T) 
 				{ModelID: "phi-4-Q5_K_M.gguf", Resident: true, Runnable: false, BlockedReasons: []string{"family_denied"}},
 			},
 		},
-		BackendRuntimes: v7llamacpp.BackendRuntimes{
-			LlamaCPP: v7llamacpp.BackendRuntimeStatus{
-				Backend:       v7llamacpp.BackendName,
+		BackendRuntimes: llamacpp.BackendRuntimes{
+			LlamaCPP: llamacpp.BackendRuntimeStatus{
+				Backend:       llamacpp.BackendName,
 				Available:     true,
 				ModelID:       "draft-profile-placeholder",
 				ModelFilename: "draft-profile-placeholder.gguf",
@@ -623,7 +623,7 @@ func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *
 	if !reflect.DeepEqual(payload.RuntimeInventory, expectedRuntimeInventory) {
 		t.Fatalf("runtime_inventory = %+v, want local status builder value %+v", payload.RuntimeInventory, expectedRuntimeInventory)
 	}
-	expectedBackendRuntimes := v7llamacpp.EnrichBackendRuntimes(v7llamacpp.NormalizeBackendRuntimes(v7llamacpp.BackendRuntimes{}), expectedRuntimeInventory, payload.HardwareCapacity)
+	expectedBackendRuntimes := llamacpp.EnrichBackendRuntimes(llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}), expectedRuntimeInventory, payload.HardwareCapacity)
 	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
 		t.Fatalf("backend_runtimes = %+v, want local status builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
 	}
@@ -2248,15 +2248,15 @@ func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
 }
 
 func TestProcessOptionalV7LlamaCppBackendBenchmarkFlagOffDoesNotHandle(t *testing.T) {
-	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "0")
+	t.Setenv(llamacpp.BackendBenchmarkFlagEnv, "0")
 	oldStatus := v7BackendBenchmarkStatus
 	oldFactory := newV7LlamaCppBackendBenchmarkRunner
 	oldState := operatorRuntimeState
-	status := v7llamacpp.NewBackendBenchmarkLocalStatus()
-	fakeRunner := &fakeLlamaCppBackendBenchmarkRunner{snapshot: testLlamaCppBackendBenchmarkSnapshot(v7llamacpp.BenchmarkProofStatusMeasured)}
+	status := llamacpp.NewBackendBenchmarkLocalStatus()
+	fakeRunner := &fakeLlamaCppBackendBenchmarkRunner{snapshot: testLlamaCppBackendBenchmarkSnapshot(llamacpp.BenchmarkProofStatusMeasured)}
 	v7BackendBenchmarkStatus = status
 	operatorRuntimeState = nil
-	newV7LlamaCppBackendBenchmarkRunner = func() v7llamacpp.BackendBenchmarkRunner {
+	newV7LlamaCppBackendBenchmarkRunner = func() llamacpp.BackendBenchmarkRunner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2282,7 +2282,7 @@ func TestProcessOptionalV7LlamaCppBackendBenchmarkFlagOffDoesNotHandle(t *testin
 	if fakeRunner.calls != 0 {
 		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
 	}
-	if snapshot := status.Snapshot(); snapshot.Counters != (v7llamacpp.BackendBenchmarkLocalStatusCounters{}) {
+	if snapshot := status.Snapshot(); snapshot.Counters != (llamacpp.BackendBenchmarkLocalStatusCounters{}) {
 		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
 	}
 }
@@ -2521,7 +2521,7 @@ func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if metadata["backend"] != v7llamacpp.BackendName || metadata["model_id"] != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+		if metadata["backend"] != llamacpp.BackendName || metadata["model_id"] != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
 			t.Errorf("backend/model metadata = %+v", metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -2900,17 +2900,17 @@ func TestProcessOptionalV7DashboardInferenceRecordsReceiptFailureCounter(t *test
 }
 
 func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
-	t.Setenv(v7llamacpp.BackendBenchmarkFlagEnv, "1")
+	t.Setenv(llamacpp.BackendBenchmarkFlagEnv, "1")
 	oldStatus := v7BackendBenchmarkStatus
 	oldFactory := newV7LlamaCppBackendBenchmarkRunner
 	oldState := operatorRuntimeState
 	oldDiagnostics := workLoopDiagnostics
-	status := v7llamacpp.NewBackendBenchmarkLocalStatus()
-	fakeRunner := &fakeLlamaCppBackendBenchmarkRunner{snapshot: testLlamaCppBackendBenchmarkSnapshot(v7llamacpp.BenchmarkProofStatusMeasured)}
+	status := llamacpp.NewBackendBenchmarkLocalStatus()
+	fakeRunner := &fakeLlamaCppBackendBenchmarkRunner{snapshot: testLlamaCppBackendBenchmarkSnapshot(llamacpp.BenchmarkProofStatusMeasured)}
 	v7BackendBenchmarkStatus = status
 	operatorRuntimeState = nil
 	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
-	newV7LlamaCppBackendBenchmarkRunner = func() v7llamacpp.BackendBenchmarkRunner {
+	newV7LlamaCppBackendBenchmarkRunner = func() llamacpp.BackendBenchmarkRunner {
 		return fakeRunner
 	}
 	t.Cleanup(func() {
@@ -2952,13 +2952,13 @@ func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *test
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		metadata, ok := req.Metadata[v7llamacpp.BackendBenchmarkTask].(map[string]any)
+		metadata, ok := req.Metadata[llamacpp.BackendBenchmarkTask].(map[string]any)
 		if !ok {
-			t.Errorf("receipt metadata missing %q: %+v", v7llamacpp.BackendBenchmarkTask, req.Metadata)
+			t.Errorf("receipt metadata missing %q: %+v", llamacpp.BackendBenchmarkTask, req.Metadata)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if metadata["proof_status"] != v7llamacpp.BenchmarkProofStatusMeasured {
+		if metadata["proof_status"] != llamacpp.BenchmarkProofStatusMeasured {
 			t.Errorf("proof_status = %v", metadata["proof_status"])
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -3424,12 +3424,12 @@ func TestProcessOptionalV7ModelBenchmarkNormalJobDoesNotRecordStatus(t *testing.
 }
 
 type fakeLlamaCppBackendBenchmarkRunner struct {
-	snapshot v7llamacpp.BenchmarkStatusSnapshot
-	configs  []v7llamacpp.BenchmarkConfig
+	snapshot llamacpp.BenchmarkStatusSnapshot
+	configs  []llamacpp.BenchmarkConfig
 	calls    int
 }
 
-func (f *fakeLlamaCppBackendBenchmarkRunner) Run(_ context.Context, config v7llamacpp.BenchmarkConfig) v7llamacpp.BenchmarkStatusSnapshot {
+func (f *fakeLlamaCppBackendBenchmarkRunner) Run(_ context.Context, config llamacpp.BenchmarkConfig) llamacpp.BenchmarkStatusSnapshot {
 	f.calls++
 	f.configs = append(f.configs, config)
 	return f.snapshot
@@ -3437,11 +3437,11 @@ func (f *fakeLlamaCppBackendBenchmarkRunner) Run(_ context.Context, config v7lla
 
 func testLlamaCppBackendBenchmarkSpecJSON(t *testing.T) string {
 	t.Helper()
-	spec := v7llamacpp.BackendBenchmarkSpec{
-		Task:            v7llamacpp.BackendBenchmarkTask,
+	spec := llamacpp.BackendBenchmarkSpec{
+		Task:            llamacpp.BackendBenchmarkTask,
 		RequestID:       "request-llamacpp-backend-local",
 		JobID:           "job-llamacpp-backend-local",
-		Backend:         v7llamacpp.BackendName,
+		Backend:         llamacpp.BackendName,
 		ModelID:         "tinyllama.Q4_K_M.gguf",
 		MaxTokens:       16,
 		WarmupRuns:      1,
@@ -3456,25 +3456,25 @@ func testLlamaCppBackendBenchmarkSpecJSON(t *testing.T) string {
 	return string(encoded)
 }
 
-func testLlamaCppBackendBenchmarkSnapshot(proofStatus string) v7llamacpp.BenchmarkStatusSnapshot {
-	available := proofStatus == v7llamacpp.BenchmarkProofStatusMeasured
+func testLlamaCppBackendBenchmarkSnapshot(proofStatus string) llamacpp.BenchmarkStatusSnapshot {
+	available := proofStatus == llamacpp.BenchmarkProofStatusMeasured
 	outputHash := testSHA256ObjectID("secret llama output")
 	outputBytes := int64(len("secret llama output"))
-	status := v7llamacpp.BenchmarkStatusCompleted
+	status := llamacpp.BenchmarkStatusCompleted
 	if !available {
 		outputHash = ""
 		outputBytes = 0
-		status = v7llamacpp.BenchmarkStatusFailed
+		status = llamacpp.BenchmarkStatusFailed
 	}
-	return v7llamacpp.BenchmarkStatusSnapshot{
+	return llamacpp.BenchmarkStatusSnapshot{
 		LastRunAt: time.Unix(1_800_000_001, 0),
 		Status:    status,
-		Metrics: v7llamacpp.BenchmarkMetrics{
+		Metrics: llamacpp.BenchmarkMetrics{
 			Available:        available,
 			SidecarHealthy:   available,
 			ModelLoaded:      available,
 			ModelID:          "tinyllama.Q4_K_M.gguf",
-			PromptHash:       v7llamacpp.HashBenchmarkPrompt(),
+			PromptHash:       llamacpp.HashBenchmarkPrompt(),
 			OutputHash:       outputHash,
 			OutputBytes:      outputBytes,
 			WarmupRuns:       1,
@@ -3490,8 +3490,8 @@ func testLlamaCppBackendBenchmarkSnapshot(proofStatus string) v7llamacpp.Benchma
 			TokensGenerated:  16,
 			PromptTokens:     8,
 			CompletionTokens: 16,
-			Backend:          v7llamacpp.BackendName,
-			RuntimeKind:      v7llamacpp.BackendName,
+			Backend:          llamacpp.BackendName,
+			RuntimeKind:      llamacpp.BackendName,
 			Acceleration:     "cpu",
 			ProofStatus:      proofStatus,
 			Streaming:        true,
@@ -3522,10 +3522,10 @@ func testBackendInferenceBenchmarkSpecJSON(t *testing.T) string {
 		RequestID:       "request-backend-inference-local",
 		BenchmarkID:     "benchmark-backend-inference-local",
 		JobID:           "job-backend-inference-local",
-		Backend:         v7llamacpp.BackendName,
+		Backend:         llamacpp.BackendName,
 		ModelID:         "tinyllama.Q4_K_M.gguf",
 		TargetNodeID:    "node-backend-inference-local",
-		PromptHash:      v7llamacpp.HashBenchmarkPrompt(),
+		PromptHash:      llamacpp.HashBenchmarkPrompt(),
 		PromptProfileID: v7inferencebench.BenchmarkPromptProfileID,
 		MaxTokens:       16,
 		TimeoutMs:       30_000,
@@ -3544,10 +3544,10 @@ func testBackendInferenceBenchmarkResult(proofStatus string) v7inferencebench.Be
 		RequestID:       "request-backend-inference-local",
 		BenchmarkID:     "benchmark-backend-inference-local",
 		JobID:           "job-backend-inference-local",
-		Backend:         v7llamacpp.BackendName,
+		Backend:         llamacpp.BackendName,
 		ModelID:         "tinyllama.Q4_K_M.gguf",
 		TargetNodeID:    "node-backend-inference-local",
-		PromptHash:      v7llamacpp.HashBenchmarkPrompt(),
+		PromptHash:      llamacpp.HashBenchmarkPrompt(),
 		PromptProfileID: v7inferencebench.BenchmarkPromptProfileID,
 		MaxTokens:       16,
 		TimeoutMs:       30_000,
@@ -3555,9 +3555,9 @@ func testBackendInferenceBenchmarkResult(proofStatus string) v7inferencebench.Be
 	}
 	result := v7inferencebench.BenchmarkExecutionResult{
 		Spec:            spec,
-		Backend:         v7llamacpp.BackendName,
+		Backend:         llamacpp.BackendName,
 		ModelID:         "tinyllama.Q4_K_M.gguf",
-		PromptHash:      v7llamacpp.HashBenchmarkPrompt(),
+		PromptHash:      llamacpp.HashBenchmarkPrompt(),
 		OutputHash:      testSHA256ObjectID("secret measured output"),
 		OutputBytes:     int64(len("secret measured output")),
 		TokensGenerated: 12,
@@ -3650,7 +3650,7 @@ func testDashboardInferenceSpecJSON(t *testing.T) string {
 		RequestID:       "dashboardinfer_request",
 		RunID:           "dashboardinfer_run",
 		JobID:           "v7dashboardinfer_job",
-		Backend:         v7llamacpp.BackendName,
+		Backend:         llamacpp.BackendName,
 		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
 		TargetNodeID:    "node-dashboard-local",
 		MaxTokens:       32,
@@ -3671,7 +3671,7 @@ func testDashboardInferenceTextSpecJSON(t *testing.T) string {
 		RequestID:       "dashboardinfer_request",
 		RunID:           "dashboardinfer_run",
 		JobID:           "v7dashboardinfer_job",
-		Backend:         v7llamacpp.BackendName,
+		Backend:         llamacpp.BackendName,
 		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
 		TargetNodeID:    "node-dashboard-local",
 		Prompt:          "private dashboard prompt",
@@ -3694,7 +3694,7 @@ func testDashboardInferenceResult(proofStatus string) v7dashboardinference.Execu
 		RequestID:       "dashboardinfer_request",
 		RunID:           "dashboardinfer_run",
 		JobID:           "v7dashboardinfer_job",
-		Backend:         v7llamacpp.BackendName,
+		Backend:         llamacpp.BackendName,
 		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
 		TargetNodeID:    "node-dashboard-local",
 		MaxTokens:       32,
@@ -3703,7 +3703,7 @@ func testDashboardInferenceResult(proofStatus string) v7dashboardinference.Execu
 	}
 	result := v7dashboardinference.ExecutionResult{
 		Spec:            spec,
-		Backend:         v7llamacpp.BackendName,
+		Backend:         llamacpp.BackendName,
 		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
 		OutputHash:      testSHA256ObjectID("dashboard measured output"),
 		OutputBytes:     int64(len("dashboard measured output")),

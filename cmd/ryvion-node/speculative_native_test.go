@@ -10,10 +10,10 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	llamacppdemo "github.com/Ryvion/ryvion-node/internal/inference/speculative/verify/llamacpp_demo"
 	sglangverify "github.com/Ryvion/ryvion-node/internal/inference/speculative/verify/sglang"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 )
 
-func TestDecodeForesightNativeDraftSpecBuildsPackets(t *testing.T) {
+func TestDecodeSpeculativeNativeDraftSpecBuildsPackets(t *testing.T) {
 	specJSON := `{
 		"task":"draft_runner_v8",
 		"draft_backend":"native_bridge",
@@ -29,14 +29,14 @@ func TestDecodeForesightNativeDraftSpecBuildsPackets(t *testing.T) {
 		"model_hash":"sha256:model",
 		"drafter_model_id":"native-test"
 	}`
-	spec, ok := decodeForesightNativeDraftSpec(specJSON)
+	spec, ok := decodeSpeculativeNativeDraftSpec(specJSON)
 	if !ok {
-		t.Fatal("decodeForesightNativeDraftSpec ok = false")
+		t.Fatal("decodeSpeculativeNativeDraftSpec ok = false")
 	}
-	if spec.DraftBackend != foresightDraftBackendNative {
-		t.Fatalf("DraftBackend = %q, want %q", spec.DraftBackend, foresightDraftBackendNative)
+	if spec.DraftBackend != speculativeDraftBackendNative {
+		t.Fatalf("DraftBackend = %q, want %q", spec.DraftBackend, speculativeDraftBackendNative)
 	}
-	packets := buildForesightNativeDraftPackets(spec)
+	packets := buildSpeculativeNativeDraftPackets(spec)
 	if len(packets) != 3 {
 		t.Fatalf("len(packets) = %d, want 3", len(packets))
 	}
@@ -61,7 +61,7 @@ func TestDecodeForesightNativeDraftSpecBuildsPackets(t *testing.T) {
 	}
 }
 
-func TestDecodeForesightNativeVerifierSpecAcceptsTree(t *testing.T) {
+func TestDecodeSpeculativeNativeVerifierSpecAcceptsTree(t *testing.T) {
 	specJSON := `{
 		"task":"verifier_session_v8",
 		"tree":{
@@ -72,12 +72,12 @@ func TestDecodeForesightNativeVerifierSpecAcceptsTree(t *testing.T) {
 			]
 		}
 	}`
-	accepted, treeCID, backend, ok := decodeForesightNativeVerifierSpec(specJSON)
+	accepted, treeCID, backend, ok := decodeSpeculativeNativeVerifierSpec(specJSON)
 	if !ok {
-		t.Fatal("decodeForesightNativeVerifierSpec ok = false")
+		t.Fatal("decodeSpeculativeNativeVerifierSpec ok = false")
 	}
-	if backend != foresightVerifierBackendBridge {
-		t.Fatalf("backend = %q, want %q", backend, foresightVerifierBackendBridge)
+	if backend != speculativeVerifierBackendBridge {
+		t.Fatalf("backend = %q, want %q", backend, speculativeVerifierBackendBridge)
 	}
 	if accepted != 8 {
 		t.Fatalf("accepted = %d, want capped 8", accepted)
@@ -87,7 +87,7 @@ func TestDecodeForesightNativeVerifierSpecAcceptsTree(t *testing.T) {
 	}
 }
 
-func TestDecodeForesightNativeHotSessionSpecPreservesNativeSGLangFields(t *testing.T) {
+func TestDecodeSpeculativeNativeHotSessionSpecPreservesNativeSGLangFields(t *testing.T) {
 	specJSON := `{
 		"task":"verifier_session_v8_hot",
 		"executor_kind":"native_report",
@@ -101,36 +101,36 @@ func TestDecodeForesightNativeHotSessionSpecPreservesNativeSGLangFields(t *testi
 		"model_path":"/models/nemotron",
 		"max_tokens":128
 	}`
-	spec, ok := decodeForesightNativeHotSessionSpec(specJSON, foresightVerifierHotSessionTask)
+	spec, ok := decodeSpeculativeNativeHotSessionSpec(specJSON, speculativeVerifierHotSessionTask)
 	if !ok {
-		t.Fatal("decodeForesightNativeHotSessionSpec ok = false")
+		t.Fatal("decodeSpeculativeNativeHotSessionSpec ok = false")
 	}
-	if spec.VerifierBackend != foresightVerifierBackendSGLang {
-		t.Fatalf("VerifierBackend = %q, want %q", spec.VerifierBackend, foresightVerifierBackendSGLang)
+	if spec.VerifierBackend != speculativeVerifierBackendSGLang {
+		t.Fatalf("VerifierBackend = %q, want %q", spec.VerifierBackend, speculativeVerifierBackendSGLang)
 	}
 	if spec.ModelPath != "/models/nemotron" {
 		t.Fatalf("ModelPath = %q", spec.ModelPath)
 	}
-	if foresightVerifierBackendKind(spec.VerifierBackend) != foresightVerifierBackendSGLang {
+	if speculativeVerifierBackendKind(spec.VerifierBackend) != speculativeVerifierBackendSGLang {
 		t.Fatalf("verifier backend kind did not select native SGLang")
 	}
 }
 
-func TestForesightVerifierBackendKindAcceptsNativeLlamaCpp(t *testing.T) {
+func TestSpeculativeVerifierBackendKindAcceptsNativeLlamaCpp(t *testing.T) {
 	for _, backend := range []string{"native_llamacpp", "llamacpp", "llama.cpp", "llama_cpp"} {
-		if got := foresightVerifierBackendKind(backend); got != foresightVerifierBackendLlamaCpp {
-			t.Fatalf("foresightVerifierBackendKind(%q) = %q, want %q", backend, got, foresightVerifierBackendLlamaCpp)
+		if got := speculativeVerifierBackendKind(backend); got != speculativeVerifierBackendLlamaCpp {
+			t.Fatalf("speculativeVerifierBackendKind(%q) = %q, want %q", backend, got, speculativeVerifierBackendLlamaCpp)
 		}
 	}
 }
 
-func TestRedactForesightAcceptedTextReceiptKeepsOnlyHash(t *testing.T) {
+func TestRedactSpeculativeAcceptedTextReceiptKeepsOnlyHash(t *testing.T) {
 	receipt := map[string]any{
 		"accepted_len":         3,
 		"accepted_text":        "private verifier text",
 		"accepted_text_public": true,
 	}
-	hash := redactForesightAcceptedTextReceipt(receipt)
+	hash := redactSpeculativeAcceptedTextReceipt(receipt)
 	if hash == "" || receipt["accepted_text_hash"] != hash {
 		t.Fatalf("redacted hash = %q receipt=%#v, want stable hash", hash, receipt)
 	}
@@ -147,33 +147,33 @@ func TestRedactForesightAcceptedTextReceiptKeepsOnlyHash(t *testing.T) {
 }
 
 func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
-	sidecar := &fakeForesightLlamaCppSidecar{status: v7llamacpp.LlamaCppSidecarStatus{
+	sidecar := &fakeSpeculativeLlamaCppSidecar{status: llamacpp.LlamaCppSidecarStatus{
 		Enabled:                true,
 		Available:              true,
 		Running:                true,
 		Healthy:                true,
 		BaseURL:                "http://127.0.0.1:45910",
 		ModelFilename:          "tinyllama.Q4_K_M.gguf",
-		Backend:                v7llamacpp.BackendName,
+		Backend:                llamacpp.BackendName,
 		OpenAICompatible:       true,
 		SupportsTextGeneration: true,
 		SupportsStreaming:      true,
 	}}
-	client := &fakeForesightLlamaCppCompletionClient{result: v7llamacpp.CompletionResult{
+	client := &fakeSpeculativeLlamaCppCompletionClient{result: llamacpp.CompletionResult{
 		Output:                   []byte("Verified local text."),
 		OutputBytes:              int64(len("Verified local text.")),
 		TokensGenerated:          4,
 		CompletionTokens:         4,
 		RequestedMaxTokens:       8,
 		FinishReason:             "stop",
-		RuntimeMeasurementStatus: v7llamacpp.RuntimeMeasurementStatusMeasured,
-		MetadataParseStatus:      v7llamacpp.MetadataParseStatusOK,
+		RuntimeMeasurementStatus: llamacpp.RuntimeMeasurementStatusMeasured,
+		MetadataParseStatus:      llamacpp.MetadataParseStatusOK,
 		TotalTimeMs:              25,
 		Streamed:                 true,
 	}}
 	verifier := llamacppdemo.Verifier{Sidecar: sidecar, Client: client}
 
-	result, err := verifier.VerifyWave(context.Background(), foresightNativeHotSessionSpec{
+	result, err := verifier.VerifyWave(context.Background(), speculativeNativeHotSessionSpec{
 		RunID:            "flab_llama",
 		SessionID:        "sess_llama",
 		WorkGraphID:      "wg_llama",
@@ -216,7 +216,7 @@ func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
 		t.Fatalf("verifier result stop = %q eos=%v, want non-terminal for llama.cpp finish_reason=stop", result.StopReason, result.EOS)
 	}
 	if result.ProbeSummary["source"] != "llamacpp_demo_verifier" ||
-		result.ProbeSummary["backend"] != v7llamacpp.BackendName ||
+		result.ProbeSummary["backend"] != llamacpp.BackendName ||
 		result.ProbeSummary["output_hash"] == "" {
 		t.Fatalf("probe summary = %#v, want llama.cpp measured metadata", result.ProbeSummary)
 	}
@@ -228,33 +228,33 @@ func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
 func TestNativeLlamaCppLabStopReasonKeepsBackendStopSeparateFromLabStop(t *testing.T) {
 	tests := []struct {
 		name       string
-		completion v7llamacpp.CompletionResult
+		completion llamacpp.CompletionResult
 		wantReason string
 		wantEOS    bool
 	}{
 		{
 			name:       "backend stop is not lab eos",
-			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonStop},
+			completion: llamacpp.CompletionResult{FinishReason: llamacpp.FinishReasonStop},
 		},
 		{
 			name:       "length maps to max tokens",
-			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonLength},
+			completion: llamacpp.CompletionResult{FinishReason: llamacpp.FinishReasonLength},
 			wantReason: "max_tokens",
 		},
 		{
 			name:       "max tokens flag wins",
-			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonStop, MaxTokensReached: true},
+			completion: llamacpp.CompletionResult{FinishReason: llamacpp.FinishReasonStop, MaxTokensReached: true},
 			wantReason: "max_tokens",
 		},
 		{
 			name:       "explicit eos remains terminal",
-			completion: v7llamacpp.CompletionResult{BackendStopReason: "eos"},
+			completion: llamacpp.CompletionResult{BackendStopReason: "eos"},
 			wantReason: "eos",
 			wantEOS:    true,
 		},
 		{
 			name:       "timeout remains terminal",
-			completion: v7llamacpp.CompletionResult{FinishReason: v7llamacpp.FinishReasonTimeout},
+			completion: llamacpp.CompletionResult{FinishReason: llamacpp.FinishReasonTimeout},
 			wantReason: "timeout",
 		},
 	}
@@ -270,16 +270,16 @@ func TestNativeLlamaCppLabStopReasonKeepsBackendStopSeparateFromLabStop(t *testi
 }
 
 func TestNativeLlamaCppVerifierUnavailableDoesNotUseDeterministicCPUFallback(t *testing.T) {
-	sidecar := &fakeForesightLlamaCppSidecar{status: v7llamacpp.LlamaCppSidecarStatus{
+	sidecar := &fakeSpeculativeLlamaCppSidecar{status: llamacpp.LlamaCppSidecarStatus{
 		Enabled:   true,
 		Available: false,
-		Backend:   v7llamacpp.BackendName,
+		Backend:   llamacpp.BackendName,
 		Reason:    "llama-server binary not detected",
 	}}
-	client := &fakeForesightLlamaCppCompletionClient{}
+	client := &fakeSpeculativeLlamaCppCompletionClient{}
 	verifier := llamacppdemo.Verifier{Sidecar: sidecar, Client: client}
 
-	_, err := verifier.VerifyWave(context.Background(), foresightNativeHotSessionSpec{
+	_, err := verifier.VerifyWave(context.Background(), speculativeNativeHotSessionSpec{
 		RunID:       "flab_llama",
 		WorkGraphID: "wg_llama",
 		ModelID:     "tinyllama",
@@ -296,16 +296,16 @@ func TestNativeLlamaCppVerifierUnavailableDoesNotUseDeterministicCPUFallback(t *
 	}
 }
 
-func TestForesightNativeExternalRuntimeRequestedSkipsManagedOCI(t *testing.T) {
+func TestSpeculativeNativeExternalRuntimeRequestedSkipsManagedOCI(t *testing.T) {
 	work := &hub.WorkAssignment{
 		Image:        "ghcr.io/ryvion/ryvion-verifier-sglang:0.1.0",
 		ExecutorKind: executorKindManagedOCI,
 	}
-	if !foresightNativeExternalRuntimeRequested(work, executorKindManagedOCI, work.Image, true) {
+	if !speculativeNativeExternalRuntimeRequested(work, executorKindManagedOCI, work.Image, true) {
 		t.Fatal("managed OCI verifier job should not be claimed by native CPU bridge")
 	}
 	nativeWork := &hub.WorkAssignment{Image: executorKindNativeReport, ExecutorKind: executorKindNativeReport}
-	if foresightNativeExternalRuntimeRequested(nativeWork, executorKindNativeReport, "", false) {
+	if speculativeNativeExternalRuntimeRequested(nativeWork, executorKindNativeReport, "", false) {
 		t.Fatal("native report job should be claimable by native speculative handlers")
 	}
 }
@@ -321,30 +321,30 @@ func TestResolveNativeSGLangVerifierCommandFromEnv(t *testing.T) {
 	}
 }
 
-type fakeForesightLlamaCppSidecar struct {
-	status  v7llamacpp.LlamaCppSidecarStatus
+type fakeSpeculativeLlamaCppSidecar struct {
+	status  llamacpp.LlamaCppSidecarStatus
 	started bool
 }
 
-func (f *fakeForesightLlamaCppSidecar) Start(context.Context) v7llamacpp.LlamaCppSidecarStatus {
+func (f *fakeSpeculativeLlamaCppSidecar) Start(context.Context) llamacpp.LlamaCppSidecarStatus {
 	f.started = true
 	return f.status
 }
 
-func (f *fakeForesightLlamaCppSidecar) Status(context.Context) v7llamacpp.LlamaCppSidecarStatus {
+func (f *fakeSpeculativeLlamaCppSidecar) Status(context.Context) llamacpp.LlamaCppSidecarStatus {
 	return f.status
 }
 
-type fakeForesightLlamaCppCompletionClient struct {
-	result   v7llamacpp.CompletionResult
+type fakeSpeculativeLlamaCppCompletionClient struct {
+	result   llamacpp.CompletionResult
 	err      error
-	requests []v7llamacpp.CompletionRequest
+	requests []llamacpp.CompletionRequest
 }
 
-func (f *fakeForesightLlamaCppCompletionClient) Complete(_ context.Context, req v7llamacpp.CompletionRequest) (v7llamacpp.CompletionResult, error) {
+func (f *fakeSpeculativeLlamaCppCompletionClient) Complete(_ context.Context, req llamacpp.CompletionRequest) (llamacpp.CompletionResult, error) {
 	f.requests = append(f.requests, req)
 	if f.err != nil {
-		return v7llamacpp.CompletionResult{}, f.err
+		return llamacpp.CompletionResult{}, f.err
 	}
 	return f.result, nil
 }

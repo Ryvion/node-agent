@@ -21,14 +21,14 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
+	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
 	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
-	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
 	v7modelcache "github.com/Ryvion/ryvion-node/internal/v7/modelcache"
-	v7sglang "github.com/Ryvion/ryvion-node/internal/v7/sglang"
 	v8energyplane "github.com/Ryvion/ryvion-node/internal/v8/energyplane"
 )
 
@@ -597,7 +597,7 @@ func TestOperatorStatusIncludesCapabilityProfile(t *testing.T) {
 }
 
 func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
-	t.Setenv(v7llamacpp.EnvKeepWarm, "0")
+	t.Setenv(llamacpp.EnvKeepWarm, "0")
 
 	port := freeOperatorAPITestPort(t)
 	state := &operatorRuntime{
@@ -605,10 +605,10 @@ func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
 		hubURL:       "https://api.ryvion.ai",
 		deviceType:   "gpu",
 		publicKeyHex: "abc123",
-		llamaCppSidecar: v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
+		llamaCppSidecar: llamacpp.NewManager(llamacpp.LlamaCppSidecarConfig{
 			Enabled: false,
-			Host:    v7llamacpp.DefaultHost,
-			Port:    v7llamacpp.DefaultPort,
+			Host:    llamacpp.DefaultHost,
+			Port:    llamacpp.DefaultPort,
 		}),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -626,7 +626,7 @@ func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
 	if status.LlamaCPPSidecar.KeepWarmEnabled ||
 		status.LlamaCPPSidecar.RestartCount != 0 ||
 		status.LlamaCPPSidecar.LastKeepWarmError != "" ||
-		status.LlamaCPPSidecar.RestartBackoffSeconds != int(v7llamacpp.DefaultRestartBackoff/time.Second) {
+		status.LlamaCPPSidecar.RestartBackoffSeconds != int(llamacpp.DefaultRestartBackoff/time.Second) {
 		t.Fatalf("llama_cpp_sidecar keepwarm fields = %+v, want disabled defaults", status.LlamaCPPSidecar)
 	}
 	if status.BackendRuntimes.LlamaCPP.Running ||
@@ -635,10 +635,10 @@ func TestOperatorAPIStatusEndpointIncludesLlamaCppSidecar(t *testing.T) {
 		status.BackendRuntimes.LlamaCPP.Warm {
 		t.Fatalf("backend_runtimes.llama_cpp = %+v, want no active loaded sidecar", status.BackendRuntimes.LlamaCPP)
 	}
-	if status.BackendRuntimes.LlamaCPP.Backend != v7llamacpp.BackendName || status.BackendRuntimes.LlamaCPP.Health == "" {
+	if status.BackendRuntimes.LlamaCPP.Backend != llamacpp.BackendName || status.BackendRuntimes.LlamaCPP.Health == "" {
 		t.Fatalf("backend_runtimes.llama_cpp missing backend health metadata: %+v", status.BackendRuntimes.LlamaCPP)
 	}
-	if status.LlamaCPPSidecar.Backend != v7llamacpp.BackendName ||
+	if status.LlamaCPPSidecar.Backend != llamacpp.BackendName ||
 		!status.LlamaCPPSidecar.OpenAICompatible ||
 		!status.LlamaCPPSidecar.SupportsTextGeneration ||
 		!status.LlamaCPPSidecar.SupportsStreaming ||
@@ -711,10 +711,10 @@ func TestOperatorAPIStatusEndpointIncludesSGLangSidecar(t *testing.T) {
 		hubURL:       "https://api.ryvion.ai",
 		deviceType:   "gpu",
 		publicKeyHex: "abc123",
-		sglangSidecar: v7sglang.NewManager(v7sglang.SGLangSidecarConfig{
+		sglangSidecar: sglang.NewManager(sglang.SGLangSidecarConfig{
 			Enabled: false,
-			Host:    v7sglang.DefaultHost,
-			Port:    v7sglang.DefaultPort,
+			Host:    sglang.DefaultHost,
+			Port:    sglang.DefaultPort,
 		}),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -729,10 +729,10 @@ func TestOperatorAPIStatusEndpointIncludesSGLangSidecar(t *testing.T) {
 	if status.SGLangSidecar.Enabled || status.SGLangSidecar.Running || status.SGLangSidecar.Healthy {
 		t.Fatalf("sglang_sidecar = %+v, want disabled stopped", status.SGLangSidecar)
 	}
-	if status.BackendRuntimes.SGLang.Backend != v7sglang.BackendName || status.BackendRuntimes.SGLang.Health == "" {
+	if status.BackendRuntimes.SGLang.Backend != sglang.BackendName || status.BackendRuntimes.SGLang.Health == "" {
 		t.Fatalf("backend_runtimes.sglang missing backend health metadata: %+v", status.BackendRuntimes.SGLang)
 	}
-	if status.SGLangSidecar.Backend != v7sglang.BackendName ||
+	if status.SGLangSidecar.Backend != sglang.BackendName ||
 		!status.SGLangSidecar.OpenAICompatible ||
 		!status.SGLangSidecar.SupportsTextGeneration ||
 		!status.SGLangSidecar.SupportsStreaming ||
@@ -804,10 +804,10 @@ func TestOperatorStatusAndHeartbeatPreviewUseSameBackendRuntimeBuilder(t *testin
 			CPUCores: 4,
 			RAMBytes: 8 << 30,
 		},
-		llamaCppSidecar: v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
+		llamaCppSidecar: llamacpp.NewManager(llamacpp.LlamaCppSidecarConfig{
 			Enabled: false,
-			Host:    v7llamacpp.DefaultHost,
-			Port:    v7llamacpp.DefaultPort,
+			Host:    llamacpp.DefaultHost,
+			Port:    llamacpp.DefaultPort,
 		}),
 	}
 
@@ -831,10 +831,10 @@ func TestOperatorAPILlamaCppEndpointsDisabledSafe(t *testing.T) {
 		hubURL:       "https://api.ryvion.ai",
 		deviceType:   "gpu",
 		publicKeyHex: "abc123",
-		llamaCppSidecar: v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
+		llamaCppSidecar: llamacpp.NewManager(llamacpp.LlamaCppSidecarConfig{
 			Enabled: false,
-			Host:    v7llamacpp.DefaultHost,
-			Port:    v7llamacpp.DefaultPort,
+			Host:    llamacpp.DefaultHost,
+			Port:    llamacpp.DefaultPort,
 		}),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -853,7 +853,7 @@ func TestOperatorAPILlamaCppEndpointsDisabledSafe(t *testing.T) {
 		} else {
 			body = postOperatorAPITestJSON(t, port, path, nil)
 		}
-		var status v7llamacpp.LlamaCppSidecarStatus
+		var status llamacpp.LlamaCppSidecarStatus
 		if err := json.Unmarshal(body, &status); err != nil {
 			t.Fatalf("decode %s response: %v\nbody: %s", path, err, body)
 		}
@@ -870,10 +870,10 @@ func TestOperatorAPISGLangEndpointsDisabledSafe(t *testing.T) {
 		hubURL:       "https://api.ryvion.ai",
 		deviceType:   "gpu",
 		publicKeyHex: "abc123",
-		sglangSidecar: v7sglang.NewManager(v7sglang.SGLangSidecarConfig{
+		sglangSidecar: sglang.NewManager(sglang.SGLangSidecarConfig{
 			Enabled: false,
-			Host:    v7sglang.DefaultHost,
-			Port:    v7sglang.DefaultPort,
+			Host:    sglang.DefaultHost,
+			Port:    sglang.DefaultPort,
 		}),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -892,7 +892,7 @@ func TestOperatorAPISGLangEndpointsDisabledSafe(t *testing.T) {
 		} else {
 			body = postOperatorAPITestJSON(t, port, path, nil)
 		}
-		var status v7sglang.SGLangSidecarStatus
+		var status sglang.SGLangSidecarStatus
 		if err := json.Unmarshal(body, &status); err != nil {
 			t.Fatalf("decode %s response: %v\nbody: %s", path, err, body)
 		}
@@ -903,7 +903,7 @@ func TestOperatorAPISGLangEndpointsDisabledSafe(t *testing.T) {
 }
 
 func TestOperatorAPILlamaCppBenchmarkEndpointRecordsSafeStatus(t *testing.T) {
-	t.Setenv(v7llamacpp.EnvBenchmark, "1")
+	t.Setenv(llamacpp.EnvBenchmark, "1")
 	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
@@ -934,7 +934,7 @@ func TestOperatorAPILlamaCppBenchmarkEndpointRecordsSafeStatus(t *testing.T) {
 		deviceType:        "gpu",
 		publicKeyHex:      "abc123",
 		llamaCppSidecar:   testLlamaCppManagerForServer(t, llamaServer.URL),
-		llamaCppBenchmark: v7llamacpp.NewBenchmarkLocalStatus(),
+		llamaCppBenchmark: llamacpp.NewBenchmarkLocalStatus(),
 		v7MemoryBenchmark: v7memorybench.NewLocalStatus(),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -942,11 +942,11 @@ func TestOperatorAPILlamaCppBenchmarkEndpointRecordsSafeStatus(t *testing.T) {
 	startOperatorAPIServer(ctx, state, port)
 
 	respBody := postOperatorAPITestJSON(t, port, "/api/v1/operator/llamacpp/benchmark", []byte(`{"max_tokens":4,"warmup_runs":0,"measured_runs":1,"timeout_ms":60000}`))
-	var snapshot v7llamacpp.BenchmarkStatusSnapshot
+	var snapshot llamacpp.BenchmarkStatusSnapshot
 	if err := json.Unmarshal(respBody, &snapshot); err != nil {
 		t.Fatalf("decode benchmark response: %v\nbody: %s", err, respBody)
 	}
-	if snapshot.Status != v7llamacpp.BenchmarkStatusCompleted {
+	if snapshot.Status != llamacpp.BenchmarkStatusCompleted {
 		t.Fatalf("benchmark status = %+v, want completed", snapshot)
 	}
 	if snapshot.Metrics.PromptHash == "" || snapshot.Metrics.OutputHash == "" || snapshot.Metrics.OutputBytes == 0 {
@@ -957,7 +957,7 @@ func TestOperatorAPILlamaCppBenchmarkEndpointRecordsSafeStatus(t *testing.T) {
 	if err := json.Unmarshal(statusBody, &status); err != nil {
 		t.Fatalf("decode status: %v\nbody: %s", err, statusBody)
 	}
-	if status.LlamaCPPBenchmark.Status != v7llamacpp.BenchmarkStatusCompleted {
+	if status.LlamaCPPBenchmark.Status != llamacpp.BenchmarkStatusCompleted {
 		t.Fatalf("status llama_cpp_benchmark = %+v, want completed", status.LlamaCPPBenchmark)
 	}
 	lower := strings.ToLower(string(respBody) + string(statusBody))
@@ -1097,12 +1097,12 @@ func TestOperatorAPIDebugV7HeartbeatPreviewEndpoint(t *testing.T) {
 	}
 }
 
-func testLlamaCppManagerForServer(t *testing.T, serverURL string) *v7llamacpp.Manager {
+func testLlamaCppManagerForServer(t *testing.T, serverURL string) *llamacpp.Manager {
 	t.Helper()
 	return testLlamaCppManagerForServerModel(t, serverURL, "")
 }
 
-func testLlamaCppManagerForServerModel(t *testing.T, serverURL string, modelPath string) *v7llamacpp.Manager {
+func testLlamaCppManagerForServerModel(t *testing.T, serverURL string, modelPath string) *llamacpp.Manager {
 	t.Helper()
 	parsed, err := url.Parse(serverURL)
 	if err != nil {
@@ -1125,7 +1125,7 @@ func testLlamaCppManagerForServerModel(t *testing.T, serverURL string, modelPath
 			t.Fatalf("write model fixture: %v", err)
 		}
 	}
-	return v7llamacpp.NewManager(v7llamacpp.LlamaCppSidecarConfig{
+	return llamacpp.NewManager(llamacpp.LlamaCppSidecarConfig{
 		Enabled:    true,
 		ServerPath: serverPath,
 		ModelPath:  modelPath,
@@ -1134,7 +1134,7 @@ func testLlamaCppManagerForServerModel(t *testing.T, serverURL string, modelPath
 	})
 }
 
-func testSGLangManagerForServer(t *testing.T, serverURL string) *v7sglang.Manager {
+func testSGLangManagerForServer(t *testing.T, serverURL string) *sglang.Manager {
 	t.Helper()
 	parsed, err := url.Parse(serverURL)
 	if err != nil {
@@ -1156,7 +1156,7 @@ func testSGLangManagerForServer(t *testing.T, serverURL string) *v7sglang.Manage
 	if err := os.WriteFile(serverPath, []byte("python"), 0o755); err != nil {
 		t.Fatalf("write SGLang launcher fixture: %v", err)
 	}
-	return v7sglang.NewManager(v7sglang.SGLangSidecarConfig{
+	return sglang.NewManager(sglang.SGLangSidecarConfig{
 		Enabled:       true,
 		ServerPath:    serverPath,
 		ModelPath:     modelPath,

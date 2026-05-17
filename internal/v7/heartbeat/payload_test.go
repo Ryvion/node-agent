@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
 	"github.com/Ryvion/ryvion-node/internal/v7/capability"
 	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
 	"github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
-	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/v7/modelcache"
 	"github.com/Ryvion/ryvion-node/internal/v7/modellease"
 	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
