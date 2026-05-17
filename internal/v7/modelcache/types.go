@@ -3,7 +3,7 @@ package modelcache
 import (
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
 )
 
 const (

@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
-	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
+	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 )
 
 func TestConfigFromEnv(t *testing.T) {
@@ -63,6 +63,25 @@ func TestConfigFromEnv(t *testing.T) {
 	gotArgs := strings.Join(cfg.ExtraArgs, " ")
 	if gotArgs != "--parallel 4 --no-webui --cache-type-k q8_0" {
 		t.Fatalf("extra args = %q, want sanitized allowlist", gotArgs)
+	}
+}
+
+func TestConfigFromEnvAllowsSlotSavePathExtraArg(t *testing.T) {
+	t.Parallel()
+
+	env := map[string]string{
+		EnvEnabled:   "1",
+		EnvModel:     filepath.Join(t.TempDir(), "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
+		EnvExtraArgs: "--slot-save-path /tmp/ryvion-slots --slot-save-path ../unsafe --parallel 2",
+	}
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			return env[name]
+		},
+	})
+	gotArgs := strings.Join(cfg.ExtraArgs, " ")
+	if gotArgs != "--slot-save-path /tmp/ryvion-slots --parallel 2" {
+		t.Fatalf("extra args = %q, want safe slot save path only", gotArgs)
 	}
 }
 

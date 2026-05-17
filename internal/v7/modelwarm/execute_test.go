@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
-	"github.com/Ryvion/node-agent/internal/v7/modelcache"
-	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/v7/modelcache"
+	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
 )
 
 func TestExecuteWarmAssignmentSwitchesLlamaCppModelAndBuildsReceipt(t *testing.T) {

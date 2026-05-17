@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hub"
+	"github.com/Ryvion/ryvion-node/internal/hub"
 )
 
 const nativeSGLangVerifierExecutor = "native_sglang_verifier"
@@ -187,7 +187,11 @@ func resolveNativeSGLangVerifierCommand() (nativeSGLangCommandSpec, bool) {
 			return nativeSGLangCommandSpec{Name: python, Args: []string{script}, Original: python + " " + script}, true
 		}
 	}
-	for _, name := range []string{"ryvion-sglang-verifier-v8", "sglang-verifier-runner-v8"} {
+	for _, name := range []string{
+		"ryvion-verifier-sglang",
+		"ryvion-sglang-verifier-v8",
+		"sglang-verifier-runner-v8",
+	} {
 		if path, err := nativeSGLangLookPath(name); err == nil && strings.TrimSpace(path) != "" {
 			return nativeSGLangCommandSpec{Name: path, Original: path}, true
 		}
@@ -207,6 +211,8 @@ func bundledNativeSGLangScripts() []string {
 	if exe, err := os.Executable(); err == nil {
 		base := filepath.Dir(exe)
 		out = append(out,
+			filepath.Join(base, "runtimes", "verifier", "sglang", "run.py"),
+			filepath.Join(base, "ryvion-runtimes", "runtimes", "verifier", "sglang", "run.py"),
 			filepath.Join(base, "sglang-verifier-runner-v8", "run.py"),
 			filepath.Join(base, "runners", "sglang-verifier-runner-v8", "run.py"),
 			filepath.Join(base, "resources", "sglang-verifier-runner-v8", "run.py"),

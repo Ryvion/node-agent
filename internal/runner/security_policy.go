@@ -190,7 +190,7 @@ func agentCosignIdentityRegex() string {
 	if raw := strings.TrimSpace(os.Getenv("RYV_AGENT_COSIGN_IDENTITY_REGEX")); raw != "" {
 		return raw
 	}
-	return `^https://github\.com/Ryvion/runners/\.github/workflows/build\.yml@refs/(heads/main|tags/.+)$`
+	return `^https://github\.com/Ryvion/ryvion-runtimes/\.github/workflows/build\.yml@refs/(heads/main|tags/.+)$`
 }
 
 func agentCosignOIDCIssuer() string {

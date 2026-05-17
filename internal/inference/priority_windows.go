@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	modkernel32         = syscall.NewLazyDLL("kernel32.dll")
+	modkernel32          = syscall.NewLazyDLL("kernel32.dll")
 	procSetPriorityClass = modkernel32.NewProc("SetPriorityClass")
 	procOpenProcess      = modkernel32.NewProc("OpenProcess")
 	procCloseHandle      = modkernel32.NewProc("CloseHandle")

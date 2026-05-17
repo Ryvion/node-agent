@@ -9,8 +9,8 @@ import (
 	"strings"
 	"unicode"
 
-	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
-	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
+	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 )
 
 const maxConfigTextLen = 1024

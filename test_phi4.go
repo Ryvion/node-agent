@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/inference"
+	"github.com/Ryvion/ryvion-node/internal/inference"
 )
 
 func main() {

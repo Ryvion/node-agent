@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Ryvion/node-agent/internal/v7/localcas"
+	"github.com/Ryvion/ryvion-node/internal/v7/localcas"
 )
 
 func TestBuildCacheAdvertisementFromCAS(t *testing.T) {

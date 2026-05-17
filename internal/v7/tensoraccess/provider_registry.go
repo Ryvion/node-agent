@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Ryvion/node-agent/internal/v7/tensorplane"
+	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 
 const TensorAccessProviderEnv = "RYV_TENSOR_ACCESS_PROVIDER"

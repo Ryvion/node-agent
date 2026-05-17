@@ -11,8 +11,8 @@ import (
 	"time"
 	"unicode"
 
-	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
-	"github.com/Ryvion/node-agent/internal/v7/runtimeinventory"
+	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 )
 
 const maxConfigTextLen = 1024
@@ -425,11 +425,12 @@ func sanitizeExtraArgs(raw string) []string {
 		"--override-kv-cache": true,
 	}
 	withValue := map[string]func(string) bool{
-		"--batch-size":   positiveIntToken,
-		"--cache-type-k": cacheTypeToken,
-		"--cache-type-v": cacheTypeToken,
-		"--parallel":     positiveIntToken,
-		"--ubatch-size":  positiveIntToken,
+		"--batch-size":     positiveIntToken,
+		"--cache-type-k":   cacheTypeToken,
+		"--cache-type-v":   cacheTypeToken,
+		"--parallel":       positiveIntToken,
+		"--slot-save-path": slotSavePathToken,
+		"--ubatch-size":    positiveIntToken,
 	}
 
 	out := make([]string, 0, len(fields))
@@ -470,6 +471,14 @@ func cacheTypeToken(value string) bool {
 	default:
 		return false
 	}
+}
+
+func slotSavePathToken(value string) bool {
+	value = cleanArgToken(value)
+	if value == "" || strings.Contains(value, "..") {
+		return false
+	}
+	return strings.Contains(value, "/") || strings.HasPrefix(strings.ToLower(value), "ryvion")
 }
 
 func cleanArgToken(value string) string {

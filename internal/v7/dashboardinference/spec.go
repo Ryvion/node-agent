@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Ryvion/node-agent/internal/v7/inferenceconfig"
-	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
+	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
 
 const (
@@ -31,6 +31,11 @@ const (
 	maxMessages           = 32
 	maxMaxTokens          = 8192
 	maxStatusErrLen       = 512
+	maxSessionIDLen       = 256
+	maxCacheStateIDLen    = 256
+	maxSlotID             = 1024
+	maxCacheReuseTokens   = 1_000_000
+	maxAffinityTTLSeconds = 24 * 60 * 60
 )
 
 var ErrInvalidSpec = errors.New("dashboardinference: invalid spec")
@@ -57,6 +62,20 @@ type Spec struct {
 	CreatedAtUnixMs           int64                        `json:"created_at_unix_ms"`
 	PromptHash                string                       `json:"prompt_hash,omitempty"`
 	PromptProfileID           string                       `json:"prompt_profile_id,omitempty"`
+	CachePolicy               CachePolicy                  `json:"cache_policy,omitempty"`
+}
+
+type CachePolicy struct {
+	SessionID            string `json:"session_id,omitempty"`
+	PrefixHash           string `json:"prefix_hash,omitempty"`
+	CachePrompt          bool   `json:"cache_prompt,omitempty"`
+	CacheReuseTokens     int    `json:"cache_reuse_tokens,omitempty"`
+	SlotID               *int   `json:"slot_id,omitempty"`
+	SaveSlotAfterRun     bool   `json:"save_slot_after_run,omitempty"`
+	RestoreSlotBeforeRun bool   `json:"restore_slot_before_run,omitempty"`
+	CacheStateID         string `json:"cache_state_id,omitempty"`
+	PreferredNodeID      string `json:"preferred_node_id,omitempty"`
+	AffinityTTLSeconds   int    `json:"affinity_ttl_seconds,omitempty"`
 }
 
 type AssignmentIdentity struct {
@@ -192,6 +211,9 @@ func ValidateSpec(spec Spec) error {
 			errs = append(errs, err)
 		}
 	}
+	if err := validateCachePolicy(spec.CachePolicy); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
@@ -215,7 +237,59 @@ func normalizeSpec(spec Spec) Spec {
 	}
 	spec.PromptHash = strings.TrimSpace(spec.PromptHash)
 	spec.PromptProfileID = cleanText(spec.PromptProfileID, maxIDLen)
+	spec.CachePolicy = normalizeCachePolicy(spec.CachePolicy)
 	return spec
+}
+
+func normalizeCachePolicy(policy CachePolicy) CachePolicy {
+	policy.SessionID = cleanText(policy.SessionID, maxSessionIDLen)
+	policy.PrefixHash = strings.TrimSpace(policy.PrefixHash)
+	policy.CacheStateID = cleanCacheStateID(policy.CacheStateID)
+	policy.PreferredNodeID = cleanText(policy.PreferredNodeID, maxIDLen)
+	if policy.CacheReuseTokens < 0 {
+		policy.CacheReuseTokens = 0
+	}
+	if policy.CacheReuseTokens > maxCacheReuseTokens {
+		policy.CacheReuseTokens = maxCacheReuseTokens
+	}
+	if policy.AffinityTTLSeconds < 0 {
+		policy.AffinityTTLSeconds = 0
+	}
+	if policy.AffinityTTLSeconds > maxAffinityTTLSeconds {
+		policy.AffinityTTLSeconds = maxAffinityTTLSeconds
+	}
+	if policy.SlotID != nil {
+		slotID := *policy.SlotID
+		if slotID < 0 || slotID > maxSlotID {
+			policy.SlotID = nil
+		} else {
+			policy.SlotID = &slotID
+		}
+	}
+	if policy.CachePrompt && policy.AffinityTTLSeconds == 0 && policy.SessionID != "" {
+		policy.AffinityTTLSeconds = 10 * 60
+	}
+	return policy
+}
+
+func validateCachePolicy(policy CachePolicy) error {
+	policy = normalizeCachePolicy(policy)
+	var errs []error
+	if policy.PrefixHash != "" {
+		if err := validateSHA256ID(policy.PrefixHash, "cache_policy.prefix_hash", ErrInvalidSpec); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if policy.CacheStateID != "" && cleanCacheStateID(policy.CacheStateID) != policy.CacheStateID {
+		errs = append(errs, fmt.Errorf("%w: cache_policy.cache_state_id contains unsafe characters", ErrInvalidSpec))
+	}
+	if policy.SlotID != nil && (*policy.SlotID < 0 || *policy.SlotID > maxSlotID) {
+		errs = append(errs, fmt.Errorf("%w: cache_policy.slot_id out of range", ErrInvalidSpec))
+	}
+	if policy.CacheReuseTokens < 0 || policy.CacheReuseTokens > maxCacheReuseTokens {
+		errs = append(errs, fmt.Errorf("%w: cache_policy.cache_reuse_tokens out of range", ErrInvalidSpec))
+	}
+	return errors.Join(errs...)
 }
 
 func normalizeSpecMessages(messages []llamacpp.CompletionMessage) []llamacpp.CompletionMessage {
@@ -309,4 +383,25 @@ func cleanPath(value string, maxRunes int) string {
 		return value
 	}
 	return string(runes[:maxRunes])
+}
+
+func cleanCacheStateID(value string) string {
+	value = cleanText(value, maxCacheStateIDLen)
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-' || r == '.' || r == ':':
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }

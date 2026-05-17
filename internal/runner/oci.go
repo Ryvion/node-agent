@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 )
 
 type Result struct {

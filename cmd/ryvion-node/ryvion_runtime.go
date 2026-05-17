@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/blob"
-	"github.com/Ryvion/node-agent/internal/hub"
-	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/ryvion-node/internal/blob"
+	"github.com/Ryvion/ryvion-node/internal/hub"
+	"github.com/Ryvion/ryvion-node/internal/hw"
 )
 
 const (

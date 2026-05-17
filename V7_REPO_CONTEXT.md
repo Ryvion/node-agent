@@ -1,14 +1,14 @@
-# V7 Repo Context - node-agent
+# V7 Repo Context - ryvion-node
 
 ## V7 Positioning
 
 Ryvion V7 is a verified execution fabric and compute object web, not just a GPU marketplace. The system coordinates work, evidence, receipts, placement, and object identity across hub-controlled planning and node-local runtime capacity.
 
-The node-agent is the single-binary runtime that turns operator hardware into verified V7 execution capacity. It runs on operator machines, reports what the machine can actually do, executes approved local work, and emits evidence that the hub can bind into receipts and graph objects.
+`ryvion-node` is the single-binary runtime that turns operator hardware into verified V7 execution capacity. It runs on operator machines, reports what the machine can actually do, executes approved local work, and emits evidence that the hub can bind into receipts and graph objects.
 
 ## Node-Agent Role
 
-The node-agent should eventually support:
+`ryvion-node` should eventually support:
 
 - V7 Capability Passport
 - network profile probing
@@ -24,11 +24,11 @@ The node-agent should eventually support:
 - V7 heartbeat extension
 - consumer-friendly onboarding without Docker as a hard requirement
 
-Node-agent owns local runtime capability, evidence, and execution support. It should keep those responsibilities local and concrete: detect hardware, measure network behavior, manage resident models, run allowlisted workloads, cache content-addressed data, and report verifiable outputs to hub-orch.
+`ryvion-node` owns local runtime capability, evidence, and execution support. It should keep those responsibilities local and concrete: detect hardware, measure network behavior, manage resident models, run allowlisted workloads, cache content-addressed data, and report verifiable outputs to `ryvion-hub`.
 
-## Hub-Orch Boundary
+## Ryvion Hub Boundary
 
-hub-orch already owns the V7 control-plane systems:
+`ryvion-hub` already owns the V7 control-plane systems:
 
 - RCOG
 - RYV3GraphReceipt
@@ -48,7 +48,7 @@ hub-orch already owns the V7 control-plane systems:
 - ObjectCDN / FEC
 - Evidence frontier / audit sampler / trust certificate / formal specs
 
-Node-agent must not reimplement these hub-orch control-plane systems. It should provide the node-local facts and execution evidence those systems need: capability passports, path measurements, model residency state, CAS object availability, sandbox decisions, artifact manifests, and proof-carrying runner output.
+`ryvion-node` must not reimplement these `ryvion-hub` control-plane systems. It should provide the node-local facts and execution evidence those systems need: capability passports, path measurements, model residency state, CAS object availability, sandbox decisions, artifact manifests, and proof-carrying runner output.
 
 ## Design Laws
 
@@ -70,7 +70,7 @@ Node-agent must not reimplement these hub-orch control-plane systems. It should 
 
 ## Roadmap
 
-- TASK-NODE-001 - Add V7 node-agent repo context
+- TASK-NODE-001 - Add V7 ryvion-node repo context
 - TASK-NODE-002 - Node Capability Passport
 - TASK-NODE-003 - Network Profile Probe
 - TASK-NODE-004 - Local ModelLease State Machine
@@ -89,9 +89,9 @@ Node-agent must not reimplement these hub-orch control-plane systems. It should 
 
 ## Memory Plane Context
 
-Node-agent eventually participates in the V7 Memory Plane, but only when the hub selects it as eligible for the role and local measurements support the assignment.
+`ryvion-node` eventually participates in the V7 Memory Plane, but only when the hub selects it as eligible for the role and local measurements support the assignment.
 
-- Global PagedAttention applies only if hub-orch selects the node as eligible.
+- Global PagedAttention applies only if `ryvion-hub` selects the node as eligible.
 - Remote Partial Attention applies only when model/KV residency and network budget allow it.
 - KV-page and attention roles must be gated by upload budget and topology.
 - Consumer nodes should default to upload-light roles: draft, audit, local inference, artifact generation, cache, readiness, and evidence.

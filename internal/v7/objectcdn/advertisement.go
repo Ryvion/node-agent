@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/v7/localcas"
+	"github.com/Ryvion/ryvion-node/internal/v7/localcas"
 )
 
 var ErrInvalidCacheAdvertisement = errors.New("objectcdn: invalid cache advertisement")

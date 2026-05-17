@@ -1,4 +1,4 @@
-# Codex Agent Instructions — node-agent
+# Codex Agent Instructions — ryvion-node
 
 ## Project Context
 

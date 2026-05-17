@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hw"
-	"github.com/Ryvion/node-agent/internal/v7/capability"
-	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
-	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
-	v7netprofile "github.com/Ryvion/node-agent/internal/v7/netprofile"
+	"github.com/Ryvion/ryvion-node/internal/hw"
+	"github.com/Ryvion/ryvion-node/internal/v7/capability"
+	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
+	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
+	v7netprofile "github.com/Ryvion/ryvion-node/internal/v7/netprofile"
 )
 
 func TestRegisterSignsExpectedMessage(t *testing.T) {

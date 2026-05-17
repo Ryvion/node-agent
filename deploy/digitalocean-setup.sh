@@ -30,7 +30,7 @@ mkdir -p /opt/ryvion/{config,data,logs}
 cd /opt/ryvion
 
 echo "Downloading latest ryvion-node binary..."
-RELEASE_URL="https://api.github.com/repos/Ryvion/node-agent/releases/latest"
+RELEASE_URL="https://api.github.com/repos/Ryvion/ryvion-node/releases/latest"
 DOWNLOAD_URL=$(curl -s $RELEASE_URL | grep "browser_download_url.*ryvion-node.*linux-amd64" | cut -d '"' -f 4)
 
 if [ -n "$DOWNLOAD_URL" ]; then
@@ -45,7 +45,7 @@ cat > docker-compose.yml << 'EOF'
 version: '3.8'
 services:
   ryvion-node:
-    image: ghcr.io/ryvion/node-agent:latest
+    image: ghcr.io/ryvion/ryvion-node:latest
     container_name: ryvion-node
     restart: unless-stopped
     environment:

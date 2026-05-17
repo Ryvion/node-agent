@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Ryvion/node-agent/internal/v7/tensorplane"
+	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 
 type NoopProviderConfig struct {

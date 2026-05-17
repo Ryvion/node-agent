@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hub"
+	"github.com/Ryvion/ryvion-node/internal/hub"
 )
 
 type workGraphAbortChecker interface {

@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/runtimeexec"
+	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 )
 
 const (
@@ -104,7 +104,7 @@ var NativeModels = map[string]ModelConfig{
 		// RequiresHuggingFaceAuth=true was hiding the model from operators
 		// who didn't set HF_TOKEN themselves, which defeated the whole point
 		// of having the public mirror.
-		PlatformPath:            "/api/v1/node/models/gemma-4-26b-a4b-it/download",
+		PlatformPath: "/api/v1/node/models/gemma-4-26b-a4b-it/download",
 		// 14 GiB floor — Q4_K_M Gemma 26B fits in ~13-15GB VRAM with all
 		// layers offloaded; llama.cpp's `-ngl` partial-offload handles the
 		// edge. A 16GB card (RTX 4070 Ti SUPER, RTX 4080) reports ~16,376 MiB
@@ -237,15 +237,15 @@ func NativeRuntimeAvailable() bool {
 type BlockerReason string
 
 const (
-	BlockerNone               BlockerReason = ""
-	BlockerNotInstalled       BlockerReason = "not-installed"
-	BlockerBinaryMissing      BlockerReason = "binary-missing"
-	BlockerStartupTimeout     BlockerReason = "health-check-timeout"
-	BlockerProcessFailed      BlockerReason = "process-failed"
-	BlockerModelDownloadFail  BlockerReason = "model-download-failed"
-	BlockerDiskSpace          BlockerReason = "disk-space"
-	BlockerStarting           BlockerReason = "starting"
-	BlockerNotStarted         BlockerReason = "not-started"
+	BlockerNone                BlockerReason = ""
+	BlockerNotInstalled        BlockerReason = "not-installed"
+	BlockerBinaryMissing       BlockerReason = "binary-missing"
+	BlockerStartupTimeout      BlockerReason = "health-check-timeout"
+	BlockerProcessFailed       BlockerReason = "process-failed"
+	BlockerModelDownloadFail   BlockerReason = "model-download-failed"
+	BlockerDiskSpace           BlockerReason = "disk-space"
+	BlockerStarting            BlockerReason = "starting"
+	BlockerNotStarted          BlockerReason = "not-started"
 	BlockerPlatformUnsupported BlockerReason = "platform-unsupported"
 )
 

@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hub"
-	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/hub"
+	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
 
-const nativeLlamaCppVerifierExecutor = "native_llamacpp_verifier"
+const nativeLlamaCppVerifierExecutor = "llamacpp_demo_verifier"
 
-var errNativeLlamaCppUnavailable = errors.New("native_llamacpp_verifier_unavailable")
+var errNativeLlamaCppUnavailable = errors.New("llamacpp_demo_verifier_unavailable")
 
 var newForesightNativeLlamaCppVerifier = func() nativeLlamaCppVerifier {
 	return nativeLlamaCppVerifier{
@@ -70,7 +70,7 @@ func processForesightNativeLlamaCppVerifier(ctx context.Context, client *hub.Cli
 					unavailable := submitForesightNativeLlamaCppUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, nativeLlamaCppUnavailableCode(verifier.sidecar().Status(ctx)))
 					return unavailable, err
 				}
-				failed := submitForesightNativeLlamaCppFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, waves, acceptedText.String(), "native_llamacpp_verify_failed")
+				failed := submitForesightNativeLlamaCppFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, waves, acceptedText.String(), "llamacpp_demo_verify_failed")
 				return failed, err
 			}
 			result.JobID = work.JobID
@@ -178,7 +178,7 @@ func nativeLlamaCppLabStopReason(completion v7llamacpp.CompletionResult) (string
 		case v7llamacpp.FinishReasonTimeout, "timed_out", "deadline", "deadline_exceeded":
 			return "timeout", false
 		case v7llamacpp.FinishReasonError:
-			return "native_llamacpp_completion_error", false
+			return "llamacpp_demo_completion_error", false
 		case "eos", "stopped_eos", "end_of_sequence", "end-of-sequence", "end_of_text", "eos_token":
 			return "eos", true
 		}
@@ -227,7 +227,7 @@ func nativeLlamaCppVerifierPrompt(spec foresightNativeHotSessionSpec, command hu
 
 func nativeLlamaCppProbeSummary(status v7llamacpp.LlamaCppSidecarStatus, req v7llamacpp.CompletionRequest, completion v7llamacpp.CompletionResult, durationMs int64) map[string]any {
 	return map[string]any{
-		"source":                     "native_llamacpp_verifier",
+		"source":                     "llamacpp_demo_verifier",
 		"backend":                    v7llamacpp.BackendName,
 		"runtime_mode":               "native_node_agent",
 		"model_id":                   req.ModelID,
@@ -262,8 +262,8 @@ func submitForesightNativeLlamaCppUnavailableReceipt(ctx context.Context, client
 		"status":                "unavailable",
 		"execution_status":      "unavailable",
 		"billing_status":        "not_billable",
-		"proof_status":          "native_llamacpp_unavailable",
-		"error_code":            firstNonEmptyString(strings.TrimSpace(errorCode), "native_llamacpp_unavailable"),
+		"proof_status":          "llamacpp_demo_unavailable",
+		"error_code":            firstNonEmptyString(strings.TrimSpace(errorCode), "llamacpp_demo_unavailable"),
 		"install_hint":          "install llama-server or set RYV_LLAMA_CPP_SERVER_PATH / RYV_LLAMA_CPP_MODEL_PATH",
 		"model_path_configured": spec.ModelPath != "",
 		"exit_code":             1,
@@ -274,7 +274,7 @@ func submitForesightNativeLlamaCppUnavailableReceipt(ctx context.Context, client
 }
 
 func submitForesightNativeLlamaCppFinalReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, accepted int, waves int, acceptedText string, reason string) *runnerResultSnapshot {
-	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|native_llamacpp|%d|%d|%s", work.JobID, spec.RunID, accepted, waves, reason))
+	resultHash := foresightFullHash(fmt.Sprintf("%s|%s|llamacpp_demo|%d|%d|%s", work.JobID, spec.RunID, accepted, waves, reason))
 	outputHash := ""
 	if strings.TrimSpace(acceptedText) != "" {
 		outputHash = "sha256:" + sha256Hex([]byte(acceptedText))
@@ -302,11 +302,11 @@ func submitForesightNativeLlamaCppFinalReceipt(ctx context.Context, client *hub.
 				"accepted_text":         acceptedText,
 				"accepted_text_public":  strings.TrimSpace(acceptedText) != "",
 				"accepted_text_hash":    outputHash,
-				"tree_cid":              "sha256:" + foresightFullHash(fmt.Sprintf("%s|%s|native_llamacpp_final_tree", work.JobID, spec.RunID)),
+				"tree_cid":              "sha256:" + foresightFullHash(fmt.Sprintf("%s|%s|llamacpp_demo_final_tree", work.JobID, spec.RunID)),
 				"hot_session_finalized": true,
 			},
 			"probe_summary": map[string]any{
-				"source":      "native_llamacpp_verifier",
+				"source":      "llamacpp_demo_verifier",
 				"backend":     v7llamacpp.BackendName,
 				"output_hash": outputHash,
 			},
@@ -323,19 +323,19 @@ func submitForesightNativeLlamaCppFinalReceipt(ctx context.Context, client *hub.
 func nativeLlamaCppUnavailableCode(status v7llamacpp.LlamaCppSidecarStatus) string {
 	switch {
 	case !status.Enabled:
-		return "native_llamacpp_disabled"
+		return "llamacpp_demo_disabled"
 	case !status.Available:
-		return "native_llamacpp_unavailable"
+		return "llamacpp_demo_unavailable"
 	case !status.Running:
-		return "native_llamacpp_not_running"
+		return "llamacpp_demo_not_running"
 	case !status.Healthy:
-		return "native_llamacpp_unhealthy"
+		return "llamacpp_demo_unhealthy"
 	case status.BaseURL == "":
-		return "native_llamacpp_base_url_missing"
+		return "llamacpp_demo_base_url_missing"
 	case !status.SupportsTextGeneration:
-		return "native_llamacpp_text_generation_unavailable"
+		return "llamacpp_demo_text_generation_unavailable"
 	default:
-		return "native_llamacpp_unavailable"
+		return "llamacpp_demo_unavailable"
 	}
 }
 

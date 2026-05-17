@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
-	"github.com/Ryvion/node-agent/internal/v7/modelcache"
-	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/v7/modelcache"
+	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
 )
 
 type fakeSidecar struct {
@@ -130,6 +130,38 @@ func (f *fakeCompletionClient) Complete(_ context.Context, req llamacpp.Completi
 	return f.result, nil
 }
 
+type fakeSlotClient struct {
+	restores []llamacpp.SlotCacheRequest
+	saves    []llamacpp.SlotCacheRequest
+	restore  llamacpp.SlotCacheResult
+	save     llamacpp.SlotCacheResult
+	err      error
+}
+
+func (f *fakeSlotClient) ListSlots(context.Context, string) ([]llamacpp.SlotState, error) {
+	return nil, nil
+}
+
+func (f *fakeSlotClient) RestoreSlot(_ context.Context, req llamacpp.SlotCacheRequest) (llamacpp.SlotCacheResult, error) {
+	f.restores = append(f.restores, req)
+	if f.err != nil {
+		return llamacpp.SlotCacheResult{}, f.err
+	}
+	return f.restore, nil
+}
+
+func (f *fakeSlotClient) SaveSlot(_ context.Context, req llamacpp.SlotCacheRequest) (llamacpp.SlotCacheResult, error) {
+	f.saves = append(f.saves, req)
+	if f.err != nil {
+		return llamacpp.SlotCacheResult{}, f.err
+	}
+	return f.save, nil
+}
+
+func (f *fakeSlotClient) EraseSlot(context.Context, llamacpp.SlotCacheRequest) (llamacpp.SlotCacheResult, error) {
+	return llamacpp.SlotCacheResult{}, nil
+}
+
 type fakeProgressSender struct {
 	err     error
 	batches []ProgressBatch
@@ -218,6 +250,92 @@ func TestExecuteAssignmentRunsDashboardInferenceWithMockedLlamaCpp(t *testing.T)
 	if !ReceiptJSONContainsNoRawText(receipt) {
 		raw, _ := json.Marshal(receipt.Metadata)
 		t.Fatalf("metadata leaked raw text: %s", raw)
+	}
+}
+
+func TestExecuteAssignmentAppliesCachePolicyAndSlotSaveRestore(t *testing.T) {
+	sidecar := &fakeSidecar{status: healthySidecarStatus()}
+	client := &fakeCompletionClient{result: llamacpp.CompletionResult{
+		Output:          []byte("cached output"),
+		OutputBytes:     int64(len("cached output")),
+		TokensGenerated: 2,
+		TTFTMs:          20,
+		TotalTimeMs:     80,
+	}}
+	slotID := 0
+	spec := validSpec(t)
+	spec.ReturnText = true
+	spec.Prompt = "Summarize the warm session."
+	spec.CachePolicy = CachePolicy{
+		SessionID:            "sess-customer-123",
+		PrefixHash:           testSHA256("shared prefix"),
+		CachePrompt:          true,
+		CacheReuseTokens:     64,
+		SlotID:               &slotID,
+		RestoreSlotBeforeRun: true,
+		SaveSlotAfterRun:     true,
+		CacheStateID:         "state-alpha",
+		AffinityTTLSeconds:   600,
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	slots := &fakeSlotClient{
+		restore: llamacpp.SlotCacheResult{RestoredTokens: 42},
+		save:    llamacpp.SlotCacheResult{SavedTokens: 55},
+	}
+
+	receipt, handled, err := ExecuteAssignment(context.Background(), string(raw), ExecuteOptions{
+		Getenv: getenvTextOutputEnabled,
+		Runner: LlamaCppRunner{
+			Sidecar:    sidecar,
+			Client:     client,
+			SlotClient: slots,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteAssignment() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if len(client.reqs) != 1 {
+		t.Fatalf("client calls = %d, want 1", len(client.reqs))
+	}
+	req := client.reqs[0]
+	if !req.CachePrompt || req.CacheReuseTokens != 64 || req.SlotID == nil || *req.SlotID != 0 {
+		t.Fatalf("completion cache request = %+v, want cache_prompt/reuse/slot", req)
+	}
+	if len(slots.restores) != 1 || len(slots.saves) != 1 {
+		t.Fatalf("slot operations restores=%d saves=%d, want one each", len(slots.restores), len(slots.saves))
+	}
+	if slots.restores[0].Filename == "" || strings.Contains(slots.restores[0].Filename, "sess-customer") {
+		t.Fatalf("restore filename = %q, want derived non-raw session filename", slots.restores[0].Filename)
+	}
+	if slots.saves[0].Filename != slots.restores[0].Filename {
+		t.Fatalf("save filename = %q, want restore filename %q", slots.saves[0].Filename, slots.restores[0].Filename)
+	}
+	metadata, ok := receipt.Metadata[Task].(map[string]any)
+	if !ok {
+		t.Fatalf("receipt metadata missing %q: %+v", Task, receipt.Metadata)
+	}
+	cache, ok := metadata["cache"].(map[string]any)
+	if !ok {
+		t.Fatalf("cache metadata missing: %+v", metadata)
+	}
+	if cache["cache_prompt"] != true || cache["cache_reuse_tokens"] != int(64) || cache["slot_id"] != int(0) {
+		t.Fatalf("cache policy metadata = %+v", cache)
+	}
+	if cache["restore_status"] != "restored" || cache["restored_tokens"] != int64(42) || cache["save_status"] != "saved" || cache["saved_tokens"] != int64(55) {
+		t.Fatalf("cache operation metadata = %+v", cache)
+	}
+	if cache["prefix_hash"] != spec.CachePolicy.PrefixHash || cache["session_id_hash"] == "" || cache["session_id_hash"] == spec.CachePolicy.SessionID {
+		t.Fatalf("cache identity metadata = %+v", cache)
+	}
+	rawReceipt, _ := json.Marshal(receipt.Metadata)
+	if strings.Contains(string(rawReceipt), "sess-customer-123") || strings.Contains(string(rawReceipt), spec.Prompt) {
+		t.Fatalf("receipt leaked raw cache/session/prompt text: %s", rawReceipt)
 	}
 }
 

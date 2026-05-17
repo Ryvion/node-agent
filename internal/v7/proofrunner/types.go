@@ -1,8 +1,8 @@
 package proofrunner
 
 import (
-	"github.com/Ryvion/node-agent/internal/v7/artifact"
-	"github.com/Ryvion/node-agent/internal/v7/evidence"
+	"github.com/Ryvion/ryvion-node/internal/v7/artifact"
+	"github.com/Ryvion/ryvion-node/internal/v7/evidence"
 )
 
 type RunnerResultInput struct {

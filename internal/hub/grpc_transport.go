@@ -4,15 +4,19 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	v7alphapb "github.com/Ryvion/node-agent/internal/genproto/v7alpha"
+	nodev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/node/v1"
+	v7alphapb "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/v7alpha"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -34,9 +38,10 @@ type grpcTransport struct {
 	mode     string
 	insecure bool
 
-	mu     sync.Mutex
-	conn   *grpc.ClientConn
-	client v7alphapb.V7NodeTransportServiceClient
+	mu            sync.Mutex
+	conn          *grpc.ClientConn
+	client        v7alphapb.V7NodeTransportServiceClient
+	gatewayClient nodev1.NodeGatewayClient
 }
 
 func defaultGRPCTransport() *grpcTransport {
@@ -81,6 +86,10 @@ func (c *Client) shouldFallbackGRPC(err error) bool {
 	}
 }
 
+func nodeGatewayCompatFallback(err error) bool {
+	return status.Code(err) == codes.Unimplemented || errors.Is(err, io.EOF)
+}
+
 func (c *Client) registerGRPC(ctx context.Context, body registerRequest) error {
 	client, err := c.v7NodeTransportClient(ctx)
 	if err != nil {
@@ -109,6 +118,94 @@ func (c *Client) registerGRPC(ctx context.Context, body registerRequest) error {
 }
 
 func (c *Client) heartbeatGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
+	if resp, err := c.heartbeatNodeGatewayGRPC(ctx, body); err == nil {
+		return resp, nil
+	} else if !nodeGatewayCompatFallback(err) {
+		return HeartbeatResponse{}, err
+	}
+	return c.heartbeatUnaryGRPC(ctx, body)
+}
+
+func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
+	client, err := c.nodeGatewayClient(ctx)
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	var v7Struct *structpb.Struct
+	if body.V7 != nil {
+		v7Struct, err = structFromJSONValue(body.V7)
+		if err != nil {
+			return HeartbeatResponse{}, err
+		}
+	}
+	var networkStruct *structpb.Struct
+	if body.NetworkProfile != nil {
+		networkStruct, err = structFromJSONValue(body.NetworkProfile)
+		if err != nil {
+			return HeartbeatResponse{}, err
+		}
+	}
+	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 10*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	if err := stream.Send(&nodev1.NodeToHub{
+		NodeId:          body.PublicKeyHex,
+		MessageId:       fmt.Sprintf("heartbeat-%d", body.TimestampMs),
+		CreatedAtUnixMs: body.TimestampMs,
+		Payload: &nodev1.NodeToHub_Heartbeat{
+			Heartbeat: &nodev1.NodeHeartbeat{
+				PublicKeyHex:      body.PublicKeyHex,
+				TimestampMs:       body.TimestampMs,
+				CpuUtil:           body.CPUUtil,
+				MemUtil:           body.MemUtil,
+				GpuUtil:           body.GPUUtil,
+				PowerWatts:        body.PowerWatts,
+				GpuThrottled:      body.GPUThrottled,
+				SystemTimezone:    body.SystemTimezone,
+				CapabilityPayload: v7Struct,
+				NetworkProfile:    networkStruct,
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     body.PublicKeyHex,
+			Algorithm: "ed25519",
+			Signature: append([]byte(nil), body.Signature...),
+		},
+	}); err != nil {
+		return HeartbeatResponse{}, err
+	}
+	resp, err := stream.Recv()
+	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return HeartbeatResponse{}, err
+	}
+	ack := resp.GetHeartbeatAck()
+	if ack == nil {
+		return HeartbeatResponse{}, status.Error(codes.Internal, "heartbeat ack missing")
+	}
+	upserted := ack.GetV7SnapshotUpserted()
+	return HeartbeatResponse{
+		LatestVersion:        ack.GetLatestVersion(),
+		NodeID:               ack.GetNodeId(),
+		CountryCode:          ack.GetCountryCode(),
+		LocationApproved:     ack.GetLocationApproved(),
+		SovereignVerified:    ack.GetSovereignVerified(),
+		VerificationSource:   ack.GetVerificationSource(),
+		TrustReason:          ack.GetTrustReason(),
+		V7SnapshotUpserted:   &upserted,
+		SnapshotModelCount:   int(ack.GetSnapshotModelCount()),
+		SnapshotBackendCount: int(ack.GetSnapshotBackendCount()),
+		HasCapabilityProfile: ack.GetHasCapabilityProfile(),
+		HubInstanceID:        ack.GetHubInstanceId(),
+	}, nil
+}
+
+func (c *Client) heartbeatUnaryGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
 	client, err := c.v7NodeTransportClient(ctx)
 	if err != nil {
 		return HeartbeatResponse{}, err
@@ -155,6 +252,83 @@ func (c *Client) heartbeatGRPC(ctx context.Context, body heartbeatRequest) (Hear
 }
 
 func (c *Client) fetchWorkGRPC(ctx context.Context, pubHex string, ts int64, signature []byte, longPoll bool) (*WorkAssignment, error) {
+	if work, err := c.fetchWorkNodeGatewayGRPC(ctx, pubHex, ts, signature, longPoll); err == nil {
+		return work, nil
+	} else if !nodeGatewayCompatFallback(err) {
+		return nil, err
+	}
+	return c.fetchWorkUnaryGRPC(ctx, pubHex, ts, signature, longPoll)
+}
+
+func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts int64, signature []byte, longPoll bool) (*WorkAssignment, error) {
+	client, err := c.nodeGatewayClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	timeout := 10 * time.Second
+	if longPoll {
+		timeout = 35 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), timeout)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := stream.Send(&nodev1.NodeToHub{
+		NodeId:          pubHex,
+		MessageId:       fmt.Sprintf("work-lease-%d", ts),
+		CreatedAtUnixMs: ts,
+		Payload: &nodev1.NodeToHub_WorkLeaseRequest{
+			WorkLeaseRequest: &nodev1.WorkLeaseRequest{
+				PublicKeyHex: pubHex,
+				TimestampMs:  ts,
+				LongPoll:     longPoll,
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     pubHex,
+			Algorithm: "ed25519",
+			Signature: append([]byte(nil), signature...),
+		},
+	}); err != nil {
+		return nil, err
+	}
+	resp, err := stream.Recv()
+	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	ack := resp.GetWorkLeaseAck()
+	if ack == nil {
+		return nil, status.Error(codes.Internal, "work lease ack missing")
+	}
+	if !ack.GetHasWork() || ack.GetAssignment() == nil {
+		return nil, nil
+	}
+	assignment := ack.GetAssignment()
+	if strings.TrimSpace(assignment.GetJobId()) == "" {
+		return nil, fmt.Errorf("work assignment missing job_id")
+	}
+	return &WorkAssignment{
+		JobID:               assignment.GetJobId(),
+		WorkGraphID:         assignment.GetWorkgraphId(),
+		JobPubkey:           assignment.GetJobPubkey(),
+		Kind:                assignment.GetKind(),
+		PayloadURL:          assignment.GetPayloadUrl(),
+		PricePerUnit:        assignment.GetPricePerUnit(),
+		Units:               assignment.GetUnits(),
+		Image:               assignment.GetImage(),
+		SpecJSON:            assignment.GetSpecJson(),
+		ExecutorKind:        assignment.GetExecutorKind(),
+		AssuranceClass:      assignment.GetAssuranceClass(),
+		RuntimeRequirements: runtimeRequirementsFromNodeProto(assignment.GetRuntimeRequirements()),
+	}, nil
+}
+
+func (c *Client) fetchWorkUnaryGRPC(ctx context.Context, pubHex string, ts int64, signature []byte, longPoll bool) (*WorkAssignment, error) {
 	client, err := c.v7NodeTransportClient(ctx)
 	if err != nil {
 		return nil, err
@@ -197,6 +371,74 @@ func (c *Client) fetchWorkGRPC(ctx context.Context, pubHex string, ts int64, sig
 }
 
 func (c *Client) submitReceiptGRPC(ctx context.Context, body receiptRequest) error {
+	if err := c.submitReceiptNodeGatewayGRPC(ctx, body); err == nil {
+		return nil
+	} else if !nodeGatewayCompatFallback(err) {
+		return err
+	}
+	return c.submitReceiptUnaryGRPC(ctx, body)
+}
+
+func (c *Client) submitReceiptNodeGatewayGRPC(ctx context.Context, body receiptRequest) error {
+	client, err := c.nodeGatewayClient(ctx)
+	if err != nil {
+		return err
+	}
+	var metadataStruct *structpb.Struct
+	if body.Metadata != nil {
+		metadataStruct, err = structFromJSONValue(body.Metadata)
+		if err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 30*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(&nodev1.NodeToHub{
+		NodeId:          body.PublicKeyHex,
+		MessageId:       fmt.Sprintf("receipt-%s", body.JobID),
+		CreatedAtUnixMs: time.Now().UnixMilli(),
+		Payload: &nodev1.NodeToHub_Receipt{
+			Receipt: &nodev1.WorkReceipt{
+				JobId:         body.JobID,
+				PublicKeyHex:  body.PublicKeyHex,
+				ResultHashHex: body.ResultHashHex,
+				MeteringUnits: body.MeteringUnits,
+				Metadata:      metadataStruct,
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     body.PublicKeyHex,
+			Algorithm: "ed25519",
+			Signature: append([]byte(nil), body.Signature...),
+		},
+	}); err != nil {
+		return err
+	}
+	resp, err := stream.Recv()
+	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	ack := resp.GetReceiptAck()
+	if ack == nil {
+		return status.Error(codes.Internal, "receipt ack missing")
+	}
+	if !ack.GetAccepted() {
+		if reason := strings.TrimSpace(ack.GetReason()); reason != "" {
+			return fmt.Errorf("receipt rejected: %s", reason)
+		}
+		return fmt.Errorf("receipt rejected")
+	}
+	return nil
+}
+
+func (c *Client) submitReceiptUnaryGRPC(ctx context.Context, body receiptRequest) error {
 	client, err := c.v7NodeTransportClient(ctx)
 	if err != nil {
 		return err
@@ -219,6 +461,77 @@ func (c *Client) submitReceiptGRPC(ctx context.Context, body receiptRequest) err
 		Metadata:      metadataStruct,
 	})
 	return err
+}
+
+func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
+	client, err := c.nodeGatewayClient(ctx)
+	if err != nil {
+		return DraftPacketBatchDecision{}, err
+	}
+	protoPackets := make([]*structpb.Struct, 0, len(packets))
+	for _, packet := range packets {
+		packetStruct, err := structFromJSONValue(packet)
+		if err != nil {
+			return DraftPacketBatchDecision{}, err
+		}
+		protoPackets = append(protoPackets, packetStruct)
+	}
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 30*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return DraftPacketBatchDecision{}, err
+	}
+	if err := stream.Send(&nodev1.NodeToHub{
+		NodeId:          pubHex,
+		MessageId:       fmt.Sprintf("draft-packets-%s-%d", windowID, ts),
+		CreatedAtUnixMs: ts,
+		Payload: &nodev1.NodeToHub_DraftPacketBatch{
+			DraftPacketBatch: &nodev1.DraftPacketBatch{
+				WindowId: windowID,
+				Packets:  protoPackets,
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     pubHex,
+			Algorithm: "ed25519-node-auth",
+			Signature: c.sign("node_auth", pubHex, strconv.FormatInt(ts, 10)),
+		},
+	}); err != nil {
+		return DraftPacketBatchDecision{}, err
+	}
+	resp, err := stream.Recv()
+	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return DraftPacketBatchDecision{}, err
+	}
+	ack := resp.GetDraftPacketBatchAck()
+	if ack == nil {
+		return DraftPacketBatchDecision{}, status.Error(codes.Internal, "draft packet batch ack missing")
+	}
+	decisions := make([]DraftPacketDecision, 0, len(ack.GetDecisions()))
+	for _, decision := range ack.GetDecisions() {
+		if decision == nil {
+			continue
+		}
+		decisions = append(decisions, DraftPacketDecision{
+			PacketID: decision.GetPacketId(),
+			Accepted: decision.GetAccepted(),
+			Reason:   decision.GetReason(),
+		})
+	}
+	return DraftPacketBatchDecision{
+		SchemaVersion: ack.GetSchemaVersion(),
+		WindowID:      ack.GetWindowId(),
+		Attempted:     int(ack.GetAttempted()),
+		Accepted:      int(ack.GetAccepted()),
+		Rejected:      int(ack.GetRejected()),
+		Decisions:     decisions,
+	}, nil
 }
 
 func (c *Client) sendDashboardInferenceProgressGRPC(ctx context.Context, body dashboardInferenceProgressRequest) error {
@@ -255,6 +568,13 @@ func (c *Client) v7NodeTransportClient(ctx context.Context) (v7alphapb.V7NodeTra
 	return c.grpc.clientFor(ctx)
 }
 
+func (c *Client) nodeGatewayClient(ctx context.Context) (nodev1.NodeGatewayClient, error) {
+	if c == nil || c.grpc == nil || !c.grpc.enabled() {
+		return nil, status.Error(codes.Unavailable, "gRPC transport disabled")
+	}
+	return c.grpc.gatewayClientFor(ctx)
+}
+
 func (c *Client) Close() error {
 	if c == nil || c.grpc == nil {
 		return nil
@@ -281,6 +601,7 @@ func (t *grpcTransport) close() error {
 	err := t.conn.Close()
 	t.conn = nil
 	t.client = nil
+	t.gatewayClient = nil
 	return err
 }
 
@@ -297,6 +618,32 @@ func (t *grpcTransport) clientFor(ctx context.Context) (v7alphapb.V7NodeTranspor
 	defer t.mu.Unlock()
 	if t.client != nil {
 		return t.client, nil
+	}
+	conn, err := t.connForLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	t.client = v7alphapb.NewV7NodeTransportServiceClient(conn)
+	return t.client, nil
+}
+
+func (t *grpcTransport) gatewayClientFor(ctx context.Context) (nodev1.NodeGatewayClient, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.gatewayClient != nil {
+		return t.gatewayClient, nil
+	}
+	conn, err := t.connForLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	t.gatewayClient = nodev1.NewNodeGatewayClient(conn)
+	return t.gatewayClient, nil
+}
+
+func (t *grpcTransport) connForLocked(_ context.Context) (*grpc.ClientConn, error) {
+	if t.conn != nil {
+		return t.conn, nil
 	}
 	target := strings.TrimSpace(t.target)
 	if target == "" {
@@ -323,8 +670,7 @@ func (t *grpcTransport) clientFor(ctx context.Context) (v7alphapb.V7NodeTranspor
 		return nil, err
 	}
 	t.conn = conn
-	t.client = v7alphapb.NewV7NodeTransportServiceClient(conn)
-	return t.client, nil
+	return conn, nil
 }
 
 func (t *grpcTransport) applyDefaultTarget(baseURL string) {
@@ -349,6 +695,26 @@ func (t *grpcTransport) applyDefaultTarget(baseURL string) {
 }
 
 func runtimeRequirementsFromProto(req *v7alphapb.V7RuntimeRequirements) RuntimeRequirements {
+	if req == nil {
+		return RuntimeRequirements{}
+	}
+	return RuntimeRequirements{
+		NeedsGPU:             req.GetNeedsGpu(),
+		NeedsManagedOCI:      req.GetNeedsManagedOci(),
+		NeedsManagedOCIGPU:   req.GetNeedsManagedOciGpu(),
+		NeedsRyvionRuntime:   req.GetNeedsRyvionRuntime(),
+		NeedsNativeStreaming: req.GetNeedsNativeStreaming(),
+		NeedsNativeReport:    req.GetNeedsNativeReport(),
+		NeedsAgentHosting:    req.GetNeedsAgentHosting(),
+		Tooling:              append([]string(nil), req.GetTooling()...),
+		MinDiskGB:            req.GetMinDiskGb(),
+		MinVRAMMB:            req.GetMinVramMb(),
+		Jurisdiction:         req.GetJurisdiction(),
+		TrustLevel:           req.GetTrustLevel(),
+	}
+}
+
+func runtimeRequirementsFromNodeProto(req *nodev1.RuntimeRequirements) RuntimeRequirements {
 	if req == nil {
 		return RuntimeRequirements{}
 	}

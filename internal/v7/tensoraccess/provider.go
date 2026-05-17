@@ -3,7 +3,7 @@ package tensoraccess
 import (
 	"context"
 
-	"github.com/Ryvion/node-agent/internal/v7/tensorplane"
+	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 
 type TensorAccessProvider interface {

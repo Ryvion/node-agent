@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hub"
-	v8energyplane "github.com/Ryvion/node-agent/internal/v8/energyplane"
+	"github.com/Ryvion/ryvion-node/internal/hub"
+	v8energyplane "github.com/Ryvion/ryvion-node/internal/v8/energyplane"
 )
 
 func TestReceiptMetadataBaseIncludesJobScopedEnergyReceipt(t *testing.T) {

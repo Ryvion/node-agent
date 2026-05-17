@@ -8,7 +8,7 @@ It registers with the hub orchestrator, sends signed heartbeats, polls for jobs,
 
 ```bash
 # Download the latest release for your platform
-curl -L https://github.com/Ryvion/node-agent/releases/latest/download/ryvion-node-linux-amd64 -o ryvion-node
+curl -L https://github.com/Ryvion/ryvion-node/releases/latest/download/ryvion-node-linux-amd64 -o ryvion-node
 chmod +x ryvion-node
 
 # Start the node (generates an Ed25519 key on first run)
@@ -56,7 +56,7 @@ go build -o ryvion-node ./cmd/ryvion-node
 ## Architecture
 
 ```
-node-agent/
+ryvion-node/
   cmd/ryvion-node/     Entry point
   internal/
     hub/               Typed API client for hub endpoints

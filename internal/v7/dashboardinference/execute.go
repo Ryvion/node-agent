@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
-	"github.com/Ryvion/node-agent/internal/v7/modelcache"
-	"github.com/Ryvion/node-agent/internal/v7/modelpolicy"
+	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/v7/modelcache"
+	"github.com/Ryvion/ryvion-node/internal/v7/modelpolicy"
 )
 
 const (
@@ -75,11 +75,12 @@ type LlamaCppStopper interface {
 }
 
 type LlamaCppRunner struct {
-	Sidecar  LlamaCppSidecar
-	KeepWarm KeepWarmChecker
-	Client   llamacpp.CompletionClient
-	Getenv   func(string) string
-	Policy   modelpolicy.Policy
+	Sidecar    LlamaCppSidecar
+	KeepWarm   KeepWarmChecker
+	Client     llamacpp.CompletionClient
+	SlotClient llamacpp.SlotCacheClient
+	Getenv     func(string) string
+	Policy     modelpolicy.Policy
 }
 
 type ExecutionResult struct {
@@ -117,6 +118,11 @@ type ExecutionResult struct {
 	// Set by the runner when the sidecar status reports speculative
 	// readiness. Consumed by BuildReceipt to surface acceleration.
 	Speculative SpeculativeMetadata
+
+	// Same-node llama.cpp prompt-cache/session metadata. This records
+	// policy and slot API outcomes only; it never serializes prompt,
+	// output, KV bytes, or slot-cache filenames.
+	Cache CacheMetadata
 }
 
 type LocalStatusCounters struct {
@@ -274,6 +280,9 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 		Temperature:  0,
 		Stream:       streaming,
 	}
+	cacheMeta := initialCacheMetadata(spec)
+	cacheMeta = restoreSlotCacheIfRequested(runCtx, r.slotClient(), status.BaseURL, spec, cacheMeta)
+	req = applyCompletionCachePolicy(req, spec.CachePolicy)
 	if batcher != nil {
 		req.OnDelta = func(delta llamacpp.CompletionDelta) error {
 			if firstDeltaAt.IsZero() {
@@ -314,7 +323,9 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	if err != nil {
 		return failedExecutionResult(spec, safeErrorCode(err)), nil
 	}
+	cacheMeta = saveSlotCacheIfRequested(runCtx, r.slotClient(), status.BaseURL, spec, cacheMeta)
 	result := measuredExecutionResult(spec, completion)
+	result.Cache = cacheMeta
 	result.PreInferenceMs = preInferenceMs
 	if result.TTFTMs > 0 {
 		result.PerceivedTTFTMs = result.PreInferenceMs + result.TTFTMs
@@ -558,6 +569,16 @@ func (r LlamaCppRunner) sidecar() LlamaCppSidecar {
 func (r LlamaCppRunner) client() llamacpp.CompletionClient {
 	if r.Client != nil {
 		return r.Client
+	}
+	return llamacpp.OpenAIClient{}
+}
+
+func (r LlamaCppRunner) slotClient() llamacpp.SlotCacheClient {
+	if r.SlotClient != nil {
+		return r.SlotClient
+	}
+	if client, ok := r.Client.(llamacpp.SlotCacheClient); ok {
+		return client
 	}
 	return llamacpp.OpenAIClient{}
 }

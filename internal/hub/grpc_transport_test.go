@@ -5,9 +5,11 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"net"
+	"strings"
 	"testing"
 
-	v7alphapb "github.com/Ryvion/node-agent/internal/genproto/v7alpha"
+	nodev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/node/v1"
+	v7alphapb "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/v7alpha"
 	"google.golang.org/grpc"
 )
 
@@ -47,6 +49,220 @@ func TestClientHeartbeatUsesGRPCTransportWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestClientHeartbeatUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	fake := &fakeNodeGatewayServer{}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	resp, err := client.Heartbeat(context.Background(), Metrics{TimestampMs: 456, CPUUtil: 5, MemUtil: 6, GPUUtil: 7, PowerWatts: 8})
+	if err != nil {
+		t.Fatalf("Heartbeat() error = %v", err)
+	}
+	if resp.NodeID != "node-gateway" || resp.HubInstanceID != "hub-gateway" || resp.V7SnapshotUpserted == nil || !*resp.V7SnapshotUpserted {
+		t.Fatalf("unexpected heartbeat response: %#v", resp)
+	}
+	if fake.heartbeat == nil {
+		t.Fatal("NodeGateway heartbeat was not received")
+	}
+	if fake.heartbeat.GetPublicKeyHex() != hex.EncodeToString(pub) || len(fake.signature.GetSignature()) == 0 {
+		t.Fatalf("heartbeat did not carry signed node identity: heartbeat=%#v signature=%#v", fake.heartbeat, fake.signature)
+	}
+}
+
+func TestClientFetchWorkUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	fake := &fakeNodeGatewayServer{work: &nodev1.WorkAssignment{
+		JobId:          "job-gateway",
+		WorkgraphId:    "wg-gateway",
+		Kind:           "v7_dashboard_inference",
+		PayloadUrl:     "https://example.invalid/payload",
+		PricePerUnit:   9,
+		Units:          2,
+		Image:          "ryvion-verifier-sglang",
+		SpecJson:       `{"task":"v7_dashboard_inference"}`,
+		JobPubkey:      "buyer-key",
+		ExecutorKind:   "native",
+		AssuranceClass: "standard",
+		RuntimeRequirements: &nodev1.RuntimeRequirements{
+			NeedsGpu:           true,
+			NeedsRyvionRuntime: true,
+			MinVramMb:          8192,
+			Tooling:            []string{"llama.cpp"},
+		},
+	}}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	work, err := client.FetchWork(context.Background())
+	if err != nil {
+		t.Fatalf("FetchWork() error = %v", err)
+	}
+	if work == nil || work.JobID != "job-gateway" || work.WorkGraphID != "wg-gateway" || !work.RuntimeRequirements.NeedsGPU {
+		t.Fatalf("unexpected work assignment: %#v", work)
+	}
+	if fake.workLease == nil || fake.workLease.GetPublicKeyHex() != hex.EncodeToString(pub) || len(fake.signature.GetSignature()) == 0 {
+		t.Fatalf("work lease did not carry signed node identity: lease=%#v signature=%#v", fake.workLease, fake.signature)
+	}
+}
+
+func TestClientFetchWorkNodeGatewayNoWork(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	fake := &fakeNodeGatewayServer{}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	work, err := client.FetchWork(context.Background())
+	if err != nil {
+		t.Fatalf("FetchWork() error = %v", err)
+	}
+	if work != nil {
+		t.Fatalf("FetchWork() = %#v, want nil", work)
+	}
+}
+
+func TestClientSubmitReceiptUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	fake := &fakeNodeGatewayServer{receiptAccepted: true}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	err = client.SubmitReceipt(context.Background(), Receipt{
+		JobID:         "job-gateway",
+		ResultHashHex: "abcd",
+		MeteringUnits: 3,
+		Metadata:      map[string]any{"finish_reason": "stop"},
+	})
+	if err != nil {
+		t.Fatalf("SubmitReceipt() error = %v", err)
+	}
+	if fake.receipt == nil || fake.receipt.GetJobId() != "job-gateway" || fake.receipt.GetPublicKeyHex() != hex.EncodeToString(pub) || len(fake.signature.GetSignature()) == 0 {
+		t.Fatalf("receipt did not carry signed node identity: receipt=%#v signature=%#v", fake.receipt, fake.signature)
+	}
+}
+
+func TestClientSubmitReceiptNodeGatewayRejectsAck(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	fake := &fakeNodeGatewayServer{receiptAccepted: false, receiptReason: "bad_hash"}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	err = client.SubmitReceipt(context.Background(), Receipt{JobID: "job-gateway", ResultHashHex: "abcd", MeteringUnits: 3})
+	if err == nil || !strings.Contains(err.Error(), "bad_hash") {
+		t.Fatalf("SubmitReceipt() error = %v, want bad_hash rejection", err)
+	}
+}
+
+func TestClientSubmitDraftPacketBatchUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	fake := &fakeNodeGatewayServer{}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	decision, err := client.SubmitForesightDraftPacketBatch(context.Background(), "win-gateway", []map[string]any{
+		{"packet_id": "pkt-a", "candidate_tokens": []int{1, 2, 3}},
+	})
+	if err != nil {
+		t.Fatalf("SubmitForesightDraftPacketBatch() error = %v", err)
+	}
+	if decision.WindowID != "win-gateway" || decision.Accepted != 1 || len(decision.Decisions) != 1 || decision.Decisions[0].PacketID != "pkt-a" {
+		t.Fatalf("unexpected draft batch decision: %#v", decision)
+	}
+	if fake.draftBatch == nil || fake.draftBatch.GetWindowId() != "win-gateway" || len(fake.draftBatch.GetPackets()) != 1 || len(fake.signature.GetSignature()) == 0 {
+		t.Fatalf("draft batch did not carry signed node identity: batch=%#v signature=%#v", fake.draftBatch, fake.signature)
+	}
+}
+
 type fakeV7NodeTransportServer struct {
 	v7alphapb.UnimplementedV7NodeTransportServiceServer
 	heartbeat *v7alphapb.SendHeartbeatRequest
@@ -63,4 +279,105 @@ func (s *fakeV7NodeTransportServer) SendHeartbeat(_ context.Context, req *v7alph
 		HasCapabilityProfile: true,
 		HubInstanceId:        "hub-grpc",
 	}, nil
+}
+
+type fakeNodeGatewayServer struct {
+	nodev1.UnimplementedNodeGatewayServer
+	heartbeat       *nodev1.NodeHeartbeat
+	workLease       *nodev1.WorkLeaseRequest
+	work            *nodev1.WorkAssignment
+	receipt         *nodev1.WorkReceipt
+	receiptAccepted bool
+	receiptReason   string
+	draftBatch      *nodev1.DraftPacketBatch
+	signature       *nodev1.Signature
+}
+
+func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer) error {
+	msg, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	s.signature = msg.GetSignature()
+	if hb := msg.GetHeartbeat(); hb != nil {
+		s.heartbeat = hb
+		return stream.Send(&nodev1.HubToNode{
+			MessageId:       "ack_" + msg.GetMessageId(),
+			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+			Payload: &nodev1.HubToNode_HeartbeatAck{
+				HeartbeatAck: &nodev1.NodeHeartbeatAck{
+					Ok:                   true,
+					NodeId:               "node-gateway",
+					V7SnapshotUpserted:   true,
+					SnapshotModelCount:   3,
+					SnapshotBackendCount: 2,
+					HasCapabilityProfile: true,
+					HubInstanceId:        "hub-gateway",
+				},
+			},
+		})
+	}
+	if lease := msg.GetWorkLeaseRequest(); lease != nil {
+		s.workLease = lease
+		ack := &nodev1.WorkLeaseAck{}
+		if s.work != nil {
+			ack.HasWork = true
+			ack.Assignment = s.work
+		}
+		return stream.Send(&nodev1.HubToNode{
+			MessageId:       "ack_" + msg.GetMessageId(),
+			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+			Payload: &nodev1.HubToNode_WorkLeaseAck{
+				WorkLeaseAck: ack,
+			},
+		})
+	}
+	if receipt := msg.GetReceipt(); receipt != nil {
+		s.receipt = receipt
+		return stream.Send(&nodev1.HubToNode{
+			MessageId:       "ack_" + msg.GetMessageId(),
+			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+			Payload: &nodev1.HubToNode_ReceiptAck{
+				ReceiptAck: &nodev1.WorkReceiptAck{
+					Accepted:  s.receiptAccepted,
+					Status:    "received",
+					ReceiptId: "receipt-gateway",
+					Reason:    s.receiptReason,
+				},
+			},
+		})
+	}
+	if draftBatch := msg.GetDraftPacketBatch(); draftBatch != nil {
+		s.draftBatch = draftBatch
+		packetID := ""
+		if len(draftBatch.GetPackets()) > 0 && draftBatch.GetPackets()[0] != nil {
+			if raw, ok := draftBatch.GetPackets()[0].AsMap()["packet_id"].(string); ok {
+				packetID = raw
+			}
+		}
+		return stream.Send(&nodev1.HubToNode{
+			MessageId:       "ack_" + msg.GetMessageId(),
+			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+			Payload: &nodev1.HubToNode_DraftPacketBatchAck{
+				DraftPacketBatchAck: &nodev1.DraftPacketBatchAck{
+					SchemaVersion: "ryvion.speculative.draft_packet_batch_decision.v1",
+					WindowId:      draftBatch.GetWindowId(),
+					Attempted:     1,
+					Accepted:      1,
+					Decisions: []*nodev1.DraftPacketDecision{{
+						PacketId: packetID,
+						Accepted: true,
+						Reason:   "accepted",
+					}},
+				},
+			},
+		})
+	}
+	return stream.Send(&nodev1.HubToNode{
+		MessageId:       "ack_" + msg.GetMessageId(),
+		CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+		Payload: &nodev1.HubToNode_Ping{
+			Ping: &nodev1.Ping{Nonce: msg.GetMessageId()},
+		},
+	})
 }

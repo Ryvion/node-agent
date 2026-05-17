@@ -33,15 +33,18 @@ const (
 const defaultCompletionSystemPrompt = "You are running a local llama.cpp readiness benchmark. Answer concisely."
 
 type CompletionRequest struct {
-	BaseURL      string
-	ModelID      string
-	Prompt       string
-	SystemPrompt string
-	Messages     []CompletionMessage
-	MaxTokens    int
-	Temperature  float64
-	Stream       bool
-	OnDelta      func(CompletionDelta) error
+	BaseURL          string
+	ModelID          string
+	Prompt           string
+	SystemPrompt     string
+	Messages         []CompletionMessage
+	MaxTokens        int
+	Temperature      float64
+	Stream           bool
+	CachePrompt      bool
+	CacheReuseTokens int
+	SlotID           *int
+	OnDelta          func(CompletionDelta) error
 }
 
 type CompletionMessage struct {
@@ -146,6 +149,9 @@ func (c OpenAIClient) completeChat(ctx context.Context, req CompletionRequest) (
 		Stream:      req.Stream,
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
+		CachePrompt: optionalBool(req.CachePrompt),
+		NCacheReuse: req.CacheReuseTokens,
+		IDSlot:      cloneIntPtr(req.SlotID),
 	})
 	if err != nil {
 		return CompletionResult{}, ClientError{Code: "llamacpp_request_marshal_failed"}
@@ -214,6 +220,9 @@ func (c OpenAIClient) completeRaw(ctx context.Context, req CompletionRequest) (C
 		NPredict:    req.MaxTokens,
 		Temperature: req.Temperature,
 		Stream:      req.Stream,
+		CachePrompt: optionalBool(req.CachePrompt),
+		NCacheReuse: req.CacheReuseTokens,
+		IDSlot:      cloneIntPtr(req.SlotID),
 	})
 	if err != nil {
 		return CompletionResult{}, ClientError{Code: "llamacpp_request_marshal_failed"}
@@ -293,6 +302,17 @@ func normalizeCompletionRequest(req CompletionRequest) CompletionRequest {
 	}
 	if req.Temperature < 0 {
 		req.Temperature = 0
+	}
+	if req.CacheReuseTokens < 0 {
+		req.CacheReuseTokens = 0
+	}
+	if req.SlotID != nil {
+		slotID := *req.SlotID
+		if slotID < 0 {
+			req.SlotID = nil
+		} else {
+			req.SlotID = &slotID
+		}
 	}
 	return req
 }
@@ -641,12 +661,31 @@ func (c OpenAIClient) now() time.Time {
 	return time.Now()
 }
 
+func optionalBool(value bool) *bool {
+	if !value {
+		return nil
+	}
+	out := value
+	return &out
+}
+
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
+}
+
 type openAIChatRequest struct {
 	Model       string              `json:"model,omitempty"`
 	Messages    []openAIChatMessage `json:"messages"`
 	Stream      bool                `json:"stream"`
 	MaxTokens   int                 `json:"max_tokens"`
 	Temperature float64             `json:"temperature"`
+	CachePrompt *bool               `json:"cache_prompt,omitempty"`
+	NCacheReuse int                 `json:"n_cache_reuse,omitempty"`
+	IDSlot      *int                `json:"id_slot,omitempty"`
 }
 
 type rawCompletionRequest struct {
@@ -654,6 +693,9 @@ type rawCompletionRequest struct {
 	NPredict    int     `json:"n_predict"`
 	Temperature float64 `json:"temperature"`
 	Stream      bool    `json:"stream"`
+	CachePrompt *bool   `json:"cache_prompt,omitempty"`
+	NCacheReuse int     `json:"n_cache_reuse,omitempty"`
+	IDSlot      *int    `json:"id_slot,omitempty"`
 }
 
 type openAIChatMessage struct {

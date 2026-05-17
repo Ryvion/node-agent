@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Ryvion/node-agent/internal/runner"
+	"github.com/Ryvion/ryvion-node/internal/runner"
 )
 
 func TestAnnotateManagedOCIAbortReceiptMarksOrphanedComputeNonBillable(t *testing.T) {
@@ -63,6 +63,24 @@ func TestWorkCapsuleOptInIsAdvertisedWhenGitExists(t *testing.T) {
 	kinds := v7SupportedRunnerKinds(false, true, false)
 	if !containsString(kinds, executorKindWorkCapsule) {
 		t.Fatalf("work_capsule not advertised after explicit opt-in: %v", kinds)
+	}
+}
+
+func TestUsesVerifierSessionRunnerImageRecognizesNewAndLegacyNames(t *testing.T) {
+	accepted := []string{
+		"ghcr.io/ryvion/ryvion-verifier-sglang:0.1.0",
+		"registry.example.com/ryvion/runtimes/verifier/sglang:dev",
+		"ghcr.io/ryvion/sglang-verifier-runner-v8:0.1.0",
+		"ghcr.io/ryvion/verifier-runner-v8-contract:0.1.0",
+	}
+	for _, image := range accepted {
+		if !usesVerifierSessionRunnerImage(image) {
+			t.Fatalf("usesVerifierSessionRunnerImage(%q) = false, want true", image)
+		}
+	}
+
+	if usesVerifierSessionRunnerImage("ghcr.io/ryvion/draft-runner-v8:0.1.0") {
+		t.Fatal("draft runner image must not use verifier session runner")
 	}
 }
 

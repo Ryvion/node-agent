@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
-	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
 
 func TestLlamaCppBenchmarkAccelerationModeReportsMetal(t *testing.T) {

@@ -3,7 +3,7 @@ package capability
 import (
 	"testing"
 
-	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/ryvion-node/internal/hw"
 )
 
 func TestBuildCapabilityPassportFromFacts(t *testing.T) {

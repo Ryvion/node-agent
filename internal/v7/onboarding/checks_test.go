@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hw"
+	"github.com/Ryvion/ryvion-node/internal/hw"
 )
 
 func TestRunBasicOnboardingChecksIncludesWarningsAndHardErrors(t *testing.T) {

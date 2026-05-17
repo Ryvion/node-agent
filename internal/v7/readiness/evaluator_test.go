@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Ryvion/node-agent/internal/v7/modellease"
+	"github.com/Ryvion/ryvion-node/internal/v7/modellease"
 )
 
 const readinessTestNowUnixMs int64 = 1_800_000_000_000

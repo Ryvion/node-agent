@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/Ryvion/node-agent/internal/diagnostics"
-	"github.com/Ryvion/node-agent/internal/hub"
-	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
-	v7modelwarm "github.com/Ryvion/node-agent/internal/v7/modelwarm"
+	"github.com/Ryvion/ryvion-node/internal/diagnostics"
+	"github.com/Ryvion/ryvion-node/internal/hub"
+	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
+	v7modelwarm "github.com/Ryvion/ryvion-node/internal/v7/modelwarm"
 )
 
 func TestProcessOptionalV7ModelWarmSubmitsReceiptForWarmRuntime(t *testing.T) {

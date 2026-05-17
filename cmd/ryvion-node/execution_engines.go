@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/blob"
-	"github.com/Ryvion/node-agent/internal/hub"
-	"github.com/Ryvion/node-agent/internal/inference"
-	"github.com/Ryvion/node-agent/internal/runner"
+	"github.com/Ryvion/ryvion-node/internal/blob"
+	"github.com/Ryvion/ryvion-node/internal/hub"
+	"github.com/Ryvion/ryvion-node/internal/inference"
+	"github.com/Ryvion/ryvion-node/internal/runner"
 )
 
 type executionContext struct {
@@ -279,7 +279,7 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 
 	var result *runner.Result
 	var runErr error
-	if runner.IsVerifierSessionSpec(work.SpecJSON) || strings.Contains(strings.ToLower(work.Image), "verifier-runner-v8") {
+	if runner.IsVerifierSessionSpec(work.SpecJSON) || usesVerifierSessionRunnerImage(work.Image) {
 		result, runErr = runner.RunVerifierSession(ctx, work.Image, work.SpecJSON, execCtx.gpus)
 	} else {
 		result, runErr = runner.Run(ctx, work.Image, work.SpecJSON, execCtx.gpus)
@@ -358,6 +358,14 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 		ObjectKey:     stringValue(metadata["object_key"]),
 		Metadata:      metadata,
 	}, runErr
+}
+
+func usesVerifierSessionRunnerImage(image string) bool {
+	image = strings.ToLower(strings.TrimSpace(image))
+	return strings.Contains(image, "ryvion-verifier-sglang") ||
+		strings.Contains(image, "verifier/sglang") ||
+		strings.Contains(image, "sglang-verifier-runner-v8") ||
+		strings.Contains(image, "verifier-runner-v8")
 }
 
 func submitForesightDraftPackets(ctx context.Context, client interface {

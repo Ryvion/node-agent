@@ -171,6 +171,38 @@ func TestOpenAIClientSendsResolvedSystemPromptAsChatMessage(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientSendsCachePromptSlotFields(t *testing.T) {
+	slotID := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		var req openAIChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.CachePrompt == nil || !*req.CachePrompt || req.NCacheReuse != 128 || req.IDSlot == nil || *req.IDSlot != 0 {
+			t.Fatalf("cache request fields = %+v", req)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"choices":[{"message":{"content":"cache hit path"},"finish_reason":"stop"}],"usage":{"completion_tokens":3}}`)
+	}))
+	defer server.Close()
+
+	_, err := (OpenAIClient{HTTPClient: server.Client()}).Complete(context.Background(), CompletionRequest{
+		BaseURL:          server.URL,
+		ModelID:          "tinyllama.Q4_K_M.gguf",
+		Prompt:           "Reuse the prefix.",
+		MaxTokens:        8,
+		CachePrompt:      true,
+		CacheReuseTokens: 128,
+		SlotID:           &slotID,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+}
+
 func TestOpenAIClientSendsProvidedMessagesWithLeadingSystemPrompt(t *testing.T) {
 	const systemPrompt = "Use Ryvion runtime facts."
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +246,51 @@ func TestOpenAIClientSendsProvidedMessagesWithLeadingSystemPrompt(t *testing.T) 
 	}
 	if result.PromptMode != PromptModeChatMessages || result.SystemPromptHash != HashSystemPrompt(systemPrompt) {
 		t.Fatalf("prompt metadata = %+v, want chat messages with system hash", result)
+	}
+}
+
+func TestOpenAIClientSlotSaveRestoreUsesLocalSlotsEndpoint(t *testing.T) {
+	var paths []string
+	var filenames []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.String())
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		var req slotActionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode slot request: %v", err)
+		}
+		filenames = append(filenames, req.Filename)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("action") {
+		case "restore":
+			fmt.Fprintln(w, `{"id_slot":0,"filename":"ryvion_slot_abc.bin","n_restored":12,"n_read":4096}`)
+		case "save":
+			fmt.Fprintln(w, `{"id_slot":0,"filename":"ryvion_slot_abc.bin","n_saved":13,"n_written":8192}`)
+		default:
+			t.Fatalf("unexpected action %q", r.URL.Query().Get("action"))
+		}
+	}))
+	defer server.Close()
+
+	client := OpenAIClient{HTTPClient: server.Client()}
+	restore, err := client.RestoreSlot(context.Background(), SlotCacheRequest{BaseURL: server.URL, SlotID: 0, Filename: "ryvion_slot_abc.bin"})
+	if err != nil {
+		t.Fatalf("RestoreSlot() error = %v", err)
+	}
+	save, err := client.SaveSlot(context.Background(), SlotCacheRequest{BaseURL: server.URL, SlotID: 0, Filename: "ryvion_slot_abc.bin"})
+	if err != nil {
+		t.Fatalf("SaveSlot() error = %v", err)
+	}
+	if strings.Join(paths, ",") != "/slots/0?action=restore,/slots/0?action=save" {
+		t.Fatalf("paths = %v", paths)
+	}
+	if strings.Join(filenames, ",") != "ryvion_slot_abc.bin,ryvion_slot_abc.bin" {
+		t.Fatalf("filenames = %v", filenames)
+	}
+	if restore.RestoredTokens != 12 || save.SavedTokens != 13 {
+		t.Fatalf("slot results restore=%+v save=%+v", restore, save)
 	}
 }
 

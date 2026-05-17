@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hw"
-	v7dashboardinference "github.com/Ryvion/node-agent/internal/v7/dashboardinference"
-	v7heartbeat "github.com/Ryvion/node-agent/internal/v7/heartbeat"
-	v7netprofile "github.com/Ryvion/node-agent/internal/v7/netprofile"
+	"github.com/Ryvion/ryvion-node/internal/hw"
+	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
+	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
+	v7netprofile "github.com/Ryvion/ryvion-node/internal/v7/netprofile"
 )
 
 type Client struct {
@@ -323,6 +323,21 @@ func (c *Client) SubmitForesightDraftPacket(ctx context.Context, windowID string
 	if len(packet) == 0 {
 		return DraftPacketDecision{}, fmt.Errorf("draft packet required")
 	}
+	if c.useGRPCTransport() {
+		if batch, err := c.submitDraftPacketBatchGRPC(ctx, windowID, []map[string]any{packet}); err == nil {
+			if len(batch.Decisions) > 0 {
+				return batch.Decisions[0], nil
+			}
+			return DraftPacketDecision{
+				SchemaVersion: batch.SchemaVersion,
+				WindowID:      batch.WindowID,
+				Accepted:      batch.Accepted > 0,
+				Reason:        "accepted",
+			}, nil
+		} else if !c.shouldFallbackGRPC(err) {
+			return DraftPacketDecision{}, err
+		}
+	}
 	headers := map[string]string{
 		"X-Node-Token": c.NodeAuthToken(0),
 	}
@@ -341,6 +356,11 @@ func (c *Client) SubmitForesightDraftPacketBatch(ctx context.Context, windowID s
 	}
 	if len(packets) == 0 {
 		return DraftPacketBatchDecision{}, fmt.Errorf("draft packets required")
+	}
+	if c.useGRPCTransport() {
+		if out, err := c.submitDraftPacketBatchGRPC(ctx, windowID, packets); err == nil || !c.shouldFallbackGRPC(err) {
+			return out, err
+		}
 	}
 	headers := map[string]string{
 		"X-Node-Token": c.NodeAuthToken(0),

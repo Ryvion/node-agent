@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hub"
+	"github.com/Ryvion/ryvion-node/internal/hub"
 )
 
 func TestWriteHubStreamErrorUsesOpenAIErrorShape(t *testing.T) {

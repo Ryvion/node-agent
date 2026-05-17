@@ -37,7 +37,7 @@ const releasePublicKeyB64 = "KZWGe+VQWPy2ypCNpGwPEYlc8FnFVadufGXnbGAk2nE="
 // version number (an untrusted hint), so it cannot substitute or downgrade
 // signed binaries. This is a package var ONLY so in-package tests can point it
 // at a local server; there is no runtime/env path to change it.
-var releaseAssetBaseURL = "https://github.com/Ryvion/node-agent/releases/download"
+var releaseAssetBaseURL = "https://github.com/Ryvion/ryvion-node/releases/download"
 
 // testSigningPublicKeyB64, when set by an in-package test, overrides the pinned
 // verification key. There is no runtime/env path to set it (not an attack

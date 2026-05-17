@@ -330,7 +330,7 @@ func TestStress_StringVal(t *testing.T) {
 		{"nil_value", nil, ""},
 		{"bool_true", true, ""},
 		{"bool_false", false, ""},
-		{"int_value", 42, ""},       // only float64 and string handled
+		{"int_value", 42, ""},         // only float64 and string handled
 		{"int64_value", int64(9), ""}, // not handled
 		{"slice_value", []string{"a"}, ""},
 		{"map_value", map[string]int{"a": 1}, ""},
@@ -383,11 +383,11 @@ func TestStress_ParseWindowsSizedMemory_Exhaustive(t *testing.T) {
 		{"4294967296", 4294967296},
 
 		// Edge cases
-		{"0 GB", 0},           // v <= 0 returns 0
-		{"0 MB", 0},           // v <= 0 returns 0
-		{"0.0 GB", 0},         // 0.0 <= 0 returns 0
-		{"-1 GB", 0},          // negative: v <= 0 returns 0
-		{"-500 MB", 0},        // negative
+		{"0 GB", 0},    // v <= 0 returns 0
+		{"0 MB", 0},    // v <= 0 returns 0
+		{"0.0 GB", 0},  // 0.0 <= 0 returns 0
+		{"-1 GB", 0},   // negative: v <= 0 returns 0
+		{"-500 MB", 0}, // negative
 
 		// Fractional
 		{"1.5 GB", uint64(1.5 * 1024 * 1024 * 1024)},
@@ -411,8 +411,8 @@ func TestStress_ParseWindowsSizedMemory_Exhaustive(t *testing.T) {
 
 		// Junk input
 		{"not a number", 0},
-		{"MB", 0},                // no numeric part after stripping
-		{"   ", 0},               // whitespace only
+		{"MB", 0},  // no numeric part after stripping
+		{"   ", 0}, // whitespace only
 	}
 
 	for _, tc := range tests {

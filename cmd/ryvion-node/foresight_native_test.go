@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Ryvion/node-agent/internal/hub"
-	v7llamacpp "github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/hub"
+	v7llamacpp "github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
 
 func TestDecodeForesightNativeDraftSpecBuildsPackets(t *testing.T) {
@@ -31,8 +31,8 @@ func TestDecodeForesightNativeDraftSpecBuildsPackets(t *testing.T) {
 	if !ok {
 		t.Fatal("decodeForesightNativeDraftSpec ok = false")
 	}
-	if spec.DraftBackend != "native_bridge" {
-		t.Fatalf("DraftBackend = %q, want native_bridge", spec.DraftBackend)
+	if spec.DraftBackend != foresightDraftBackendNative {
+		t.Fatalf("DraftBackend = %q, want %q", spec.DraftBackend, foresightDraftBackendNative)
 	}
 	packets := buildForesightNativeDraftPackets(spec)
 	if len(packets) != 3 {
@@ -74,8 +74,8 @@ func TestDecodeForesightNativeVerifierSpecAcceptsTree(t *testing.T) {
 	if !ok {
 		t.Fatal("decodeForesightNativeVerifierSpec ok = false")
 	}
-	if backend != "" {
-		t.Fatalf("backend = %q, want empty bridge default", backend)
+	if backend != foresightVerifierBackendBridge {
+		t.Fatalf("backend = %q, want %q", backend, foresightVerifierBackendBridge)
 	}
 	if accepted != 8 {
 		t.Fatalf("accepted = %d, want capped 8", accepted)
@@ -191,7 +191,7 @@ func TestNativeLlamaCppVerifierWaveUsesMeasuredCompletion(t *testing.T) {
 	if result.StopReason != "" || result.EOS {
 		t.Fatalf("verifier result stop = %q eos=%v, want non-terminal for llama.cpp finish_reason=stop", result.StopReason, result.EOS)
 	}
-	if result.ProbeSummary["source"] != "native_llamacpp_verifier" ||
+	if result.ProbeSummary["source"] != "llamacpp_demo_verifier" ||
 		result.ProbeSummary["backend"] != v7llamacpp.BackendName ||
 		result.ProbeSummary["output_hash"] == "" {
 		t.Fatalf("probe summary = %#v, want llama.cpp measured metadata", result.ProbeSummary)
@@ -274,7 +274,7 @@ func TestNativeLlamaCppVerifierUnavailableDoesNotUseDeterministicCPUFallback(t *
 
 func TestForesightNativeExternalRuntimeRequestedSkipsManagedOCI(t *testing.T) {
 	work := &hub.WorkAssignment{
-		Image:        "ghcr.io/ryvion/sglang-verifier-runner-v8:0.1.0",
+		Image:        "ghcr.io/ryvion/ryvion-verifier-sglang:0.1.0",
 		ExecutorKind: executorKindManagedOCI,
 	}
 	if !foresightNativeExternalRuntimeRequested(work, executorKindManagedOCI, work.Image, true) {
@@ -282,7 +282,7 @@ func TestForesightNativeExternalRuntimeRequestedSkipsManagedOCI(t *testing.T) {
 	}
 	nativeWork := &hub.WorkAssignment{Image: executorKindNativeReport, ExecutorKind: executorKindNativeReport}
 	if foresightNativeExternalRuntimeRequested(nativeWork, executorKindNativeReport, "", false) {
-		t.Fatal("native report job should be claimable by native Foresight handlers")
+		t.Fatal("native report job should be claimable by native speculative handlers")
 	}
 }
 

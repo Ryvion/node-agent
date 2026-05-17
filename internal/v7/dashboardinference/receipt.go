@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Ryvion/node-agent/internal/v7/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/v7/llamacpp"
 )
 
 var ErrInvalidReceipt = errors.New("dashboardinference: invalid receipt")
@@ -60,6 +60,7 @@ type ReceiptMetadata struct {
 	// Empty for legacy non-speculative receipts so existing hashes are
 	// unchanged.
 	Speculative SpeculativeMetadata `json:"speculative,omitempty"`
+	Cache       CacheMetadata       `json:"cache,omitempty"`
 }
 
 func BuildReceipt(result ExecutionResult) (Receipt, error) {
@@ -250,6 +251,9 @@ func (m ReceiptMetadata) Map() map[string]any {
 	if specMap := m.Speculative.Map(); specMap != nil {
 		out["speculative"] = specMap
 	}
+	if cacheMap := m.Cache.Map(); cacheMap != nil {
+		out["cache"] = cacheMap
+	}
 	return out
 }
 
@@ -286,6 +290,7 @@ func (m ReceiptMetadata) clone() ReceiptMetadata {
 	m.ErrorCode = cleanErrorCode(m.ErrorCode)
 	m.PromptMode = cleanPromptMode(m.PromptMode)
 	m.SystemPromptHash = cleanHash(m.SystemPromptHash)
+	m.Cache = m.Cache.clone()
 	if m.OutputBytes < 0 {
 		m.OutputBytes = 0
 	}
@@ -401,6 +406,7 @@ func receiptMetadataFromResult(result ExecutionResult) ReceiptMetadata {
 		SystemPromptHash:         result.SystemPromptHash,
 		MaxReturnChars:           result.MaxReturnChars,
 		Speculative:              result.Speculative,
+		Cache:                    result.Cache,
 	}.clone()
 }
 
@@ -416,6 +422,7 @@ func normalizeExecutionResult(result ExecutionResult) ExecutionResult {
 	result.ErrorCode = cleanErrorCode(result.ErrorCode)
 	result.PromptMode = cleanPromptMode(result.PromptMode)
 	result.SystemPromptHash = cleanHash(result.SystemPromptHash)
+	result.Cache = result.Cache.clone()
 	finish := llamacpp.NormalizeCompletionFinishMetadata(llamacpp.CompletionResult{
 		RequestedMaxTokens:  result.RequestedMaxTokens,
 		TokensGenerated:     result.TokensGenerated,

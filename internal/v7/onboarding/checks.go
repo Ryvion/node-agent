@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hw"
-	"github.com/Ryvion/node-agent/internal/inference"
-	"github.com/Ryvion/node-agent/internal/runtimeexec"
-	"github.com/Ryvion/node-agent/internal/v7/capability"
-	"github.com/Ryvion/node-agent/internal/v7/sandbox"
+	"github.com/Ryvion/ryvion-node/internal/hw"
+	"github.com/Ryvion/ryvion-node/internal/inference"
+	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
+	"github.com/Ryvion/ryvion-node/internal/v7/capability"
+	"github.com/Ryvion/ryvion-node/internal/v7/sandbox"
 )
 
 const reportSchemaVersion = "v7.onboarding-report.v1"

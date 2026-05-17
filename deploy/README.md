@@ -20,7 +20,7 @@
 ssh root@YOUR_DROPLET_IP
 
 # Download and run setup script
-curl -fsSL https://raw.githubusercontent.com/Ryvion/node-agent/main/deploy/digitalocean-setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Ryvion/ryvion-node/main/deploy/digitalocean-setup.sh | bash
 
 # Start the service
 systemctl start ryvion-node
@@ -165,4 +165,4 @@ environment:
 
 - **Documentation**: [docs.ryvion.io](https://docs.ryvion.io)
 - **Discord**: [discord.gg/ryvion](https://discord.gg/ryvion)
-- **GitHub Issues**: [github.com/Ryvion/node-agent/issues](https://github.com/Ryvion/node-agent/issues)
+- **GitHub Issues**: [github.com/Ryvion/ryvion-node/issues](https://github.com/Ryvion/ryvion-node/issues)

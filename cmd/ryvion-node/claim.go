@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Ryvion/node-agent/internal/hub"
-	"github.com/Ryvion/node-agent/internal/nodekey"
+	"github.com/Ryvion/ryvion-node/internal/hub"
+	"github.com/Ryvion/ryvion-node/internal/nodekey"
 )
 
 func runClaim() {

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	v7hardware "github.com/Ryvion/node-agent/internal/v7/hardware"
+	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
 )
 
 func TestBuildDerivedPolicyBlocksPhiOnConstrainedAppleMac(t *testing.T) {
