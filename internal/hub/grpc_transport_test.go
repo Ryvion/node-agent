@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	experimentsv1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/experiments/v1"
@@ -48,6 +49,48 @@ func TestClientHeartbeatUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
 	}
 	if fake.heartbeat.GetPublicKeyHex() != hex.EncodeToString(pub) || len(fake.signature.GetSignature()) == 0 {
 		t.Fatalf("heartbeat did not carry signed node identity: heartbeat=%#v signature=%#v", fake.heartbeat, fake.signature)
+	}
+}
+
+func TestClientReusesNodeGatewayStream(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	fake := &fakePersistentNodeGatewayServer{work: &nodev1.WorkAssignment{
+		JobId:        "job-reuse",
+		Kind:         "inference",
+		SpecJson:     `{"task":"inference"}`,
+		ExecutorKind: "native",
+	}}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	defer client.Close()
+	if _, err := client.Heartbeat(context.Background(), Metrics{TimestampMs: 457, CPUUtil: 1}); err != nil {
+		t.Fatalf("Heartbeat() error = %v", err)
+	}
+	work, err := client.FetchWork(context.Background())
+	if err != nil {
+		t.Fatalf("FetchWork() error = %v", err)
+	}
+	if work == nil || work.JobID != "job-reuse" {
+		t.Fatalf("unexpected work assignment: %#v", work)
+	}
+	if got := fake.connectCount.Load(); got != 1 {
+		t.Fatalf("NodeGateway Connect calls = %d, want one persistent stream", got)
 	}
 }
 
@@ -361,6 +404,55 @@ type fakeNodeGatewayServer struct {
 	receiptReason   string
 	draftBatch      *nodev1.DraftPacketBatch
 	signature       *nodev1.Signature
+}
+
+type fakePersistentNodeGatewayServer struct {
+	nodev1.UnimplementedNodeGatewayServer
+	connectCount atomic.Int32
+	work         *nodev1.WorkAssignment
+}
+
+func (s *fakePersistentNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer) error {
+	s.connectCount.Add(1)
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		if msg.GetHeartbeat() != nil {
+			if err := stream.Send(&nodev1.HubToNode{
+				MessageId:       "ack_" + msg.GetMessageId(),
+				CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+				Payload: &nodev1.HubToNode_HeartbeatAck{
+					HeartbeatAck: &nodev1.NodeHeartbeatAck{
+						Ok:                   true,
+						NodeId:               "node-reuse",
+						V7SnapshotUpserted:   true,
+						SnapshotModelCount:   1,
+						SnapshotBackendCount: 1,
+						HasCapabilityProfile: true,
+					},
+				},
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		if msg.GetWorkLeaseRequest() != nil {
+			if err := stream.Send(&nodev1.HubToNode{
+				MessageId:       "ack_" + msg.GetMessageId(),
+				CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+				Payload: &nodev1.HubToNode_WorkLeaseAck{
+					WorkLeaseAck: &nodev1.WorkLeaseAck{
+						HasWork:    s.work != nil,
+						Assignment: s.work,
+					},
+				},
+			}); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer) error {

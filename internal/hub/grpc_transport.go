@@ -42,7 +42,14 @@ type grpcTransport struct {
 	mu             sync.Mutex
 	conn           *grpc.ClientConn
 	gatewayClient  nodev1.NodeGatewayClient
+	gatewayStream  nodev1.NodeGateway_ConnectClient
+	gatewayPending map[string]chan nodeGatewayResponse
 	liveLabGateway experimentsv1.ExperimentalLiveLabGatewayClient
+}
+
+type nodeGatewayResponse struct {
+	resp *nodev1.HubToNode
+	err  error
 }
 
 func defaultGRPCTransport() *grpcTransport {
@@ -92,10 +99,7 @@ func (c *Client) heartbeatGRPC(ctx context.Context, body heartbeatRequest) (Hear
 }
 
 func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
-	client, err := c.nodeGatewayClient(ctx)
-	if err != nil {
-		return HeartbeatResponse{}, err
-	}
+	var err error
 	var v7Struct *structpb.Struct
 	if body.V7 != nil {
 		v7Struct, err = structFromJSONValue(body.V7)
@@ -110,13 +114,9 @@ func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatReq
 			return HeartbeatResponse{}, err
 		}
 	}
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	stream, err := client.Connect(ctx)
-	if err != nil {
-		return HeartbeatResponse{}, err
-	}
-	if err := stream.Send(&nodev1.NodeToHub{
+	resp, err := c.nodeGatewayRoundTrip(ctx, &nodev1.NodeToHub{
 		NodeId:          body.PublicKeyHex,
 		MessageId:       fmt.Sprintf("heartbeat-%d", body.TimestampMs),
 		CreatedAtUnixMs: body.TimestampMs,
@@ -139,13 +139,7 @@ func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatReq
 			Algorithm: "ed25519",
 			Signature: append([]byte(nil), body.Signature...),
 		},
-	}); err != nil {
-		return HeartbeatResponse{}, err
-	}
-	resp, err := stream.Recv()
-	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
-		err = closeErr
-	}
+	})
 	if err != nil {
 		return HeartbeatResponse{}, err
 	}
@@ -175,21 +169,13 @@ func (c *Client) fetchWorkGRPC(ctx context.Context, pubHex string, ts int64, sig
 }
 
 func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts int64, signature []byte, longPoll bool) (*WorkAssignment, error) {
-	client, err := c.nodeGatewayClient(ctx)
-	if err != nil {
-		return nil, err
-	}
 	timeout := 10 * time.Second
 	if longPoll {
 		timeout = 35 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	stream, err := client.Connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := stream.Send(&nodev1.NodeToHub{
+	resp, err := c.nodeGatewayRoundTrip(ctx, &nodev1.NodeToHub{
 		NodeId:          pubHex,
 		MessageId:       fmt.Sprintf("work-lease-%d", ts),
 		CreatedAtUnixMs: ts,
@@ -205,13 +191,7 @@ func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts
 			Algorithm: "ed25519",
 			Signature: append([]byte(nil), signature...),
 		},
-	}); err != nil {
-		return nil, err
-	}
-	resp, err := stream.Recv()
-	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
-		err = closeErr
-	}
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -247,10 +227,7 @@ func (c *Client) submitReceiptGRPC(ctx context.Context, body receiptRequest) err
 }
 
 func (c *Client) submitReceiptNodeGatewayGRPC(ctx context.Context, body receiptRequest) error {
-	client, err := c.nodeGatewayClient(ctx)
-	if err != nil {
-		return err
-	}
+	var err error
 	var metadataStruct *structpb.Struct
 	if body.Metadata != nil {
 		metadataStruct, err = structFromJSONValue(body.Metadata)
@@ -258,13 +235,9 @@ func (c *Client) submitReceiptNodeGatewayGRPC(ctx context.Context, body receiptR
 			return err
 		}
 	}
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	stream, err := client.Connect(ctx)
-	if err != nil {
-		return err
-	}
-	if err := stream.Send(&nodev1.NodeToHub{
+	resp, err := c.nodeGatewayRoundTrip(ctx, &nodev1.NodeToHub{
 		NodeId:          body.PublicKeyHex,
 		MessageId:       fmt.Sprintf("receipt-%s", body.JobID),
 		CreatedAtUnixMs: time.Now().UnixMilli(),
@@ -282,13 +255,7 @@ func (c *Client) submitReceiptNodeGatewayGRPC(ctx context.Context, body receiptR
 			Algorithm: "ed25519",
 			Signature: append([]byte(nil), body.Signature...),
 		},
-	}); err != nil {
-		return err
-	}
-	resp, err := stream.Recv()
-	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
-		err = closeErr
-	}
+	})
 	if err != nil {
 		return err
 	}
@@ -306,10 +273,6 @@ func (c *Client) submitReceiptNodeGatewayGRPC(ctx context.Context, body receiptR
 }
 
 func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
-	client, err := c.nodeGatewayClient(ctx)
-	if err != nil {
-		return DraftPacketBatchDecision{}, err
-	}
 	protoPackets := make([]*speculativev1.DraftPacket, 0, len(packets))
 	for _, packet := range packets {
 		packetProto, err := draftPacketProtoFromMap(packet)
@@ -320,13 +283,9 @@ func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string
 	}
 	ts := time.Now().UnixMilli()
 	pubHex := c.pubHex()
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	stream, err := client.Connect(ctx)
-	if err != nil {
-		return DraftPacketBatchDecision{}, err
-	}
-	if err := stream.Send(&nodev1.NodeToHub{
+	resp, err := c.nodeGatewayRoundTrip(ctx, &nodev1.NodeToHub{
 		NodeId:          pubHex,
 		MessageId:       fmt.Sprintf("draft-packets-%s-%d", windowID, ts),
 		CreatedAtUnixMs: ts,
@@ -341,13 +300,7 @@ func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string
 			Algorithm: "ed25519-node-auth",
 			Signature: c.sign("node_auth", pubHex, strconv.FormatInt(ts, 10)),
 		},
-	}); err != nil {
-		return DraftPacketBatchDecision{}, err
-	}
-	resp, err := stream.Recv()
-	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
-		err = closeErr
-	}
+	})
 	if err != nil {
 		return DraftPacketBatchDecision{}, err
 	}
@@ -521,11 +474,18 @@ func nonNegativeUint32(value int) uint32 {
 	return uint32(value)
 }
 
-func (c *Client) nodeGatewayClient(ctx context.Context) (nodev1.NodeGatewayClient, error) {
+func (c *Client) nodeGatewayRoundTrip(ctx context.Context, msg *nodev1.NodeToHub) (*nodev1.HubToNode, error) {
 	if c == nil || c.grpc == nil || !c.grpc.enabled() {
 		return nil, status.Error(codes.Unavailable, "gRPC transport disabled")
 	}
-	return c.grpc.gatewayClientFor(ctx)
+	if msg == nil {
+		return nil, status.Error(codes.InvalidArgument, "node gateway message required")
+	}
+	messageID := strings.TrimSpace(msg.GetMessageId())
+	if messageID == "" {
+		return nil, status.Error(codes.InvalidArgument, "node gateway message_id required")
+	}
+	return c.grpc.gatewayRoundTrip(ctx, c.grpcMetadataContext(context.Background()), msg, "ack_"+messageID)
 }
 
 func (c *Client) experimentalLiveLabGatewayClient(ctx context.Context) (experimentsv1.ExperimentalLiveLabGatewayClient, error) {
@@ -554,14 +514,31 @@ func (c *Client) grpcMetadataContext(ctx context.Context) context.Context {
 
 func (t *grpcTransport) close() error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if t.gatewayStream != nil {
+		_ = t.gatewayStream.CloseSend()
+		t.gatewayStream = nil
+	}
+	pending := t.gatewayPending
+	t.gatewayPending = nil
 	if t.conn == nil {
+		t.mu.Unlock()
+		for _, ch := range pending {
+			if ch != nil {
+				ch <- nodeGatewayResponse{err: status.Error(codes.Canceled, "gRPC transport closed")}
+			}
+		}
 		return nil
 	}
 	err := t.conn.Close()
 	t.conn = nil
 	t.gatewayClient = nil
 	t.liveLabGateway = nil
+	t.mu.Unlock()
+	for _, ch := range pending {
+		if ch != nil {
+			ch <- nodeGatewayResponse{err: status.Error(codes.Canceled, "gRPC transport closed")}
+		}
+	}
 	return err
 }
 
@@ -571,20 +548,6 @@ func (t *grpcTransport) enabled() bool {
 
 func (t *grpcTransport) required() bool {
 	return t != nil && t.mode == hubTransportGRPC
-}
-
-func (t *grpcTransport) gatewayClientFor(ctx context.Context) (nodev1.NodeGatewayClient, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.gatewayClient != nil {
-		return t.gatewayClient, nil
-	}
-	conn, err := t.connForLocked(ctx)
-	if err != nil {
-		return nil, err
-	}
-	t.gatewayClient = nodev1.NewNodeGatewayClient(conn)
-	return t.gatewayClient, nil
 }
 
 func (t *grpcTransport) liveLabGatewayClientFor(ctx context.Context) (experimentsv1.ExperimentalLiveLabGatewayClient, error) {
@@ -599,6 +562,117 @@ func (t *grpcTransport) liveLabGatewayClientFor(ctx context.Context) (experiment
 	}
 	t.liveLabGateway = experimentsv1.NewExperimentalLiveLabGatewayClient(conn)
 	return t.liveLabGateway, nil
+}
+
+func (t *grpcTransport) gatewayRoundTrip(ctx context.Context, streamCtx context.Context, msg *nodev1.NodeToHub, responseID string) (*nodev1.HubToNode, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ch := make(chan nodeGatewayResponse, 1)
+	stream, err := t.gatewayStreamFor(streamCtx)
+	if err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	if t.gatewayPending == nil {
+		t.gatewayPending = make(map[string]chan nodeGatewayResponse)
+	}
+	if _, exists := t.gatewayPending[responseID]; exists {
+		t.mu.Unlock()
+		return nil, status.Error(codes.Aborted, "duplicate node gateway response id")
+	}
+	t.gatewayPending[responseID] = ch
+	t.mu.Unlock()
+
+	if err := stream.Send(msg); err != nil {
+		t.removeGatewayPending(responseID)
+		t.resetGatewayStream(stream, err)
+		return nil, err
+	}
+	select {
+	case out := <-ch:
+		return out.resp, out.err
+	case <-ctx.Done():
+		t.removeGatewayPending(responseID)
+		return nil, ctx.Err()
+	}
+}
+
+func (t *grpcTransport) gatewayStreamFor(ctx context.Context) (nodev1.NodeGateway_ConnectClient, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.gatewayStream != nil {
+		return t.gatewayStream, nil
+	}
+	conn, err := t.connForLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if t.gatewayClient == nil {
+		t.gatewayClient = nodev1.NewNodeGatewayClient(conn)
+	}
+	stream, err := t.gatewayClient.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	t.gatewayStream = stream
+	if t.gatewayPending == nil {
+		t.gatewayPending = make(map[string]chan nodeGatewayResponse)
+	}
+	go t.recvGatewayStream(stream)
+	return stream, nil
+}
+
+func (t *grpcTransport) recvGatewayStream(stream nodev1.NodeGateway_ConnectClient) {
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			t.resetGatewayStream(stream, err)
+			return
+		}
+		if resp == nil {
+			continue
+		}
+		t.mu.Lock()
+		ch := t.gatewayPending[resp.GetMessageId()]
+		if ch != nil {
+			delete(t.gatewayPending, resp.GetMessageId())
+		}
+		t.mu.Unlock()
+		if ch != nil {
+			ch <- nodeGatewayResponse{resp: resp}
+		}
+	}
+}
+
+func (t *grpcTransport) removeGatewayPending(responseID string) {
+	t.mu.Lock()
+	delete(t.gatewayPending, responseID)
+	t.mu.Unlock()
+}
+
+func (t *grpcTransport) resetGatewayStream(stream nodev1.NodeGateway_ConnectClient, streamErr error) {
+	if streamErr == nil {
+		streamErr = status.Error(codes.Unavailable, "node gateway stream closed")
+	}
+	t.mu.Lock()
+	if stream != nil && t.gatewayStream != stream {
+		t.mu.Unlock()
+		return
+	}
+	if t.gatewayStream != nil {
+		_ = t.gatewayStream.CloseSend()
+	}
+	t.gatewayStream = nil
+	pending := t.gatewayPending
+	t.gatewayPending = nil
+	t.mu.Unlock()
+
+	for _, ch := range pending {
+		if ch != nil {
+			ch <- nodeGatewayResponse{err: streamErr}
+		}
+	}
 }
 
 func (t *grpcTransport) connForLocked(_ context.Context) (*grpc.ClientConn, error) {
