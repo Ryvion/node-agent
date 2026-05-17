@@ -98,59 +98,12 @@ func processOptionalForesightNativeDraftHotSession(ctx context.Context, client *
 		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.DraftBackend, foresightDraftHotSessionTask), fmt.Errorf("unsupported native foresight draft backend: %s", spec.DraftBackend)
 	}
 	started := time.Now()
-	submittedWindows := map[string]bool{}
-	totalAccepted := 0
-	totalRaw := 0
-	waves := 0
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		command, err := client.FetchForesightLiveLabDraftCommand(ctx, spec.RunID, work.JobID)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return true, nil, ctx.Err()
-			case <-ticker.C:
-				continue
-			}
-		}
-		switch strings.TrimSpace(command.Command) {
-		case "close_session":
-			result := submitForesightNativeHotDraftReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, totalRaw, waves)
-			return true, result, nil
-		case "generate_draft_packets":
-			windowID := strings.TrimSpace(command.WindowID)
-			if windowID != "" && !submittedWindows[windowID] {
-				draftSpec := foresightNativeDraftSpec{
-					Task:                 foresightDraftRunnerTask,
-					WorkGraphID:          firstNonEmptyString(command.WorkGraphID, spec.WorkGraphID),
-					WindowID:             windowID,
-					RoleID:               firstNonEmptyString(command.RoleID, spec.RoleID),
-					TargetNodeID:         firstNonEmptyString(command.TargetNodeID, spec.TargetNodeID),
-					NodeID:               firstNonEmptyString(command.NodeID, spec.NodeID),
-					Prompt:               firstNonEmptyString(command.Prompt, spec.Prompt),
-					ParentPrefixHash:     firstNonEmptyString(command.ParentPrefixHash, spec.ParentPrefixHash),
-					BranchCount:          command.BranchCount,
-					Horizon:              command.Horizon,
-					DeadlineMs:           command.DeadlineMs,
-					ModelHash:            firstNonEmptyString(command.ModelHash, spec.ModelHash),
-					DrafterModelID:       firstNonEmptyString(command.DrafterModelID, spec.DrafterModelID),
-					FirstPacketTimeoutMs: command.FirstPacketTimeout,
-				}
-				packets := buildForesightNativeDraftPackets(draftSpec)
-				summary := submitForesightDraftPackets(ctx, client, packets)
-				totalAccepted += intFromAny(summary["accepted"])
-				totalRaw += len(packets)
-				waves++
-				submittedWindows[windowID] = true
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return true, nil, ctx.Err()
-		case <-ticker.C:
-		}
+	session, err := draftbridge.RunHotSession(ctx, client, spec, work.JobID, 100*time.Millisecond)
+	if err != nil {
+		return true, nil, err
 	}
+	result := submitForesightNativeHotDraftReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, session.AcceptedPackets, session.RawPackets, session.Waves)
+	return true, result, nil
 }
 
 func submitForesightNativeHotDraftReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, accepted int, raw int, waves int) *runnerResultSnapshot {
@@ -279,46 +232,12 @@ func processOptionalForesightNativeVerifierHotSession(ctx context.Context, clien
 		return true, submitForesightNativeUnsupportedReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec.VerifierBackend, foresightVerifierHotSessionTask), fmt.Errorf("unsupported native foresight verifier backend: %s", spec.VerifierBackend)
 	}
 	started := time.Now()
-	verifiedCommands := map[string]bool{}
-	totalAccepted := 0
-	waves := 0
-	var acceptedText strings.Builder
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		command, err := client.FetchForesightLiveLabVerifierCommand(ctx, spec.RunID, work.JobID)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return true, nil, ctx.Err()
-			case <-ticker.C:
-				continue
-			}
-		}
-		switch strings.TrimSpace(command.Command) {
-		case "close_session":
-			result := submitForesightNativeHotVerifierReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, waves, acceptedText.String(), command.Reason)
-			return true, result, nil
-		case "verify_tree":
-			commandID := firstNonEmptyString(command.CommandID, fmt.Sprintf("%s:%s:%d", spec.RunID, command.WindowID, command.WaveIndex))
-			if !verifiedCommands[commandID] {
-				result := contracttestverifier.VerifyWave(work.JobID, spec, command, totalAccepted)
-				if err := client.SubmitForesightLiveLabVerifierResult(ctx, spec.RunID, result); err == nil {
-					totalAccepted += result.AcceptedLen
-					waves++
-					if strings.TrimSpace(result.AcceptedText) != "" {
-						acceptedText.WriteString(result.AcceptedText)
-					}
-					verifiedCommands[commandID] = true
-				}
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return true, nil, ctx.Err()
-		case <-ticker.C:
-		}
+	session, err := contracttestverifier.RunHotSession(ctx, client, work.JobID, spec, 100*time.Millisecond)
+	if err != nil {
+		return true, nil, err
 	}
+	result := submitForesightNativeHotVerifierReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
+	return true, result, nil
 }
 
 func submitForesightNativeHotVerifierReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, accepted int, waves int, acceptedText string, reason string) *runnerResultSnapshot {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,110 +61,17 @@ func processForesightNativeSGLangVerifier(ctx context.Context, client *hub.Clien
 		return result, err
 	}
 
-	totalAccepted := 0
-	waves := 0
-	sessionStarted := false
-	prefilled := false
-	verifiedCommands := map[string]bool{}
-	var acceptedText strings.Builder
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		command, err := client.FetchForesightLiveLabVerifierCommand(ctx, spec.RunID, work.JobID)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				_, _ = sglangverify.RPC(context.Background(), socketPath, "abort", map[string]any{"reason": ctx.Err().Error()})
-				result := submitForesightNativeSGLangFinalReceipt(context.Background(), client, work, runtimeMgr, gpuDetected, spec, started, workDir, totalAccepted, waves, acceptedText.String(), "aborted")
-				return result, ctx.Err()
-			case <-ticker.C:
-				continue
-			}
+	session, err := sglangverify.RunHotSession(ctx, client, socketPath, work.JobID, spec, 100*time.Millisecond)
+	if err != nil {
+		receiptCtx := ctx
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			receiptCtx = context.Background()
 		}
-		switch strings.TrimSpace(command.Command) {
-		case "close_session":
-			_, _ = sglangverify.RPC(ctx, socketPath, "close_session", map[string]any{"session_id": spec.SessionID, "reason": command.Reason})
-			result := submitForesightNativeSGLangFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, totalAccepted, waves, acceptedText.String(), command.Reason)
-			return result, nil
-		case "verify_tree":
-			commandID := firstNonEmptyString(command.CommandID, fmt.Sprintf("%s:%s:%d", spec.RunID, command.WindowID, command.WaveIndex))
-			if verifiedCommands[commandID] {
-				break
-			}
-			if !sessionStarted {
-				if _, err := sglangverify.RPC(ctx, socketPath, "start_session", map[string]any{"session": nativeSGLangSessionPayload(spec)}); err != nil {
-					result := submitForesightNativeSGLangFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, totalAccepted, waves, acceptedText.String(), "start_session_failed")
-					return result, err
-				}
-				sessionStarted = true
-			}
-			if !prefilled {
-				if _, err := sglangverify.RPC(ctx, socketPath, "prefill", map[string]any{"session_id": spec.SessionID, "prefix_hash": spec.ParentPrefixHash, "prefix_tokens": []int{}}); err != nil {
-					result := submitForesightNativeSGLangFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, totalAccepted, waves, acceptedText.String(), "prefill_failed")
-					return result, err
-				}
-				prefilled = true
-			}
-			waveStarted := time.Now()
-			verifyResult, err := sglangverify.RPC(ctx, socketPath, "verify_tree", map[string]any{
-				"session_id": spec.SessionID,
-				"session":    nativeSGLangSessionPayload(spec),
-				"tree":       command.Tree,
-			})
-			if err != nil {
-				result := submitForesightNativeSGLangFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, totalAccepted, waves, acceptedText.String(), "verify_tree_failed")
-				return result, err
-			}
-			acceptedReceipt := mapFromAny(verifyResult["accepted_token_receipt"])
-			probeSummary := mapFromAny(verifyResult["probe_summary"])
-			acceptedLen := intFromAny(acceptedReceipt["accepted_len"])
-			treeCID := strings.TrimSpace(stringValue(acceptedReceipt["tree_cid"]))
-			acceptedTextChunk := strings.TrimSpace(stringValue(acceptedReceipt["accepted_text"]))
-			if acceptedTextChunk != "" {
-				acceptedText.WriteString(acceptedTextChunk)
-			}
-			commitParams := map[string]any{"session_id": spec.SessionID, "accepted_len": acceptedLen}
-			if tokens := sliceFromAny(acceptedReceipt["accepted_token_ids"]); len(tokens) > 0 {
-				commitParams["accepted_token_ids"] = tokens
-			}
-			if acceptedLen > 0 {
-				_, _ = sglangverify.RPC(ctx, socketPath, "commit", commitParams)
-			} else {
-				_, _ = sglangverify.RPC(ctx, socketPath, "rollback", map[string]any{"session_id": spec.SessionID, "branch_ids": acceptedReceipt["rollback_branch_ids"]})
-			}
-			durationMs := maxInt64Node(1, firstPositiveInt64(int64FromAny(acceptedReceipt["latency_ms"]), time.Since(waveStarted).Milliseconds()))
-			result := hub.ForesightLiveLabVerifierResult{
-				JobID:              work.JobID,
-				WindowID:           command.WindowID,
-				WaveIndex:          command.WaveIndex,
-				AcceptedLen:        acceptedLen,
-				TreeCID:            treeCID,
-				DurationMs:         durationMs,
-				AcceptedText:       acceptedTextChunk,
-				AcceptedTextPublic: acceptedTextChunk != "",
-				EOS:                boolFromAny(acceptedReceipt["eos"]),
-				StopReason:         strings.TrimSpace(stringValue(acceptedReceipt["stop_reason"])),
-				ProbeSummary:       probeSummary,
-			}
-			if spec.MaxTokens > 0 && totalAccepted+acceptedLen >= spec.MaxTokens && result.StopReason == "" {
-				result.StopReason = "max_tokens"
-			}
-			if err := client.SubmitForesightLiveLabVerifierResult(ctx, spec.RunID, result); err != nil {
-				return submitForesightNativeSGLangFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, totalAccepted, waves, acceptedText.String(), "result_submit_failed"), err
-			}
-			totalAccepted += acceptedLen
-			waves++
-			verifiedCommands[commandID] = true
-		}
-		select {
-		case <-ctx.Done():
-			_, _ = sglangverify.RPC(context.Background(), socketPath, "abort", map[string]any{"reason": ctx.Err().Error()})
-			result := submitForesightNativeSGLangFinalReceipt(context.Background(), client, work, runtimeMgr, gpuDetected, spec, started, workDir, totalAccepted, waves, acceptedText.String(), "aborted")
-			return result, ctx.Err()
-		case <-ticker.C:
-		}
+		result := submitForesightNativeSGLangFinalReceipt(receiptCtx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
+		return result, err
 	}
+	result := submitForesightNativeSGLangFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, workDir, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
+	return result, nil
 }
 
 func nativeSGLangJobPayload(work *hub.WorkAssignment, spec foresightNativeHotSessionSpec) map[string]any {

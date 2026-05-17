@@ -21,64 +21,21 @@ var newForesightNativeLlamaCppVerifier = llamacppdemo.NewVerifierFromEnv
 func processForesightNativeLlamaCppVerifier(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec) (*runnerResultSnapshot, error) {
 	started := time.Now()
 	verifier := newForesightNativeLlamaCppVerifier()
-	totalAccepted := 0
-	waves := 0
-	verifiedCommands := map[string]bool{}
-	var acceptedText strings.Builder
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		command, err := client.FetchForesightLiveLabVerifierCommand(ctx, spec.RunID, work.JobID)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				result := submitForesightNativeLlamaCppFinalReceipt(context.Background(), client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, waves, acceptedText.String(), "aborted")
-				return result, ctx.Err()
-			case <-ticker.C:
-				continue
-			}
+	session, err := llamacppdemo.RunHotSession(ctx, client, verifier, work.JobID, spec, 100*time.Millisecond)
+	if err != nil {
+		if errors.Is(err, errNativeLlamaCppUnavailable) {
+			unavailable := submitForesightNativeLlamaCppUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, llamacppdemo.UnavailableCode(verifier.Status(ctx)))
+			return unavailable, err
 		}
-		switch strings.TrimSpace(command.Command) {
-		case "close_session":
-			result := submitForesightNativeLlamaCppFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, waves, acceptedText.String(), command.Reason)
-			return result, nil
-		case "verify_tree":
-			commandID := firstNonEmptyString(command.CommandID, fmt.Sprintf("%s:%s:%d", spec.RunID, command.WindowID, command.WaveIndex))
-			if verifiedCommands[commandID] {
-				break
-			}
-			result, err := verifier.VerifyWave(ctx, spec, command, totalAccepted)
-			if err != nil {
-				if errors.Is(err, errNativeLlamaCppUnavailable) {
-					unavailable := submitForesightNativeLlamaCppUnavailableReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, llamacppdemo.UnavailableCode(verifier.Status(ctx)))
-					return unavailable, err
-				}
-				failed := submitForesightNativeLlamaCppFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, waves, acceptedText.String(), "llamacpp_demo_verify_failed")
-				return failed, err
-			}
-			result.JobID = work.JobID
-			if spec.MaxTokens > 0 && totalAccepted+result.AcceptedLen >= spec.MaxTokens && result.StopReason == "" {
-				result.StopReason = "max_tokens"
-			}
-			if err := client.SubmitForesightLiveLabVerifierResult(ctx, spec.RunID, result); err != nil {
-				failed := submitForesightNativeLlamaCppFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, waves, acceptedText.String(), "result_submit_failed")
-				return failed, err
-			}
-			totalAccepted += result.AcceptedLen
-			waves++
-			if strings.TrimSpace(result.AcceptedText) != "" {
-				acceptedText.WriteString(result.AcceptedText)
-			}
-			verifiedCommands[commandID] = true
+		receiptCtx := ctx
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			receiptCtx = context.Background()
 		}
-		select {
-		case <-ctx.Done():
-			result := submitForesightNativeLlamaCppFinalReceipt(context.Background(), client, work, runtimeMgr, gpuDetected, spec, started, totalAccepted, waves, acceptedText.String(), "aborted")
-			return result, ctx.Err()
-		case <-ticker.C:
-		}
+		failed := submitForesightNativeLlamaCppFinalReceipt(receiptCtx, client, work, runtimeMgr, gpuDetected, spec, started, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
+		return failed, err
 	}
+	result := submitForesightNativeLlamaCppFinalReceipt(ctx, client, work, runtimeMgr, gpuDetected, spec, started, session.TotalAccepted, session.Waves, session.AcceptedText, session.FinalReason)
+	return result, nil
 }
 
 func submitForesightNativeLlamaCppUnavailableReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, spec foresightNativeHotSessionSpec, started time.Time, errorCode string) *runnerResultSnapshot {
