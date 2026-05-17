@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 )
 
 func TestConfigFromEnvBuildsLocalPythonLaunch(t *testing.T) {
@@ -194,9 +194,9 @@ func TestBuildBackendRuntimeMarksHealthySidecarLoadedWarm(t *testing.T) {
 		SupportsStreaming:        true,
 		SupportsStatefulSessions: true,
 	}
-	runtimeStatus := BuildBackendRuntime(status, v7hardware.CapacityInventory{
+	runtimeStatus := BuildBackendRuntime(status, capshardware.CapacityInventory{
 		GPUDetected:       true,
-		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUVendor:         capshardware.GPUVendorNVIDIA,
 		CUDAAvailable:     true,
 		ComputeCapability: "8.9",
 	})

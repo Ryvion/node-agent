@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 )
 
@@ -359,8 +359,8 @@ func (m *Manager) statusLocked() SGLangSidecarStatus {
 	}
 }
 
-func BuildBackendRuntime(status SGLangSidecarStatus, hardware v7hardware.CapacityInventory) llamacpp.BackendRuntimeStatus {
-	hardware = v7hardware.NormalizeInventory(hardware)
+func BuildBackendRuntime(status SGLangSidecarStatus, hardware capshardware.CapacityInventory) llamacpp.BackendRuntimeStatus {
+	hardware = capshardware.NormalizeInventory(hardware)
 	status.Backend = firstNonEmptyRuntimeText(status.Backend, BackendName)
 	modelFilename := firstNonEmptyRuntimeText(status.ModelFilename, modelIDFromPath(status.ModelPath))
 	runtimeStatus := llamacpp.BackendRuntimeStatus{
@@ -623,8 +623,8 @@ func accelerationContains(values []string, want string) bool {
 	return false
 }
 
-func accelerationFromHardware(hardware v7hardware.CapacityInventory) []string {
-	hardware = v7hardware.NormalizeInventory(hardware)
+func accelerationFromHardware(hardware capshardware.CapacityInventory) []string {
+	hardware = capshardware.NormalizeInventory(hardware)
 	if len(hardware.AccelerationHints) > 0 {
 		return hardware.AccelerationHints
 	}
@@ -679,16 +679,16 @@ func normalizeAcceleration(values []string) []string {
 	return out
 }
 
-func gpuArchitectureFromHardware(hardware v7hardware.CapacityInventory) string {
-	hardware = v7hardware.NormalizeInventory(hardware)
+func gpuArchitectureFromHardware(hardware capshardware.CapacityInventory) string {
+	hardware = capshardware.NormalizeInventory(hardware)
 	switch hardware.GPUVendor {
-	case v7hardware.GPUVendorApple:
+	case capshardware.GPUVendorApple:
 		if hardware.MetalAvailable {
 			return "apple_metal"
 		}
-	case v7hardware.GPUVendorNVIDIA:
+	case capshardware.GPUVendorNVIDIA:
 		return nvidiaArchitectureFromComputeCapability(hardware.ComputeCapability)
-	case v7hardware.GPUVendorAMD:
+	case capshardware.GPUVendorAMD:
 		if hardware.VulkanAvailable {
 			return "amd_vulkan"
 		}

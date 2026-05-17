@@ -4,16 +4,16 @@ import (
 	"strings"
 	"unicode"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/inference/config"
 	"github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/models/policy"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	"github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
-	"github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	"github.com/Ryvion/ryvion-node/internal/v7/speculative"
-	"github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
 )
 
 const (
@@ -23,7 +23,7 @@ const (
 )
 
 type BuildInput struct {
-	Hardware            v7hardware.CapacityInventory
+	Hardware            capshardware.CapacityInventory
 	Policy              modelpolicy.Policy
 	ModelCache          modelcache.Status
 	BackendProbes       backendprobe.Probes
@@ -36,7 +36,7 @@ type BuildInput struct {
 }
 
 func BuildProfile(input BuildInput) Profile {
-	hardware := v7hardware.NormalizeInventory(input.Hardware)
+	hardware := capshardware.NormalizeInventory(input.Hardware)
 	policy := modelpolicy.NormalizePolicy(input.Policy)
 	cache := modelcache.NormalizeStatus(input.ModelCache)
 	probes := backendprobe.NormalizeProbes(input.BackendProbes)
@@ -129,7 +129,7 @@ func NormalizeProfile(profile Profile) Profile {
 	return profile
 }
 
-func speculativeDecodingSummary(input BuildInput, hardware v7hardware.CapacityInventory, policy modelpolicy.Policy, cache modelcache.Status, probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes) speculative.DecodingCapability {
+func speculativeDecodingSummary(input BuildInput, hardware capshardware.CapacityInventory, policy modelpolicy.Policy, cache modelcache.Status, probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes) speculative.DecodingCapability {
 	if input.SpeculativeDecoding != nil {
 		return speculative.NormalizeCapability(*input.SpeculativeDecoding)
 	}
@@ -145,7 +145,7 @@ func speculativeDecodingSummary(input BuildInput, hardware v7hardware.CapacityIn
 	return report.SpeculativeDecoding
 }
 
-func hardwareSummary(hardware v7hardware.CapacityInventory) HardwareSummary {
+func hardwareSummary(hardware capshardware.CapacityInventory) HardwareSummary {
 	return HardwareSummary{
 		OS:                hardware.OS,
 		Arch:              hardware.Arch,
@@ -362,7 +362,7 @@ func readinessReason(hardwareOK bool, backend BackendSummary, inferenceEnabled b
 	}
 }
 
-func hasHardwareCapacity(hardware v7hardware.CapacityInventory) bool {
+func hasHardwareCapacity(hardware capshardware.CapacityInventory) bool {
 	return strings.TrimSpace(hardware.OS) != "" &&
 		strings.TrimSpace(hardware.Arch) != "" &&
 		hardware.CPULogicalCores > 0 &&

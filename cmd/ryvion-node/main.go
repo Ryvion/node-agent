@@ -23,30 +23,30 @@ import (
 	"time"
 
 	artifact "github.com/Ryvion/ryvion-node/internal/artifacts/core"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	capability "github.com/Ryvion/ryvion-node/internal/capabilities/passport"
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
 	"github.com/Ryvion/ryvion-node/internal/hub"
+	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
 	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 	modelprepare "github.com/Ryvion/ryvion-node/internal/models/prepare"
 	modelwarm "github.com/Ryvion/ryvion-node/internal/models/warm"
+	netprofile "github.com/Ryvion/ryvion-node/internal/network/profile"
 	"github.com/Ryvion/ryvion-node/internal/nodekey"
 	onboarding "github.com/Ryvion/ryvion-node/internal/operator/onboarding"
 	proofrunner "github.com/Ryvion/ryvion-node/internal/receipts/proofrunner"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
+	backendprobe "github.com/Ryvion/ryvion-node/internal/runtimes/probe"
+	_ "github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	sandbox "github.com/Ryvion/ryvion-node/internal/sandbox"
 	"github.com/Ryvion/ryvion-node/internal/update"
-	v7backendprobe "github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
-	v7capability "github.com/Ryvion/ryvion-node/internal/v7/capability"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7netprofile "github.com/Ryvion/ryvion-node/internal/v7/netprofile"
-	_ "github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
 	v7tensorplane "github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 
@@ -68,7 +68,7 @@ var (
 // Used by the work loop to skip fetching work when GPU is busy.
 var cachedGPUUtil atomic.Uint64 // stores float64 bits via math.Float64bits
 
-var hubNetworkProfile = v7netprofile.NewRollingHubProfile(8, "")
+var hubNetworkProfile = netprofile.NewRollingHubProfile(8, "")
 
 // jobActive is set to 1 while a job is being processed.
 // The update check reads this to avoid restarting during active work.
@@ -316,7 +316,7 @@ var (
 	}
 )
 
-func buildDashboardInferencePolicy(getenv func(string) string, detectHardware func(string) v7hardware.CapacityInventory) modelpolicy.Policy {
+func buildDashboardInferencePolicy(getenv func(string) string, detectHardware func(string) capshardware.CapacityInventory) modelpolicy.Policy {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
@@ -482,7 +482,7 @@ func runLlamaCPPBackendProbe(args []string) {
 		os.Exit(2)
 	}
 
-	probe := v7backendprobe.ProbeLlamaCPP(v7backendprobe.Detector{})
+	probe := backendprobe.ProbeLlamaCPP(backendprobe.Detector{})
 	if *jsonOutput {
 		if err := json.NewEncoder(os.Stdout).Encode(probe); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -1156,9 +1156,9 @@ func sendHeartbeatDetailed(ctx context.Context, client *hub.Client, caps hw.CapS
 	// Report whether the node is self-throttling due to operator GPU usage.
 	throttled := flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 && metrics.GPUUtil > flagMaxGPUUtil
 
-	var v7Payload *v7heartbeat.V7HeartbeatPayload
+	var v7Payload *heartbeat.V7HeartbeatPayload
 	var payloadSummary operatorHeartbeatPayloadSummary
-	if v7heartbeat.V7HeartbeatEnabledFromEnv() {
+	if heartbeat.V7HeartbeatEnabledFromEnv() {
 		payload, err := buildV7HeartbeatPayloadForNodeWithBackendRuntimes(client.PublicKeyHex(), caps, deviceType, declaredCountry, infMgr, runtimeMgr, buildCurrentBackendRuntimes(ctx))
 		if err != nil {
 			slog.Warn("failed to build V7 heartbeat payload; sending legacy heartbeat", "error", err)
@@ -1249,7 +1249,7 @@ func requestV7CapabilityHeartbeat(reason string) {
 }
 
 func currentV7HeartbeatPayloadSummary(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) (operatorHeartbeatPayloadSummary, bool) {
-	if !v7heartbeat.V7HeartbeatEnabledFromEnv() || client == nil {
+	if !heartbeat.V7HeartbeatEnabledFromEnv() || client == nil {
 		return operatorHeartbeatPayloadSummary{}, false
 	}
 	payload, err := buildV7HeartbeatPayloadForNodeWithBackendRuntimes(client.PublicKeyHex(), caps, deviceType, declaredCountry, infMgr, runtimeMgr, buildCurrentBackendRuntimes(ctx))
@@ -1260,7 +1260,7 @@ func currentV7HeartbeatPayloadSummary(ctx context.Context, client *hub.Client, c
 	return summarizeV7HeartbeatPayload(payload), true
 }
 
-func summarizeV7HeartbeatPayload(payload *v7heartbeat.V7HeartbeatPayload) operatorHeartbeatPayloadSummary {
+func summarizeV7HeartbeatPayload(payload *heartbeat.V7HeartbeatPayload) operatorHeartbeatPayloadSummary {
 	if payload == nil {
 		return operatorHeartbeatPayloadSummary{}
 	}
@@ -1357,12 +1357,12 @@ func heartbeatRuntimeAvailable(runtime llamacpp.BackendRuntimeStatus) bool {
 		runtime.Warm
 }
 
-func buildOptionalV7HeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) *v7heartbeat.V7HeartbeatPayload {
+func buildOptionalV7HeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) *heartbeat.V7HeartbeatPayload {
 	return buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}))
 }
 
-func buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes llamacpp.BackendRuntimes) *v7heartbeat.V7HeartbeatPayload {
-	if !v7heartbeat.V7HeartbeatEnabledFromEnv() {
+func buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes llamacpp.BackendRuntimes) *heartbeat.V7HeartbeatPayload {
+	if !heartbeat.V7HeartbeatEnabledFromEnv() {
 		return nil
 	}
 	payload, err := buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, backendRuntimes)
@@ -1373,16 +1373,16 @@ func buildOptionalV7HeartbeatPayloadWithBackendRuntimes(nodePublicKey string, ca
 	return payload
 }
 
-func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) (*v7heartbeat.V7HeartbeatPayload, error) {
+func buildV7HeartbeatPayloadForNode(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager) (*heartbeat.V7HeartbeatPayload, error) {
 	return buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey, caps, deviceType, declaredCountry, infMgr, runtimeMgr, llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}))
 }
 
-func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes llamacpp.BackendRuntimes) (*v7heartbeat.V7HeartbeatPayload, error) {
+func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, caps hw.CapSet, deviceType string, declaredCountry string, infMgr *inference.Manager, runtimeMgr *runtimeManager, backendRuntimes llamacpp.BackendRuntimes) (*heartbeat.V7HeartbeatPayload, error) {
 	gpuDetected := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
 	nativeSupported := inference.NativeRuntimeAvailable()
 	nativeReady := nativeSupported && infMgr != nil && infMgr.Healthy()
 
-	runtimeProfile := v7capability.RuntimeProfile{
+	runtimeProfile := capability.RuntimeProfile{
 		NativeInferenceSupported: nativeSupported,
 		OCIAvailable:             false,
 		LlamaServerAvailable:     nativeSupported,
@@ -1412,12 +1412,12 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 	speculativeReport := buildSpeculativeReportStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory)
 	capabilityProfile := buildCapabilityProfileStatus(hardwareCapacity, modelPolicy, modelCache, backendProbes, backendRuntimes, runtimeInventory, &speculativeReport.SpeculativeDecoding, &kvCapability, tensorAccess)
 
-	evidenceSummary := v7capability.EvidenceCapabilitySummary{
+	evidenceSummary := capability.EvidenceCapabilitySummary{
 		SupportsArtifactManifest:    true,
 		SupportsRYV3EvidencePayload: true,
 		SupportsRuntimeHash:         v7RuntimeManifestHash(runtimeMgr) != "",
 	}
-	sandboxSummary := v7capability.SandboxCapabilitySummary{
+	sandboxSummary := capability.SandboxCapabilitySummary{
 		RejectsUnsafePickle:        true,
 		RunnerAllowlistEnabled:     true,
 		FilesystemIsolationPlanned: true,
@@ -1425,7 +1425,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 	}
 	sandboxPolicy := sandbox.DefaultSandboxPolicy()
 
-	payload, err := v7heartbeat.BuildV7HeartbeatPayload(v7heartbeat.BuildV7HeartbeatPayloadInput{
+	payload, err := heartbeat.BuildV7HeartbeatPayload(heartbeat.BuildV7HeartbeatPayloadInput{
 		AgentVersion:         version,
 		NodePublicKey:        nodePublicKey,
 		OS:                   runtime.GOOS,
@@ -1435,7 +1435,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 		HardwareCapabilities: caps,
 		NetworkProfile:       currentHubNetworkProfile(),
 		RuntimeProfile:       runtimeProfile,
-		ModelCapabilitySummary: v7capability.ModelCapabilitySummary{
+		ModelCapabilitySummary: capability.ModelCapabilitySummary{
 			ResidentModelIDs:      residentModelIDs,
 			MaxResidentModelBytes: caps.VRAMBytes,
 			SupportsModelLease:    gpuDetected && caps.VRAMBytes > 0 && nativeSupported,
@@ -1460,7 +1460,7 @@ func buildV7HeartbeatPayloadForNodeWithBackendRuntimes(nodePublicKey string, cap
 	return &payload, nil
 }
 
-func currentHubNetworkProfile() *v7netprofile.NetworkProfile {
+func currentHubNetworkProfile() *netprofile.NetworkProfile {
 	if hubNetworkProfile == nil {
 		return nil
 	}
@@ -2474,11 +2474,11 @@ func currentV7LlamaCppBackendBenchmarkProfile(ctx context.Context, client *hub.C
 	}
 }
 
-func llamaCppBenchmarkAccelerationMode(cfg llamacpp.LlamaCppSidecarConfig, hardware v7hardware.CapacityInventory) string {
+func llamaCppBenchmarkAccelerationMode(cfg llamacpp.LlamaCppSidecarConfig, hardware capshardware.CapacityInventory) string {
 	if !llamaCppConfigUsesGPU(cfg) {
 		return "cpu"
 	}
-	hardware = v7hardware.NormalizeInventory(hardware)
+	hardware = capshardware.NormalizeInventory(hardware)
 	switch {
 	case hardware.CUDAAvailable:
 		return "cuda"

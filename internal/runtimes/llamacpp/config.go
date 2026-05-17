@@ -11,8 +11,8 @@ import (
 	"time"
 	"unicode"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
 )
 
 const maxConfigTextLen = 1024
@@ -38,7 +38,7 @@ type ConfigSource struct {
 	ConfiguredBinaryDirs []string
 	ConfiguredModelDirs  []string
 	RuntimeInventory     *runtimeinventory.Inventory
-	HardwareCapacity     *v7hardware.CapacityInventory
+	HardwareCapacity     *capshardware.CapacityInventory
 }
 
 type ResidencyKeeperConfig struct {
@@ -202,7 +202,7 @@ func configAccelerationHints(source ConfigSource) []string {
 	source = normalizeConfigSource(source)
 	hints := []string{}
 	if source.HardwareCapacity != nil {
-		hardware := v7hardware.NormalizeInventory(*source.HardwareCapacity)
+		hardware := capshardware.NormalizeInventory(*source.HardwareCapacity)
 		if len(hardware.AccelerationHints) > 0 {
 			hints = append(hints, hardware.AccelerationHints...)
 		}
@@ -220,9 +220,9 @@ func hardwareCUDAAvailable(source ConfigSource) bool {
 	if source.HardwareCapacity == nil {
 		return false
 	}
-	hardware := v7hardware.NormalizeInventory(*source.HardwareCapacity)
+	hardware := capshardware.NormalizeInventory(*source.HardwareCapacity)
 	return hardware.GPUDetected &&
-		hardware.GPUVendor == v7hardware.GPUVendorNVIDIA &&
+		hardware.GPUVendor == capshardware.GPUVendorNVIDIA &&
 		hardware.CUDAAvailable
 }
 

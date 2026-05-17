@@ -15,30 +15,30 @@ import (
 	"sync"
 	"time"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	capabilityprofile "github.com/Ryvion/ryvion-node/internal/capabilities/profile"
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
 	"github.com/Ryvion/ryvion-node/internal/hub"
+	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
+	inferenceconfig "github.com/Ryvion/ryvion-node/internal/inference/config"
 	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
 	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 	modelprepare "github.com/Ryvion/ryvion-node/internal/models/prepare"
 	modelwarm "github.com/Ryvion/ryvion-node/internal/models/warm"
+	runtimeinventory "github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
+	kvprobe "github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
+	backendprobe "github.com/Ryvion/ryvion-node/internal/runtimes/probe"
 	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
+	tensoraccess "github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	usefulenergy "github.com/Ryvion/ryvion-node/internal/telemetry/usefulenergy"
-	v7backendprobe "github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
-	v7capabilityprofile "github.com/Ryvion/ryvion-node/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
-	v7inferenceconfig "github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
-	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
-	v7runtimeinventory "github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 	v7speculative "github.com/Ryvion/ryvion-node/internal/v7/speculative"
-	v7tensoraccess "github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
 )
 
 const defaultOperatorAPIPort = "45890"
@@ -133,14 +133,14 @@ type operatorStatusResponse struct {
 	Heartbeat            operatorHeartbeatStatus                      `json:"heartbeat"`
 	Machine              operatorMachine                              `json:"machine"`
 	Runtime              operatorRuntimeInfo                          `json:"runtime"`
-	TensorAccess         v7tensoraccess.TensorAccessCapability        `json:"tensor_access"`
-	RuntimeInventory     v7runtimeinventory.Inventory                 `json:"runtime_inventory"`
-	HardwareCapacity     v7hardware.CapacityInventory                 `json:"hardware_capacity"`
+	TensorAccess         tensoraccess.TensorAccessCapability          `json:"tensor_access"`
+	RuntimeInventory     runtimeinventory.Inventory                   `json:"runtime_inventory"`
+	HardwareCapacity     capshardware.CapacityInventory               `json:"hardware_capacity"`
 	ModelPolicy          modelpolicy.Status                           `json:"model_policy"`
 	ModelCache           modelcache.Status                            `json:"model_cache"`
-	BackendProbes        v7backendprobe.Probes                        `json:"backend_probes"`
+	BackendProbes        backendprobe.Probes                          `json:"backend_probes"`
 	BackendRuntimes      llamacpp.BackendRuntimes                     `json:"backend_runtimes"`
-	CapabilityProfile    v7capabilityprofile.Profile                  `json:"capability_profile"`
+	CapabilityProfile    capabilityprofile.Profile                    `json:"capability_profile"`
 	SpeculativeProfiles  []v7speculative.Profile                      `json:"speculative_profiles"`
 	LlamaCPPSidecar      llamacpp.LlamaCppSidecarStatusView           `json:"llama_cpp_sidecar"`
 	SGLangSidecar        sglang.SGLangSidecarStatus                   `json:"sglang_sidecar"`
@@ -200,45 +200,45 @@ type operatorMachine struct {
 }
 
 type operatorRuntimeInfo struct {
-	LocalAPIURL              string                                `json:"local_api_url"`
-	StatusMessage            string                                `json:"status_message,omitempty"`
-	RuntimeReady             bool                                  `json:"runtime_ready"`
-	RuntimeGPUReady          bool                                  `json:"runtime_gpu_ready"`
-	RuntimeWarming           bool                                  `json:"runtime_warming"`
-	RuntimeHealth            string                                `json:"runtime_health,omitempty"`
-	RuntimePosture           string                                `json:"runtime_posture,omitempty"`
-	RuntimeDetail            string                                `json:"runtime_detail,omitempty"`
-	RuntimeVersion           string                                `json:"runtime_version,omitempty"`
-	RuntimeChannel           string                                `json:"runtime_channel,omitempty"`
-	RuntimeProvider          string                                `json:"runtime_provider,omitempty"`
-	RuntimeMode              string                                `json:"runtime_mode,omitempty"`
-	RuntimeSource            string                                `json:"runtime_source,omitempty"`
-	RuntimeArtifact          string                                `json:"runtime_artifact,omitempty"`
-	RuntimeBinary            string                                `json:"runtime_binary,omitempty"`
-	RuntimeBackend           string                                `json:"runtime_backend,omitempty"`
-	RuntimeEngine            string                                `json:"runtime_engine,omitempty"`
-	RuntimeEngineKind        string                                `json:"runtime_engine_kind,omitempty"`
-	RuntimeBackendPresent    bool                                  `json:"runtime_backend_present"`
-	RuntimeManifestHash      string                                `json:"runtime_manifest_hash,omitempty"`
-	TensorAccess             v7tensoraccess.TensorAccessCapability `json:"tensor_access"`
-	ManagedOCIGPUReady       bool                                  `json:"managed_oci_gpu_ready"`
-	GPUReady                 bool                                  `json:"gpu_ready"`
-	SpatialReady             bool                                  `json:"spatial_ready"`
-	PublicAIOptIn            bool                                  `json:"public_ai_opt_in"`
-	PublicAIReady            bool                                  `json:"public_ai_ready"`
-	NativeInferenceSupported bool                                  `json:"native_inference_supported"`
-	NativeInferenceReady     bool                                  `json:"native_inference_ready"`
-	PublicInferenceReady     bool                                  `json:"public_inference_ready"`
-	SovereignReviewReady     bool                                  `json:"sovereign_review_ready"`
-	SovereignStatus          string                                `json:"sovereign_status,omitempty"`
-	SovereignDetail          string                                `json:"sovereign_detail,omitempty"`
-	VerifiedCountry          string                                `json:"verified_country,omitempty"`
-	LocationApproved         bool                                  `json:"location_approved"`
-	SovereignVerified        bool                                  `json:"sovereign_verified"`
-	VerificationSource       string                                `json:"verification_source,omitempty"`
-	TrustReason              string                                `json:"trust_reason,omitempty"`
-	NativeModel              string                                `json:"native_model,omitempty"`
-	DiskGB                   uint64                                `json:"disk_gb,omitempty"`
+	LocalAPIURL              string                              `json:"local_api_url"`
+	StatusMessage            string                              `json:"status_message,omitempty"`
+	RuntimeReady             bool                                `json:"runtime_ready"`
+	RuntimeGPUReady          bool                                `json:"runtime_gpu_ready"`
+	RuntimeWarming           bool                                `json:"runtime_warming"`
+	RuntimeHealth            string                              `json:"runtime_health,omitempty"`
+	RuntimePosture           string                              `json:"runtime_posture,omitempty"`
+	RuntimeDetail            string                              `json:"runtime_detail,omitempty"`
+	RuntimeVersion           string                              `json:"runtime_version,omitempty"`
+	RuntimeChannel           string                              `json:"runtime_channel,omitempty"`
+	RuntimeProvider          string                              `json:"runtime_provider,omitempty"`
+	RuntimeMode              string                              `json:"runtime_mode,omitempty"`
+	RuntimeSource            string                              `json:"runtime_source,omitempty"`
+	RuntimeArtifact          string                              `json:"runtime_artifact,omitempty"`
+	RuntimeBinary            string                              `json:"runtime_binary,omitempty"`
+	RuntimeBackend           string                              `json:"runtime_backend,omitempty"`
+	RuntimeEngine            string                              `json:"runtime_engine,omitempty"`
+	RuntimeEngineKind        string                              `json:"runtime_engine_kind,omitempty"`
+	RuntimeBackendPresent    bool                                `json:"runtime_backend_present"`
+	RuntimeManifestHash      string                              `json:"runtime_manifest_hash,omitempty"`
+	TensorAccess             tensoraccess.TensorAccessCapability `json:"tensor_access"`
+	ManagedOCIGPUReady       bool                                `json:"managed_oci_gpu_ready"`
+	GPUReady                 bool                                `json:"gpu_ready"`
+	SpatialReady             bool                                `json:"spatial_ready"`
+	PublicAIOptIn            bool                                `json:"public_ai_opt_in"`
+	PublicAIReady            bool                                `json:"public_ai_ready"`
+	NativeInferenceSupported bool                                `json:"native_inference_supported"`
+	NativeInferenceReady     bool                                `json:"native_inference_ready"`
+	PublicInferenceReady     bool                                `json:"public_inference_ready"`
+	SovereignReviewReady     bool                                `json:"sovereign_review_ready"`
+	SovereignStatus          string                              `json:"sovereign_status,omitempty"`
+	SovereignDetail          string                              `json:"sovereign_detail,omitempty"`
+	VerifiedCountry          string                              `json:"verified_country,omitempty"`
+	LocationApproved         bool                                `json:"location_approved"`
+	SovereignVerified        bool                                `json:"sovereign_verified"`
+	VerificationSource       string                              `json:"verification_source,omitempty"`
+	TrustReason              string                              `json:"trust_reason,omitempty"`
+	NativeModel              string                              `json:"native_model,omitempty"`
+	DiskGB                   uint64                              `json:"disk_gb,omitempty"`
 }
 
 type operatorMetrics struct {
@@ -288,7 +288,7 @@ type v7HeartbeatPreviewResponse struct {
 }
 
 type v7HeartbeatPreviewEnvelope struct {
-	V7 v7heartbeat.V7HeartbeatPayload `json:"v7"`
+	V7 heartbeat.V7HeartbeatPayload `json:"v7"`
 }
 
 type v7HeartbeatPreviewFieldPresence struct {
@@ -643,7 +643,7 @@ func (s *operatorRuntime) backendRuntimesStatus(ctx context.Context) llamacpp.Ba
 		runtimeInventory := buildRuntimeInventoryStatus(runtimeInfo, tensorAccess, infMgr)
 		return buildBackendRuntimesStatus(s.llamaCppSidecarStatus(ctx), s.sglangSidecarStatus(ctx), runtimeInventory, hardwareCapacity)
 	}
-	return buildBackendRuntimesStatus(llamacpp.LlamaCppSidecarStatus{}, sglang.SGLangSidecarStatus{}, v7runtimeinventory.Inventory{}, hardwareCapacity)
+	return buildBackendRuntimesStatus(llamacpp.LlamaCppSidecarStatus{}, sglang.SGLangSidecarStatus{}, runtimeinventory.Inventory{}, hardwareCapacity)
 }
 
 func (s *operatorRuntime) startLlamaCppSidecar(ctx context.Context) llamacpp.LlamaCppSidecarStatusView {
@@ -1192,8 +1192,8 @@ func (s *operatorRuntime) statusSnapshot(apiPort string) operatorStatusResponse 
 	}
 }
 
-func buildBackendProbeStatus() v7backendprobe.Probes {
-	return v7backendprobe.ProbeAll(v7backendprobe.Detector{
+func buildBackendProbeStatus() backendprobe.Probes {
+	return backendprobe.ProbeAll(backendprobe.Detector{
 		// Operator status and heartbeat should stay metadata-only and must not
 		// execute local backend binaries while preparing JSON.
 		VersionCommand: func(string, time.Duration) (string, error) {
@@ -1205,7 +1205,7 @@ func buildBackendProbeStatus() v7backendprobe.Probes {
 	})
 }
 
-func buildNativeTensorAccessCapability(infMgr *inference.Manager) v7kvprobe.Capability {
+func buildNativeTensorAccessCapability(infMgr *inference.Manager) kvprobe.Capability {
 	nativeSupported := inference.NativeRuntimeAvailable()
 	modelID := ""
 	modelLoaded := false
@@ -1213,20 +1213,20 @@ func buildNativeTensorAccessCapability(infMgr *inference.Manager) v7kvprobe.Capa
 		modelID = infMgr.ModelName()
 		modelLoaded = nativeSupported && infMgr.Healthy()
 	}
-	backend := v7kvprobe.BackendUnknown
+	backend := kvprobe.BackendUnknown
 	if nativeSupported {
-		backend = v7kvprobe.BackendLlamaCPP
+		backend = kvprobe.BackendLlamaCPP
 	}
-	return v7kvprobe.ProbeNativeRuntime(v7kvprobe.ProbeInput{
+	return kvprobe.ProbeNativeRuntime(kvprobe.ProbeInput{
 		RuntimeAvailable: nativeSupported,
-		RuntimeKind:      v7kvprobe.RuntimeKindNative,
+		RuntimeKind:      kvprobe.RuntimeKindNative,
 		Backend:          backend,
 		ModelID:          modelID,
 		ModelLoaded:      modelLoaded,
 	})
 }
 
-func buildRuntimeTensorAccessStatus(infMgr *inference.Manager) v7tensoraccess.TensorAccessCapability {
+func buildRuntimeTensorAccessStatus(infMgr *inference.Manager) tensoraccess.TensorAccessCapability {
 	nativeSupported := inference.NativeRuntimeAvailable()
 	modelID := ""
 	modelLoaded := false
@@ -1234,17 +1234,17 @@ func buildRuntimeTensorAccessStatus(infMgr *inference.Manager) v7tensoraccess.Te
 		modelID = infMgr.ModelName()
 		modelLoaded = nativeSupported && infMgr.Healthy()
 	}
-	capability := v7tensoraccess.NewNativeNoopProvider(modelID, modelLoaded, nativeSupported).Capability(context.Background())
+	capability := tensoraccess.NewNativeNoopProvider(modelID, modelLoaded, nativeSupported).Capability(context.Background())
 	capability.TensorPlaneDemoSupported = true
 	return capability
 }
 
-func buildRuntimeInventoryStatus(runtimeInfo operatorRuntimeInfo, capability v7tensoraccess.TensorAccessCapability, infMgr *inference.Manager) v7runtimeinventory.Inventory {
-	processMode := v7runtimeinventory.ProcessModeUnknown
+func buildRuntimeInventoryStatus(runtimeInfo operatorRuntimeInfo, capability tensoraccess.TensorAccessCapability, infMgr *inference.Manager) runtimeinventory.Inventory {
+	processMode := runtimeinventory.ProcessModeUnknown
 	if infMgr != nil {
-		processMode = v7runtimeinventory.ProcessModeSidecar
+		processMode = runtimeinventory.ProcessModeSidecar
 	}
-	return v7runtimeinventory.BuildInventory(v7runtimeinventory.RuntimeStatus{
+	return runtimeinventory.BuildInventory(runtimeinventory.RuntimeStatus{
 		RuntimeKind:             capability.RuntimeKind,
 		Backend:                 capability.Backend,
 		Provider:                capability.Provider,
@@ -1263,15 +1263,15 @@ func buildModelPolicyStatus() modelpolicy.Status {
 	return modelpolicy.StatusFromEnv()
 }
 
-func buildDerivedModelPolicyStatus(policy modelpolicy.Status, hardware v7hardware.CapacityInventory) modelpolicy.Status {
+func buildDerivedModelPolicyStatus(policy modelpolicy.Status, hardware capshardware.CapacityInventory) modelpolicy.Status {
 	return modelpolicy.BuildDerivedPolicy(modelpolicy.DerivedPolicyInput{
 		BasePolicy: policy,
 		Hardware:   hardware,
 	})
 }
 
-func buildHardwareCapacityStatus(modelCacheDir string) v7hardware.CapacityInventory {
-	return v7hardware.DetectInventory(modelCacheDir)
+func buildHardwareCapacityStatus(modelCacheDir string) capshardware.CapacityInventory {
+	return capshardware.DetectInventory(modelCacheDir)
 }
 
 func buildModelCacheStatus(policy modelpolicy.Status) modelcache.Status {
@@ -1313,37 +1313,37 @@ func modelCacheScanDirs(primary string, getenv func(string) string) []string {
 	return dirs
 }
 
-func buildModelCacheRuntimeStatus(modelCache modelcache.Status, policy modelpolicy.Status, hardware v7hardware.CapacityInventory, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes) modelcache.Status {
+func buildModelCacheRuntimeStatus(modelCache modelcache.Status, policy modelpolicy.Status, hardware capshardware.CapacityInventory, backendProbes backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes) modelcache.Status {
 	return modelcache.AnnotateRuntimeStatus(modelcache.RuntimeAnnotationInput{
 		Status:                         modelCache,
 		Policy:                         policy,
 		HardwareCapacityAvailable:      hardwareCapacityAvailable(hardware),
 		BackendTextGenerationAvailable: ggufBackendTextGenerationAvailable(backendProbes, backendRuntimes),
-		V7InferenceEnabled:             v7inferenceconfig.V7InferenceEnabled(os.Getenv),
+		V7InferenceEnabled:             inferenceconfig.V7InferenceEnabled(os.Getenv),
 	})
 }
 
-func buildBackendRuntimesStatus(llamaStatus llamacpp.LlamaCppSidecarStatus, sglangStatus sglang.SGLangSidecarStatus, runtimeInventory v7runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) llamacpp.BackendRuntimes {
+func buildBackendRuntimesStatus(llamaStatus llamacpp.LlamaCppSidecarStatus, sglangStatus sglang.SGLangSidecarStatus, runtimeInventory runtimeinventory.Inventory, hardware capshardware.CapacityInventory) llamacpp.BackendRuntimes {
 	runtimes := llamacpp.BuildBackendRuntimes(llamaStatus)
 	runtimes.SGLang = sglang.BuildBackendRuntime(sglangStatus, hardware)
 	return llamacpp.EnrichBackendRuntimes(runtimes, runtimeInventory, hardware)
 }
 
-func hardwareCapacityAvailable(hardware v7hardware.CapacityInventory) bool {
-	hardware = v7hardware.NormalizeInventory(hardware)
+func hardwareCapacityAvailable(hardware capshardware.CapacityInventory) bool {
+	hardware = capshardware.NormalizeInventory(hardware)
 	return strings.TrimSpace(hardware.OS) != "" &&
 		strings.TrimSpace(hardware.Arch) != "" &&
 		hardware.CPULogicalCores > 0 &&
 		hardware.SystemRAMBytes > 0
 }
 
-func ggufBackendTextGenerationAvailable(backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes) bool {
+func ggufBackendTextGenerationAvailable(backendProbes backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes) bool {
 	return (backendRuntimes.LlamaCPP.Available && backendRuntimes.LlamaCPP.SupportsTextGeneration) ||
 		(backendProbes.LlamaCPP.Available && backendProbes.LlamaCPP.SupportsTextGeneration)
 }
 
-func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory, speculativeDecoding *v7speculative.DecodingCapability, kvCapability *v7kvprobe.Capability, tensorAccess v7tensoraccess.TensorAccessCapability) v7capabilityprofile.Profile {
-	return v7capabilityprofile.BuildProfile(v7capabilityprofile.BuildInput{
+func buildCapabilityProfileStatus(hardware capshardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory runtimeinventory.Inventory, speculativeDecoding *v7speculative.DecodingCapability, kvCapability *kvprobe.Capability, tensorAccess tensoraccess.TensorAccessCapability) capabilityprofile.Profile {
+	return capabilityprofile.BuildProfile(capabilityprofile.BuildInput{
 		Hardware:            hardware,
 		Policy:              policy,
 		ModelCache:          modelCache,
@@ -1357,7 +1357,7 @@ func buildCapabilityProfileStatus(hardware v7hardware.CapacityInventory, policy 
 	})
 }
 
-func buildSpeculativeReportStatus(hardware v7hardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes v7backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory v7runtimeinventory.Inventory) v7speculative.Report {
+func buildSpeculativeReportStatus(hardware capshardware.CapacityInventory, policy modelpolicy.Status, modelCache modelcache.Status, backendProbes backendprobe.Probes, backendRuntimes llamacpp.BackendRuntimes, runtimeInventory runtimeinventory.Inventory) v7speculative.Report {
 	return v7speculative.BuildReport(v7speculative.BuildInput{
 		Hardware:         hardware,
 		Policy:           policy,
@@ -1369,8 +1369,8 @@ func buildSpeculativeReportStatus(hardware v7hardware.CapacityInventory, policy 
 	})
 }
 
-func runtimeInventoryBackendDetector() v7runtimeinventory.CandidateBackendDetector {
-	return v7runtimeinventory.CandidateBackendDetector{
+func runtimeInventoryBackendDetector() runtimeinventory.CandidateBackendDetector {
+	return runtimeinventory.CandidateBackendDetector{
 		VersionCommand: func(string, time.Duration) (string, error) {
 			return "", os.ErrNotExist
 		},
@@ -1574,7 +1574,7 @@ func (s *operatorRuntime) v7HeartbeatPreview() (v7HeartbeatPreviewResponse, erro
 	return buildV7HeartbeatPreviewResponse(nodeID, *payload), nil
 }
 
-func buildV7HeartbeatPreviewResponse(nodeID string, payload v7heartbeat.V7HeartbeatPayload) v7HeartbeatPreviewResponse {
+func buildV7HeartbeatPreviewResponse(nodeID string, payload heartbeat.V7HeartbeatPayload) v7HeartbeatPreviewResponse {
 	return v7HeartbeatPreviewResponse{
 		OK:     true,
 		NodeID: strings.TrimSpace(nodeID),

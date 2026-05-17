@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Ryvion/ryvion-node/internal/capabilities/passport"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	"github.com/Ryvion/ryvion-node/internal/sandbox"
-	"github.com/Ryvion/ryvion-node/internal/v7/capability"
 )
 
 const reportSchemaVersion = "ryvion.node.onboarding_report.v1"

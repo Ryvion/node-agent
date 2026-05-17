@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/Ryvion/ryvion-node/internal/hw"
-	"github.com/Ryvion/ryvion-node/internal/v7/netprofile"
+	"github.com/Ryvion/ryvion-node/internal/network/profile"
 )
 
 func TestBuildV7HeartbeatPayloadIncludesHubNetworkTelemetry(t *testing.T) {

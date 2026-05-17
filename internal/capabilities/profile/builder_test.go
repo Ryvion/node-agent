@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/inference/config"
 	"github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/models/policy"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	"github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
-	"github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 )
 
 const gib = uint64(1024 * 1024 * 1024)
@@ -74,14 +74,14 @@ func TestBuildProfileFreshMacLlamaRunnablePhiResidentBlocked(t *testing.T) {
 func TestBuildProfileWindowsRTXIncludesHardwareBackendAndInventory(t *testing.T) {
 	t.Parallel()
 
-	hardware := v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+	hardware := capshardware.NormalizeInventory(capshardware.CapacityInventory{
 		OS:                "windows",
 		Arch:              "amd64",
 		CPULogicalCores:   24,
 		SystemRAMBytes:    64 * gib,
 		AvailableRAMBytes: 48 * gib,
 		GPUDetected:       true,
-		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUVendor:         capshardware.GPUVendorNVIDIA,
 		GPUName:           "NVIDIA GeForce RTX 4090",
 		GPUVRAMBytes:      24 * gib,
 		CUDAAvailable:     true,
@@ -165,7 +165,7 @@ func TestBuildProfileMissingHardwareDoesNotClaimCapability(t *testing.T) {
 	t.Parallel()
 
 	profile := BuildProfile(BuildInput{
-		Hardware:        v7hardware.NormalizeInventory(v7hardware.CapacityInventory{OS: "darwin", Arch: "arm64"}),
+		Hardware:        capshardware.NormalizeInventory(capshardware.CapacityInventory{OS: "darwin", Arch: "arm64"}),
 		Policy:          modelpolicy.FromConfigSource(modelpolicy.ConfigSource{Getenv: func(string) string { return "" }, UserHomeDir: func() (string, error) { return "/Users/operator", nil }, GOOS: "darwin"}),
 		ModelCache:      modelcache.Status{CacheDir: "/models", Models: []modelcache.Model{llamaModel("/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf")}},
 		BackendProbes:   llamaProbe(true),
@@ -181,15 +181,15 @@ func TestBuildProfileMissingHardwareDoesNotClaimCapability(t *testing.T) {
 	}
 }
 
-func macHardware() v7hardware.CapacityInventory {
-	return v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+func macHardware() capshardware.CapacityInventory {
+	return capshardware.NormalizeInventory(capshardware.CapacityInventory{
 		OS:                "darwin",
 		Arch:              "arm64",
 		CPULogicalCores:   10,
 		SystemRAMBytes:    16 * gib,
 		AvailableRAMBytes: 10 * gib,
 		GPUDetected:       true,
-		GPUVendor:         v7hardware.GPUVendorApple,
+		GPUVendor:         capshardware.GPUVendorApple,
 		GPUName:           "Apple M4",
 		UnifiedMemory:     true,
 		MetalAvailable:    true,

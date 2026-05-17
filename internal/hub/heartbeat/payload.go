@@ -8,21 +8,21 @@ import (
 	"strings"
 	"time"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/capabilities/passport"
+	"github.com/Ryvion/ryvion-node/internal/capabilities/profile"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/models/lease"
 	"github.com/Ryvion/ryvion-node/internal/models/policy"
+	"github.com/Ryvion/ryvion-node/internal/network/profile"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	"github.com/Ryvion/ryvion-node/internal/sandbox"
-	"github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
-	"github.com/Ryvion/ryvion-node/internal/v7/capability"
-	"github.com/Ryvion/ryvion-node/internal/v7/capabilityprofile"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
-	"github.com/Ryvion/ryvion-node/internal/v7/netprofile"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
 	"github.com/Ryvion/ryvion-node/internal/v7/speculative"
-	"github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
 )
 
 const (
@@ -40,7 +40,7 @@ type V7HeartbeatPayload struct {
 	KVCapability              *kvprobe.Capability                   `json:"kv_capability,omitempty"`
 	TensorAccess              tensoraccess.TensorAccessCapability   `json:"tensor_access"`
 	RuntimeInventory          runtimeinventory.Inventory            `json:"runtime_inventory"`
-	HardwareCapacity          v7hardware.CapacityInventory          `json:"hardware_capacity"`
+	HardwareCapacity          capshardware.CapacityInventory        `json:"hardware_capacity"`
 	ModelPolicy               modelpolicy.Status                    `json:"model_policy"`
 	ModelCache                modelcache.Status                     `json:"model_cache"`
 	BackendProbes             backendprobe.Probes                   `json:"backend_probes"`
@@ -76,7 +76,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	KVCapability           *kvprobe.Capability
 	TensorAccess           *tensoraccess.TensorAccessCapability
 	RuntimeInventory       *runtimeinventory.Inventory
-	HardwareCapacity       *v7hardware.CapacityInventory
+	HardwareCapacity       *capshardware.CapacityInventory
 	ModelPolicy            *modelpolicy.Status
 	ModelCache             *modelcache.Status
 	BackendProbes          *backendprobe.Probes
@@ -378,14 +378,14 @@ func cloneRuntimeInventory(inventory *runtimeinventory.Inventory) runtimeinvento
 	return runtimeinventory.NormalizeInventory(*inventory)
 }
 
-func cloneHardwareCapacity(inventory *v7hardware.CapacityInventory, osName, arch string) v7hardware.CapacityInventory {
+func cloneHardwareCapacity(inventory *capshardware.CapacityInventory, osName, arch string) capshardware.CapacityInventory {
 	if inventory == nil {
-		return v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		return capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:   osName,
 			Arch: arch,
 		})
 	}
-	return v7hardware.NormalizeInventory(*inventory)
+	return capshardware.NormalizeInventory(*inventory)
 }
 
 func cloneModelPolicy(policy *modelpolicy.Status) modelpolicy.Status {

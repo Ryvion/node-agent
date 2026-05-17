@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	"github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
 )
 

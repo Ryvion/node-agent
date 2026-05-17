@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 )
 
 const (

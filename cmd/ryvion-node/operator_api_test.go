@@ -22,12 +22,12 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
+	kvprobe "github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	sglang "github.com/Ryvion/ryvion-node/internal/runtimes/sglang"
 	usefulenergy "github.com/Ryvion/ryvion-node/internal/telemetry/usefulenergy"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
-	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
 )
@@ -371,7 +371,7 @@ func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
 	if err := json.Unmarshal(respBody, &status); err != nil {
 		t.Fatalf("decode status response: %v\nbody: %s", err, respBody)
 	}
-	if status.TensorAccess.RuntimeKind != v7kvprobe.RuntimeKindNative {
+	if status.TensorAccess.RuntimeKind != kvprobe.RuntimeKindNative {
 		t.Fatalf("top-level tensor_access = %+v, want native runtime kind", status.TensorAccess)
 	}
 	if status.TensorAccess.Reason == "" {
@@ -383,7 +383,7 @@ func TestOperatorAPIStatusEndpointIncludesTensorAccessCapability(t *testing.T) {
 	if status.TensorAccess.KVAccessSupported {
 		t.Fatalf("top-level tensor_access kv_access_supported = true by default: %+v", status.TensorAccess)
 	}
-	if status.Runtime.TensorAccess.RuntimeKind != v7kvprobe.RuntimeKindNative {
+	if status.Runtime.TensorAccess.RuntimeKind != kvprobe.RuntimeKindNative {
 		t.Fatalf("runtime tensor_access = %+v, want native runtime kind", status.Runtime.TensorAccess)
 	}
 	if status.Runtime.TensorAccess.KVAccessSupported ||

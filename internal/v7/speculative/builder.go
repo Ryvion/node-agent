@@ -6,13 +6,13 @@ import (
 	"strings"
 	"unicode"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/inference/config"
 	"github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/models/policy"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	"github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
 )
 
 const (
@@ -25,7 +25,7 @@ const (
 )
 
 type BuildInput struct {
-	Hardware         v7hardware.CapacityInventory
+	Hardware         capshardware.CapacityInventory
 	Policy           modelpolicy.Policy
 	ModelCache       modelcache.Status
 	BackendProbes    backendprobe.Probes
@@ -55,7 +55,7 @@ type targetModel struct {
 }
 
 func BuildReport(input BuildInput) Report {
-	hardware := v7hardware.NormalizeInventory(input.Hardware)
+	hardware := capshardware.NormalizeInventory(input.Hardware)
 	policy := modelpolicy.NormalizePolicy(input.Policy)
 	cache := modelcache.NormalizeStatus(input.ModelCache)
 	probes := backendprobe.NormalizeProbes(input.BackendProbes)
@@ -423,7 +423,7 @@ func compatibleDraftModel(target targetModel, targets []targetModel) (targetMode
 	return candidates[0], true
 }
 
-func buildBackendMethodSupport(probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes, inventory runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) []backendMethodSupport {
+func buildBackendMethodSupport(probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes, inventory runtimeinventory.Inventory, hardware capshardware.CapacityInventory) []backendMethodSupport {
 	out := []backendMethodSupport{}
 	if support := llamaMethodSupport(probes, runtimes, inventory, hardware); support.Available {
 		out = append(out, support)
@@ -440,7 +440,7 @@ func buildBackendMethodSupport(probes backendprobe.Probes, runtimes llamacpp.Bac
 	return out
 }
 
-func llamaMethodSupport(probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes, inventory runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) backendMethodSupport {
+func llamaMethodSupport(probes backendprobe.Probes, runtimes llamacpp.BackendRuntimes, inventory runtimeinventory.Inventory, hardware capshardware.CapacityInventory) backendMethodSupport {
 	runtime := runtimes.LlamaCPP
 	probe := probes.LlamaCPP
 	candidate := backendCandidate(inventory, runtimeinventory.BackendCandidateLlamaCPP)
@@ -539,7 +539,7 @@ func normalizeProfile(profile Profile) Profile {
 	return profiles[0]
 }
 
-func hasHardwareCapacity(hardware v7hardware.CapacityInventory) bool {
+func hasHardwareCapacity(hardware capshardware.CapacityInventory) bool {
 	return strings.TrimSpace(hardware.OS) != "" &&
 		strings.TrimSpace(hardware.Arch) != "" &&
 		hardware.CPULogicalCores > 0 &&

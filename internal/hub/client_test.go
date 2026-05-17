@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Ryvion/ryvion-node/internal/capabilities/passport"
+	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
-	"github.com/Ryvion/ryvion-node/internal/v7/capability"
+	netprofile "github.com/Ryvion/ryvion-node/internal/network/profile"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
-	v7netprofile "github.com/Ryvion/ryvion-node/internal/v7/netprofile"
 )
 
 func TestRegisterSignsExpectedMessage(t *testing.T) {
@@ -565,7 +565,7 @@ func TestHeartbeatIncludesV7PayloadAndPreservesOldFields(t *testing.T) {
 		GPUUtil:      3.75,
 		PowerWatts:   4.5,
 		GPUThrottled: true,
-		NetworkProfile: &v7netprofile.NetworkProfile{
+		NetworkProfile: &netprofile.NetworkProfile{
 			RTTMsP95:    44,
 			JitterMsP95: 3,
 			SampleCount: 2,
@@ -827,10 +827,10 @@ func TestSendDashboardInferenceProgressPostsChunkBatch(t *testing.T) {
 	}
 }
 
-func testV7HeartbeatPayload(t *testing.T) *v7heartbeat.V7HeartbeatPayload {
+func testV7HeartbeatPayload(t *testing.T) *heartbeat.V7HeartbeatPayload {
 	t.Helper()
 
-	payload, err := v7heartbeat.BuildV7HeartbeatPayload(v7heartbeat.BuildV7HeartbeatPayloadInput{
+	payload, err := heartbeat.BuildV7HeartbeatPayload(heartbeat.BuildV7HeartbeatPayloadInput{
 		AgentVersion:  "test",
 		NodePublicKey: strings.Repeat("a", 64),
 		OS:            "linux",

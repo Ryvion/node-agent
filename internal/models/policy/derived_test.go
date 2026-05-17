@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 )
 
 func TestBuildDerivedPolicyBlocksPhiOnConstrainedAppleMac(t *testing.T) {
@@ -25,13 +25,13 @@ func TestBuildDerivedPolicyBlocksPhiOnConstrainedAppleMac(t *testing.T) {
 				AllowFamilies:                    []string{"llama", "phi"},
 			},
 		},
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:              "darwin",
 			Arch:            "arm64",
 			CPULogicalCores: 8,
 			SystemRAMBytes:  16 * bytesPerGiB,
 			GPUDetected:     true,
-			GPUVendor:       v7hardware.GPUVendorApple,
+			GPUVendor:       capshardware.GPUVendorApple,
 			GPUName:         "Apple M4",
 			UnifiedMemory:   true,
 			MetalAvailable:  true,
@@ -62,14 +62,14 @@ func TestBuildDerivedPolicyAllowsPhiOnLargeAppleUnifiedMemory(t *testing.T) {
 			},
 			GOOS: "darwin",
 		}),
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:                "darwin",
 			Arch:              "arm64",
 			CPULogicalCores:   14,
 			SystemRAMBytes:    48 * bytesPerGiB,
 			AvailableRAMBytes: 36 * bytesPerGiB,
 			GPUDetected:       true,
-			GPUVendor:         v7hardware.GPUVendorApple,
+			GPUVendor:         capshardware.GPUVendorApple,
 			GPUName:           "Apple M4 Max",
 			UnifiedMemory:     true,
 			MetalAvailable:    true,
@@ -111,13 +111,13 @@ func TestBuildDerivedPolicyBoundsRuntimeBytesByVRAM(t *testing.T) {
 				AllowFamilies:                    []string{"llama"},
 			},
 		},
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:              "windows",
 			Arch:            "amd64",
 			CPULogicalCores: 24,
 			SystemRAMBytes:  64 * bytesPerGiB,
 			GPUDetected:     true,
-			GPUVendor:       v7hardware.GPUVendorNVIDIA,
+			GPUVendor:       capshardware.GPUVendorNVIDIA,
 			GPUName:         "NVIDIA GeForce RTX 4090",
 			GPUVRAMBytes:    24 * bytesPerGiB,
 			CUDAAvailable:   true,
@@ -143,14 +143,14 @@ func TestBuildDerivedPolicyAllowsPhiOnCapableWindowsRTX(t *testing.T) {
 			},
 			GOOS: "windows",
 		}),
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:                "windows",
 			Arch:              "amd64",
 			CPULogicalCores:   24,
 			SystemRAMBytes:    64 * bytesPerGiB,
 			AvailableRAMBytes: 48 * bytesPerGiB,
 			GPUDetected:       true,
-			GPUVendor:         v7hardware.GPUVendorNVIDIA,
+			GPUVendor:         capshardware.GPUVendorNVIDIA,
 			GPUName:           "NVIDIA GeForce RTX 4090",
 			GPUVRAMBytes:      24 * bytesPerGiB,
 			CUDAAvailable:     true,
@@ -187,14 +187,14 @@ func TestBuildDerivedPolicyAllowsPhiOnMidrangeAcceleratedGPU(t *testing.T) {
 			},
 			GOOS: "windows",
 		}),
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:                "windows",
 			Arch:              "amd64",
 			CPULogicalCores:   16,
 			SystemRAMBytes:    34 * bytesPerGiB,
 			AvailableRAMBytes: 20 * bytesPerGiB,
 			GPUDetected:       true,
-			GPUVendor:         v7hardware.GPUVendorAMD,
+			GPUVendor:         capshardware.GPUVendorAMD,
 			GPUName:           "AMD Radeon RX 7900 XTX",
 			GPUVRAMBytes:      16 * bytesPerGiB,
 			VulkanAvailable:   true,
@@ -226,14 +226,14 @@ func TestBuildDerivedPolicyAllowsPhiOnWindowsThirtyTwoGBClassRTX(t *testing.T) {
 			},
 			GOOS: "windows",
 		}),
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:                "windows",
 			Arch:              "amd64",
 			CPULogicalCores:   16,
 			SystemRAMBytes:    33934004224,
 			AvailableRAMBytes: 19450638336,
 			GPUDetected:       true,
-			GPUVendor:         v7hardware.GPUVendorNVIDIA,
+			GPUVendor:         capshardware.GPUVendorNVIDIA,
 			GPUName:           "NVIDIA GeForce RTX 4070 Ti SUPER",
 			GPUVRAMBytes:      17171480576,
 			CUDAAvailable:     true,
@@ -262,14 +262,14 @@ func TestBuildDerivedPolicyAllowsResidentGemmaOnWindowsSixteenGBClassRTX(t *test
 			},
 			GOOS: "windows",
 		}),
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:                "windows",
 			Arch:              "amd64",
 			CPULogicalCores:   16,
 			SystemRAMBytes:    33934004224,
 			AvailableRAMBytes: 19450638336,
 			GPUDetected:       true,
-			GPUVendor:         v7hardware.GPUVendorNVIDIA,
+			GPUVendor:         capshardware.GPUVendorNVIDIA,
 			GPUName:           "NVIDIA GeForce RTX 4070 Ti SUPER",
 			GPUVRAMBytes:      17171480576,
 			CUDAAvailable:     true,
@@ -307,14 +307,14 @@ func TestBuildDerivedPolicyAllowsPhiOnCapableLinuxGPU(t *testing.T) {
 			},
 			GOOS: "linux",
 		}),
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:                "linux",
 			Arch:              "amd64",
 			CPULogicalCores:   24,
 			SystemRAMBytes:    64 * bytesPerGiB,
 			AvailableRAMBytes: 48 * bytesPerGiB,
 			GPUDetected:       true,
-			GPUVendor:         v7hardware.GPUVendorNVIDIA,
+			GPUVendor:         capshardware.GPUVendorNVIDIA,
 			GPUName:           "NVIDIA GeForce RTX 4090",
 			GPUVRAMBytes:      24 * bytesPerGiB,
 			CUDAAvailable:     true,
@@ -351,7 +351,7 @@ func TestBuildDerivedPolicyKeepsWindowsUnknownHardwareConservative(t *testing.T)
 			},
 			GOOS: "windows",
 		}),
-		Hardware: v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:   "windows",
 			Arch: "amd64",
 		}),

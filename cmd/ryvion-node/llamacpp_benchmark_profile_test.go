@@ -3,15 +3,15 @@ package main
 import (
 	"testing"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
 )
 
 func TestLlamaCppBenchmarkAccelerationModeReportsMetal(t *testing.T) {
 	cfg := llamacpp.LlamaCppSidecarConfig{GPULayers: 99}
-	hardware := v7hardware.CapacityInventory{
+	hardware := capshardware.CapacityInventory{
 		GPUDetected:    true,
-		GPUVendor:      v7hardware.GPUVendorApple,
+		GPUVendor:      capshardware.GPUVendorApple,
 		GPUName:        "Apple M4",
 		MetalAvailable: true,
 	}
@@ -23,9 +23,9 @@ func TestLlamaCppBenchmarkAccelerationModeReportsMetal(t *testing.T) {
 
 func TestLlamaCppBenchmarkAccelerationModeHonorsExplicitCPU(t *testing.T) {
 	cfg := llamacpp.LlamaCppSidecarConfig{GPULayers: 0}
-	hardware := v7hardware.CapacityInventory{
+	hardware := capshardware.CapacityInventory{
 		GPUDetected:    true,
-		GPUVendor:      v7hardware.GPUVendorApple,
+		GPUVendor:      capshardware.GPUVendorApple,
 		GPUName:        "Apple M4",
 		MetalAvailable: true,
 	}

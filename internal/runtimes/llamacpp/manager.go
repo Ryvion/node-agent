@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
 )
 
 const (
@@ -598,7 +598,7 @@ func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 			SupportsStreaming:      status.SupportsStreaming,
 			Acceleration:           statusAccelerationOrDefault(status),
 			AccelerationReason:     statusAccelerationReasonOrDefault(status),
-			GPUArchitecture:        gpuArchitectureFromHardware(v7hardware.CapacityInventory{}),
+			GPUArchitecture:        gpuArchitectureFromHardware(capshardware.CapacityInventory{}),
 			SupportsKVAccess:       status.SupportsKVAccess,
 			SupportsTensorHooks:    status.SupportsTensorHooks,
 			LastHealthAtUnixMs:     unixMilliOrZero(status.LastHealthAt),
@@ -637,13 +637,13 @@ func buildLaunchConfig(cfg LlamaCppSidecarConfig, managed bool, attached bool) *
 	})
 }
 
-func BuildBackendRuntimesWithInventory(status LlamaCppSidecarStatus, inventory runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) BackendRuntimes {
+func BuildBackendRuntimesWithInventory(status LlamaCppSidecarStatus, inventory runtimeinventory.Inventory, hardware capshardware.CapacityInventory) BackendRuntimes {
 	return EnrichBackendRuntimes(BuildBackendRuntimes(status), inventory, hardware)
 }
 
-func EnrichBackendRuntimes(runtimes BackendRuntimes, inventory runtimeinventory.Inventory, hardware v7hardware.CapacityInventory) BackendRuntimes {
+func EnrichBackendRuntimes(runtimes BackendRuntimes, inventory runtimeinventory.Inventory, hardware capshardware.CapacityInventory) BackendRuntimes {
 	inventory = runtimeinventory.NormalizeInventory(inventory)
-	hardware = v7hardware.NormalizeInventory(hardware)
+	hardware = capshardware.NormalizeInventory(hardware)
 	runtimes = NormalizeBackendRuntimes(runtimes)
 	if !runtimes.LlamaCPP.Loaded {
 		runtimes.LlamaCPP.Acceleration = mergeAcceleration(runtimes.LlamaCPP.Acceleration, accelerationFromHardware(hardware))
@@ -917,7 +917,7 @@ func normalizeOtherBackendRuntimes(runtimes []BackendRuntimeStatus) []BackendRun
 	return out
 }
 
-func runtimeFromBackendCandidate(candidate runtimeinventory.BackendCandidate, hardware v7hardware.CapacityInventory) BackendRuntimeStatus {
+func runtimeFromBackendCandidate(candidate runtimeinventory.BackendCandidate, hardware capshardware.CapacityInventory) BackendRuntimeStatus {
 	acceleration := []string{}
 	if candidate.Detected {
 		acceleration = accelerationFromBackend(candidate.Backend, hardware)
@@ -961,7 +961,7 @@ func mergeDetectedRuntime(active BackendRuntimeStatus, detected BackendRuntimeSt
 	return active
 }
 
-func accelerationFromBackend(backend string, hardware v7hardware.CapacityInventory) []string {
+func accelerationFromBackend(backend string, hardware capshardware.CapacityInventory) []string {
 	switch backend {
 	case runtimeinventory.BackendCandidateTensorRTLLM, runtimeinventory.BackendCandidateVLLM, runtimeinventory.BackendCandidateSGLang:
 		acceleration := accelerationFromHardware(hardware)
@@ -974,8 +974,8 @@ func accelerationFromBackend(backend string, hardware v7hardware.CapacityInvento
 	}
 }
 
-func accelerationFromHardware(hardware v7hardware.CapacityInventory) []string {
-	hardware = v7hardware.NormalizeInventory(hardware)
+func accelerationFromHardware(hardware capshardware.CapacityInventory) []string {
+	hardware = capshardware.NormalizeInventory(hardware)
 	if len(hardware.AccelerationHints) > 0 {
 		return hardware.AccelerationHints
 	}
@@ -1073,8 +1073,8 @@ func normalizeOptimizationCapabilities(capabilities []OptimizationCapability, ba
 	return out
 }
 
-func optimizationCapabilitiesForBackend(backend string, hardware v7hardware.CapacityInventory) []OptimizationCapability {
-	hardware = v7hardware.NormalizeInventory(hardware)
+func optimizationCapabilitiesForBackend(backend string, hardware capshardware.CapacityInventory) []OptimizationCapability {
+	hardware = capshardware.NormalizeInventory(hardware)
 	gpuArchitecture := gpuArchitectureFromHardware(hardware)
 	switch backend {
 	case runtimeinventory.BackendCandidateTensorRTLLM:
@@ -1119,16 +1119,16 @@ func normalizeOptimizationName(value string) string {
 	}
 }
 
-func gpuArchitectureFromHardware(hardware v7hardware.CapacityInventory) string {
-	hardware = v7hardware.NormalizeInventory(hardware)
+func gpuArchitectureFromHardware(hardware capshardware.CapacityInventory) string {
+	hardware = capshardware.NormalizeInventory(hardware)
 	switch hardware.GPUVendor {
-	case v7hardware.GPUVendorApple:
+	case capshardware.GPUVendorApple:
 		if hardware.MetalAvailable {
 			return "apple_metal"
 		}
-	case v7hardware.GPUVendorNVIDIA:
+	case capshardware.GPUVendorNVIDIA:
 		return nvidiaArchitectureFromComputeCapability(hardware.ComputeCapability)
-	case v7hardware.GPUVendorAMD:
+	case capshardware.GPUVendorAMD:
 		if hardware.VulkanAvailable {
 			return "amd_vulkan"
 		}

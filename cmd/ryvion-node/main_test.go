@@ -17,21 +17,21 @@ import (
 	"testing"
 	"time"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	capabilityprofile "github.com/Ryvion/ryvion-node/internal/capabilities/profile"
 	"github.com/Ryvion/ryvion-node/internal/diagnostics"
 	"github.com/Ryvion/ryvion-node/internal/hub"
+	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/inference"
 	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
 	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
+	kvprobe "github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
 	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/update"
-	v7capabilityprofile "github.com/Ryvion/ryvion-node/internal/v7/capabilityprofile"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
 	v7inferencebench "github.com/Ryvion/ryvion-node/internal/v7/inferencebench"
-	v7kvprobe "github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
 	v7memorybench "github.com/Ryvion/ryvion-node/internal/v7/memorybench"
 	v7modelbench "github.com/Ryvion/ryvion-node/internal/v7/modelbench"
 	v7tensorplane "github.com/Ryvion/ryvion-node/internal/v7/tensorplane"
@@ -236,17 +236,17 @@ func TestBuildDashboardInferencePolicyUsesDerivedHardwarePolicy(t *testing.T) {
 			return cacheDir
 		}
 		return ""
-	}, func(gotCacheDir string) v7hardware.CapacityInventory {
+	}, func(gotCacheDir string) capshardware.CapacityInventory {
 		if gotCacheDir != cacheDir {
 			t.Fatalf("hardware cache dir = %q, want %q", gotCacheDir, cacheDir)
 		}
-		return v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+		return capshardware.NormalizeInventory(capshardware.CapacityInventory{
 			OS:              "windows",
 			Arch:            "amd64",
 			CPULogicalCores: 16,
 			SystemRAMBytes:  31 * gib,
 			GPUDetected:     true,
-			GPUVendor:       v7hardware.GPUVendorNVIDIA,
+			GPUVendor:       capshardware.GPUVendorNVIDIA,
 			GPUName:         "NVIDIA GeForce RTX 4070 Ti SUPER",
 			GPUVRAMBytes:    16 * gib,
 			CUDAAvailable:   true,
@@ -450,7 +450,7 @@ func TestBuildOptionalV7HeartbeatPayloadDefaultsOnAndHonorsExplicitOff(t *testin
 	if payload.CapabilityPassport.NodePublicKey != "pubkey" {
 		t.Fatalf("node public key = %q, want pubkey", payload.CapabilityPassport.NodePublicKey)
 	}
-	if payload.KVCapability == nil || payload.KVCapability.RuntimeKind != v7kvprobe.RuntimeKindNative {
+	if payload.KVCapability == nil || payload.KVCapability.RuntimeKind != kvprobe.RuntimeKindNative {
 		t.Fatalf("kv capability = %+v, want native runtime capability probe", payload.KVCapability)
 	}
 	expectedTensorAccess := buildRuntimeTensorAccessStatus(nil)
@@ -560,22 +560,22 @@ func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
 }
 
 func TestSummarizeV7HeartbeatPayloadCountsOnlyRealInventoryModels(t *testing.T) {
-	payload := &v7heartbeat.V7HeartbeatPayload{
+	payload := &heartbeat.V7HeartbeatPayload{
 		ModelCache: modelcache.Status{
 			Models: []modelcache.Model{
 				{ModelID: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", Filename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
 				{ModelID: "phi-4-Q5_K_M.gguf", Filename: "phi-4-Q5_K_M.gguf"},
 			},
 		},
-		CapabilityProfile: v7capabilityprofile.Profile{
+		CapabilityProfile: capabilityprofile.Profile{
 			SchemaVersion: "v7.capability-profile.v1",
 			TextOutput:    true,
 			Streaming:     true,
-			WarmModel: v7capabilityprofile.WarmModelSummary{
+			WarmModel: capabilityprofile.WarmModelSummary{
 				ModelID: "draft-profile-placeholder",
 				Warm:    true,
 			},
-			Models: []v7capabilityprofile.ModelCapability{
+			Models: []capabilityprofile.ModelCapability{
 				{ModelID: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", Resident: true, Warm: true, Runnable: true},
 				{ModelID: "phi-4-Q5_K_M.gguf", Resident: true, Runnable: false, BlockedReasons: []string{"family_denied"}},
 			},

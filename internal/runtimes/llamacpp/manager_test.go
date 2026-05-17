@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
 )
 
 func TestConfigFromEnv(t *testing.T) {
@@ -258,9 +258,9 @@ func TestConfigFromEnvUsesHardwareInventoryForCUDAFastDefaults(t *testing.T) {
 			return nil, os.ErrNotExist
 		},
 		GOOS: "linux",
-		HardwareCapacity: &v7hardware.CapacityInventory{
+		HardwareCapacity: &capshardware.CapacityInventory{
 			GPUDetected:       true,
-			GPUVendor:         v7hardware.GPUVendorNVIDIA,
+			GPUVendor:         capshardware.GPUVendorNVIDIA,
 			GPUName:           "NVIDIA GeForce RTX 4090",
 			CUDAAvailable:     true,
 			ComputeCapability: "8.9",
@@ -934,9 +934,9 @@ func TestEnrichBackendRuntimesDoesNotPromoteActiveCPUOnlySidecarToCUDA(t *testin
 		SupportsStreaming:      true,
 	})
 
-	enriched := EnrichBackendRuntimes(runtimes, runtimeinventory.Inventory{}, v7hardware.CapacityInventory{
+	enriched := EnrichBackendRuntimes(runtimes, runtimeinventory.Inventory{}, capshardware.CapacityInventory{
 		GPUDetected:       true,
-		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUVendor:         capshardware.GPUVendorNVIDIA,
 		GPUName:           "NVIDIA GeForce RTX 4090",
 		CUDAAvailable:     true,
 		ComputeCapability: "8.9",
@@ -980,9 +980,9 @@ func TestEnrichBackendRuntimesPreservesActiveSGLangSidecar(t *testing.T) {
 			SupportsStreaming:              true,
 			SupportsOpenAICompatibleServer: true,
 		}},
-	}, v7hardware.CapacityInventory{
+	}, capshardware.CapacityInventory{
 		GPUDetected:       true,
-		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUVendor:         capshardware.GPUVendorNVIDIA,
 		CUDAAvailable:     true,
 		ComputeCapability: "8.9",
 	})
@@ -1085,9 +1085,9 @@ func TestEnrichBackendRuntimesRepresentsBlackwellGVRCapability(t *testing.T) {
 			SupportsOpenAICompatibleServer: true,
 			SupportsStreaming:              true,
 		}},
-	}, v7hardware.CapacityInventory{
+	}, capshardware.CapacityInventory{
 		GPUDetected:       true,
-		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUVendor:         capshardware.GPUVendorNVIDIA,
 		GPUName:           "NVIDIA B200",
 		CUDAAvailable:     true,
 		ComputeCapability: "10.0",
@@ -1117,9 +1117,9 @@ func TestEnrichBackendRuntimesDoesNotFalselyClaimGVRForNonBlackwellRTX(t *testin
 			Detected:               true,
 			SupportsTextGeneration: true,
 		}},
-	}, v7hardware.CapacityInventory{
+	}, capshardware.CapacityInventory{
 		GPUDetected:       true,
-		GPUVendor:         v7hardware.GPUVendorNVIDIA,
+		GPUVendor:         capshardware.GPUVendorNVIDIA,
 		GPUName:           "NVIDIA GeForce RTX 4090",
 		CUDAAvailable:     true,
 		ComputeCapability: "8.9",

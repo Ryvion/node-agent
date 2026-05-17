@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 	"github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/models/policy"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	"github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
 )
 
 const gib = uint64(1024 * 1024 * 1024)
@@ -104,15 +104,15 @@ func TestBuildReportSpeculativeOptOutDisablesRunnableProfiles(t *testing.T) {
 	}
 }
 
-func macHardware() v7hardware.CapacityInventory {
-	return v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+func macHardware() capshardware.CapacityInventory {
+	return capshardware.NormalizeInventory(capshardware.CapacityInventory{
 		OS:                "darwin",
 		Arch:              "arm64",
 		CPULogicalCores:   10,
 		SystemRAMBytes:    16 * gib,
 		AvailableRAMBytes: 10 * gib,
 		GPUDetected:       true,
-		GPUVendor:         v7hardware.GPUVendorApple,
+		GPUVendor:         capshardware.GPUVendorApple,
 		GPUName:           "Apple M4",
 		UnifiedMemory:     true,
 		MetalAvailable:    true,

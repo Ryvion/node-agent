@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/inferenceconfig"
+	"github.com/Ryvion/ryvion-node/internal/inference/config"
 )
 
 const (

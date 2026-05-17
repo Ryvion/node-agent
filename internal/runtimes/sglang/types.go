@@ -4,8 +4,8 @@ import (
 	"os"
 	"time"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
 )
 
 const (
@@ -34,7 +34,7 @@ type ConfigSource struct {
 	Stat             func(string) (os.FileInfo, error)
 	GOOS             string
 	RuntimeInventory *runtimeinventory.Inventory
-	HardwareCapacity *v7hardware.CapacityInventory
+	HardwareCapacity *capshardware.CapacityInventory
 }
 
 type SGLangSidecarConfig struct {

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"unicode"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
 )
 
 const maxConfigTextLen = 1024
@@ -113,7 +113,7 @@ func configAccelerationHints(source ConfigSource) []string {
 	source = normalizeConfigSource(source)
 	hints := []string{}
 	if source.HardwareCapacity != nil {
-		hardware := v7hardware.NormalizeInventory(*source.HardwareCapacity)
+		hardware := capshardware.NormalizeInventory(*source.HardwareCapacity)
 		if len(hardware.AccelerationHints) > 0 {
 			hints = append(hints, hardware.AccelerationHints...)
 		}

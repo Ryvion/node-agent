@@ -3,17 +3,17 @@ package modelpolicy
 import (
 	"strings"
 
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
 )
 
 type DerivedPolicyInput struct {
 	BasePolicy Policy
-	Hardware   v7hardware.CapacityInventory
+	Hardware   capshardware.CapacityInventory
 }
 
 func BuildDerivedPolicy(input DerivedPolicyInput) Policy {
 	policy := NormalizePolicy(input.BasePolicy)
-	hardware := v7hardware.NormalizeInventory(input.Hardware)
+	hardware := capshardware.NormalizeInventory(input.Hardware)
 
 	if isConstrainedAppleUnifiedMemory(hardware) {
 		policy.RuntimePolicy.DenyFamilies = appendIfMissing(policy.RuntimePolicy.DenyFamilies, "phi")
@@ -36,7 +36,7 @@ func BuildDerivedPolicy(input DerivedPolicyInput) Policy {
 	return NormalizePolicy(policy)
 }
 
-func deriveAcceleratedRuntimePolicy(policy Policy, hardware v7hardware.CapacityInventory) Policy {
+func deriveAcceleratedRuntimePolicy(policy Policy, hardware capshardware.CapacityInventory) Policy {
 	capBytes := runtimePolicyByteCap(policy, hardware)
 	if capBytes > policy.RuntimePolicy.MaxRuntimeModelBytes &&
 		policy.RuntimePolicy.MaxRuntimeModelBytes == DefaultRuntimeMaxModelGB*bytesPerGiB {
@@ -75,7 +75,7 @@ func deriveAcceleratedRuntimePolicy(policy Policy, hardware v7hardware.CapacityI
 	return policy
 }
 
-func runtimePolicyByteCap(policy Policy, hardware v7hardware.CapacityInventory) uint64 {
+func runtimePolicyByteCap(policy Policy, hardware capshardware.CapacityInventory) uint64 {
 	capBytes := runtimeHardwareByteCap(hardware)
 	if policy.RuntimePolicy.AllowCPUOffload && hasDiscreteAcceleratedGPU(hardware) && hardware.SystemRAMBytes > 0 {
 		if offloadCap := (hardware.SystemRAMBytes * 3) / 5; offloadCap > capBytes {
@@ -85,7 +85,7 @@ func runtimePolicyByteCap(policy Policy, hardware v7hardware.CapacityInventory) 
 	return capBytes
 }
 
-func runtimeHardwareByteCap(hardware v7hardware.CapacityInventory) uint64 {
+func runtimeHardwareByteCap(hardware capshardware.CapacityInventory) uint64 {
 	if hardware.GPUVRAMBytes > 0 {
 		return (hardware.GPUVRAMBytes * 3) / 4
 	}
@@ -98,28 +98,28 @@ func runtimeHardwareByteCap(hardware v7hardware.CapacityInventory) uint64 {
 	return 0
 }
 
-func hasDiscreteAcceleratedGPU(hardware v7hardware.CapacityInventory) bool {
+func hasDiscreteAcceleratedGPU(hardware capshardware.CapacityInventory) bool {
 	if !hardware.GPUDetected || hardware.GPUVRAMBytes == 0 || hardware.UnifiedMemory {
 		return false
 	}
 	return hardware.CUDAAvailable || hardware.VulkanAvailable || hardware.DirectMLAvailable
 }
 
-func isDarwinApple(hardware v7hardware.CapacityInventory) bool {
+func isDarwinApple(hardware capshardware.CapacityInventory) bool {
 	return strings.EqualFold(strings.TrimSpace(hardware.OS), "darwin") &&
-		(strings.EqualFold(strings.TrimSpace(hardware.GPUVendor), v7hardware.GPUVendorApple) ||
+		(strings.EqualFold(strings.TrimSpace(hardware.GPUVendor), capshardware.GPUVendorApple) ||
 			hardware.MetalAvailable ||
 			hardware.UnifiedMemory)
 }
 
-func isConstrainedAppleUnifiedMemory(hardware v7hardware.CapacityInventory) bool {
+func isConstrainedAppleUnifiedMemory(hardware capshardware.CapacityInventory) bool {
 	if !isDarwinApple(hardware) {
 		return false
 	}
 	return runtimeHardwareByteCap(hardware) < 10*bytesPerGiB || hardware.SystemRAMBytes < 30*bytesPerGiB
 }
 
-func hasUsableAcceleratedRuntime(hardware v7hardware.CapacityInventory) bool {
+func hasUsableAcceleratedRuntime(hardware capshardware.CapacityInventory) bool {
 	if isDarwinApple(hardware) {
 		return hardware.MetalAvailable && hardware.UnifiedMemory && runtimeHardwareByteCap(hardware) >= 10*bytesPerGiB
 	}

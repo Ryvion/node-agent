@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
 )
 
 const (

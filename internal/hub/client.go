@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
+	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	netprofile "github.com/Ryvion/ryvion-node/internal/network/profile"
 	v7dashboardinference "github.com/Ryvion/ryvion-node/internal/v7/dashboardinference"
-	v7heartbeat "github.com/Ryvion/ryvion-node/internal/v7/heartbeat"
-	v7netprofile "github.com/Ryvion/ryvion-node/internal/v7/netprofile"
 )
 
 type Client struct {
@@ -1049,8 +1049,8 @@ type Metrics struct {
 	GPUUtil        float64
 	PowerWatts     float64
 	GPUThrottled   bool // node is self-throttling due to operator GPU usage
-	NetworkProfile *v7netprofile.NetworkProfile
-	V7Heartbeat    *v7heartbeat.V7HeartbeatPayload
+	NetworkProfile *netprofile.NetworkProfile
+	V7Heartbeat    *heartbeat.V7HeartbeatPayload
 }
 
 type WorkAssignment struct {
@@ -1173,17 +1173,17 @@ type registerRequest struct {
 }
 
 type heartbeatRequest struct {
-	PublicKeyHex   string                          `json:"public_key_hex"`
-	TimestampMs    int64                           `json:"timestamp_ms"`
-	CPUUtil        float64                         `json:"cpu_util"`
-	MemUtil        float64                         `json:"mem_util"`
-	GPUUtil        float64                         `json:"gpu_util"`
-	PowerWatts     float64                         `json:"power_watts"`
-	GPUThrottled   bool                            `json:"gpu_throttled"`
-	SystemTimezone string                          `json:"system_timezone,omitempty"`
-	NetworkProfile *v7netprofile.NetworkProfile    `json:"network_profile,omitempty"`
-	V7             *v7heartbeat.V7HeartbeatPayload `json:"v7,omitempty"`
-	Signature      []byte                          `json:"signature"`
+	PublicKeyHex   string                        `json:"public_key_hex"`
+	TimestampMs    int64                         `json:"timestamp_ms"`
+	CPUUtil        float64                       `json:"cpu_util"`
+	MemUtil        float64                       `json:"mem_util"`
+	GPUUtil        float64                       `json:"gpu_util"`
+	PowerWatts     float64                       `json:"power_watts"`
+	GPUThrottled   bool                          `json:"gpu_throttled"`
+	SystemTimezone string                        `json:"system_timezone,omitempty"`
+	NetworkProfile *netprofile.NetworkProfile    `json:"network_profile,omitempty"`
+	V7             *heartbeat.V7HeartbeatPayload `json:"v7,omitempty"`
+	Signature      []byte                        `json:"signature"`
 }
 
 type workResponse struct {

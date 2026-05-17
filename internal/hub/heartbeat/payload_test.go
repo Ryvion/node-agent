@@ -7,19 +7,19 @@ import (
 	"testing"
 	"time"
 
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	"github.com/Ryvion/ryvion-node/internal/capabilities/passport"
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/models/cache"
 	"github.com/Ryvion/ryvion-node/internal/models/lease"
 	"github.com/Ryvion/ryvion-node/internal/models/policy"
+	"github.com/Ryvion/ryvion-node/internal/network/profile"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
 	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
+	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
 	"github.com/Ryvion/ryvion-node/internal/sandbox"
-	"github.com/Ryvion/ryvion-node/internal/v7/backendprobe"
-	"github.com/Ryvion/ryvion-node/internal/v7/capability"
-	v7hardware "github.com/Ryvion/ryvion-node/internal/v7/hardware"
-	"github.com/Ryvion/ryvion-node/internal/v7/kvprobe"
-	"github.com/Ryvion/ryvion-node/internal/v7/netprofile"
-	"github.com/Ryvion/ryvion-node/internal/v7/runtimeinventory"
-	"github.com/Ryvion/ryvion-node/internal/v7/tensoraccess"
 )
 
 func TestV7HeartbeatEnabledFromEnv(t *testing.T) {
@@ -98,7 +98,7 @@ func TestBuildV7HeartbeatPayloadIncludesCapabilityPassport(t *testing.T) {
 	}
 	if payload.HardwareCapacity.OS != "linux" ||
 		payload.HardwareCapacity.Arch != "amd64" ||
-		payload.HardwareCapacity.GPUVendor != v7hardware.GPUVendorNVIDIA ||
+		payload.HardwareCapacity.GPUVendor != capshardware.GPUVendorNVIDIA ||
 		payload.HardwareCapacity.GPUName != "NVIDIA GeForce RTX 4090" ||
 		payload.HardwareCapacity.GPUVRAMBytes != 24*1024*1024*1024 {
 		t.Fatalf("hardware_capacity = %+v, want mocked RTX 4090 capacity", payload.HardwareCapacity)
@@ -376,10 +376,10 @@ func TestBuildV7HeartbeatPayloadDefaultsSafeHardwareCapacity(t *testing.T) {
 		t.Fatalf("hardware_capacity identity = %+v, want input OS/arch fallback", payload.HardwareCapacity)
 	}
 	if payload.HardwareCapacity.GPUDetected ||
-		payload.HardwareCapacity.GPUVendor != v7hardware.GPUVendorUnknown ||
+		payload.HardwareCapacity.GPUVendor != capshardware.GPUVendorUnknown ||
 		payload.HardwareCapacity.GPUName != "unknown" ||
-		payload.HardwareCapacity.PowerProfile != v7hardware.PowerProfileUnknown ||
-		payload.HardwareCapacity.ThermalRisk != v7hardware.ThermalRiskUnknown {
+		payload.HardwareCapacity.PowerProfile != capshardware.PowerProfileUnknown ||
+		payload.HardwareCapacity.ThermalRisk != capshardware.ThermalRiskUnknown {
 		t.Fatalf("default hardware_capacity should be safe unknown capacity: %+v", payload.HardwareCapacity)
 	}
 	raw, err := json.Marshal(payload)
@@ -739,21 +739,21 @@ func validInput() BuildV7HeartbeatPayloadInput {
 	}
 }
 
-func validHardwareCapacity() v7hardware.CapacityInventory {
-	return v7hardware.NormalizeInventory(v7hardware.CapacityInventory{
+func validHardwareCapacity() capshardware.CapacityInventory {
+	return capshardware.NormalizeInventory(capshardware.CapacityInventory{
 		OS:                      "linux",
 		Arch:                    "amd64",
 		CPULogicalCores:         16,
 		SystemRAMBytes:          64 * 1024 * 1024 * 1024,
 		AvailableRAMBytes:       48 * 1024 * 1024 * 1024,
 		GPUDetected:             true,
-		GPUVendor:               v7hardware.GPUVendorNVIDIA,
+		GPUVendor:               capshardware.GPUVendorNVIDIA,
 		GPUName:                 "NVIDIA GeForce RTX 4090",
 		GPUVRAMBytes:            24 * 1024 * 1024 * 1024,
 		CUDAAvailable:           true,
 		DiskFreeBytesModelCache: 90 * 1024 * 1024 * 1024,
-		PowerProfile:            v7hardware.PowerProfileDesktop,
-		ThermalRisk:             v7hardware.ThermalRiskLow,
+		PowerProfile:            capshardware.PowerProfileDesktop,
+		ThermalRisk:             capshardware.ThermalRiskLow,
 	})
 }
 
