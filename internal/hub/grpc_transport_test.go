@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	experimentsv1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/experiments/v1"
 	nodev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/node/v1"
 	v7alphapb "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/v7alpha"
 	"google.golang.org/grpc"
@@ -265,7 +266,7 @@ func TestClientSubmitDraftPacketBatchUsesNodeGatewayStreamWhenAvailable(t *testi
 	}
 }
 
-func TestClientFetchLiveLabCommandUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
+func TestClientFetchLiveLabCommandUsesExperimentalGatewayStreamWhenAvailable(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("GenerateKey() error = %v", err)
@@ -293,7 +294,7 @@ func TestClientFetchLiveLabCommandUsesNodeGatewayStreamWhenAvailable(t *testing.
 	if err != nil {
 		t.Fatalf("command payload: %v", err)
 	}
-	fake := &fakeNodeGatewayServer{liveLabCommand: &nodev1.LiveLabCommand{
+	fake := &fakeExperimentalLiveLabGatewayServer{liveLabCommand: &experimentsv1.LiveLabCommand{
 		SchemaVersion: "ryvion.foresight_live_lab.session_command.v1",
 		RunId:         "flab-gateway",
 		JobId:         "job-draft",
@@ -303,7 +304,7 @@ func TestClientFetchLiveLabCommandUsesNodeGatewayStreamWhenAvailable(t *testing.
 		Payload:       payload,
 	}}
 	grpcServer := grpc.NewServer()
-	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	experimentsv1.RegisterExperimentalLiveLabGatewayServer(grpcServer, fake)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -337,14 +338,14 @@ func TestClientFetchLiveLabCommandUsesNodeGatewayStreamWhenAvailable(t *testing.
 	}
 }
 
-func TestClientSubmitLiveLabVerifierResultUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
+func TestClientSubmitLiveLabVerifierResultUsesExperimentalGatewayStreamWhenAvailable(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("GenerateKey() error = %v", err)
 	}
-	fake := &fakeNodeGatewayServer{liveLabVerifierResultStatus: "accepted"}
+	fake := &fakeExperimentalLiveLabGatewayServer{liveLabVerifierResultStatus: "accepted"}
 	grpcServer := grpc.NewServer()
-	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	experimentsv1.RegisterExperimentalLiveLabGatewayServer(grpcServer, fake)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -415,11 +416,6 @@ type fakeNodeGatewayServer struct {
 	receiptReason   string
 	draftBatch      *nodev1.DraftPacketBatch
 	signature       *nodev1.Signature
-
-	liveLabCommandRequest       *nodev1.LiveLabCommandRequest
-	liveLabCommand              *nodev1.LiveLabCommand
-	liveLabVerifierResult       *nodev1.LiveLabVerifierResult
-	liveLabVerifierResultStatus string
 }
 
 func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer) error {
@@ -502,11 +498,35 @@ func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer)
 			},
 		})
 	}
-	if request := msg.GetLiveLabCommandRequest(); request != nil {
+	return stream.Send(&nodev1.HubToNode{
+		MessageId:       "ack_" + msg.GetMessageId(),
+		CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+		Payload: &nodev1.HubToNode_Ping{
+			Ping: &nodev1.Ping{Nonce: msg.GetMessageId()},
+		},
+	})
+}
+
+type fakeExperimentalLiveLabGatewayServer struct {
+	experimentsv1.UnimplementedExperimentalLiveLabGatewayServer
+	liveLabCommandRequest       *experimentsv1.LiveLabCommandRequest
+	liveLabCommand              *experimentsv1.LiveLabCommand
+	liveLabVerifierResult       *experimentsv1.LiveLabVerifierResult
+	liveLabVerifierResultStatus string
+	signature                   *nodev1.Signature
+}
+
+func (s *fakeExperimentalLiveLabGatewayServer) Connect(stream experimentsv1.ExperimentalLiveLabGateway_ConnectServer) error {
+	msg, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	s.signature = msg.GetSignature()
+	if request := msg.GetCommandRequest(); request != nil {
 		s.liveLabCommandRequest = request
 		command := s.liveLabCommand
 		if command == nil {
-			command = &nodev1.LiveLabCommand{
+			command = &experimentsv1.LiveLabCommand{
 				SchemaVersion: "ryvion.foresight_live_lab.session_command.v1",
 				RunId:         request.GetRunId(),
 				JobId:         request.GetJobId(),
@@ -515,25 +535,25 @@ func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer)
 				Reason:        "test_default",
 			}
 		}
-		return stream.Send(&nodev1.HubToNode{
+		return stream.Send(&experimentsv1.LiveLabHubToNode{
 			MessageId:       "ack_" + msg.GetMessageId(),
 			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
-			Payload: &nodev1.HubToNode_LiveLabCommand{
-				LiveLabCommand: command,
+			Payload: &experimentsv1.LiveLabHubToNode_Command{
+				Command: command,
 			},
 		})
 	}
-	if result := msg.GetLiveLabVerifierResult(); result != nil {
+	if result := msg.GetVerifierResult(); result != nil {
 		s.liveLabVerifierResult = result
 		status := s.liveLabVerifierResultStatus
 		if strings.TrimSpace(status) == "" {
 			status = "accepted"
 		}
-		return stream.Send(&nodev1.HubToNode{
+		return stream.Send(&experimentsv1.LiveLabHubToNode{
 			MessageId:       "ack_" + msg.GetMessageId(),
 			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
-			Payload: &nodev1.HubToNode_LiveLabVerifierResultAck{
-				LiveLabVerifierResultAck: &nodev1.LiveLabVerifierResultAck{
+			Payload: &experimentsv1.LiveLabHubToNode_VerifierResultAck{
+				VerifierResultAck: &experimentsv1.LiveLabVerifierResultAck{
 					SchemaVersion: "ryvion.foresight_live_lab.verifier_result_ack.v1",
 					Status:        status,
 					RunId:         result.GetRunId(),
@@ -542,11 +562,8 @@ func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer)
 			},
 		})
 	}
-	return stream.Send(&nodev1.HubToNode{
+	return stream.Send(&experimentsv1.LiveLabHubToNode{
 		MessageId:       "ack_" + msg.GetMessageId(),
 		CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
-		Payload: &nodev1.HubToNode_Ping{
-			Ping: &nodev1.Ping{Nonce: msg.GetMessageId()},
-		},
 	})
 }

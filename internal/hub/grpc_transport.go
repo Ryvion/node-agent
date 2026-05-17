@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	experimentsv1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/experiments/v1"
 	nodev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/node/v1"
 	v7alphapb "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/v7alpha"
 	"google.golang.org/grpc"
@@ -40,10 +41,11 @@ type grpcTransport struct {
 	mode     string
 	insecure bool
 
-	mu            sync.Mutex
-	conn          *grpc.ClientConn
-	client        v7alphapb.V7NodeTransportServiceClient
-	gatewayClient nodev1.NodeGatewayClient
+	mu             sync.Mutex
+	conn           *grpc.ClientConn
+	client         v7alphapb.V7NodeTransportServiceClient
+	gatewayClient  nodev1.NodeGatewayClient
+	liveLabGateway experimentsv1.ExperimentalLiveLabGatewayClient
 }
 
 func defaultGRPCTransport() *grpcTransport {
@@ -537,7 +539,7 @@ func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string
 }
 
 func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, runID string, jobID string, role string) (ForesightLiveLabSessionCommand, error) {
-	client, err := c.nodeGatewayClient(ctx)
+	client, err := c.experimentalLiveLabGatewayClient(ctx)
 	if err != nil {
 		return ForesightLiveLabSessionCommand{}, err
 	}
@@ -549,12 +551,12 @@ func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, ru
 	if err != nil {
 		return ForesightLiveLabSessionCommand{}, err
 	}
-	if err := stream.Send(&nodev1.NodeToHub{
+	if err := stream.Send(&experimentsv1.LiveLabNodeToHub{
 		NodeId:          pubHex,
 		MessageId:       fmt.Sprintf("live-lab-command-%s-%d", runID, ts),
 		CreatedAtUnixMs: ts,
-		Payload: &nodev1.NodeToHub_LiveLabCommandRequest{
-			LiveLabCommandRequest: &nodev1.LiveLabCommandRequest{
+		Payload: &experimentsv1.LiveLabNodeToHub_CommandRequest{
+			CommandRequest: &experimentsv1.LiveLabCommandRequest{
 				RunId: runID,
 				JobId: strings.TrimSpace(jobID),
 				Role:  strings.TrimSpace(role),
@@ -575,7 +577,7 @@ func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, ru
 	if err != nil {
 		return ForesightLiveLabSessionCommand{}, err
 	}
-	command := resp.GetLiveLabCommand()
+	command := resp.GetCommand()
 	if command == nil {
 		return ForesightLiveLabSessionCommand{}, status.Error(codes.Internal, "live lab command missing")
 	}
@@ -602,7 +604,7 @@ func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, ru
 }
 
 func (c *Client) submitForesightLiveLabVerifierResultGRPC(ctx context.Context, runID string, result ForesightLiveLabVerifierResult) error {
-	client, err := c.nodeGatewayClient(ctx)
+	client, err := c.experimentalLiveLabGatewayClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -629,12 +631,12 @@ func (c *Client) submitForesightLiveLabVerifierResultGRPC(ctx context.Context, r
 	if err != nil {
 		return err
 	}
-	if err := stream.Send(&nodev1.NodeToHub{
+	if err := stream.Send(&experimentsv1.LiveLabNodeToHub{
 		NodeId:          pubHex,
 		MessageId:       fmt.Sprintf("live-lab-verifier-result-%s-%d", runID, ts),
 		CreatedAtUnixMs: ts,
-		Payload: &nodev1.NodeToHub_LiveLabVerifierResult{
-			LiveLabVerifierResult: &nodev1.LiveLabVerifierResult{
+		Payload: &experimentsv1.LiveLabNodeToHub_VerifierResult{
+			VerifierResult: &experimentsv1.LiveLabVerifierResult{
 				RunId:              runID,
 				JobId:              result.JobID,
 				WindowId:           result.WindowID,
@@ -664,7 +666,7 @@ func (c *Client) submitForesightLiveLabVerifierResultGRPC(ctx context.Context, r
 	if err != nil {
 		return err
 	}
-	ack := resp.GetLiveLabVerifierResultAck()
+	ack := resp.GetVerifierResultAck()
 	if ack == nil {
 		return status.Error(codes.Internal, "live lab verifier result ack missing")
 	}
@@ -722,6 +724,13 @@ func (c *Client) nodeGatewayClient(ctx context.Context) (nodev1.NodeGatewayClien
 	return c.grpc.gatewayClientFor(ctx)
 }
 
+func (c *Client) experimentalLiveLabGatewayClient(ctx context.Context) (experimentsv1.ExperimentalLiveLabGatewayClient, error) {
+	if c == nil || c.grpc == nil || !c.grpc.enabled() {
+		return nil, status.Error(codes.Unavailable, "gRPC transport disabled")
+	}
+	return c.grpc.liveLabGatewayClientFor(ctx)
+}
+
 func (c *Client) Close() error {
 	if c == nil || c.grpc == nil {
 		return nil
@@ -749,6 +758,7 @@ func (t *grpcTransport) close() error {
 	t.conn = nil
 	t.client = nil
 	t.gatewayClient = nil
+	t.liveLabGateway = nil
 	return err
 }
 
@@ -786,6 +796,20 @@ func (t *grpcTransport) gatewayClientFor(ctx context.Context) (nodev1.NodeGatewa
 	}
 	t.gatewayClient = nodev1.NewNodeGatewayClient(conn)
 	return t.gatewayClient, nil
+}
+
+func (t *grpcTransport) liveLabGatewayClientFor(ctx context.Context) (experimentsv1.ExperimentalLiveLabGatewayClient, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.liveLabGateway != nil {
+		return t.liveLabGateway, nil
+	}
+	conn, err := t.connForLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	t.liveLabGateway = experimentsv1.NewExperimentalLiveLabGatewayClient(conn)
+	return t.liveLabGateway, nil
 }
 
 func (t *grpcTransport) connForLocked(_ context.Context) (*grpc.ClientConn, error) {
