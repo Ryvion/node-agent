@@ -476,9 +476,7 @@ func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer)
 		s.draftBatch = draftBatch
 		packetID := ""
 		if len(draftBatch.GetPackets()) > 0 && draftBatch.GetPackets()[0] != nil {
-			if raw, ok := draftBatch.GetPackets()[0].AsMap()["packet_id"].(string); ok {
-				packetID = raw
-			}
+			packetID = draftBatch.GetPackets()[0].GetPacketId()
 		}
 		return stream.Send(&nodev1.HubToNode{
 			MessageId:       "ack_" + msg.GetMessageId(),

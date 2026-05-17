@@ -19,6 +19,7 @@ import (
 
 	experimentsv1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/experiments/v1"
 	nodev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/node/v1"
+	speculativev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/speculative/v1"
 	v7alphapb "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/v7alpha"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -472,13 +473,13 @@ func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string
 	if err != nil {
 		return DraftPacketBatchDecision{}, err
 	}
-	protoPackets := make([]*structpb.Struct, 0, len(packets))
+	protoPackets := make([]*speculativev1.DraftPacket, 0, len(packets))
 	for _, packet := range packets {
-		packetStruct, err := structFromJSONValue(packet)
+		packetProto, err := draftPacketProtoFromMap(packet)
 		if err != nil {
 			return DraftPacketBatchDecision{}, err
 		}
-		protoPackets = append(protoPackets, packetStruct)
+		protoPackets = append(protoPackets, packetProto)
 	}
 	ts := time.Now().UnixMilli()
 	pubHex := c.pubHex()
@@ -903,6 +904,134 @@ func runtimeRequirementsFromNodeProto(req *nodev1.RuntimeRequirements) RuntimeRe
 		Jurisdiction:         req.GetJurisdiction(),
 		TrustLevel:           req.GetTrustLevel(),
 	}
+}
+
+func draftPacketProtoFromMap(packet map[string]any) (*speculativev1.DraftPacket, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("draft packet required")
+	}
+	return &speculativev1.DraftPacket{
+		PacketId:         stringFromMap(packet, "packet_id"),
+		WindowId:         stringFromMap(packet, "window_id"),
+		WorkgraphId:      stringFromMap(packet, "workgraph_id"),
+		RoleId:           stringFromMap(packet, "role_id"),
+		NodeId:           stringFromMap(packet, "node_id"),
+		ParentPrefixHash: stringFromMap(packet, "parent_prefix_hash"),
+		CandidateTokens:  int32SliceFromMap(packet, "candidate_tokens"),
+		ModelHash:        stringFromMap(packet, "model_hash"),
+		DrafterModelId:   stringFromMap(packet, "drafter_model_id"),
+		Horizon:          uint32(nonNegativeInt64(int64FromMap(packet, "horizon"))),
+		ConfidenceBps:    int64FromMap(packet, "confidence_bps"),
+		DeadlineMs:       int64FromMap(packet, "deadline_ms"),
+		EnergyMwh:        int64FromMap(packet, "energy_mwh"),
+		Signature:        stringFromMap(packet, "signature"),
+		ProductionValid:  boolFromMap(packet, "production_valid"),
+		TestAdapter:      boolFromMap(packet, "test_adapter"),
+		BillingStatus:    stringFromMap(packet, "billing_status"),
+	}, nil
+}
+
+func stringFromMap(packet map[string]any, key string) string {
+	value, ok := packet[key]
+	if !ok || value == nil {
+		return ""
+	}
+	if typed, ok := value.(string); ok {
+		return strings.TrimSpace(typed)
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func int32SliceFromMap(packet map[string]any, key string) []int32 {
+	value, ok := packet[key]
+	if !ok || value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []int:
+		out := make([]int32, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int32(item))
+		}
+		return out
+	case []int32:
+		return append([]int32(nil), typed...)
+	case []int64:
+		out := make([]int32, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int32(item))
+		}
+		return out
+	case []float64:
+		out := make([]int32, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int32(item))
+		}
+		return out
+	case []any:
+		out := make([]int32, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int32(int64FromAny(item)))
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func int64FromMap(packet map[string]any, key string) int64 {
+	return int64FromAny(packet[key])
+}
+
+func int64FromAny(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case uint32:
+		return int64(typed)
+	case uint64:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case float32:
+		return int64(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func boolFromMap(packet map[string]any, key string) bool {
+	value, ok := packet[key]
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func nonNegativeInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func structFromJSONValue(v any) (*structpb.Struct, error) {
