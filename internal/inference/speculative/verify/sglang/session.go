@@ -34,8 +34,7 @@ func ResolveVerifierCommand() (CommandSpec, bool) {
 	}
 	for _, name := range []string{
 		"ryvion-verifier-sglang",
-		"ryvion-sglang-verifier-v8",
-		"sglang-verifier-runner-v8",
+		"sglang-verifier",
 	} {
 		if path, err := LookPath(name); err == nil && strings.TrimSpace(path) != "" {
 			return CommandSpec{Name: path, Original: path}, true
@@ -58,9 +57,8 @@ func BundledScripts() []string {
 		out = append(out,
 			filepath.Join(base, "runtimes", "verifier", "sglang", "run.py"),
 			filepath.Join(base, "ryvion-runtimes", "runtimes", "verifier", "sglang", "run.py"),
-			filepath.Join(base, "sglang-verifier-runner-v8", "run.py"),
-			filepath.Join(base, "runners", "sglang-verifier-runner-v8", "run.py"),
-			filepath.Join(base, "resources", "sglang-verifier-runner-v8", "run.py"),
+			filepath.Join(base, "verifier", "sglang", "run.py"),
+			filepath.Join(base, "resources", "verifier", "sglang", "run.py"),
 		)
 	}
 	return out

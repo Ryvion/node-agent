@@ -66,12 +66,12 @@ func TestWorkCapsuleOptInIsAdvertisedWhenGitExists(t *testing.T) {
 	}
 }
 
-func TestUsesVerifierSessionRunnerImageRecognizesNewAndLegacyNames(t *testing.T) {
+func TestUsesVerifierSessionRunnerImageRecognizesVerifierRuntimeNames(t *testing.T) {
 	accepted := []string{
 		"ghcr.io/ryvion/ryvion-verifier-sglang:0.1.0",
+		"ghcr.io/ryvion/ryvion-verifier-contract-test:0.1.0",
 		"registry.example.com/ryvion/runtimes/verifier/sglang:dev",
-		"ghcr.io/ryvion/sglang-verifier-runner-v8:0.1.0",
-		"ghcr.io/ryvion/verifier-runner-v8-contract:0.1.0",
+		"registry.example.com/ryvion/runtimes/verifier/contract-test:dev",
 	}
 	for _, image := range accepted {
 		if !usesVerifierSessionRunnerImage(image) {
@@ -79,7 +79,7 @@ func TestUsesVerifierSessionRunnerImageRecognizesNewAndLegacyNames(t *testing.T)
 		}
 	}
 
-	if usesVerifierSessionRunnerImage("ghcr.io/ryvion/draft-runner-v8:0.1.0") {
+	if usesVerifierSessionRunnerImage("ghcr.io/ryvion/ryvion-draft-small-model:0.1.0") {
 		t.Fatal("draft runner image must not use verifier session runner")
 	}
 }

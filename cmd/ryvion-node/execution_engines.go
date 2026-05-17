@@ -363,9 +363,9 @@ func (managedOCIEngine) Execute(ctx context.Context, work *hub.WorkAssignment, e
 func usesVerifierSessionRunnerImage(image string) bool {
 	image = strings.ToLower(strings.TrimSpace(image))
 	return strings.Contains(image, "ryvion-verifier-sglang") ||
-		strings.Contains(image, "verifier/sglang") ||
-		strings.Contains(image, "sglang-verifier-runner-v8") ||
-		strings.Contains(image, "verifier-runner-v8")
+		strings.Contains(image, "ryvion-verifier-contract-test") ||
+		strings.Contains(image, "runtimes/verifier/sglang") ||
+		strings.Contains(image, "runtimes/verifier/contract-test")
 }
 
 func submitSpeculativeDraftPackets(ctx context.Context, client interface {

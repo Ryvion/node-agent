@@ -87,7 +87,7 @@ func nativeSGLangJobPayload(work *hub.WorkAssignment, spec speculativeNativeHotS
 		"verifier_backend":  speculativeVerifierBackendSGLang,
 		"network":           "offline",
 		"docker_required":   false,
-		"runner_contract":   "VerifierSessionContract.v8",
+		"runner_contract":   "VerifierSessionContract.speculative.v1",
 		"raw_kv_forbidden":  true,
 		"raw_prompt_stored": false,
 		"session":           nativeSGLangSessionPayload(spec),
