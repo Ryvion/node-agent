@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"net"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	nodev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/node/v1"
 	v7alphapb "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/v7alpha"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func TestClientHeartbeatUsesGRPCTransportWhenConfigured(t *testing.T) {
@@ -263,6 +265,128 @@ func TestClientSubmitDraftPacketBatchUsesNodeGatewayStreamWhenAvailable(t *testi
 	}
 }
 
+func TestClientFetchLiveLabCommandUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	payload, err := structpb.NewStruct(map[string]any{
+		"schema_version":            "ryvion.foresight_live_lab.session_command.v1",
+		"run_id":                    "flab-gateway",
+		"job_id":                    "job-draft",
+		"role":                      "draft_worker",
+		"command":                   "generate_draft_packets",
+		"command_id":                "flab-gateway:draft:1:win-gateway",
+		"workgraph_id":              "wg-gateway",
+		"session_id":                "sess-gateway",
+		"window_id":                 "win-gateway",
+		"wave_index":                1,
+		"parent_prefix_hash":        "sha256:prefix",
+		"branch_count":              2,
+		"horizon":                   4,
+		"first_packet_timeout_ms":   500,
+		"accepted_tokens_total":     0,
+		"production_valid":          false,
+		"billing_status":            "not_billable_live_lab",
+		"read_only_experiment_path": true,
+	})
+	if err != nil {
+		t.Fatalf("command payload: %v", err)
+	}
+	fake := &fakeNodeGatewayServer{liveLabCommand: &nodev1.LiveLabCommand{
+		SchemaVersion: "ryvion.foresight_live_lab.session_command.v1",
+		RunId:         "flab-gateway",
+		JobId:         "job-draft",
+		Role:          "draft_worker",
+		Command:       "generate_draft_packets",
+		CommandId:     "flab-gateway:draft:1:win-gateway",
+		Payload:       payload,
+	}}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	command, err := client.FetchForesightLiveLabDraftCommand(context.Background(), "flab-gateway", "job-draft")
+	if err != nil {
+		t.Fatalf("FetchForesightLiveLabDraftCommand() error = %v", err)
+	}
+	if command.Command != "generate_draft_packets" ||
+		command.RunID != "flab-gateway" ||
+		command.JobID != "job-draft" ||
+		command.WindowID != "win-gateway" ||
+		command.BranchCount != 2 ||
+		command.Prompt != "" {
+		t.Fatalf("unexpected live lab command: %#v", command)
+	}
+	if fake.liveLabCommandRequest == nil ||
+		fake.liveLabCommandRequest.GetRole() != "draft_worker" ||
+		fake.liveLabCommandRequest.GetRunId() != "flab-gateway" ||
+		len(fake.signature.GetSignature()) == 0 {
+		t.Fatalf("live lab command request missing signed gateway payload: request=%#v signature=%#v", fake.liveLabCommandRequest, fake.signature)
+	}
+}
+
+func TestClientSubmitLiveLabVerifierResultUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	fake := &fakeNodeGatewayServer{liveLabVerifierResultStatus: "accepted"}
+	grpcServer := grpc.NewServer()
+	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		_ = grpcServer.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+	})
+
+	client := New("http://127.0.0.1:1", pub, priv, WithGRPCTransport(listener.Addr().String(), "grpc", true))
+	err = client.SubmitForesightLiveLabVerifierResult(context.Background(), "flab-gateway", ForesightLiveLabVerifierResult{
+		JobID:              "job-verify",
+		WindowID:           "win-gateway",
+		WaveIndex:          1,
+		AcceptedLen:        3,
+		TreeCID:            "cid-tree",
+		DurationMs:         12,
+		AcceptedText:       "private accepted text",
+		AcceptedTextPublic: true,
+		EOS:                true,
+		StopReason:         "eos",
+		ProbeSummary:       map[string]any{"backend": "sglang"},
+	})
+	if err != nil {
+		t.Fatalf("SubmitForesightLiveLabVerifierResult() error = %v", err)
+	}
+	if fake.liveLabVerifierResult == nil ||
+		fake.liveLabVerifierResult.GetRunId() != "flab-gateway" ||
+		fake.liveLabVerifierResult.GetJobId() != "job-verify" ||
+		fake.liveLabVerifierResult.GetAcceptedLen() != 3 ||
+		fake.liveLabVerifierResult.GetProbeSummary().AsMap()["backend"] != "sglang" {
+		t.Fatalf("unexpected live lab verifier result: %#v", fake.liveLabVerifierResult)
+	}
+	sum := sha256.Sum256([]byte("private accepted text"))
+	if got := fake.liveLabVerifierResult.GetAcceptedTextHash(); got != "sha256:"+hex.EncodeToString(sum[:]) {
+		t.Fatalf("accepted text hash = %q, want sha256 hash", got)
+	}
+}
+
 type fakeV7NodeTransportServer struct {
 	v7alphapb.UnimplementedV7NodeTransportServiceServer
 	heartbeat *v7alphapb.SendHeartbeatRequest
@@ -291,6 +415,11 @@ type fakeNodeGatewayServer struct {
 	receiptReason   string
 	draftBatch      *nodev1.DraftPacketBatch
 	signature       *nodev1.Signature
+
+	liveLabCommandRequest       *nodev1.LiveLabCommandRequest
+	liveLabCommand              *nodev1.LiveLabCommand
+	liveLabVerifierResult       *nodev1.LiveLabVerifierResult
+	liveLabVerifierResultStatus string
 }
 
 func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer) error {
@@ -369,6 +498,46 @@ func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer)
 						Accepted: true,
 						Reason:   "accepted",
 					}},
+				},
+			},
+		})
+	}
+	if request := msg.GetLiveLabCommandRequest(); request != nil {
+		s.liveLabCommandRequest = request
+		command := s.liveLabCommand
+		if command == nil {
+			command = &nodev1.LiveLabCommand{
+				SchemaVersion: "ryvion.foresight_live_lab.session_command.v1",
+				RunId:         request.GetRunId(),
+				JobId:         request.GetJobId(),
+				Role:          request.GetRole(),
+				Command:       "wait",
+				Reason:        "test_default",
+			}
+		}
+		return stream.Send(&nodev1.HubToNode{
+			MessageId:       "ack_" + msg.GetMessageId(),
+			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+			Payload: &nodev1.HubToNode_LiveLabCommand{
+				LiveLabCommand: command,
+			},
+		})
+	}
+	if result := msg.GetLiveLabVerifierResult(); result != nil {
+		s.liveLabVerifierResult = result
+		status := s.liveLabVerifierResultStatus
+		if strings.TrimSpace(status) == "" {
+			status = "accepted"
+		}
+		return stream.Send(&nodev1.HubToNode{
+			MessageId:       "ack_" + msg.GetMessageId(),
+			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
+			Payload: &nodev1.HubToNode_LiveLabVerifierResultAck{
+				LiveLabVerifierResultAck: &nodev1.LiveLabVerifierResultAck{
+					SchemaVersion: "ryvion.foresight_live_lab.verifier_result_ack.v1",
+					Status:        status,
+					RunId:         result.GetRunId(),
+					WindowId:      result.GetWindowId(),
 				},
 			},
 		})

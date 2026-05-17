@@ -427,6 +427,15 @@ func (c *Client) fetchForesightLiveLabSessionCommand(ctx context.Context, runID 
 	if runID == "" {
 		return ForesightLiveLabSessionCommand{}, fmt.Errorf("run_id required")
 	}
+	if c.useGRPCTransport() {
+		role := "target_verifier"
+		if commandPath == "draft-command" {
+			role = "draft_worker"
+		}
+		if out, err := c.fetchForesightLiveLabSessionCommandGRPC(ctx, runID, jobID, role); err == nil || !c.shouldFallbackGRPC(err) {
+			return out, err
+		}
+	}
 	u := "/api/v1/node/foresight/live-lab/runs/" + url.PathEscape(runID) + "/" + commandPath
 	if strings.TrimSpace(jobID) != "" {
 		u += "?job_id=" + url.QueryEscape(strings.TrimSpace(jobID))
@@ -443,6 +452,11 @@ func (c *Client) SubmitForesightLiveLabVerifierResult(ctx context.Context, runID
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return fmt.Errorf("run_id required")
+	}
+	if c.useGRPCTransport() {
+		if err := c.submitForesightLiveLabVerifierResultGRPC(ctx, runID, result); err == nil || !c.shouldFallbackGRPC(err) {
+			return err
+		}
 	}
 	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
 	return c.postWithHeaders(ctx, "/api/v1/node/foresight/live-lab/runs/"+url.PathEscape(runID)+"/verifier-results", result, nil, headers)

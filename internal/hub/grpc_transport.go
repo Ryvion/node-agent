@@ -2,7 +2,9 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -532,6 +534,148 @@ func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string
 		Rejected:      int(ack.GetRejected()),
 		Decisions:     decisions,
 	}, nil
+}
+
+func (c *Client) fetchForesightLiveLabSessionCommandGRPC(ctx context.Context, runID string, jobID string, role string) (ForesightLiveLabSessionCommand, error) {
+	client, err := c.nodeGatewayClient(ctx)
+	if err != nil {
+		return ForesightLiveLabSessionCommand{}, err
+	}
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 10*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return ForesightLiveLabSessionCommand{}, err
+	}
+	if err := stream.Send(&nodev1.NodeToHub{
+		NodeId:          pubHex,
+		MessageId:       fmt.Sprintf("live-lab-command-%s-%d", runID, ts),
+		CreatedAtUnixMs: ts,
+		Payload: &nodev1.NodeToHub_LiveLabCommandRequest{
+			LiveLabCommandRequest: &nodev1.LiveLabCommandRequest{
+				RunId: runID,
+				JobId: strings.TrimSpace(jobID),
+				Role:  strings.TrimSpace(role),
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     pubHex,
+			Algorithm: "ed25519-node-auth",
+			Signature: c.sign("node_auth", pubHex, strconv.FormatInt(ts, 10)),
+		},
+	}); err != nil {
+		return ForesightLiveLabSessionCommand{}, err
+	}
+	resp, err := stream.Recv()
+	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return ForesightLiveLabSessionCommand{}, err
+	}
+	command := resp.GetLiveLabCommand()
+	if command == nil {
+		return ForesightLiveLabSessionCommand{}, status.Error(codes.Internal, "live lab command missing")
+	}
+	payload := map[string]any{}
+	if command.GetPayload() != nil {
+		payload = command.GetPayload().AsMap()
+	}
+	payload["schema_version"] = command.GetSchemaVersion()
+	payload["run_id"] = command.GetRunId()
+	payload["job_id"] = command.GetJobId()
+	payload["role"] = command.GetRole()
+	payload["command"] = command.GetCommand()
+	payload["command_id"] = command.GetCommandId()
+	payload["reason"] = command.GetReason()
+	var out ForesightLiveLabSessionCommand
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ForesightLiveLabSessionCommand{}, err
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return ForesightLiveLabSessionCommand{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) submitForesightLiveLabVerifierResultGRPC(ctx context.Context, runID string, result ForesightLiveLabVerifierResult) error {
+	client, err := c.nodeGatewayClient(ctx)
+	if err != nil {
+		return err
+	}
+	var probeSummary *structpb.Struct
+	if result.ProbeSummary != nil {
+		probeSummary, err = structFromJSONValue(result.ProbeSummary)
+		if err != nil {
+			return err
+		}
+	}
+	acceptedTextHash := ""
+	if strings.TrimSpace(result.AcceptedText) != "" {
+		sum := sha256.Sum256([]byte(result.AcceptedText))
+		acceptedTextHash = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 10*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(&nodev1.NodeToHub{
+		NodeId:          pubHex,
+		MessageId:       fmt.Sprintf("live-lab-verifier-result-%s-%d", runID, ts),
+		CreatedAtUnixMs: ts,
+		Payload: &nodev1.NodeToHub_LiveLabVerifierResult{
+			LiveLabVerifierResult: &nodev1.LiveLabVerifierResult{
+				RunId:              runID,
+				JobId:              result.JobID,
+				WindowId:           result.WindowID,
+				WaveIndex:          nonNegativeUint32(result.WaveIndex),
+				AcceptedLen:        nonNegativeUint32(result.AcceptedLen),
+				TreeCid:            result.TreeCID,
+				DurationMs:         result.DurationMs,
+				AcceptedTextHash:   acceptedTextHash,
+				AcceptedTextPublic: result.AcceptedTextPublic,
+				Eos:                result.EOS,
+				StopReason:         result.StopReason,
+				ProbeSummary:       probeSummary,
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     pubHex,
+			Algorithm: "ed25519-node-auth",
+			Signature: c.sign("node_auth", pubHex, strconv.FormatInt(ts, 10)),
+		},
+	}); err != nil {
+		return err
+	}
+	resp, err := stream.Recv()
+	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	ack := resp.GetLiveLabVerifierResultAck()
+	if ack == nil {
+		return status.Error(codes.Internal, "live lab verifier result ack missing")
+	}
+	if statusText := strings.TrimSpace(ack.GetStatus()); statusText != "" && statusText != "accepted" && statusText != "duplicate" && statusText != "ok" {
+		return fmt.Errorf("live lab verifier result rejected: %s", statusText)
+	}
+	return nil
+}
+
+func nonNegativeUint32(value int) uint32 {
+	if value <= 0 {
+		return 0
+	}
+	return uint32(value)
 }
 
 func (c *Client) sendDashboardInferenceProgressGRPC(ctx context.Context, body dashboardInferenceProgressRequest) error {
