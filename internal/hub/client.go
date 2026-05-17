@@ -123,11 +123,6 @@ func (c *Client) Register(ctx context.Context, caps Capabilities, deviceType, re
 		strconv.FormatUint(uint64(body.AttestationMethod), 10),
 	)
 	body.Signature = c.sign(signParts...)
-	if c.useGRPCTransport() {
-		if err := c.registerGRPC(ctx, body); err == nil || !c.shouldFallbackGRPC(err) {
-			return err
-		}
-	}
 	return c.post(ctx, "/api/v1/node/register", body, nil)
 }
 
@@ -881,11 +876,6 @@ func (c *Client) SendDashboardInferenceProgress(ctx context.Context, batch route
 		PublicKeyHex: pubHex,
 		SeqStart:     batch.SeqStart,
 		Chunks:       append([]routedinference.ProgressChunk(nil), batch.Chunks...),
-	}
-	if c.useGRPCTransport() {
-		if err := c.sendDashboardInferenceProgressGRPC(ctx, body); err == nil || !c.shouldFallbackGRPC(err) {
-			return err
-		}
 	}
 	return c.postWithHeaders(ctx, "/api/v1/node/inference/chunks", body, nil, map[string]string{
 		"X-Node-Pubkey": pubHex,

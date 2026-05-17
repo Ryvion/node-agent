@@ -6,9 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"os"
@@ -20,7 +18,6 @@ import (
 	experimentsv1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/experiments/v1"
 	nodev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/node/v1"
 	speculativev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/speculative/v1"
-	v7alphapb "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/v7alpha"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -44,7 +41,6 @@ type grpcTransport struct {
 
 	mu             sync.Mutex
 	conn           *grpc.ClientConn
-	client         v7alphapb.V7NodeTransportServiceClient
 	gatewayClient  nodev1.NodeGatewayClient
 	liveLabGateway experimentsv1.ExperimentalLiveLabGatewayClient
 }
@@ -91,44 +87,8 @@ func (c *Client) shouldFallbackGRPC(err error) bool {
 	}
 }
 
-func nodeGatewayCompatFallback(err error) bool {
-	return status.Code(err) == codes.Unimplemented || errors.Is(err, io.EOF)
-}
-
-func (c *Client) registerGRPC(ctx context.Context, body registerRequest) error {
-	client, err := c.v7NodeTransportClient(ctx)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 15*time.Second)
-	defer cancel()
-	_, err = client.RegisterNode(ctx, &v7alphapb.RegisterNodeRequest{
-		PublicKeyHex:      body.PublicKeyHex,
-		DeviceType:        body.DeviceType,
-		DeclaredCountry:   body.DeclaredCountry,
-		GpuModel:          body.GPUModel,
-		CpuCores:          body.CPUCores,
-		RamBytes:          body.RAMBytes,
-		VramBytes:         body.VRAMBytes,
-		Sensors:           body.Sensors,
-		BandwidthMbps:     body.BandwidthMbps,
-		GeohashBucket:     body.GeohashBucket,
-		AttestationMethod: body.AttestationMethod,
-		ReferralCode:      body.ReferralCode,
-		TeeSupported:      body.TEESupported,
-		TeeType:           body.TEEType,
-		Signature:         append([]byte(nil), body.Signature...),
-	})
-	return err
-}
-
 func (c *Client) heartbeatGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
-	if resp, err := c.heartbeatNodeGatewayGRPC(ctx, body); err == nil {
-		return resp, nil
-	} else if !nodeGatewayCompatFallback(err) {
-		return HeartbeatResponse{}, err
-	}
-	return c.heartbeatUnaryGRPC(ctx, body)
+	return c.heartbeatNodeGatewayGRPC(ctx, body)
 }
 
 func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
@@ -210,59 +170,8 @@ func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatReq
 	}, nil
 }
 
-func (c *Client) heartbeatUnaryGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
-	client, err := c.v7NodeTransportClient(ctx)
-	if err != nil {
-		return HeartbeatResponse{}, err
-	}
-	var v7Struct *structpb.Struct
-	if body.V7 != nil {
-		v7Struct, err = structFromJSONValue(body.V7)
-		if err != nil {
-			return HeartbeatResponse{}, err
-		}
-	}
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 10*time.Second)
-	defer cancel()
-	resp, err := client.SendHeartbeat(ctx, &v7alphapb.SendHeartbeatRequest{
-		PublicKeyHex:   body.PublicKeyHex,
-		TimestampMs:    body.TimestampMs,
-		CpuUtil:        body.CPUUtil,
-		MemUtil:        body.MemUtil,
-		GpuUtil:        body.GPUUtil,
-		PowerWatts:     body.PowerWatts,
-		GpuThrottled:   body.GPUThrottled,
-		SystemTimezone: body.SystemTimezone,
-		V7:             v7Struct,
-		Signature:      append([]byte(nil), body.Signature...),
-	})
-	if err != nil {
-		return HeartbeatResponse{}, err
-	}
-	upserted := resp.GetV7SnapshotUpserted()
-	return HeartbeatResponse{
-		LatestVersion:        resp.GetLatestVersion(),
-		NodeID:               resp.GetNodeId(),
-		CountryCode:          resp.GetCountryCode(),
-		LocationApproved:     resp.GetLocationApproved(),
-		SovereignVerified:    resp.GetSovereignVerified(),
-		VerificationSource:   resp.GetVerificationSource(),
-		TrustReason:          resp.GetTrustReason(),
-		V7SnapshotUpserted:   &upserted,
-		SnapshotModelCount:   int(resp.GetSnapshotModelCount()),
-		SnapshotBackendCount: int(resp.GetSnapshotBackendCount()),
-		HasCapabilityProfile: resp.GetHasCapabilityProfile(),
-		HubInstanceID:        resp.GetHubInstanceId(),
-	}, nil
-}
-
 func (c *Client) fetchWorkGRPC(ctx context.Context, pubHex string, ts int64, signature []byte, longPoll bool) (*WorkAssignment, error) {
-	if work, err := c.fetchWorkNodeGatewayGRPC(ctx, pubHex, ts, signature, longPoll); err == nil {
-		return work, nil
-	} else if !nodeGatewayCompatFallback(err) {
-		return nil, err
-	}
-	return c.fetchWorkUnaryGRPC(ctx, pubHex, ts, signature, longPoll)
+	return c.fetchWorkNodeGatewayGRPC(ctx, pubHex, ts, signature, longPoll)
 }
 
 func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts int64, signature []byte, longPoll bool) (*WorkAssignment, error) {
@@ -333,55 +242,8 @@ func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts
 	}, nil
 }
 
-func (c *Client) fetchWorkUnaryGRPC(ctx context.Context, pubHex string, ts int64, signature []byte, longPoll bool) (*WorkAssignment, error) {
-	client, err := c.v7NodeTransportClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	timeout := 10 * time.Second
-	if longPoll {
-		timeout = 35 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), timeout)
-	defer cancel()
-	resp, err := client.LeaseWork(ctx, &v7alphapb.LeaseWorkRequest{
-		PublicKeyHex: pubHex,
-		TimestampMs:  ts,
-		LongPoll:     longPoll,
-		Signature:    append([]byte(nil), signature...),
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !resp.GetHasWork() || resp.GetAssignment() == nil {
-		return nil, nil
-	}
-	assignment := resp.GetAssignment()
-	if strings.TrimSpace(assignment.GetJobId()) == "" {
-		return nil, fmt.Errorf("work assignment missing job_id")
-	}
-	return &WorkAssignment{
-		JobID:               assignment.GetJobId(),
-		JobPubkey:           assignment.GetJobPubkey(),
-		Kind:                assignment.GetKind(),
-		PayloadURL:          assignment.GetPayloadUrl(),
-		PricePerUnit:        assignment.GetPricePerUnit(),
-		Units:               assignment.GetUnits(),
-		Image:               assignment.GetImage(),
-		SpecJSON:            assignment.GetSpecJson(),
-		ExecutorKind:        assignment.GetExecutorKind(),
-		AssuranceClass:      assignment.GetAssuranceClass(),
-		RuntimeRequirements: runtimeRequirementsFromProto(assignment.GetRuntimeRequirements()),
-	}, nil
-}
-
 func (c *Client) submitReceiptGRPC(ctx context.Context, body receiptRequest) error {
-	if err := c.submitReceiptNodeGatewayGRPC(ctx, body); err == nil {
-		return nil
-	} else if !nodeGatewayCompatFallback(err) {
-		return err
-	}
-	return c.submitReceiptUnaryGRPC(ctx, body)
+	return c.submitReceiptNodeGatewayGRPC(ctx, body)
 }
 
 func (c *Client) submitReceiptNodeGatewayGRPC(ctx context.Context, body receiptRequest) error {
@@ -441,31 +303,6 @@ func (c *Client) submitReceiptNodeGatewayGRPC(ctx context.Context, body receiptR
 		return fmt.Errorf("receipt rejected")
 	}
 	return nil
-}
-
-func (c *Client) submitReceiptUnaryGRPC(ctx context.Context, body receiptRequest) error {
-	client, err := c.v7NodeTransportClient(ctx)
-	if err != nil {
-		return err
-	}
-	var metadataStruct *structpb.Struct
-	if body.Metadata != nil {
-		metadataStruct, err = structFromJSONValue(body.Metadata)
-		if err != nil {
-			return err
-		}
-	}
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 30*time.Second)
-	defer cancel()
-	_, err = client.SubmitReceipt(ctx, &v7alphapb.SubmitReceiptRequest{
-		JobId:         body.JobID,
-		PublicKeyHex:  body.PublicKeyHex,
-		ResultHashHex: body.ResultHashHex,
-		MeteringUnits: body.MeteringUnits,
-		Signature:     append([]byte(nil), body.Signature...),
-		Metadata:      metadataStruct,
-	})
-	return err
 }
 
 func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
@@ -684,40 +521,6 @@ func nonNegativeUint32(value int) uint32 {
 	return uint32(value)
 }
 
-func (c *Client) sendDashboardInferenceProgressGRPC(ctx context.Context, body dashboardInferenceProgressRequest) error {
-	client, err := c.v7NodeTransportClient(ctx)
-	if err != nil {
-		return err
-	}
-	chunks := make([]*v7alphapb.V7DashboardInferenceProgressChunk, 0, len(body.Chunks))
-	for _, chunk := range body.Chunks {
-		chunks = append(chunks, &v7alphapb.V7DashboardInferenceProgressChunk{
-			Seq:          chunk.Seq,
-			Type:         chunk.Type,
-			Text:         chunk.Text,
-			FinishReason: chunk.FinishReason,
-		})
-	}
-	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 10*time.Second)
-	defer cancel()
-	_, err = client.SubmitDashboardInferenceProgress(ctx, &v7alphapb.SubmitDashboardInferenceProgressRequest{
-		RunId:        body.RunID,
-		JobId:        body.JobID,
-		NodeId:       body.NodeID,
-		PublicKeyHex: body.PublicKeyHex,
-		SeqStart:     body.SeqStart,
-		Chunks:       chunks,
-	})
-	return err
-}
-
-func (c *Client) v7NodeTransportClient(ctx context.Context) (v7alphapb.V7NodeTransportServiceClient, error) {
-	if c == nil || c.grpc == nil || !c.grpc.enabled() {
-		return nil, status.Error(codes.Unavailable, "gRPC transport disabled")
-	}
-	return c.grpc.clientFor(ctx)
-}
-
 func (c *Client) nodeGatewayClient(ctx context.Context) (nodev1.NodeGatewayClient, error) {
 	if c == nil || c.grpc == nil || !c.grpc.enabled() {
 		return nil, status.Error(codes.Unavailable, "gRPC transport disabled")
@@ -757,7 +560,6 @@ func (t *grpcTransport) close() error {
 	}
 	err := t.conn.Close()
 	t.conn = nil
-	t.client = nil
 	t.gatewayClient = nil
 	t.liveLabGateway = nil
 	return err
@@ -769,20 +571,6 @@ func (t *grpcTransport) enabled() bool {
 
 func (t *grpcTransport) required() bool {
 	return t != nil && t.mode == hubTransportGRPC
-}
-
-func (t *grpcTransport) clientFor(ctx context.Context) (v7alphapb.V7NodeTransportServiceClient, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.client != nil {
-		return t.client, nil
-	}
-	conn, err := t.connForLocked(ctx)
-	if err != nil {
-		return nil, err
-	}
-	t.client = v7alphapb.NewV7NodeTransportServiceClient(conn)
-	return t.client, nil
 }
 
 func (t *grpcTransport) gatewayClientFor(ctx context.Context) (nodev1.NodeGatewayClient, error) {
@@ -864,26 +652,6 @@ func (t *grpcTransport) applyDefaultTarget(baseURL string) {
 		}
 	}
 	t.target = host
-}
-
-func runtimeRequirementsFromProto(req *v7alphapb.V7RuntimeRequirements) RuntimeRequirements {
-	if req == nil {
-		return RuntimeRequirements{}
-	}
-	return RuntimeRequirements{
-		NeedsGPU:             req.GetNeedsGpu(),
-		NeedsManagedOCI:      req.GetNeedsManagedOci(),
-		NeedsManagedOCIGPU:   req.GetNeedsManagedOciGpu(),
-		NeedsRyvionRuntime:   req.GetNeedsRyvionRuntime(),
-		NeedsNativeStreaming: req.GetNeedsNativeStreaming(),
-		NeedsNativeReport:    req.GetNeedsNativeReport(),
-		NeedsAgentHosting:    req.GetNeedsAgentHosting(),
-		Tooling:              append([]string(nil), req.GetTooling()...),
-		MinDiskGB:            req.GetMinDiskGb(),
-		MinVRAMMB:            req.GetMinVramMb(),
-		Jurisdiction:         req.GetJurisdiction(),
-		TrustLevel:           req.GetTrustLevel(),
-	}
 }
 
 func runtimeRequirementsFromNodeProto(req *nodev1.RuntimeRequirements) RuntimeRequirements {
