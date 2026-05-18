@@ -1,59 +1,39 @@
 package heartbeat
 
 import (
-	"context"
 	"os"
 	goruntime "runtime"
-	"sort"
 	"strings"
 	"time"
 
 	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
-	"github.com/Ryvion/ryvion-node/internal/capabilities/passport"
-	"github.com/Ryvion/ryvion-node/internal/capabilities/profile"
+	capability "github.com/Ryvion/ryvion-node/internal/capabilities/passport"
 	"github.com/Ryvion/ryvion-node/internal/hw"
-	"github.com/Ryvion/ryvion-node/internal/inference/speculative/capabilities"
-	"github.com/Ryvion/ryvion-node/internal/models/cache"
-	"github.com/Ryvion/ryvion-node/internal/models/lease"
-	"github.com/Ryvion/ryvion-node/internal/models/policy"
-	"github.com/Ryvion/ryvion-node/internal/network/profile"
-	"github.com/Ryvion/ryvion-node/internal/runtimes/inventory"
-	"github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
-	"github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
-	"github.com/Ryvion/ryvion-node/internal/runtimes/probe"
-	"github.com/Ryvion/ryvion-node/internal/runtimes/tensoraccess"
+	netprofile "github.com/Ryvion/ryvion-node/internal/network/profile"
 	"github.com/Ryvion/ryvion-node/internal/sandbox"
 )
 
 const (
-	SchemaVersionV1                  = "v7.heartbeat-payload.v1"
-	EnvV7Caps                        = "RYV_NODE_V7_CAPS"
-	EnvExperimentalSpeculativeFields = "RYV_NODE_ENABLE_EXPERIMENTAL_SPEC_HEARTBEAT"
+	SchemaVersionV1 = "render.node-heartbeat.v1"
+	EnvNodeCaps     = "RYV_NODE_CAPS"
 )
 
-type V7HeartbeatPayload struct {
+type V7HeartbeatPayload = NodeHeartbeatPayload
+type BuildV7HeartbeatPayloadInput = BuildNodeHeartbeatPayloadInput
+
+type NodeHeartbeatPayload struct {
 	SchemaVersion             string                                `json:"schema_version"`
 	NodeID                    string                                `json:"node_id"`
 	CapabilityPassport        capability.CapabilityPassport         `json:"capability_passport"`
 	NetworkProfile            *netprofile.NetworkProfile            `json:"network_profile,omitempty"`
-	ModelLeaseSummary         *ModelLeaseSummary                    `json:"model_lease_summary,omitempty"`
-	KVCapability              *kvprobe.Capability                   `json:"kv_capability,omitempty"`
-	TensorAccess              tensoraccess.TensorAccessCapability   `json:"tensor_access"`
-	RuntimeInventory          runtimeinventory.Inventory            `json:"runtime_inventory"`
 	HardwareCapacity          capshardware.CapacityInventory        `json:"hardware_capacity"`
-	ModelPolicy               modelpolicy.Status                    `json:"model_policy"`
-	ModelCache                modelcache.Status                     `json:"model_cache"`
-	BackendProbes             backendprobe.Probes                   `json:"backend_probes"`
-	BackendRuntimes           llamacpp.BackendRuntimes              `json:"backend_runtimes"`
-	CapabilityProfile         capabilityprofile.Profile             `json:"capability_profile"`
-	SpeculativeProfiles       []speculative.Profile                 `json:"-"`
 	CASSummary                *CASSummary                           `json:"cas_summary,omitempty"`
 	SandboxPolicySummary      *SandboxPolicySummary                 `json:"sandbox_policy_summary,omitempty"`
 	EvidenceCapabilitySummary *capability.EvidenceCapabilitySummary `json:"evidence_capability_summary,omitempty"`
 	CreatedAtUnixMs           int64                                 `json:"created_at_unix_ms"`
 }
 
-type BuildV7HeartbeatPayloadInput struct {
+type BuildNodeHeartbeatPayloadInput struct {
 	SchemaVersion   string
 	AgentVersion    string
 	NodeID          string
@@ -70,19 +50,7 @@ type BuildV7HeartbeatPayloadInput struct {
 	NetworkCapabilitySummary capability.NetworkCapabilitySummary
 	NetworkProfile           *netprofile.NetworkProfile
 
-	ModelCapabilitySummary capability.ModelCapabilitySummary
-	ModelLeases            []modellease.ModelLease
-	ModelLeaseSummary      *ModelLeaseSummary
-	KVCapability           *kvprobe.Capability
-	TensorAccess           *tensoraccess.TensorAccessCapability
-	RuntimeInventory       *runtimeinventory.Inventory
-	HardwareCapacity       *capshardware.CapacityInventory
-	ModelPolicy            *modelpolicy.Status
-	ModelCache             *modelcache.Status
-	BackendProbes          *backendprobe.Probes
-	BackendRuntimes        *llamacpp.BackendRuntimes
-	CapabilityProfile      *capabilityprofile.Profile
-	SpeculativeProfiles    []speculative.Profile
+	HardwareCapacity *capshardware.CapacityInventory
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -93,18 +61,6 @@ type BuildV7HeartbeatPayloadInput struct {
 
 	EvidenceCapabilitySummary capability.EvidenceCapabilitySummary
 	CreatedAtUnixMs           int64
-}
-
-type ModelLeaseSummary struct {
-	SupportsModelLease bool     `json:"supports_model_lease"`
-	TotalLeases        int      `json:"total_leases"`
-	ResidentLeases     int      `json:"resident_leases"`
-	LoadingLeases      int      `json:"loading_leases"`
-	DrainingLeases     int      `json:"draining_leases"`
-	FailedLeases       int      `json:"failed_leases"`
-	ResidentModelIDs   []string `json:"resident_model_ids,omitempty"`
-	VRAMReservedBytes  uint64   `json:"vram_reserved_bytes"`
-	UpdatedAtUnixMs    int64    `json:"updated_at_unix_ms,omitempty"`
 }
 
 type CASSummary struct {
@@ -128,7 +84,7 @@ type SandboxPolicySummary struct {
 }
 
 func V7HeartbeatEnabledFromEnv() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvV7Caps))) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvNodeCaps))) {
 	case "0", "false", "no", "off", "disabled":
 		return false
 	default:
@@ -136,16 +92,11 @@ func V7HeartbeatEnabledFromEnv() bool {
 	}
 }
 
-func ExperimentalSpeculativeHeartbeatEnabledFromEnv() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvExperimentalSpeculativeFields))) {
-	case "1", "true", "yes", "on", "enabled":
-		return true
-	default:
-		return false
-	}
+func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPayload, error) {
+	return BuildNodeHeartbeatPayload(input)
 }
 
-func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPayload, error) {
+func BuildNodeHeartbeatPayload(input BuildNodeHeartbeatPayloadInput) (NodeHeartbeatPayload, error) {
 	createdAtUnixMs := input.CreatedAtUnixMs
 	if createdAtUnixMs == 0 {
 		createdAtUnixMs = time.Now().UnixMilli()
@@ -160,63 +111,17 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 	networkProfile := cloneNetworkProfile(input.NetworkProfile)
 	if networkProfile != nil {
 		if err := netprofile.ValidateNetworkProfile(*networkProfile); err != nil {
-			return V7HeartbeatPayload{}, err
+			return NodeHeartbeatPayload{}, err
 		}
 		networkSummary = networkCapabilitySummaryFromProfile(*networkProfile)
 	}
 
-	modelSummary := input.ModelCapabilitySummary
-	modelLeaseSummary := cloneModelLeaseSummary(input.ModelLeaseSummary)
-	if modelLeaseSummary == nil && len(input.ModelLeases) > 0 {
-		summary := summarizeModelLeases(input.ModelLeases, modelSummary.SupportsModelLease)
-		modelLeaseSummary = &summary
+	runtimeProfile := input.RuntimeProfile
+	if len(runtimeProfile.SupportedRunnerKinds) == 0 {
+		runtimeProfile.SupportedRunnerKinds = []string{"oci"}
 	}
-	if modelLeaseSummary != nil {
-		modelSummary.ResidentModelIDs = mergeStrings(modelSummary.ResidentModelIDs, modelLeaseSummary.ResidentModelIDs)
-		if modelSummary.MaxResidentModelBytes == 0 {
-			modelSummary.MaxResidentModelBytes = modelLeaseSummary.VRAMReservedBytes
-		}
-	}
-	kvCapability := cloneKVCapability(input.KVCapability)
-	tensorAccess := cloneTensorAccessCapability(input.TensorAccess)
-	runtimeInventory := cloneRuntimeInventory(input.RuntimeInventory)
+
 	hardwareCapacity := cloneHardwareCapacity(input.HardwareCapacity, firstNonEmpty(input.OS, goruntime.GOOS), firstNonEmpty(input.Arch, goruntime.GOARCH))
-	modelPolicy := cloneModelPolicy(input.ModelPolicy)
-	modelCache := cloneModelCache(input.ModelCache)
-	backendProbes := cloneBackendProbes(input.BackendProbes)
-	backendRuntimes := cloneBackendRuntimes(input.BackendRuntimes)
-	includeSpeculative := ExperimentalSpeculativeHeartbeatEnabledFromEnv()
-	var speculativeDecoding *speculative.DecodingCapability
-	if includeSpeculative {
-		speculativeProfiles := cloneSpeculativeProfiles(input.SpeculativeProfiles)
-		if input.SpeculativeProfiles == nil {
-			speculativeReport := speculative.BuildReport(speculative.BuildInput{
-				Hardware:         hardwareCapacity,
-				Policy:           modelPolicy,
-				ModelCache:       modelCache,
-				BackendProbes:    backendProbes,
-				BackendRuntimes:  backendRuntimes,
-				RuntimeInventory: runtimeInventory,
-			})
-			speculativeProfiles = speculativeReport.SpeculativeProfiles
-		}
-		decoding := speculative.BuildCapabilityFromProfiles(speculativeProfiles)
-		speculativeDecoding = &decoding
-	}
-	capabilityProfile := cloneCapabilityProfile(input.CapabilityProfile, capabilityprofile.BuildInput{
-		Hardware:            hardwareCapacity,
-		Policy:              modelPolicy,
-		ModelCache:          modelCache,
-		BackendProbes:       backendProbes,
-		BackendRuntimes:     backendRuntimes,
-		RuntimeInventory:    runtimeInventory,
-		SpeculativeDecoding: speculativeDecoding,
-		KVCapability:        kvCapability,
-		TensorAccess:        tensorAccess,
-	})
-	if !includeSpeculative {
-		capabilityProfile.SpeculativeDecoding = nil
-	}
 
 	casSummary := cloneCASSummary(input.CASSummary)
 	if casSummary == nil && input.CASCapabilitySummary.Enabled {
@@ -245,33 +150,23 @@ func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPay
 		DeclaredCountry:           input.DeclaredCountry,
 		HardwareCapabilities:      input.HardwareCapabilities,
 		HardwareProfile:           input.HardwareProfile,
-		RuntimeProfile:            input.RuntimeProfile,
+		RuntimeProfile:            runtimeProfile,
 		NetworkCapabilitySummary:  networkSummary,
-		ModelCapabilitySummary:    modelSummary,
 		SandboxCapabilitySummary:  sandboxSummary,
 		CASCapabilitySummary:      input.CASCapabilitySummary,
 		EvidenceCapabilitySummary: input.EvidenceCapabilitySummary,
 		CreatedAtUnixMs:           createdAtUnixMs,
 	})
 	if err != nil {
-		return V7HeartbeatPayload{}, err
+		return NodeHeartbeatPayload{}, err
 	}
 
-	payload := V7HeartbeatPayload{
+	payload := NodeHeartbeatPayload{
 		SchemaVersion:        schemaVersion,
 		NodeID:               firstNonEmpty(input.NodeID, input.NodePublicKey),
 		CapabilityPassport:   passport,
 		NetworkProfile:       networkProfile,
-		ModelLeaseSummary:    modelLeaseSummary,
-		KVCapability:         kvCapability,
-		TensorAccess:         tensorAccess,
-		RuntimeInventory:     runtimeInventory,
 		HardwareCapacity:     hardwareCapacity,
-		ModelPolicy:          modelPolicy,
-		ModelCache:           modelCache,
-		BackendProbes:        backendProbes,
-		BackendRuntimes:      backendRuntimes,
-		CapabilityProfile:    capabilityProfile,
 		CASSummary:           casSummary,
 		SandboxPolicySummary: sandboxPolicySummary,
 		CreatedAtUnixMs:      createdAtUnixMs,
@@ -296,35 +191,6 @@ func networkCapabilitySummaryFromProfile(profile netprofile.NetworkProfile) capa
 	}
 }
 
-func summarizeModelLeases(leases []modellease.ModelLease, supportsModelLease bool) ModelLeaseSummary {
-	summary := ModelLeaseSummary{
-		SupportsModelLease: supportsModelLease,
-		TotalLeases:        len(leases),
-	}
-	residentIDs := map[string]struct{}{}
-	for _, lease := range leases {
-		switch lease.State {
-		case modellease.ModelLeaseStateResident:
-			summary.ResidentLeases++
-			if modelID := strings.TrimSpace(lease.ModelID); modelID != "" {
-				residentIDs[modelID] = struct{}{}
-			}
-		case modellease.ModelLeaseStateLoading, modellease.ModelLeaseStateWarmup:
-			summary.LoadingLeases++
-		case modellease.ModelLeaseStateDraining, modellease.ModelLeaseStateEvicting:
-			summary.DrainingLeases++
-		case modellease.ModelLeaseStateFailed:
-			summary.FailedLeases++
-		}
-		summary.VRAMReservedBytes += lease.VRAMReservedBytes
-		if lease.UpdatedAtUnixMs > summary.UpdatedAtUnixMs {
-			summary.UpdatedAtUnixMs = lease.UpdatedAtUnixMs
-		}
-	}
-	summary.ResidentModelIDs = sortedKeys(residentIDs)
-	return summary
-}
-
 func summarizeSandboxPolicy(policy sandbox.SandboxPolicy, capabilitySummary capability.SandboxCapabilitySummary) SandboxPolicySummary {
 	return SandboxPolicySummary{
 		RejectsUnsafePickle:                   true,
@@ -347,37 +213,6 @@ func cloneNetworkProfile(profile *netprofile.NetworkProfile) *netprofile.Network
 	return &cloned
 }
 
-func cloneModelLeaseSummary(summary *ModelLeaseSummary) *ModelLeaseSummary {
-	if summary == nil {
-		return nil
-	}
-	cloned := *summary
-	cloned.ResidentModelIDs = cloneStrings(summary.ResidentModelIDs)
-	return &cloned
-}
-
-func cloneKVCapability(capability *kvprobe.Capability) *kvprobe.Capability {
-	if capability == nil {
-		return nil
-	}
-	cloned := kvprobe.NormalizeCapability(*capability)
-	return &cloned
-}
-
-func cloneTensorAccessCapability(capability *tensoraccess.TensorAccessCapability) tensoraccess.TensorAccessCapability {
-	if capability == nil {
-		return tensoraccess.NewNoopProvider(tensoraccess.NoopProviderConfig{}).Capability(context.Background())
-	}
-	return tensoraccess.NormalizeCapability(*capability)
-}
-
-func cloneRuntimeInventory(inventory *runtimeinventory.Inventory) runtimeinventory.Inventory {
-	if inventory == nil {
-		return runtimeinventory.NormalizeInventory(runtimeinventory.Inventory{})
-	}
-	return runtimeinventory.NormalizeInventory(*inventory)
-}
-
 func cloneHardwareCapacity(inventory *capshardware.CapacityInventory, osName, arch string) capshardware.CapacityInventory {
 	if inventory == nil {
 		return capshardware.NormalizeInventory(capshardware.CapacityInventory{
@@ -386,46 +221,6 @@ func cloneHardwareCapacity(inventory *capshardware.CapacityInventory, osName, ar
 		})
 	}
 	return capshardware.NormalizeInventory(*inventory)
-}
-
-func cloneModelPolicy(policy *modelpolicy.Status) modelpolicy.Status {
-	if policy == nil {
-		return modelpolicy.StatusFromEnv()
-	}
-	return modelpolicy.BuildStatus(*policy)
-}
-
-func cloneModelCache(status *modelcache.Status) modelcache.Status {
-	if status == nil {
-		policy := modelpolicy.StatusFromEnv()
-		return modelcache.NormalizeStatus(modelcache.Status{CacheDir: policy.CacheDir})
-	}
-	return modelcache.NormalizeStatus(*status)
-}
-
-func cloneBackendProbes(probes *backendprobe.Probes) backendprobe.Probes {
-	if probes == nil {
-		return backendprobe.NormalizeProbes(backendprobe.Probes{})
-	}
-	return backendprobe.NormalizeProbes(*probes)
-}
-
-func cloneBackendRuntimes(runtimes *llamacpp.BackendRuntimes) llamacpp.BackendRuntimes {
-	if runtimes == nil {
-		return llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{})
-	}
-	return llamacpp.NormalizeBackendRuntimes(*runtimes)
-}
-
-func cloneCapabilityProfile(profile *capabilityprofile.Profile, input capabilityprofile.BuildInput) capabilityprofile.Profile {
-	if profile == nil {
-		return capabilityprofile.BuildProfile(input)
-	}
-	return capabilityprofile.NormalizeProfile(*profile)
-}
-
-func cloneSpeculativeProfiles(profiles []speculative.Profile) []speculative.Profile {
-	return speculative.NormalizeProfiles(profiles)
 }
 
 func cloneCASSummary(summary *CASSummary) *CASSummary {
@@ -457,30 +252,6 @@ func runnerKindStrings(kinds []sandbox.RunnerKind) []string {
 			out = append(out, value)
 		}
 	}
-	return out
-}
-
-func mergeStrings(left, right []string) []string {
-	values := map[string]struct{}{}
-	for _, value := range append(cloneStrings(left), right...) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		values[value] = struct{}{}
-	}
-	return sortedKeys(values)
-}
-
-func sortedKeys(values map[string]struct{}) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(values))
-	for value := range values {
-		out = append(out, value)
-	}
-	sort.Strings(out)
 	return out
 }
 

@@ -81,8 +81,8 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	if cpuLimit == "" {
 		cpuLimit = "4"
 	}
-	// Determine network mode: finetune/training jobs need network access to
-	// download base models from HuggingFace. All other jobs run isolated.
+	// Render-farm jobs run with network isolation by default. Inputs are
+	// prefetched into /work before the container starts.
 	networkMode := "--network=none"
 	if needsNetwork(specJSON) {
 		networkMode = "--network=bridge"
@@ -379,15 +379,21 @@ func stopContainerGracefully(ociExec ociExecutor, name string, grace time.Durati
 	killCancel()
 }
 
-// needsNetwork checks if a job spec requires network access inside the container.
-// Currently only finetune jobs need this (to download HuggingFace base models).
+// needsNetwork is an explicit escape hatch for trusted operator-controlled
+// workloads. Buyer render jobs should rely on prefetched inputs and remain
+// network-isolated.
 func needsNetwork(specJSON string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_ALLOW_JOB_NETWORK"))) {
+	case "1", "true", "yes", "on":
+	default:
+		return false
+	}
 	var spec map[string]any
 	if json.Unmarshal([]byte(specJSON), &spec) != nil {
 		return false
 	}
-	task, _ := spec["task"].(string)
-	return task == "finetune"
+	value, _ := spec["network"].(bool)
+	return value
 }
 
 // prefetchPayloadURL parses specJSON for payload_url, training_data_url, or
