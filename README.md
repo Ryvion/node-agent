@@ -1,8 +1,8 @@
 # Ryvion Node Agent
 
-The Ryvion node agent turns any machine with a GPU into a compute node on the [Ryvion](https://ryvion.com) distributed inference network.
+The Ryvion node agent turns operator machines into workers for the Ryvion distributed render-farm network.
 
-It registers with the hub orchestrator, sends signed heartbeats, polls for jobs, runs OCI container workloads through the managed execution runtime, and submits cryptographically signed receipts.
+It registers with the hub, sends signed heartbeats, receives work, runs OCI container workloads through the managed execution runtime, and submits signed receipts.
 
 ## Quickstart
 
@@ -23,9 +23,10 @@ The node will:
 
 ## Requirements
 
-- Linux (amd64) with the Ryvion managed execution runtime installed
-- NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) when the runtime backend is configured for NVIDIA GPU workloads
-- CPU-only mode works without a GPU
+- Linux, macOS, or Windows for the agent binary
+- Linux worker hosts for OCI render execution
+- NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) when render workloads need GPU acceleration
+- CPU-only render/transcode jobs work without a GPU
 
 ## Configuration
 
@@ -34,7 +35,7 @@ All configuration is via flags or environment variables:
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
 | `-hub` | `RYV_HUB_URL` | `https://api.ryvion.ai` | Hub orchestrator URL |
-| `-device` | `RYV_DEVICE_TYPE` | auto-detected | Device type: `gpu`, `cpu`, `mobile`, `iot` |
+| `-device` | `RYV_DEVICE_TYPE` | auto-detected | Device type: `gpu` or `cpu` |
 | `-gpus` | `RYV_GPUS` | auto-detected | GPU configuration |
 | `-country` | `RYV_DECLARED_COUNTRY` | — | ISO country code for jurisdiction routing |
 | `-key` | `RYV_KEY_PATH` | `~/.ryvion/node.key` | Path to Ed25519 node key |
@@ -64,7 +65,6 @@ ryvion-node/
     runner/            OCI container workload execution
     blob/              Artifact upload flow
     nodekey/           Ed25519 key management
-    inference/         Native llama.cpp inference (streaming)
     update/            Signed auto-update (SHA256SUMS + Ed25519 sig)
 ```
 
@@ -72,7 +72,7 @@ ryvion-node/
 1. Node polls hub for assigned jobs
 2. Hub returns a job with container image + parameters
 3. Node pulls the OCI image and runs it with GPU passthrough
-4. Container reads `/work/job.json`, writes `/work/output.json` + `/work/receipt.json`
+4. Container reads `/work/job.json`, writes output artifacts + `/work/receipt.json`
 5. Node uploads artifacts and submits a signed receipt to the hub
 
 ## Auto-updates

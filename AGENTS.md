@@ -2,21 +2,14 @@
 
 ## Project Context
 
-Run `mempalace search "node agent runner"` for codebase context.
-
-For V7 tasks, always read:
-- `V7_REPO_CONTEXT.md`
-- `tasks/v7/TASK_INDEX.md`
-- current task file
+Run `mempalace search "node agent runner render work"` for codebase context.
 
 ## Architecture
 
-Go 1.24 cross-platform agent. Runs natively on operator machines, polls hub for work.
+Go 1.24 cross-platform agent. Runs natively on operator machines and executes assigned render-farm work.
 
 - `cmd/ryvion-node/main.go` — startup, work loop, heartbeat
 - `internal/runner/oci.go` — OCI container execution
-- `internal/runner/agent.go` — long-running agent container support
-- `internal/inference/manager.go` — native llama-server lifecycle
 - `internal/hub/client.go` — hub API client (Ed25519 signed)
 - `internal/hw/` — hardware detection
 
@@ -25,6 +18,7 @@ Go 1.24 cross-platform agent. Runs natively on operator machines, polls hub for 
 - Build: `go build ./...` must pass for Linux, macOS, AND Windows
 - Cross-compile check: `GOOS=windows go build ./...`
 - Zero external dependencies (Go stdlib + x/sys only)
-- Windows: ALWAYS use native llama-server for native inference; managed OCI workloads go through the runtime wrapper because Windows GPU passthrough remains less predictable than native execution
-- Container security: --cap-drop=ALL, --network=none (except finetune/agent_hosting → bridge)
+- Container security: --cap-drop=ALL, --network=none for normal render jobs
+- Do not add AI inference, V7/V8, benchmark-plane, model-warm, or speculative code to the active node path
+- Archive inactive surfaces in `ryvion-archive`; never import archive code back into production repos
 - Commits: Keep messages SHORT, no Co-Authored-By
