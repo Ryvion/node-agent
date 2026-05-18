@@ -17,7 +17,6 @@ import (
 	"time"
 
 	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
-	"github.com/Ryvion/ryvion-node/internal/hw"
 	netprofile "github.com/Ryvion/ryvion-node/internal/network/profile"
 )
 
@@ -27,7 +26,6 @@ type Client struct {
 	priv      ed25519.PrivateKey
 	http      *http.Client
 	bindToken string
-	wallet    string
 	adminKey  string
 	userAgent string
 	grpc      *grpcTransport
@@ -45,10 +43,6 @@ func WithHTTPClient(h *http.Client) Option {
 
 func WithBindToken(token string) Option {
 	return func(c *Client) { c.bindToken = strings.TrimSpace(token) }
-}
-
-func WithWallet(wallet string) Option {
-	return func(c *Client) { c.wallet = strings.TrimSpace(wallet) }
 }
 
 func WithAdminKey(adminKey string) Option {
@@ -484,53 +478,6 @@ func (c *Client) SavePayout(ctx context.Context, stripeConnectID, currency strin
 	return c.post(ctx, "/api/v1/node/payout/save", body, nil)
 }
 
-// Attest performs TEE attestation with the hub via challenge-response protocol.
-func (c *Client) Attest(ctx context.Context, caps hw.CapSet) error {
-	if !caps.TEESupported {
-		return nil
-	}
-
-	// Step 1: Request challenge nonce
-	var challenge struct {
-		Nonce string `json:"nonce"`
-	}
-	if err := c.post(ctx, "/api/v1/node/attest/challenge",
-		map[string]string{"public_key_hex": c.pubHex()}, &challenge); err != nil {
-		return fmt.Errorf("attestation challenge: %w", err)
-	}
-
-	// Step 2: Generate attestation report with the nonce
-	nonce, err := hex.DecodeString(challenge.Nonce)
-	if err != nil {
-		return fmt.Errorf("bad nonce: %w", err)
-	}
-	report := hw.GenerateAttestationReport(nonce)
-	if report.ReportB64 == "" {
-		return fmt.Errorf("failed to generate attestation report")
-	}
-
-	// Step 3: Submit for verification
-	var result struct {
-		Verified bool   `json:"verified"`
-		Reason   string `json:"reason,omitempty"`
-	}
-	if err := c.post(ctx, "/api/v1/node/attest/verify", map[string]any{
-		"public_key_hex": c.pubHex(),
-		"method":         report.Method,
-		"tee_type":       report.TEEType,
-		"report_b64":     report.ReportB64,
-		"nonce_hex":      report.NonceHex,
-		"cert_chain":     report.CertChain,
-	}, &result); err != nil {
-		return fmt.Errorf("attestation verify: %w", err)
-	}
-
-	if !result.Verified {
-		return fmt.Errorf("attestation rejected: %s", result.Reason)
-	}
-	return nil
-}
-
 // ReportAgentHealth sends a signed health check for a running agent deployment.
 func (c *Client) ReportAgentHealth(ctx context.Context, deploymentID string, uptimeSeconds int) (AgentHealthResponse, error) {
 	deploymentID = strings.TrimSpace(deploymentID)
@@ -887,9 +834,6 @@ func (c *Client) getWithHeaders(ctx context.Context, path string, out any, heade
 	if c.bindToken != "" {
 		req.Header.Set("X-Bind-Token", c.bindToken)
 	}
-	if c.wallet != "" {
-		req.Header.Set("X-Wallet", c.wallet)
-	}
 	for k, v := range headers {
 		if strings.TrimSpace(v) != "" {
 			req.Header.Set(k, v)
@@ -933,9 +877,6 @@ func (c *Client) postWithHeaders(ctx context.Context, path string, body any, out
 	req.Header.Set("User-Agent", c.userAgent)
 	if c.bindToken != "" {
 		req.Header.Set("X-Bind-Token", c.bindToken)
-	}
-	if c.wallet != "" {
-		req.Header.Set("X-Wallet", c.wallet)
 	}
 	for k, v := range headers {
 		if strings.TrimSpace(v) != "" {

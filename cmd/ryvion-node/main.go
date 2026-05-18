@@ -50,7 +50,6 @@ type nodeConfig struct {
 	KeyPath      string
 	MaxGPUUtil   float64
 	BindToken    string
-	Wallet       string
 	HeartbeatDur time.Duration
 }
 
@@ -88,7 +87,6 @@ func runNode(ctx context.Context) {
 		pub,
 		priv,
 		hub.WithBindToken(cfg.BindToken),
-		hub.WithWallet(cfg.Wallet),
 		hub.WithUserAgent("ryvion-node/"+version),
 	)
 
@@ -99,11 +97,6 @@ func runNode(ctx context.Context) {
 		return
 	}
 
-	if caps.TEESupported {
-		if err := client.Attest(ctx, caps); err != nil {
-			slog.Warn("TEE attestation failed", "error", err)
-		}
-	}
 	if err := client.SolveChallenge(ctx); err != nil {
 		slog.Debug("challenge solve failed", "error", err)
 	}
@@ -121,7 +114,6 @@ func parseConfig() nodeConfig {
 		GPUs:         firstNonEmpty(os.Getenv("RYV_GPUS"), "auto"),
 		KeyPath:      os.Getenv("RYV_KEY_PATH"),
 		BindToken:    os.Getenv("RYV_BIND_TOKEN"),
-		Wallet:       os.Getenv("RYV_WALLET"),
 		HeartbeatDur: 30 * time.Second,
 	}
 	flag.StringVar(&cfg.HubURL, "hub", cfg.HubURL, "Ryvion hub URL")
