@@ -40,7 +40,7 @@ func Execute(ctx context.Context, specJSON string, cfg Config, client Client, wo
 	}
 	metadata := BuildReceiptMetadata(result, workMeta)
 	outputPath := ""
-	if spec.OutputArtifact {
+	if ShouldWriteOutputArtifact(spec) {
 		outputPath, err = writeOutputArtifact(result.Text)
 		if err != nil {
 			metadata["artifact_error"] = err.Error()
@@ -82,20 +82,52 @@ func SanitizeMetadata(metadata map[string]any) map[string]any {
 		if unsafeMetadataKey(key) {
 			continue
 		}
-		switch typed := value.(type) {
-		case map[string]any:
-			out[key] = SanitizeMetadata(typed)
-		default:
-			out[key] = value
-		}
+		out[key] = sanitizeMetadataValue(value)
 	}
 	return out
+}
+
+func sanitizeMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return SanitizeMetadata(typed)
+	case map[string]string:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = item
+		}
+		return SanitizeMetadata(out)
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, sanitizeMetadataValue(item))
+		}
+		return out
+	case []map[string]any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, SanitizeMetadata(item))
+		}
+		return out
+	case []map[string]string:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, sanitizeMetadataValue(item))
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func unsafeMetadataKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
 	switch key {
-	case "prompt", "messages", "output", "output_text", "generated_text", "content", "response", "raw", "raw_output", "logprobs":
+	case "prompt", "prompt_text", "raw_prompt", "messages", "messages_json", "raw_messages",
+		"input", "input_text", "request", "request_body", "request_json",
+		"output", "output_text", "generated_text", "content",
+		"response", "response_body", "response_json", "raw_response", "completion", "text",
+		"raw", "raw_output", "logprobs":
 		return true
 	default:
 		return false

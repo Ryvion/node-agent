@@ -42,7 +42,7 @@ type Spec struct {
 	TopP           float64   `json:"top_p,omitempty"`
 	Seed           int       `json:"seed,omitempty"`
 	TimeoutSeconds int       `json:"timeout_seconds,omitempty"`
-	OutputArtifact bool      `json:"output_artifact,omitempty"`
+	OutputArtifact *bool     `json:"output_artifact,omitempty"`
 }
 
 func ShouldHandle(kind, executorKind, specJSON string) bool {
@@ -92,9 +92,6 @@ func NormalizeSpec(spec Spec) Spec {
 	if spec.TopP == 0 {
 		spec.TopP = DefaultTopP
 	}
-	if !spec.OutputArtifact {
-		spec.OutputArtifact = true
-	}
 	out := spec.Messages[:0]
 	for _, msg := range spec.Messages {
 		role := cleanText(msg.Role, MaxMessageRoleLen)
@@ -109,6 +106,13 @@ func NormalizeSpec(spec Spec) Spec {
 	}
 	spec.Messages = out
 	return spec
+}
+
+func ShouldWriteOutputArtifact(spec Spec) bool {
+	if spec.OutputArtifact == nil {
+		return true
+	}
+	return *spec.OutputArtifact
 }
 
 func ValidateSpec(spec Spec) error {
