@@ -614,8 +614,6 @@ func receiptMetadataBase(work *hub.WorkAssignment, extras ...map[string]any) map
 	if work != nil {
 		metadata["job_id"] = work.JobID
 		metadata["abort_scope_id"] = strings.TrimSpace(work.WorkScopeID)
-		// Compatibility receipt key; it carries the same active work lease scope.
-		metadata["workgraph_id"] = strings.TrimSpace(work.WorkScopeID)
 		metadata["work_kind"] = strings.TrimSpace(work.Kind)
 		metadata["assurance_class"] = strings.TrimSpace(work.AssuranceClass)
 	}

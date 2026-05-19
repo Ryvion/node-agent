@@ -213,10 +213,9 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	if strings.TrimSpace(out.JobID) == "" {
 		return nil, fmt.Errorf("work assignment missing job_id")
 	}
-	workScopeID := firstNonEmpty(out.AbortScopeID, out.WorkScopeID)
 	return &WorkAssignment{
 		JobID:               out.JobID,
-		WorkScopeID:         workScopeID,
+		WorkScopeID:         out.AbortScopeID,
 		JobPubkey:           out.JobPubkey,
 		Kind:                out.Kind,
 		PayloadURL:          out.PayloadURL,
@@ -236,15 +235,14 @@ func (c *Client) FetchAbortSignal(ctx context.Context, abortScopeID string) (*Ab
 	}
 	ts := time.Now().UnixMilli()
 	pubHex := c.pubHex()
-	sig := c.sign("workgraph_abort", pubHex, abortScopeID, strconv.FormatInt(ts, 10))
-	u, err := url.Parse(c.absoluteURL("/api/v1/node/workgraph-aborts"))
+	sig := c.sign("abort_signal", pubHex, abortScopeID, strconv.FormatInt(ts, 10))
+	u, err := url.Parse(c.absoluteURL("/api/v1/node/abort-signals"))
 	if err != nil {
 		return nil, err
 	}
 	q := u.Query()
 	q.Set("pubkey", pubHex)
 	q.Set("abort_scope_id", abortScopeID)
-	q.Set("workgraph_id", abortScopeID)
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -787,9 +785,7 @@ type workResponse struct {
 	HasWork *bool  `json:"has_work"`
 	JobID   string `json:"job_id"`
 	// abort_scope_id is the canonical active work lease scope.
-	AbortScopeID string `json:"abort_scope_id"`
-	// Deprecated wire field: the hub still sends workgraph_id as the active work lease scope.
-	WorkScopeID         string              `json:"workgraph_id"`
+	AbortScopeID        string              `json:"abort_scope_id"`
 	JobPubkey           string              `json:"job_pubkey"`
 	Kind                string              `json:"kind"`
 	PayloadURL          string              `json:"payload_url"`

@@ -1,7 +1,5 @@
-github.com/Ryvion/ryvion-protocol v0.0.0-20260519021036-031296ba4bbe h1:FjfCbNeVK6L4PTES+3E9ZOsQqWrE5vHiApMSja7OFcE=
-github.com/Ryvion/ryvion-protocol v0.0.0-20260519021036-031296ba4bbe/go.mod h1:h6x02MOdo0bLFsteD7e1hkf4RuvFrqpDuu6goxslDuk=
-github.com/Ryvion/ryvion-protocol v0.0.0-20260519145322-d0583c0bf392 h1:xv1J/bu2FkCvrSy9Q0Xtx6qRyXa/01S7ggKZoAqADqc=
-github.com/Ryvion/ryvion-protocol v0.0.0-20260519145322-d0583c0bf392/go.mod h1:h6x02MOdo0bLFsteD7e1hkf4RuvFrqpDuu6goxslDuk=
+github.com/Ryvion/ryvion-protocol v0.0.0-20260519173841-6c8607b3e14c h1:Ivq19Fu8CAnU++Lfft0ksUcF+TnozauOqe8W/VahyaE=
+github.com/Ryvion/ryvion-protocol v0.0.0-20260519173841-6c8607b3e14c/go.mod h1:h6x02MOdo0bLFsteD7e1hkf4RuvFrqpDuu6goxslDuk=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=

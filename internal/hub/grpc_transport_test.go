@@ -100,7 +100,6 @@ func TestClientFetchWorkUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
 	fake := &fakeNodeGatewayServer{work: &nodev1.WorkAssignment{
 		JobId:          "job-gateway",
 		AbortScopeId:   "scope-gateway",
-		WorkgraphId:    "wg-gateway",
 		Kind:           "llama_cpp_inference",
 		PayloadUrl:     "https://example.invalid/payload",
 		Units:          2,

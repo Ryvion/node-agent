@@ -203,7 +203,7 @@ func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts
 	}
 	return &WorkAssignment{
 		JobID:               assignment.GetJobId(),
-		WorkScopeID:         firstNonEmpty(assignment.GetAbortScopeId(), assignment.GetWorkgraphId()),
+		WorkScopeID:         assignment.GetAbortScopeId(),
 		JobPubkey:           assignment.GetJobPubkey(),
 		Kind:                assignment.GetKind(),
 		PayloadURL:          assignment.GetPayloadUrl(),
