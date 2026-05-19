@@ -56,10 +56,10 @@ func TestClientReusesNodeGatewayStream(t *testing.T) {
 	}
 	fake := &fakePersistentNodeGatewayServer{work: &nodev1.WorkAssignment{
 		JobId:        "job-reuse",
-		Kind:         "blender_render",
-		Image:        "ghcr.io/ryvion/blender-runner",
-		SpecJson:     `{"task":"blender_render"}`,
-		ExecutorKind: "oci",
+		Kind:         "llama_cpp_inference",
+		Image:        "llama_cpp",
+		SpecJson:     `{"task":"llama_cpp_inference","prompt":"hi"}`,
+		ExecutorKind: "llama_cpp",
 	}}
 	grpcServer := grpc.NewServer()
 	nodev1.RegisterNodeGatewayServer(grpcServer, fake)
@@ -99,20 +99,22 @@ func TestClientFetchWorkUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
 	}
 	fake := &fakeNodeGatewayServer{work: &nodev1.WorkAssignment{
 		JobId:          "job-gateway",
+		AbortScopeId:   "scope-gateway",
 		WorkgraphId:    "wg-gateway",
-		Kind:           "blender_render",
+		Kind:           "llama_cpp_inference",
 		PayloadUrl:     "https://example.invalid/payload",
 		Units:          2,
-		Image:          "ghcr.io/ryvion/blender-runner",
-		SpecJson:       `{"task":"blender_render"}`,
+		Image:          "llama_cpp",
+		SpecJson:       `{"task":"llama_cpp_inference","prompt":"hi"}`,
 		JobPubkey:      "buyer-key",
-		ExecutorKind:   "oci",
+		ExecutorKind:   "llama_cpp",
 		AssuranceClass: "standard",
 		RuntimeRequirements: &nodev1.RuntimeRequirements{
 			NeedsGpu:        true,
 			NeedsManagedOci: true,
+			NeedsLlamaCpp:   true,
 			MinVramMb:       8192,
-			Tooling:         []string{"blender"},
+			Tooling:         []string{"llama_cpp"},
 		},
 	}}
 	grpcServer := grpc.NewServer()
@@ -134,7 +136,7 @@ func TestClientFetchWorkUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchWork() error = %v", err)
 	}
-	if work == nil || work.JobID != "job-gateway" || work.WorkScopeID != "wg-gateway" || !work.RuntimeRequirements.NeedsGPU {
+	if work == nil || work.JobID != "job-gateway" || work.WorkScopeID != "scope-gateway" || !work.RuntimeRequirements.NeedsGPU || !work.RuntimeRequirements.NeedsLlamaCPP {
 		t.Fatalf("unexpected work assignment: %#v", work)
 	}
 	if fake.workLease == nil || fake.workLease.GetPublicKeyHex() != hex.EncodeToString(pub) || len(fake.signature.GetSignature()) == 0 {

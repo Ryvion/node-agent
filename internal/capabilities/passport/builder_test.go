@@ -26,7 +26,7 @@ func TestBuildCapabilityPassportFromFacts(t *testing.T) {
 			OCIAvailable:         true,
 			SupportedRunnerKinds: []string{"managed_oci"},
 		},
-		RenderCapabilitySummary: RenderCapabilitySummary{
+		WorkCapabilitySummary: WorkCapabilitySummary{
 			SupportsManagedOCI:     true,
 			SupportsArtifactUpload: true,
 		},
@@ -56,8 +56,8 @@ func TestBuildCapabilityPassportFromFacts(t *testing.T) {
 	if !passport.SandboxCapabilitySummary.NetworkIsolationSupported {
 		t.Fatal("OCI availability should advertise network isolation support")
 	}
-	if !containsString(passport.RenderCapabilitySummary.SupportedWorkKinds, "custom_runtime") {
-		t.Fatalf("default work kinds = %v, want generic runtime kind", passport.RenderCapabilitySummary.SupportedWorkKinds)
+	if !containsString(passport.WorkCapabilitySummary.SupportedWorkKinds, "custom_runtime") {
+		t.Fatalf("default work kinds = %v, want generic runtime kind", passport.WorkCapabilitySummary.SupportedWorkKinds)
 	}
 }
 
@@ -76,7 +76,7 @@ func TestBuildCapabilityPassportClonesSlices(t *testing.T) {
 		RuntimeProfile: RuntimeProfile{
 			SupportedRunnerKinds: runnerKinds,
 		},
-		RenderCapabilitySummary: RenderCapabilitySummary{
+		WorkCapabilitySummary: WorkCapabilitySummary{
 			SupportedWorkKinds: workKinds,
 		},
 		CreatedAtUnixMs: 123,
@@ -91,7 +91,7 @@ func TestBuildCapabilityPassportClonesSlices(t *testing.T) {
 	if got := passport.RuntimeProfile.SupportedRunnerKinds[0]; got != "managed_oci" {
 		t.Fatalf("runner kind mutated through input slice: %q", got)
 	}
-	if got := passport.RenderCapabilitySummary.SupportedWorkKinds[0]; got != "custom_runtime" {
+	if got := passport.WorkCapabilitySummary.SupportedWorkKinds[0]; got != "custom_runtime" {
 		t.Fatalf("work kind mutated through input slice: %q", got)
 	}
 }

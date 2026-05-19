@@ -14,8 +14,7 @@ const (
 	SandboxReasonAllowed                          SandboxReasonCode = "allowed"
 	SandboxReasonManagedOCIAllowed                SandboxReasonCode = "managed_oci_allowed"
 	SandboxReasonRyvionRuntimeAllowed             SandboxReasonCode = "ryvion_runtime_allowed"
-	SandboxReasonBlenderRunnerAllowed             SandboxReasonCode = "blender_runner_allowed"
-	SandboxReasonMediaToolRunnerAllowed           SandboxReasonCode = "media_tool_runner_allowed"
+	SandboxReasonLlamaCPPRunnerAllowed            SandboxReasonCode = "llama_cpp_runner_allowed"
 	SandboxReasonCustomRunnerAllowlisted          SandboxReasonCode = "custom_runner_allowlisted"
 	SandboxReasonCustomRunnerTrustedAllowed       SandboxReasonCode = "custom_runner_trusted_allowed"
 	SandboxReasonCustomRunnerNotAllowlisted       SandboxReasonCode = "custom_runner_not_allowlisted"
@@ -103,10 +102,8 @@ func evaluateRunner(evaluation *sandboxEvaluation, policy SandboxPolicy, request
 		evaluation.allow(SandboxReasonManagedOCIAllowed)
 	case RunnerKindRyvionRuntime:
 		evaluation.allow(SandboxReasonRyvionRuntimeAllowed)
-	case RunnerKindBlender:
-		evaluation.allow(SandboxReasonBlenderRunnerAllowed)
-	case RunnerKindMediaTool:
-		evaluation.allow(SandboxReasonMediaToolRunnerAllowed)
+	case RunnerKindLlamaCPP:
+		evaluation.allow(SandboxReasonLlamaCPPRunnerAllowed)
 	case RunnerKindCustom:
 		if request.IsAllowlistedRunner {
 			evaluation.allow(SandboxReasonCustomRunnerAllowlisted)

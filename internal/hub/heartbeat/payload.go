@@ -51,7 +51,7 @@ type BuildNodeHeartbeatPayloadInput struct {
 
 	HardwareCapacity *capshardware.CapacityInventory
 
-	RenderCapabilitySummary capability.RenderCapabilitySummary
+	WorkCapabilitySummary capability.WorkCapabilitySummary
 
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
@@ -151,7 +151,7 @@ func BuildNodeHeartbeatPayload(input BuildNodeHeartbeatPayloadInput) (NodeHeartb
 		HardwareProfile:           input.HardwareProfile,
 		RuntimeProfile:            runtimeProfile,
 		NetworkCapabilitySummary:  networkSummary,
-		RenderCapabilitySummary:   input.RenderCapabilitySummary,
+		WorkCapabilitySummary:     input.WorkCapabilitySummary,
 		SandboxCapabilitySummary:  sandboxSummary,
 		CASCapabilitySummary:      input.CASCapabilitySummary,
 		EvidenceCapabilitySummary: input.EvidenceCapabilitySummary,

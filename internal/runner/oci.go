@@ -80,7 +80,7 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	if cpuLimit == "" {
 		cpuLimit = "4"
 	}
-	// Render-farm jobs run with network isolation by default. Inputs are
+	// Managed OCI jobs run with network isolation by default. Inputs are
 	// prefetched into /work before the container starts.
 	networkMode := "--network=none"
 	if needsNetwork(specJSON) {
@@ -219,7 +219,7 @@ func stopContainerGracefully(ociExec ociExecutor, name string, grace time.Durati
 }
 
 // needsNetwork is an explicit escape hatch for trusted operator-controlled
-// workloads. Managed render jobs should rely on prefetched inputs and remain
+// workloads. Managed jobs should rely on prefetched inputs and remain
 // network-isolated.
 func needsNetwork(specJSON string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_ALLOW_JOB_NETWORK"))) {
@@ -235,7 +235,7 @@ func needsNetwork(specJSON string) bool {
 	return value
 }
 
-// prefetchPayloadURL parses specJSON for render/media input URL fields and
+// prefetchPayloadURL parses specJSON for trusted workload input URL fields and
 // downloads them into workDir so the container (which
 // runs with --network=none) can access them as local files.
 func prefetchPayloadURL(ctx context.Context, specJSON, workDir string) error {

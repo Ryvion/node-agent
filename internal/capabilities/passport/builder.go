@@ -22,7 +22,7 @@ type BuildPassportInput struct {
 	RuntimeProfile       RuntimeProfile
 
 	NetworkCapabilitySummary  NetworkCapabilitySummary
-	RenderCapabilitySummary   RenderCapabilitySummary
+	WorkCapabilitySummary     WorkCapabilitySummary
 	SandboxCapabilitySummary  SandboxCapabilitySummary
 	CASCapabilitySummary      CASCapabilitySummary
 	EvidenceCapabilitySummary EvidenceCapabilitySummary
@@ -53,14 +53,17 @@ func BuildCapabilityPassport(input BuildPassportInput) (CapabilityPassport, erro
 	runtimeProfile := input.RuntimeProfile
 	runtimeProfile.SupportedRunnerKinds = cloneCleanStrings(runtimeProfile.SupportedRunnerKinds)
 
-	renderSummary := input.RenderCapabilitySummary
-	if len(renderSummary.SupportedWorkKinds) == 0 {
-		renderSummary.SupportedWorkKinds = defaultRenderWorkKinds(runtimeProfile)
+	workSummary := input.WorkCapabilitySummary
+	if len(workSummary.SupportedWorkKinds) == 0 {
+		workSummary.SupportedWorkKinds = defaultWorkKinds(runtimeProfile)
 	} else {
-		renderSummary.SupportedWorkKinds = cloneCleanStrings(renderSummary.SupportedWorkKinds)
+		workSummary.SupportedWorkKinds = cloneCleanStrings(workSummary.SupportedWorkKinds)
 	}
 	if runtimeProfile.OCIAvailable {
-		renderSummary.SupportsManagedOCI = true
+		workSummary.SupportsManagedOCI = true
+	}
+	if runtimeProfile.LlamaCPPAvailable {
+		workSummary.SupportsLlamaCPP = true
 	}
 
 	sandboxSummary := input.SandboxCapabilitySummary
@@ -80,7 +83,7 @@ func BuildCapabilityPassport(input BuildPassportInput) (CapabilityPassport, erro
 		HardwareProfile:           buildHardwareProfile(input.HardwareCapabilities, input.HardwareProfile),
 		RuntimeProfile:            runtimeProfile,
 		NetworkCapabilitySummary:  input.NetworkCapabilitySummary,
-		RenderCapabilitySummary:   renderSummary,
+		WorkCapabilitySummary:     workSummary,
 		SandboxCapabilitySummary:  sandboxSummary,
 		CASCapabilitySummary:      input.CASCapabilitySummary,
 		EvidenceCapabilitySummary: input.EvidenceCapabilitySummary,
@@ -119,11 +122,15 @@ func buildHardwareProfile(caps hw.CapSet, override HardwareProfile) HardwareProf
 	return out
 }
 
-func defaultRenderWorkKinds(runtimeProfile RuntimeProfile) []string {
-	if !runtimeProfile.OCIAvailable {
-		return nil
+func defaultWorkKinds(runtimeProfile RuntimeProfile) []string {
+	out := []string{}
+	if runtimeProfile.LlamaCPPAvailable {
+		out = append(out, "llama_cpp_inference")
 	}
-	return []string{"custom_runtime"}
+	if runtimeProfile.OCIAvailable {
+		out = append(out, "custom_runtime")
+	}
+	return out
 }
 
 func cloneCleanStrings(values []string) []string {

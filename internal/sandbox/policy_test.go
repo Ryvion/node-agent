@@ -11,22 +11,13 @@ func TestEvaluateSandboxManagedOCIAllowed(t *testing.T) {
 	assertHasReason(t, result, SandboxReasonManagedOCIAllowed)
 }
 
-func TestEvaluateSandboxBlenderRunnerAllowed(t *testing.T) {
+func TestEvaluateSandboxLlamaCPPRunnerAllowed(t *testing.T) {
 	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
-		RunnerKind: RunnerKindBlender,
+		RunnerKind: RunnerKindLlamaCPP,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonBlenderRunnerAllowed)
-}
-
-func TestEvaluateSandboxMediaToolRunnerAllowed(t *testing.T) {
-	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
-		RunnerKind: RunnerKindMediaTool,
-	})
-
-	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonMediaToolRunnerAllowed)
+	assertHasReason(t, result, SandboxReasonLlamaCPPRunnerAllowed)
 }
 
 func TestEvaluateSandboxCustomAllowlistedAllowed(t *testing.T) {
@@ -75,10 +66,10 @@ func TestEvaluateSandboxNetworkRequirementTriggersIsolation(t *testing.T) {
 
 func TestEvaluateSandboxNetworkAllowedForRunner(t *testing.T) {
 	policy := DefaultSandboxPolicy()
-	policy.NetworkAllowedRunnerKinds = []RunnerKind{RunnerKindMediaTool}
+	policy.NetworkAllowedRunnerKinds = []RunnerKind{RunnerKindLlamaCPP}
 
 	result := EvaluateSandbox(policy, SandboxRequest{
-		RunnerKind:      RunnerKindMediaTool,
+		RunnerKind:      RunnerKindLlamaCPP,
 		RequiresNetwork: true,
 	})
 

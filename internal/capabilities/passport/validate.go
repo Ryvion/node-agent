@@ -30,8 +30,11 @@ func ValidateCapabilityPassport(passport CapabilityPassport) error {
 	if err := validateNetworkMetrics(passport.NetworkCapabilitySummary); err != nil {
 		errs = append(errs, err)
 	}
-	if passport.RenderCapabilitySummary.SupportsManagedOCI && !passport.RuntimeProfile.OCIAvailable {
+	if passport.WorkCapabilitySummary.SupportsManagedOCI && !passport.RuntimeProfile.OCIAvailable {
 		errs = append(errs, fmt.Errorf("managed OCI support requires OCI runtime availability"))
+	}
+	if passport.WorkCapabilitySummary.SupportsLlamaCPP && !passport.RuntimeProfile.LlamaCPPAvailable {
+		errs = append(errs, fmt.Errorf("llama.cpp support requires llama.cpp runtime availability"))
 	}
 	if err := validateNoObviousSecrets(passport); err != nil {
 		errs = append(errs, err)

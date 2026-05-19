@@ -61,7 +61,7 @@ func TestZeroCPURejected(t *testing.T) {
 func TestManagedOCIWithoutRuntimeRejected(t *testing.T) {
 	passport := validCPUPassport()
 	passport.RuntimeProfile.OCIAvailable = false
-	passport.RenderCapabilitySummary.SupportsManagedOCI = true
+	passport.WorkCapabilitySummary.SupportsManagedOCI = true
 	if err := ValidateCapabilityPassport(passport); err == nil || !strings.Contains(err.Error(), "managed OCI support") {
 		t.Fatalf("ValidateCapabilityPassport() error = %v, want managed OCI runtime error", err)
 	}
@@ -96,7 +96,7 @@ func validCPUPassport() CapabilityPassport {
 			OCIAvailable:         true,
 			SupportedRunnerKinds: []string{"managed_oci"},
 		},
-		RenderCapabilitySummary: RenderCapabilitySummary{
+		WorkCapabilitySummary: WorkCapabilitySummary{
 			SupportsManagedOCI:     true,
 			SupportsArtifactUpload: true,
 		},

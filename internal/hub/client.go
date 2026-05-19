@@ -704,6 +704,7 @@ type AbortSignal struct {
 
 type RuntimeRequirements struct {
 	NeedsGPU           bool     `json:"needs_gpu,omitempty"`
+	NeedsLlamaCPP      bool     `json:"needs_llama_cpp,omitempty"`
 	NeedsManagedOCI    bool     `json:"needs_managed_oci,omitempty"`
 	NeedsManagedOCIGPU bool     `json:"needs_managed_oci_gpu,omitempty"`
 	Tooling            []string `json:"tooling,omitempty"`

@@ -13,7 +13,7 @@ type CapabilityPassport struct {
 	HardwareProfile           HardwareProfile           `json:"hardware_profile"`
 	RuntimeProfile            RuntimeProfile            `json:"runtime_profile"`
 	NetworkCapabilitySummary  NetworkCapabilitySummary  `json:"network_capability_summary"`
-	RenderCapabilitySummary   RenderCapabilitySummary   `json:"render_capability_summary"`
+	WorkCapabilitySummary     WorkCapabilitySummary     `json:"work_capability_summary"`
 	SandboxCapabilitySummary  SandboxCapabilitySummary  `json:"sandbox_capability_summary"`
 	CASCapabilitySummary      CASCapabilitySummary      `json:"cas_capability_summary"`
 	EvidenceCapabilitySummary EvidenceCapabilitySummary `json:"evidence_capability_summary"`
@@ -33,8 +33,8 @@ type HardwareProfile struct {
 
 type RuntimeProfile struct {
 	OCIAvailable         bool     `json:"oci_available"`
-	BlenderAvailable     bool     `json:"blender_available,omitempty"`
-	MediaToolsAvailable  bool     `json:"media_tools_available,omitempty"`
+	LlamaCPPAvailable    bool     `json:"llama_cpp_available,omitempty"`
+	LlamaCPPModel        string   `json:"llama_cpp_model,omitempty"`
 	SupportedRunnerKinds []string `json:"supported_runner_kinds,omitempty"`
 }
 
@@ -49,8 +49,9 @@ type NetworkCapabilitySummary struct {
 	LossRateP95     float64 `json:"loss_rate_p95"`
 }
 
-type RenderCapabilitySummary struct {
+type WorkCapabilitySummary struct {
 	SupportsManagedOCI     bool     `json:"supports_managed_oci"`
+	SupportsLlamaCPP       bool     `json:"supports_llama_cpp"`
 	SupportsArtifactUpload bool     `json:"supports_artifact_upload"`
 	SupportedWorkKinds     []string `json:"supported_work_kinds,omitempty"`
 }

@@ -5,8 +5,7 @@ type RunnerKind string
 const (
 	RunnerKindManagedOCI    RunnerKind = "managed_oci"
 	RunnerKindRyvionRuntime RunnerKind = "ryvion_runtime"
-	RunnerKindBlender       RunnerKind = "blender"
-	RunnerKindMediaTool     RunnerKind = "media_tool"
+	RunnerKindLlamaCPP      RunnerKind = "llama_cpp"
 	RunnerKindCustom        RunnerKind = "custom"
 )
 
@@ -14,8 +13,7 @@ func validRunnerKind(kind RunnerKind) bool {
 	switch kind {
 	case RunnerKindManagedOCI,
 		RunnerKindRyvionRuntime,
-		RunnerKindBlender,
-		RunnerKindMediaTool,
+		RunnerKindLlamaCPP,
 		RunnerKindCustom:
 		return true
 	default:

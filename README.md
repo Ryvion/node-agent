@@ -1,8 +1,8 @@
 # Ryvion Node Agent
 
-The Ryvion node agent turns operator machines into workers for the Ryvion distributed render-farm network.
+The Ryvion node agent turns trusted machines into workers for Ryvion local AI work.
 
-It registers with the hub, sends signed heartbeats, receives work, runs OCI container workloads through the managed execution runtime, and submits signed receipts.
+It registers with the hub, sends signed heartbeats, receives work, runs local llama.cpp inference or managed OCI workloads, uploads artifacts, and submits signed receipts.
 
 ## Quickstart
 
@@ -18,15 +18,16 @@ chmod +x ryvion-node
 The node will:
 1. Generate an Ed25519 keypair (stored in `~/.ryvion/node.key`)
 2. Register with the hub and begin sending heartbeats
-3. Poll for jobs and execute them through the managed OCI runtime
+3. Poll for jobs and execute them through local llama.cpp or the managed OCI runtime
 4. Submit signed receipts for completed work
 
 ## Requirements
 
 - Linux, macOS, or Windows for the agent binary
-- Linux worker hosts for OCI render execution
-- NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) when render workloads need GPU acceleration
-- CPU-only render/transcode jobs work without a GPU
+- Local [llama.cpp](https://github.com/ggml-org/llama.cpp) server for native inference jobs
+- Linux worker hosts for managed OCI execution
+- NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) when OCI workloads need GPU acceleration
+- CPU-only llama.cpp jobs work without a GPU when the local server supports the model
 
 ## Configuration
 
@@ -44,6 +45,10 @@ All configuration is via flags or environment variables:
 | `-ui-port` | `RYV_UI_PORT` | `0` | Local status UI port (0 = disabled) |
 | — | `RYV_CONTAINER_CPUS` | — | CPU limit for containers |
 | — | `RYV_CONTAINER_MEMORY` | — | Memory limit for containers |
+| — | `RYV_LLAMA_CPP_SERVER_URL` | — | Local llama.cpp server URL, for example `http://127.0.0.1:8080` |
+| — | `RYV_LLAMA_CPP_MODEL` | — | Model id sent to `/v1/chat/completions` when a job does not specify one |
+| — | `RYV_LLAMA_CPP_PROBE_TIMEOUT` | `2s` | llama.cpp health probe timeout |
+| — | `RYV_LLAMA_CPP_HTTP_TIMEOUT` | `10m` | llama.cpp inference request timeout |
 | — | `RYV_JOB_TIMEOUT` | `10m` | Maximum job execution time |
 | — | `RYV_MAX_GPU_UTIL` | — | GPU utilization threshold |
 | — | `RYV_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
@@ -64,6 +69,7 @@ ryvion-node/
   internal/
     hub/               Typed API client for hub endpoints
     hw/                Hardware detection + metrics sampling
+    llamacpp/          Local llama.cpp client, spec validation, artifact writer
     runner/            OCI container workload execution
     blob/              Artifact upload flow
     nodekey/           Ed25519 key management
@@ -72,10 +78,10 @@ ryvion-node/
 
 **Job lifecycle:**
 1. Node polls hub for assigned jobs
-2. Hub returns a job with container image + parameters
-3. Node pulls the OCI image and runs it with GPU passthrough
-4. Container reads `/work/job.json`, writes output artifacts + `/work/receipt.json`
-5. Node uploads artifacts and submits a signed receipt to the hub
+2. Hub returns a job with `executor_kind=llama_cpp` or a managed OCI image
+3. llama.cpp jobs call the local OpenAI-compatible server and write a JSON artifact
+4. OCI jobs pull the image and run with the configured isolation policy
+5. Node uploads artifacts and submits a signed receipt to the hub without raw prompt/output in metadata
 
 ## Auto-updates
 

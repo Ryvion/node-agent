@@ -24,11 +24,11 @@ func TestValidateRunnerRequestCustomNonAllowlistedRejected(t *testing.T) {
 
 func TestValidateRunnerRequestBuiltInRunnerAccepted(t *testing.T) {
 	result := ValidateRunnerRequest(DefaultSandboxPolicy(), RunnerAllowlist{}, RunnerRequest{
-		RunnerKind: RunnerKindBlender,
+		RunnerKind: RunnerKindLlamaCPP,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonBlenderRunnerAllowed)
+	assertHasReason(t, result, SandboxReasonLlamaCPPRunnerAllowed)
 }
 
 func TestValidateRunnerRequestNetworkRequiresIsolation(t *testing.T) {

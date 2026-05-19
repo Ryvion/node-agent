@@ -9,7 +9,7 @@ require (
 )
 
 require (
-	github.com/Ryvion/ryvion-protocol v0.0.0-20260519021036-031296ba4bbe
+	github.com/Ryvion/ryvion-protocol v0.0.0-20260519145322-d0583c0bf392
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect

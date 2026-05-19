@@ -22,6 +22,7 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	"github.com/Ryvion/ryvion-node/internal/llamacpp"
 	"github.com/Ryvion/ryvion-node/internal/nodekey"
 	"github.com/Ryvion/ryvion-node/internal/runner"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
@@ -52,14 +53,17 @@ type nodeConfig struct {
 	MaxGPUUtil   float64
 	BindToken    string
 	HeartbeatDur time.Duration
+	LlamaCPP     llamacpp.Config
 }
 
 type runtimeHealthSnapshot struct {
 	OCIAvailable         bool
+	LlamaCPPAvailable    bool
 	GPUReady             bool
 	ManagedOCIGPUReady   bool
 	SupportedRunnerKinds []string
 	EngineKind           string
+	LlamaCPPModel        string
 	Health               string
 	Message              string
 }
@@ -137,6 +141,7 @@ func parseConfig() nodeConfig {
 	flag.Float64Var(&cfg.MaxGPUUtil, "max-gpu-util", envFloat("RYV_MAX_GPU_UTIL"), "skip work while GPU util is above this percentage")
 	flag.DurationVar(&cfg.HeartbeatDur, "heartbeat-interval", cfg.HeartbeatDur, "heartbeat interval")
 	flag.Parse()
+	cfg.LlamaCPP = llamacpp.ResolveConfig(os.Getenv)
 	cfg.HubURL = strings.TrimRight(strings.TrimSpace(cfg.HubURL), "/")
 	if cfg.HubURL == "" {
 		cfg.HubURL = "https://api.ryvion.ai"
@@ -170,7 +175,7 @@ func registerWithRetry(ctx context.Context, client *hub.Client, caps hw.CapSet, 
 func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, cfg nodeConfig) {
 	send := func(reason string) {
 		metrics := hw.SampleMetrics()
-		runtimeHealth := detectRuntimeHealth(caps)
+		runtimeHealth := detectRuntimeHealth(ctx, caps, cfg)
 		cachedGPUUtil.Store(math.Float64bits(metrics.GPUUtil))
 		throttled := cfg.MaxGPUUtil > 0 && cfg.MaxGPUUtil < 100 && metrics.GPUUtil > cfg.MaxGPUUtil
 
@@ -233,10 +238,13 @@ func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType 
 		HardwareCapabilities: caps,
 		RuntimeProfile: capability.RuntimeProfile{
 			OCIAvailable:         runtimeHealth.OCIAvailable,
+			LlamaCPPAvailable:    runtimeHealth.LlamaCPPAvailable,
+			LlamaCPPModel:        runtimeHealth.LlamaCPPModel,
 			SupportedRunnerKinds: runtimeHealth.SupportedRunnerKinds,
 		},
-		RenderCapabilitySummary: capability.RenderCapabilitySummary{
+		WorkCapabilitySummary: capability.WorkCapabilitySummary{
 			SupportsManagedOCI:     runtimeHealth.OCIAvailable,
+			SupportsLlamaCPP:       runtimeHealth.LlamaCPPAvailable,
 			SupportsArtifactUpload: true,
 		},
 		SandboxCapabilitySummary: capability.SandboxCapabilitySummary{
@@ -254,11 +262,18 @@ func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType 
 	})
 }
 
-func detectRuntimeHealth(caps hw.CapSet) runtimeHealthSnapshot {
+func detectRuntimeHealth(ctx context.Context, caps hw.CapSet, cfg nodeConfig) runtimeHealthSnapshot {
 	gpuReady := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
 	snapshot := runtimeHealthSnapshot{
 		GPUReady: gpuReady,
 		Health:   "missing",
+	}
+	llamaHealth := llamacpp.Probe(ctx, cfg.LlamaCPP, nil)
+	if llamaHealth.Available {
+		snapshot.LlamaCPPAvailable = true
+		snapshot.LlamaCPPModel = llamaHealth.Model
+		snapshot.Health = "ready"
+		snapshot.SupportedRunnerKinds = append(snapshot.SupportedRunnerKinds, "llama_cpp")
 	}
 	executor, err := runtimeexec.ResolveExecutor(runtime.GOOS, os.Getenv)
 	if err == nil {
@@ -268,7 +283,7 @@ func detectRuntimeHealth(caps hw.CapSet) runtimeHealthSnapshot {
 			snapshot.EngineKind = runtimeexec.EngineKind(executor.Command)
 		}
 		snapshot.Health = "ready"
-		snapshot.SupportedRunnerKinds = []string{"managed_oci"}
+		snapshot.SupportedRunnerKinds = append(snapshot.SupportedRunnerKinds, "managed_oci")
 	}
 	snapshot.ManagedOCIGPUReady = snapshot.OCIAvailable && gpuReady
 	snapshot.Message = runtimeHealthMessage(snapshot)
@@ -277,10 +292,18 @@ func detectRuntimeHealth(caps hw.CapSet) runtimeHealthSnapshot {
 
 func runtimeHealthMessage(snapshot runtimeHealthSnapshot) string {
 	tokens := []string{
-		"runtime-ready:" + boolToken(snapshot.OCIAvailable),
+		"runtime-ready:" + boolToken(snapshot.OCIAvailable || snapshot.LlamaCPPAvailable),
 		"runtime-health:" + firstNonEmpty(snapshot.Health, "missing"),
+		"cap:llama_cpp:" + boolToken(snapshot.LlamaCPPAvailable),
 		"cap:managed_oci_cpu:" + boolToken(snapshot.OCIAvailable),
 		"cap:managed_oci_gpu:" + boolToken(snapshot.ManagedOCIGPUReady),
+	}
+	if snapshot.LlamaCPPAvailable {
+		model := strings.TrimSpace(snapshot.LlamaCPPModel)
+		if model == "" {
+			model = "default"
+		}
+		tokens = append(tokens, "runtime:llama_cpp:"+sanitizeStatusToken(model), "tool:llama_cpp")
 	}
 	if strings.TrimSpace(snapshot.EngineKind) != "" {
 		tokens = append(tokens, "runtime-source:"+strings.TrimSpace(snapshot.EngineKind))
@@ -336,7 +359,7 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	defer stopAbortMonitor()
 
 	start := time.Now()
-	result, runErr := runOCIWork(runCtx, client, work, cfg.GPUs, caps)
+	result, runErr := runWork(runCtx, client, work, caps, cfg)
 	if runErr != nil {
 		slog.Warn("job failed", "job_id", work.JobID, "duration_ms", time.Since(start).Milliseconds(), "error", runErr)
 		return
@@ -344,6 +367,51 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 	if result != nil {
 		slog.Info("job completed", "job_id", work.JobID, "hash", result.ResultHashHex, "units", result.MeteringUnits)
 	}
+}
+
+func runWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, caps hw.CapSet, cfg nodeConfig) (*runnerResultSnapshot, error) {
+	if llamacpp.ShouldHandle(work.Kind, work.ExecutorKind, work.SpecJSON) {
+		return runLlamaCPPWork(ctx, client, work, cfg.LlamaCPP)
+	}
+	if strings.TrimSpace(work.Image) != "" || strings.EqualFold(strings.TrimSpace(work.ExecutorKind), "managed_oci") {
+		return runOCIWork(ctx, client, work, cfg.GPUs, caps)
+	}
+	return submitFailureReceipt(ctx, client, work, fmt.Errorf("unsupported executor %q", work.ExecutorKind), "unsupported_executor")
+}
+
+func runLlamaCPPWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, cfg llamacpp.Config) (*runnerResultSnapshot, error) {
+	if err := cfg.Validate(); err != nil {
+		return submitFailureReceipt(ctx, client, work, err, "llama_cpp_unavailable")
+	}
+	exec, runErr := llamacpp.Execute(ctx, work.SpecJSON, cfg, llamacpp.Client{}, receiptMetadataBase(work))
+	if runErr != nil {
+		return submitFailureReceipt(ctx, client, work, runErr, "llama_cpp_failed")
+	}
+	resultHash := exec.ResultHashHex
+	metadata := exec.Metadata
+	if strings.TrimSpace(exec.OutputPath) != "" {
+		uploadRes, uploadErr := blob.Upload(ctx, client, work.JobID, exec.OutputPath)
+		if uploadErr != nil {
+			metadata["upload_error"] = uploadErr.Error()
+		} else if uploadRes != nil {
+			metadata["blob_url"] = uploadRes.URL
+			metadata["object_key"] = uploadRes.Key
+			if strings.TrimSpace(uploadRes.Hash) != "" {
+				metadata["artifact_sha256"] = uploadRes.Hash
+			}
+		}
+		_ = os.Remove(exec.OutputPath)
+	}
+	receipt := hub.Receipt{
+		JobID:         work.JobID,
+		ResultHashHex: resultHash,
+		MeteringUnits: exec.MeteringUnits,
+		Metadata:      llamacpp.SanitizeMetadata(metadata),
+	}
+	if err := submitReceiptWithRetry(ctx, client, receipt); err != nil {
+		return &runnerResultSnapshot{ResultHashHex: resultHash, MeteringUnits: exec.MeteringUnits, Metadata: metadata}, err
+	}
+	return &runnerResultSnapshot{ResultHashHex: resultHash, MeteringUnits: exec.MeteringUnits, Metadata: metadata}, nil
 }
 
 func runOCIWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, caps hw.CapSet) (*runnerResultSnapshot, error) {
@@ -604,6 +672,17 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func sanitizeStatusToken(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, ",", "_")
+	value = strings.ReplaceAll(value, ":", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	if value == "" {
+		return "default"
+	}
+	return value
 }
 
 func stringValue(value any) string {

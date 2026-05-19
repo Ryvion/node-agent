@@ -1,6 +1,6 @@
 set -e
 
-echo "Ryvion Render Node Agent - DigitalOcean Setup"
+echo "Ryvion AI Node Agent - DigitalOcean Setup"
 echo "=============================================="
 
 echo "Updating system packages..."
@@ -76,7 +76,7 @@ EOF
 
 cat > /etc/systemd/system/ryvion-node.service << 'EOF'
 [Unit]
-Description=Ryvion Render Node Agent
+Description=Ryvion AI Node Agent
 Requires=docker.service
 After=docker.service
 
@@ -115,4 +115,5 @@ echo ""
 echo "Droplet Requirements:"
 echo "- Minimum: 2GB RAM, 1 vCPU"
 echo "- Recommended: 4GB RAM, 2 vCPU"
-echo "- For GPU render workloads: GPU droplet plus NVIDIA Container Toolkit"
+echo "- For GPU OCI workloads: GPU droplet plus NVIDIA Container Toolkit"
+echo "- For native inference: local llama.cpp server and RYV_LLAMA_CPP_SERVER_URL"
