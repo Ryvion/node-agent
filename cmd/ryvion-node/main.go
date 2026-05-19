@@ -370,10 +370,15 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 }
 
 func runWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, caps hw.CapSet, cfg nodeConfig) (*runnerResultSnapshot, error) {
-	if llamacpp.ShouldHandle(work.Kind, work.ExecutorKind, work.SpecJSON) {
+	wantsOCI := strings.TrimSpace(work.Image) != "" || strings.EqualFold(strings.TrimSpace(work.ExecutorKind), "managed_oci")
+	if work.RuntimeRequirements.NeedsLlamaCPP && wantsOCI {
+		err := fmt.Errorf("assignment requires llama.cpp but also declares managed OCI execution")
+		return submitFailureReceiptForExecutor(ctx, client, work, err, "contradictory_runtime_requirements", llamacpp.ExecutorKind)
+	}
+	if work.RuntimeRequirements.NeedsLlamaCPP || (llamacpp.ShouldHandle(work.Kind, work.ExecutorKind, work.SpecJSON) && !wantsOCI) {
 		return runLlamaCPPWork(ctx, client, work, cfg.LlamaCPP)
 	}
-	if strings.TrimSpace(work.Image) != "" || strings.EqualFold(strings.TrimSpace(work.ExecutorKind), "managed_oci") {
+	if wantsOCI || work.RuntimeRequirements.NeedsManagedOCI || work.RuntimeRequirements.NeedsManagedOCIGPU {
 		return runOCIWork(ctx, client, work, cfg.GPUs, caps)
 	}
 	return submitFailureReceipt(ctx, client, work, fmt.Errorf("unsupported executor %q", work.ExecutorKind), "unsupported_executor")
@@ -393,7 +398,16 @@ func runLlamaCPPWork(ctx context.Context, client *hub.Client, work *hub.WorkAssi
 		uploadRes, uploadErr := blob.Upload(ctx, client, work.JobID, exec.OutputPath)
 		if uploadErr != nil {
 			metadata["upload_error"] = uploadErr.Error()
-		} else if uploadRes != nil {
+			_ = os.Remove(exec.OutputPath)
+			return submitFailureReceiptForExecutor(ctx, client, work, uploadErr, "artifact_upload_failed", llamacpp.ExecutorKind)
+		}
+		if uploadRes == nil {
+			uploadErr = fmt.Errorf("artifact upload returned no result")
+			metadata["upload_error"] = uploadErr.Error()
+			_ = os.Remove(exec.OutputPath)
+			return submitFailureReceiptForExecutor(ctx, client, work, uploadErr, "artifact_upload_failed", llamacpp.ExecutorKind)
+		}
+		if uploadRes != nil {
 			metadata["blob_url"] = uploadRes.URL
 			metadata["object_key"] = uploadRes.Key
 			if strings.TrimSpace(uploadRes.Hash) != "" {
@@ -417,12 +431,12 @@ func runLlamaCPPWork(ctx context.Context, client *hub.Client, work *hub.WorkAssi
 func runOCIWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, gpus string, caps hw.CapSet) (*runnerResultSnapshot, error) {
 	if strings.TrimSpace(work.Image) == "" || strings.TrimSpace(work.SpecJSON) == "" {
 		err := fmt.Errorf("missing container image or spec")
-		return submitFailureReceipt(ctx, client, work, err, "missing_spec")
+		return submitFailureReceiptForExecutor(ctx, client, work, err, "missing_spec", "oci")
 	}
 
 	result, runErr := runner.Run(ctx, work.Image, work.SpecJSON, gpus)
 	if result == nil {
-		return submitFailureReceipt(ctx, client, work, runErr, "runner_failed")
+		return submitFailureReceiptForExecutor(ctx, client, work, runErr, "runner_failed", "oci")
 	}
 
 	resultHash := result.Hash
@@ -442,7 +456,16 @@ func runOCIWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignmen
 		uploadRes, uploadErr := blob.Upload(ctx, client, work.JobID, result.OutputPath)
 		if uploadErr != nil {
 			metadata["upload_error"] = uploadErr.Error()
-		} else if uploadRes != nil {
+			_ = os.Remove(result.OutputPath)
+			return submitFailureReceiptForExecutor(ctx, client, work, uploadErr, "artifact_upload_failed", "oci")
+		}
+		if uploadRes == nil {
+			uploadErr = fmt.Errorf("artifact upload returned no result")
+			metadata["upload_error"] = uploadErr.Error()
+			_ = os.Remove(result.OutputPath)
+			return submitFailureReceiptForExecutor(ctx, client, work, uploadErr, "artifact_upload_failed", "oci")
+		}
+		if uploadRes != nil {
 			metadata["blob_url"] = uploadRes.URL
 			metadata["object_key"] = uploadRes.Key
 			if strings.TrimSpace(uploadRes.Hash) != "" {
@@ -470,9 +493,17 @@ func runOCIWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignmen
 }
 
 func submitFailureReceipt(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, cause error, reason string) (*runnerResultSnapshot, error) {
+	return submitFailureReceiptForExecutor(ctx, client, work, cause, reason, failureExecutor(work))
+}
+
+func submitFailureReceiptForExecutor(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, cause error, reason string, executor string) (*runnerResultSnapshot, error) {
+	executor = strings.TrimSpace(executor)
+	if executor == "" {
+		executor = "unknown"
+	}
 	hash := sha256.Sum256([]byte(work.JobID + ":" + reason))
 	metadata := receiptMetadataBase(work, map[string]any{
-		"executor":  "oci",
+		"executor":  executor,
 		"exit_code": 1,
 		"status":    "failed",
 		"reason":    reason,
@@ -484,7 +515,7 @@ func submitFailureReceipt(ctx context.Context, client *hub.Client, work *hub.Wor
 		JobID:         work.JobID,
 		ResultHashHex: hex.EncodeToString(hash[:]),
 		MeteringUnits: 0,
-		Metadata:      metadata,
+		Metadata:      llamacpp.SanitizeMetadata(metadata),
 	}
 	submitCtx := ctx
 	var cancel context.CancelFunc
@@ -499,8 +530,27 @@ func submitFailureReceipt(ctx context.Context, client *hub.Client, work *hub.Wor
 		ResultHashHex: receipt.ResultHashHex,
 		ExitCode:      1,
 		MeteringUnits: 0,
-		Metadata:      metadata,
+		Metadata:      receipt.Metadata,
 	}, cause
+}
+
+func failureExecutor(work *hub.WorkAssignment) string {
+	if work == nil {
+		return "unknown"
+	}
+	if work.RuntimeRequirements.NeedsLlamaCPP || llamacpp.ShouldHandle(work.Kind, work.ExecutorKind, work.SpecJSON) {
+		return llamacpp.ExecutorKind
+	}
+	if strings.TrimSpace(work.Image) != "" ||
+		strings.EqualFold(strings.TrimSpace(work.ExecutorKind), "managed_oci") ||
+		work.RuntimeRequirements.NeedsManagedOCI ||
+		work.RuntimeRequirements.NeedsManagedOCIGPU {
+		return "oci"
+	}
+	if strings.TrimSpace(work.ExecutorKind) != "" {
+		return strings.TrimSpace(work.ExecutorKind)
+	}
+	return "unknown"
 }
 
 func startAbortMonitor(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, cancel context.CancelFunc) func() {
