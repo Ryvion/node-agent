@@ -35,9 +35,9 @@ All configuration is via flags or environment variables:
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
 | `-hub` | `RYV_HUB_URL` | `https://api.ryvion.ai` | Hub orchestrator URL |
-| `-device` | `RYV_DEVICE_TYPE` | auto-detected | Device type: `gpu` or `cpu` |
+| `-device` | `RYV_DEVICE` | auto-detected | Device type: `gpu` or `cpu` |
 | `-gpus` | `RYV_GPUS` | auto-detected | GPU configuration |
-| `-country` | `RYV_DECLARED_COUNTRY` | — | ISO country code for jurisdiction routing |
+| `-country` | `RYV_COUNTRY` | — | ISO country code for jurisdiction routing |
 | `-key` | `RYV_KEY_PATH` | `~/.ryvion/node.key` | Path to Ed25519 node key |
 | `-data` | `RYV_DATA_DIR` | `~/.ryvion/data` | Working directory for job artifacts |
 | `-bind-token` | `RYV_BIND_TOKEN` | — | Token to bind node to a specific account |
@@ -47,6 +47,8 @@ All configuration is via flags or environment variables:
 | — | `RYV_JOB_TIMEOUT` | `10m` | Maximum job execution time |
 | — | `RYV_MAX_GPU_UTIL` | — | GPU utilization threshold |
 | — | `RYV_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+
+`RYV_DEVICE_TYPE` and `-type` are still accepted as deprecated aliases for older launch scripts; new deployments should use `RYV_DEVICE` and `-device`.
 
 ## Building from source
 

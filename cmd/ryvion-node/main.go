@@ -108,7 +108,7 @@ func runNode(ctx context.Context) {
 func parseConfig() nodeConfig {
 	cfg := nodeConfig{
 		HubURL:       firstNonEmpty(os.Getenv("RYV_HUB_URL"), "https://api.ryvion.ai"),
-		Device:       os.Getenv("RYV_DEVICE"),
+		Device:       firstNonEmpty(os.Getenv("RYV_DEVICE"), os.Getenv("RYV_DEVICE_TYPE")),
 		Country:      os.Getenv("RYV_COUNTRY"),
 		Referral:     os.Getenv("RYV_REFERRAL"),
 		GPUs:         firstNonEmpty(os.Getenv("RYV_GPUS"), "auto"),
@@ -118,6 +118,7 @@ func parseConfig() nodeConfig {
 	}
 	flag.StringVar(&cfg.HubURL, "hub", cfg.HubURL, "Ryvion hub URL")
 	flag.StringVar(&cfg.Device, "device", cfg.Device, "operator device class hint")
+	flag.StringVar(&cfg.Device, "type", cfg.Device, "deprecated alias for -device")
 	flag.StringVar(&cfg.Country, "country", cfg.Country, "declared operator country")
 	flag.StringVar(&cfg.Referral, "referral", cfg.Referral, "operator referral code")
 	flag.StringVar(&cfg.GPUs, "gpus", cfg.GPUs, "OCI GPU flag value, usually auto or all")
