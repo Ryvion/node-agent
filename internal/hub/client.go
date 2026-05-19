@@ -135,8 +135,8 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (HeartbeatRespo
 		GPUThrottled:   metrics.GPUThrottled,
 		SystemTimezone: detectIANATimezone(),
 		NetworkProfile: metrics.NetworkProfile,
-		Capability:     metrics.V7Heartbeat,
-		V7:             metrics.V7Heartbeat,
+		Capability:     metrics.NodeCapability,
+		V7:             metrics.NodeCapability,
 	}
 	body.Signature = c.sign(
 		"heartbeat",
@@ -658,7 +658,7 @@ type Metrics struct {
 	PowerWatts     float64
 	GPUThrottled   bool // node is self-throttling due to operator GPU usage
 	NetworkProfile *netprofile.NetworkProfile
-	V7Heartbeat    *heartbeat.V7HeartbeatPayload
+	NodeCapability *heartbeat.NodeHeartbeatPayload
 }
 
 type WorkAssignment struct {
@@ -752,18 +752,19 @@ type registerRequest struct {
 }
 
 type heartbeatRequest struct {
-	PublicKeyHex   string                        `json:"public_key_hex"`
-	TimestampMs    int64                         `json:"timestamp_ms"`
-	CPUUtil        float64                       `json:"cpu_util"`
-	MemUtil        float64                       `json:"mem_util"`
-	GPUUtil        float64                       `json:"gpu_util"`
-	PowerWatts     float64                       `json:"power_watts"`
-	GPUThrottled   bool                          `json:"gpu_throttled"`
-	SystemTimezone string                        `json:"system_timezone,omitempty"`
-	NetworkProfile *netprofile.NetworkProfile    `json:"network_profile,omitempty"`
-	Capability     *heartbeat.V7HeartbeatPayload `json:"capability,omitempty"`
-	V7             *heartbeat.V7HeartbeatPayload `json:"v7,omitempty"`
-	Signature      []byte                        `json:"signature"`
+	PublicKeyHex   string                          `json:"public_key_hex"`
+	TimestampMs    int64                           `json:"timestamp_ms"`
+	CPUUtil        float64                         `json:"cpu_util"`
+	MemUtil        float64                         `json:"mem_util"`
+	GPUUtil        float64                         `json:"gpu_util"`
+	PowerWatts     float64                         `json:"power_watts"`
+	GPUThrottled   bool                            `json:"gpu_throttled"`
+	SystemTimezone string                          `json:"system_timezone,omitempty"`
+	NetworkProfile *netprofile.NetworkProfile      `json:"network_profile,omitempty"`
+	Capability     *heartbeat.NodeHeartbeatPayload `json:"capability,omitempty"`
+	// V7 is a deprecated wire alias kept for older hub heartbeat consumers.
+	V7        *heartbeat.NodeHeartbeatPayload `json:"v7,omitempty"`
+	Signature []byte                          `json:"signature"`
 }
 
 type workResponse struct {

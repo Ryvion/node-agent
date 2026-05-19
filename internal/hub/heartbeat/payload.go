@@ -16,11 +16,9 @@ import (
 const (
 	SchemaVersionV1 = "render.node-heartbeat.v1"
 	EnvNodeCaps     = "RYV_NODE_CAPS"
+	// EnvLegacyV7Caps is accepted only as a deprecated compatibility alias.
 	EnvLegacyV7Caps = "RYV_NODE_V7_CAPS"
 )
-
-type V7HeartbeatPayload = NodeHeartbeatPayload
-type BuildV7HeartbeatPayloadInput = BuildNodeHeartbeatPayloadInput
 
 type NodeHeartbeatPayload struct {
 	SchemaVersion             string                                `json:"schema_version"`
@@ -84,10 +82,6 @@ type SandboxPolicySummary struct {
 	AllowsTrustedCustomRunners        bool     `json:"allows_trusted_custom_runners"`
 }
 
-func V7HeartbeatEnabledFromEnv() bool {
-	return NodeCapsEnabledFromEnv()
-}
-
 func NodeCapsEnabledFromEnv() bool {
 	value := strings.TrimSpace(os.Getenv(EnvNodeCaps))
 	if value == "" {
@@ -99,10 +93,6 @@ func NodeCapsEnabledFromEnv() bool {
 	default:
 		return true
 	}
-}
-
-func BuildV7HeartbeatPayload(input BuildV7HeartbeatPayloadInput) (V7HeartbeatPayload, error) {
-	return BuildNodeHeartbeatPayload(input)
 }
 
 func BuildNodeHeartbeatPayload(input BuildNodeHeartbeatPayloadInput) (NodeHeartbeatPayload, error) {

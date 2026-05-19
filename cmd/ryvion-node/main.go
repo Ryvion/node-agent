@@ -173,13 +173,13 @@ func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 		}
 
 		_, err := client.Heartbeat(ctx, hub.Metrics{
-			TimestampMs:  time.Now().UnixMilli(),
-			CPUUtil:      metrics.CPUUtil,
-			MemUtil:      metrics.MemUtil,
-			GPUUtil:      metrics.GPUUtil,
-			PowerWatts:   metrics.PowerWatts,
-			GPUThrottled: throttled,
-			V7Heartbeat:  capsPayload,
+			TimestampMs:    time.Now().UnixMilli(),
+			CPUUtil:        metrics.CPUUtil,
+			MemUtil:        metrics.MemUtil,
+			GPUUtil:        metrics.GPUUtil,
+			PowerWatts:     metrics.PowerWatts,
+			GPUThrottled:   throttled,
+			NodeCapability: capsPayload,
 		})
 		if err != nil {
 			slog.Warn("heartbeat failed", "reason", reason, "error", err)
