@@ -38,7 +38,7 @@ func TestClientHeartbeatUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Heartbeat() error = %v", err)
 	}
-	if resp.NodeID != "node-gateway" || resp.HubInstanceID != "hub-gateway" || resp.V7SnapshotUpserted == nil || !*resp.V7SnapshotUpserted {
+	if resp.NodeID != "node-gateway" || resp.HubInstanceID != "hub-gateway" || resp.CapabilityProfileUpserted == nil || !*resp.CapabilityProfileUpserted {
 		t.Fatalf("unexpected heartbeat response: %#v", resp)
 	}
 	if fake.heartbeat == nil {
@@ -264,12 +264,12 @@ func (s *fakePersistentNodeGatewayServer) Connect(stream nodev1.NodeGateway_Conn
 				CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
 				Payload: &nodev1.HubToNode_HeartbeatAck{
 					HeartbeatAck: &nodev1.NodeHeartbeatAck{
-						Ok:                   true,
-						NodeId:               "node-reuse",
-						V7SnapshotUpserted:   true,
-						SnapshotModelCount:   1,
-						SnapshotBackendCount: 1,
-						HasCapabilityProfile: true,
+						Ok:                        true,
+						NodeId:                    "node-reuse",
+						CapabilityProfileUpserted: true,
+						ProfileRuntimeCount:       1,
+						ProfileBackendCount:       1,
+						HasCapabilityProfile:      true,
 					},
 				},
 			}); err != nil {
@@ -307,13 +307,13 @@ func (s *fakeNodeGatewayServer) Connect(stream nodev1.NodeGateway_ConnectServer)
 			CreatedAtUnixMs: msg.GetCreatedAtUnixMs(),
 			Payload: &nodev1.HubToNode_HeartbeatAck{
 				HeartbeatAck: &nodev1.NodeHeartbeatAck{
-					Ok:                   true,
-					NodeId:               "node-gateway",
-					V7SnapshotUpserted:   true,
-					SnapshotModelCount:   3,
-					SnapshotBackendCount: 2,
-					HasCapabilityProfile: true,
-					HubInstanceId:        "hub-gateway",
+					Ok:                        true,
+					NodeId:                    "node-gateway",
+					CapabilityProfileUpserted: true,
+					ProfileRuntimeCount:       3,
+					ProfileBackendCount:       2,
+					HasCapabilityProfile:      true,
+					HubInstanceId:             "hub-gateway",
 				},
 			},
 		})

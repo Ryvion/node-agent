@@ -145,20 +145,20 @@ func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatReq
 	if ack == nil {
 		return HeartbeatResponse{}, status.Error(codes.Internal, "heartbeat ack missing")
 	}
-	upserted := ack.GetV7SnapshotUpserted()
+	upserted := ack.GetCapabilityProfileUpserted()
 	return HeartbeatResponse{
-		LatestVersion:        ack.GetLatestVersion(),
-		NodeID:               ack.GetNodeId(),
-		CountryCode:          ack.GetCountryCode(),
-		LocationApproved:     ack.GetLocationApproved(),
-		SovereignVerified:    ack.GetSovereignVerified(),
-		VerificationSource:   ack.GetVerificationSource(),
-		TrustReason:          ack.GetTrustReason(),
-		V7SnapshotUpserted:   &upserted,
-		SnapshotModelCount:   int(ack.GetSnapshotModelCount()),
-		SnapshotBackendCount: int(ack.GetSnapshotBackendCount()),
-		HasCapabilityProfile: ack.GetHasCapabilityProfile(),
-		HubInstanceID:        ack.GetHubInstanceId(),
+		LatestVersion:             ack.GetLatestVersion(),
+		NodeID:                    ack.GetNodeId(),
+		CountryCode:               ack.GetCountryCode(),
+		LocationApproved:          ack.GetLocationApproved(),
+		SovereignVerified:         ack.GetSovereignVerified(),
+		VerificationSource:        ack.GetVerificationSource(),
+		TrustReason:               ack.GetTrustReason(),
+		CapabilityProfileUpserted: &upserted,
+		ProfileRuntimeCount:       int(ack.GetProfileRuntimeCount()),
+		ProfileBackendCount:       int(ack.GetProfileBackendCount()),
+		HasCapabilityProfile:      ack.GetHasCapabilityProfile(),
+		HubInstanceID:             ack.GetHubInstanceId(),
 	}, nil
 }
 
