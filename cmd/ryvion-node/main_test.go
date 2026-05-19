@@ -53,23 +53,21 @@ func TestParseConfigTypeFlagAlias(t *testing.T) {
 	}
 }
 
-func TestRuntimeHealthMissingDoesNotAdvertiseOCI(t *testing.T) {
-	t.Setenv("RYV_RUNTIME_BINARY", "/definitely/not/present")
-	t.Setenv("RYV_RUNTIME_BACKEND_BINARY", "/definitely/not/present")
-	t.Setenv("RYV_RUNTIME_ENGINE_BINARY", "/definitely/not/present")
-	t.Setenv("RYV_ALLOW_DOCKER_FALLBACK", "0")
-
-	snapshot := detectRuntimeHealth(hw.CapSet{})
-	if snapshot.OCIAvailable {
-		t.Fatal("OCIAvailable = true, want false when no runtime is present")
+func TestBuildHeartbeatPayloadDoesNotAdvertiseMissingOCI(t *testing.T) {
+	payload, err := buildNodeHeartbeatPayload("node-test", zeroCaps(), "cpu", "", runtimeHealthSnapshot{Health: "missing"})
+	if err != nil {
+		t.Fatalf("buildNodeHeartbeatPayload() error = %v", err)
 	}
-	if snapshot.Health != "missing" {
-		t.Fatalf("Health = %q, want missing", snapshot.Health)
+	runtimeProfile := payload.CapabilityPassport.RuntimeProfile
+	if runtimeProfile.OCIAvailable {
+		t.Fatal("OCIAvailable = true, want false for missing runtime")
 	}
-	if len(snapshot.SupportedRunnerKinds) != 0 {
-		t.Fatalf("SupportedRunnerKinds = %v, want empty", snapshot.SupportedRunnerKinds)
+	if len(runtimeProfile.SupportedRunnerKinds) != 0 {
+		t.Fatalf("SupportedRunnerKinds = %v, want empty", runtimeProfile.SupportedRunnerKinds)
 	}
 }
+
+func zeroCaps() hw.CapSet { return hw.CapSet{CPUCores: 1, RAMBytes: 1 << 30} }
 
 func withArgs(t *testing.T, args ...string) {
 	t.Helper()
