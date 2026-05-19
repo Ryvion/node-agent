@@ -134,7 +134,7 @@ func TestClientFetchWorkUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchWork() error = %v", err)
 	}
-	if work == nil || work.JobID != "job-gateway" || work.WorkGraphID != "wg-gateway" || !work.RuntimeRequirements.NeedsGPU {
+	if work == nil || work.JobID != "job-gateway" || work.WorkScopeID != "wg-gateway" || !work.RuntimeRequirements.NeedsGPU {
 		t.Fatalf("unexpected work assignment: %#v", work)
 	}
 	if fake.workLease == nil || fake.workLease.GetPublicKeyHex() != hex.EncodeToString(pub) || len(fake.signature.GetSignature()) == 0 {

@@ -216,7 +216,7 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	}
 	return &WorkAssignment{
 		JobID:               out.JobID,
-		WorkGraphID:         out.WorkGraphID,
+		WorkScopeID:         out.WorkScopeID,
 		JobPubkey:           out.JobPubkey,
 		Kind:                out.Kind,
 		PayloadURL:          out.PayloadURL,
@@ -229,21 +229,21 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	}, nil
 }
 
-func (c *Client) FetchWorkGraphAbort(ctx context.Context, workGraphID string) (*WorkGraphAbort, error) {
-	workGraphID = strings.TrimSpace(workGraphID)
-	if workGraphID == "" {
+func (c *Client) FetchAbortSignal(ctx context.Context, abortScopeID string) (*AbortSignal, error) {
+	abortScopeID = strings.TrimSpace(abortScopeID)
+	if abortScopeID == "" {
 		return nil, nil
 	}
 	ts := time.Now().UnixMilli()
 	pubHex := c.pubHex()
-	sig := c.sign("workgraph_abort", pubHex, workGraphID, strconv.FormatInt(ts, 10))
+	sig := c.sign("workgraph_abort", pubHex, abortScopeID, strconv.FormatInt(ts, 10))
 	u, err := url.Parse(c.absoluteURL("/api/v1/node/workgraph-aborts"))
 	if err != nil {
 		return nil, err
 	}
 	q := u.Query()
 	q.Set("pubkey", pubHex)
-	q.Set("workgraph_id", workGraphID)
+	q.Set("workgraph_id", abortScopeID)
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -263,14 +263,21 @@ func (c *Client) FetchWorkGraphAbort(ctx context.Context, workGraphID string) (*
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		return nil, fmt.Errorf("GET %s: %d %s", u.String(), resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	var out workGraphAbortResponse
+	var out abortSignalResponseWire
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
 	if !out.Aborted {
 		return nil, nil
 	}
-	return &out.Abort, nil
+	return &AbortSignal{
+		AbortScopeHash:  out.Abort.AbortScopeHash,
+		AbortEpoch:      out.Abort.AbortEpoch,
+		Reason:          out.Abort.Reason,
+		IssuedAt:        out.Abort.IssuedAt,
+		NoCreditAfter:   out.Abort.NoCreditAfter,
+		NoCreditAfterMs: out.Abort.NoCreditAfterMs,
+	}, nil
 }
 
 func (c *Client) SubmitReceipt(ctx context.Context, receipt Receipt) error {
@@ -663,7 +670,7 @@ type Metrics struct {
 
 type WorkAssignment struct {
 	JobID               string
-	WorkGraphID         string
+	WorkScopeID         string
 	JobPubkey           string
 	Kind                string
 	PayloadURL          string
@@ -675,13 +682,13 @@ type WorkAssignment struct {
 	RuntimeRequirements RuntimeRequirements
 }
 
-type WorkGraphAbort struct {
-	WorkGraphHash   string `json:"workgraph_hash"`
-	AbortEpoch      int64  `json:"abort_epoch"`
-	Reason          string `json:"reason"`
-	IssuedAt        string `json:"issued_at"`
-	NoCreditAfter   string `json:"no_credit_after"`
-	NoCreditAfterMs int64  `json:"no_credit_after_ms"`
+type AbortSignal struct {
+	AbortScopeHash  string
+	AbortEpoch      int64
+	Reason          string
+	IssuedAt        string
+	NoCreditAfter   string
+	NoCreditAfterMs int64
 }
 
 type RuntimeRequirements struct {
@@ -768,9 +775,10 @@ type heartbeatRequest struct {
 }
 
 type workResponse struct {
-	HasWork             *bool               `json:"has_work"`
-	JobID               string              `json:"job_id"`
-	WorkGraphID         string              `json:"workgraph_id"`
+	HasWork *bool  `json:"has_work"`
+	JobID   string `json:"job_id"`
+	// Deprecated wire field: the hub still sends workgraph_id as the active work lease scope.
+	WorkScopeID         string              `json:"workgraph_id"`
 	JobPubkey           string              `json:"job_pubkey"`
 	Kind                string              `json:"kind"`
 	PayloadURL          string              `json:"payload_url"`
@@ -782,11 +790,21 @@ type workResponse struct {
 	RuntimeRequirements RuntimeRequirements `json:"runtime_requirements"`
 }
 
-type workGraphAbortResponse struct {
-	SchemaVersion string         `json:"schema_version"`
-	Status        string         `json:"status"`
-	Aborted       bool           `json:"aborted"`
-	Abort         WorkGraphAbort `json:"abort"`
+type abortSignalResponseWire struct {
+	SchemaVersion string          `json:"schema_version"`
+	Status        string          `json:"status"`
+	Aborted       bool            `json:"aborted"`
+	Abort         abortSignalWire `json:"abort"`
+}
+
+type abortSignalWire struct {
+	// Deprecated wire field: workgraph_hash identifies the abort signal payload for this scope.
+	AbortScopeHash  string `json:"workgraph_hash"`
+	AbortEpoch      int64  `json:"abort_epoch"`
+	Reason          string `json:"reason"`
+	IssuedAt        string `json:"issued_at"`
+	NoCreditAfter   string `json:"no_credit_after"`
+	NoCreditAfterMs int64  `json:"no_credit_after_ms"`
 }
 
 type receiptRequest struct {

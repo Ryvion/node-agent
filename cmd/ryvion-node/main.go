@@ -375,8 +375,8 @@ func submitFailureReceipt(ctx context.Context, client *hub.Client, work *hub.Wor
 }
 
 func startAbortMonitor(ctx context.Context, client *hub.Client, work *hub.WorkAssignment, cancel context.CancelFunc) func() {
-	workGraphID := strings.TrimSpace(work.WorkGraphID)
-	if workGraphID == "" || client == nil || cancel == nil {
+	abortScopeID := strings.TrimSpace(work.WorkScopeID)
+	if abortScopeID == "" || client == nil || cancel == nil {
 		return func() {}
 	}
 	done := make(chan struct{})
@@ -389,13 +389,13 @@ func startAbortMonitor(ctx context.Context, client *hub.Client, work *hub.WorkAs
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				abort, err := client.FetchWorkGraphAbort(ctx, workGraphID)
+				abort, err := client.FetchAbortSignal(ctx, abortScopeID)
 				if err != nil {
-					slog.Debug("abort check failed", "workgraph_id", workGraphID, "error", err)
+					slog.Debug("abort signal check failed", "abort_scope_id", abortScopeID, "error", err)
 					continue
 				}
 				if abort != nil {
-					slog.Warn("abort requested", "workgraph_id", workGraphID, "reason", abort.Reason)
+					slog.Warn("abort signal received", "abort_scope_id", abortScopeID, "reason", abort.Reason)
 					cancel()
 					return
 				}
@@ -434,7 +434,8 @@ func receiptMetadataBase(work *hub.WorkAssignment, extras ...map[string]any) map
 	}
 	if work != nil {
 		metadata["job_id"] = work.JobID
-		metadata["workgraph_id"] = strings.TrimSpace(work.WorkGraphID)
+		// Compatibility receipt key; it carries the active work lease scope.
+		metadata["workgraph_id"] = strings.TrimSpace(work.WorkScopeID)
 		metadata["work_kind"] = strings.TrimSpace(work.Kind)
 		metadata["assurance_class"] = strings.TrimSpace(work.AssuranceClass)
 	}

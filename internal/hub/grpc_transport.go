@@ -205,8 +205,9 @@ func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts
 		return nil, fmt.Errorf("work assignment missing job_id")
 	}
 	return &WorkAssignment{
-		JobID:               assignment.GetJobId(),
-		WorkGraphID:         assignment.GetWorkgraphId(),
+		JobID: assignment.GetJobId(),
+		// Deprecated proto field: WorkgraphId carries the active work lease scope.
+		WorkScopeID:         assignment.GetWorkgraphId(),
 		JobPubkey:           assignment.GetJobPubkey(),
 		Kind:                assignment.GetKind(),
 		PayloadURL:          assignment.GetPayloadUrl(),
