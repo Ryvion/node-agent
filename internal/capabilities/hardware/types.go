@@ -1,6 +1,7 @@
 package hardware
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"time"
@@ -31,26 +32,26 @@ const (
 )
 
 type CapacityInventory struct {
-	OS                      string   `json:"os"`
-	Arch                    string   `json:"arch"`
-	CPUName                 string   `json:"cpu_name"`
-	CPULogicalCores         int      `json:"cpu_logical_cores"`
-	SystemRAMBytes          uint64   `json:"system_ram_bytes"`
-	AvailableRAMBytes       uint64   `json:"available_ram_bytes"`
-	GPUDetected             bool     `json:"gpu_detected"`
-	GPUVendor               string   `json:"gpu_vendor"`
-	GPUName                 string   `json:"gpu_name"`
-	GPUVRAMBytes            uint64   `json:"gpu_vram_bytes"`
-	UnifiedMemory           bool     `json:"unified_memory"`
-	MetalAvailable          bool     `json:"metal_available"`
-	CUDAAvailable           bool     `json:"cuda_available"`
-	VulkanAvailable         bool     `json:"vulkan_available"`
-	DirectMLAvailable       bool     `json:"directml_available"`
-	ComputeCapability       string   `json:"compute_capability,omitempty"`
-	AccelerationHints       []string `json:"acceleration_hints"`
-	DiskFreeBytesModelCache uint64   `json:"disk_free_bytes_model_cache"`
-	PowerProfile            string   `json:"power_profile"`
-	ThermalRisk             string   `json:"thermal_risk"`
+	OS                     string   `json:"os"`
+	Arch                   string   `json:"arch"`
+	CPUName                string   `json:"cpu_name"`
+	CPULogicalCores        int      `json:"cpu_logical_cores"`
+	SystemRAMBytes         uint64   `json:"system_ram_bytes"`
+	AvailableRAMBytes      uint64   `json:"available_ram_bytes"`
+	GPUDetected            bool     `json:"gpu_detected"`
+	GPUVendor              string   `json:"gpu_vendor"`
+	GPUName                string   `json:"gpu_name"`
+	GPUVRAMBytes           uint64   `json:"gpu_vram_bytes"`
+	UnifiedMemory          bool     `json:"unified_memory"`
+	MetalAvailable         bool     `json:"metal_available"`
+	CUDAAvailable          bool     `json:"cuda_available"`
+	VulkanAvailable        bool     `json:"vulkan_available"`
+	DirectMLAvailable      bool     `json:"directml_available"`
+	ComputeCapability      string   `json:"compute_capability,omitempty"`
+	AccelerationHints      []string `json:"acceleration_hints"`
+	DiskFreeBytesWorkCache uint64   `json:"disk_free_bytes_work_cache"`
+	PowerProfile           string   `json:"power_profile"`
+	ThermalRisk            string   `json:"thermal_risk"`
 }
 
 type CommandRunner func(name string, args []string, timeout time.Duration) ([]byte, error)
@@ -58,7 +59,7 @@ type CommandRunner func(name string, args []string, timeout time.Duration) ([]by
 type Detector struct {
 	GOOS            string
 	GOARCH          string
-	ModelCacheDir   string
+	WorkCacheDir    string
 	CommandTimeout  time.Duration
 	RunCommand      CommandRunner
 	LookPath        func(string) (string, error)
@@ -68,6 +69,37 @@ type Detector struct {
 	DiskFreeBytes   func(string) (uint64, error)
 	CPULogicalCores func() int
 	Getenv          func(string) string
+}
+
+type capacityInventoryAlias CapacityInventory
+
+func (inventory CapacityInventory) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		capacityInventoryAlias
+		LegacyDiskFreeBytesWorkCache uint64 `json:"disk_free_bytes_model_cache"`
+	}{
+		capacityInventoryAlias:       capacityInventoryAlias(inventory),
+		LegacyDiskFreeBytesWorkCache: inventory.DiskFreeBytesWorkCache,
+	})
+}
+
+func (inventory *CapacityInventory) UnmarshalJSON(data []byte) error {
+	var payload struct {
+		capacityInventoryAlias
+		DiskFreeBytesWorkCache       *uint64 `json:"disk_free_bytes_work_cache"`
+		LegacyDiskFreeBytesWorkCache *uint64 `json:"disk_free_bytes_model_cache"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	*inventory = CapacityInventory(payload.capacityInventoryAlias)
+	if payload.LegacyDiskFreeBytesWorkCache != nil {
+		inventory.DiskFreeBytesWorkCache = *payload.LegacyDiskFreeBytesWorkCache
+	}
+	if payload.DiskFreeBytesWorkCache != nil {
+		inventory.DiskFreeBytesWorkCache = *payload.DiskFreeBytesWorkCache
+	}
+	return nil
 }
 
 func NormalizeInventory(inventory CapacityInventory) CapacityInventory {

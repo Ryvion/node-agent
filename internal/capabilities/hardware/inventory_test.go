@@ -13,9 +13,9 @@ func TestBuildInventoryMockedDarwin(t *testing.T) {
 	t.Parallel()
 
 	detector := Detector{
-		GOOS:          "darwin",
-		GOARCH:        "arm64",
-		ModelCacheDir: "/Users/test/.ryvion/models",
+		GOOS:         "darwin",
+		GOARCH:       "arm64",
+		WorkCacheDir: "/Users/test/.ryvion/work-cache",
 		CPULogicalCores: func() int {
 			return 1
 		},
@@ -49,7 +49,7 @@ Graphics/Displays:
 			}
 		},
 		DiskFreeBytes: func(path string) (uint64, error) {
-			if path != "/Users/test/.ryvion/models" {
+			if path != "/Users/test/.ryvion/work-cache" {
 				t.Fatalf("disk path = %q", path)
 			}
 			return 99 * 1024 * 1024 * 1024, nil
@@ -78,8 +78,8 @@ Graphics/Displays:
 	if inventory.PowerProfile != PowerProfileLaptop || inventory.ThermalRisk != ThermalRiskUnknown {
 		t.Fatalf("power/thermal = %q/%q", inventory.PowerProfile, inventory.ThermalRisk)
 	}
-	if inventory.DiskFreeBytesModelCache != 99*1024*1024*1024 {
-		t.Fatalf("disk_free_bytes_model_cache = %d", inventory.DiskFreeBytesModelCache)
+	if inventory.DiskFreeBytesWorkCache != 99*1024*1024*1024 {
+		t.Fatalf("disk_free_bytes_work_cache = %d", inventory.DiskFreeBytesWorkCache)
 	}
 }
 
@@ -87,9 +87,9 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 	t.Parallel()
 
 	detector := Detector{
-		GOOS:          "windows",
-		GOARCH:        "amd64",
-		ModelCacheDir: `C:\ryvion\models`,
+		GOOS:         "windows",
+		GOARCH:       "amd64",
+		WorkCacheDir: `C:\ryvion\work-cache`,
 		CPULogicalCores: func() int {
 			return 24
 		},
@@ -115,7 +115,7 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 			}
 		},
 		DiskFreeBytes: func(path string) (uint64, error) {
-			if path != `C:\ryvion\models` {
+			if path != `C:\ryvion\work-cache` {
 				t.Fatalf("disk path = %q", path)
 			}
 			return 512 * 1024 * 1024 * 1024, nil
@@ -156,8 +156,43 @@ func TestBuildInventoryMockedWindows(t *testing.T) {
 	if inventory.PowerProfile != PowerProfileDesktop || inventory.ThermalRisk != ThermalRiskLow {
 		t.Fatalf("power/thermal = %q/%q", inventory.PowerProfile, inventory.ThermalRisk)
 	}
-	if inventory.DiskFreeBytesModelCache != 512*1024*1024*1024 {
-		t.Fatalf("disk_free_bytes_model_cache = %d", inventory.DiskFreeBytesModelCache)
+	if inventory.DiskFreeBytesWorkCache != 512*1024*1024*1024 {
+		t.Fatalf("disk_free_bytes_work_cache = %d", inventory.DiskFreeBytesWorkCache)
+	}
+}
+
+func TestCapacityInventoryJSONPublishesWorkCacheWithLegacyAlias(t *testing.T) {
+	t.Parallel()
+
+	inventory := CapacityInventory{DiskFreeBytesWorkCache: 42}
+	raw, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("json.Unmarshal(%s) error = %v", raw, err)
+	}
+	assertJSONUint64(t, fields, "disk_free_bytes_work_cache", 42, raw)
+	assertJSONUint64(t, fields, "disk_free_bytes_model_cache", 42, raw)
+}
+
+func TestCapacityInventoryJSONAcceptsLegacyWorkCacheAlias(t *testing.T) {
+	t.Parallel()
+
+	var inventory CapacityInventory
+	if err := json.Unmarshal([]byte(`{"disk_free_bytes_model_cache":99}`), &inventory); err != nil {
+		t.Fatalf("json.Unmarshal legacy alias error = %v", err)
+	}
+	if inventory.DiskFreeBytesWorkCache != 99 {
+		t.Fatalf("legacy alias disk bytes = %d, want 99", inventory.DiskFreeBytesWorkCache)
+	}
+
+	if err := json.Unmarshal([]byte(`{"disk_free_bytes_model_cache":99,"disk_free_bytes_work_cache":123}`), &inventory); err != nil {
+		t.Fatalf("json.Unmarshal canonical value error = %v", err)
+	}
+	if inventory.DiskFreeBytesWorkCache != 123 {
+		t.Fatalf("canonical disk bytes = %d, want 123", inventory.DiskFreeBytesWorkCache)
 	}
 }
 
@@ -313,3 +348,18 @@ func (f fakeHardwareFileInfo) Mode() os.FileMode  { return 0 }
 func (f fakeHardwareFileInfo) ModTime() time.Time { return time.Unix(1, 0) }
 func (f fakeHardwareFileInfo) IsDir() bool        { return false }
 func (f fakeHardwareFileInfo) Sys() any           { return nil }
+
+func assertJSONUint64(t *testing.T, fields map[string]json.RawMessage, key string, want uint64, raw []byte) {
+	t.Helper()
+	value, ok := fields[key]
+	if !ok {
+		t.Fatalf("%s missing in %s", key, raw)
+	}
+	var got uint64
+	if err := json.Unmarshal(value, &got); err != nil {
+		t.Fatalf("%s = %s, not a uint64: %v", key, value, err)
+	}
+	if got != want {
+		t.Fatalf("%s = %d, want %d in %s", key, got, want, raw)
+	}
+}
