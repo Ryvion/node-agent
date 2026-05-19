@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	SchemaVersionV1 = "render.node-heartbeat.v1"
+	SchemaVersionV1 = "ryvion.node-heartbeat.v1"
 	EnvNodeCaps     = "RYV_NODE_CAPS"
 	// EnvLegacyV7Caps is accepted only as a deprecated compatibility alias.
 	EnvLegacyV7Caps = "RYV_NODE_V7_CAPS"
@@ -116,8 +116,8 @@ func BuildNodeHeartbeatPayload(input BuildNodeHeartbeatPayloadInput) (NodeHeartb
 	}
 
 	runtimeProfile := input.RuntimeProfile
-	if len(runtimeProfile.SupportedRunnerKinds) == 0 {
-		runtimeProfile.SupportedRunnerKinds = []string{"oci"}
+	if len(runtimeProfile.SupportedRunnerKinds) == 0 && runtimeProfile.OCIAvailable {
+		runtimeProfile.SupportedRunnerKinds = []string{"managed_oci"}
 	}
 
 	hardwareCapacity := cloneHardwareCapacity(input.HardwareCapacity, firstNonEmpty(input.OS, goruntime.GOOS), firstNonEmpty(input.Arch, goruntime.GOARCH))

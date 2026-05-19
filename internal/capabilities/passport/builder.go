@@ -123,7 +123,7 @@ func defaultRenderWorkKinds(runtimeProfile RuntimeProfile) []string {
 	if !runtimeProfile.OCIAvailable {
 		return nil
 	}
-	return []string{"blender_render", "media_transcode"}
+	return []string{"custom_runtime"}
 }
 
 func cloneCleanStrings(values []string) []string {

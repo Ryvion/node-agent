@@ -24,8 +24,6 @@ func TestBuildCapabilityPassportFromFacts(t *testing.T) {
 		},
 		RuntimeProfile: RuntimeProfile{
 			OCIAvailable:         true,
-			BlenderAvailable:     true,
-			MediaToolsAvailable:  true,
 			SupportedRunnerKinds: []string{"managed_oci"},
 		},
 		RenderCapabilitySummary: RenderCapabilitySummary{
@@ -58,15 +56,14 @@ func TestBuildCapabilityPassportFromFacts(t *testing.T) {
 	if !passport.SandboxCapabilitySummary.NetworkIsolationSupported {
 		t.Fatal("OCI availability should advertise network isolation support")
 	}
-	if !containsString(passport.RenderCapabilitySummary.SupportedWorkKinds, "blender_render") ||
-		!containsString(passport.RenderCapabilitySummary.SupportedWorkKinds, "media_transcode") {
-		t.Fatalf("default work kinds = %v, want render and media kinds", passport.RenderCapabilitySummary.SupportedWorkKinds)
+	if !containsString(passport.RenderCapabilitySummary.SupportedWorkKinds, "custom_runtime") {
+		t.Fatalf("default work kinds = %v, want generic runtime kind", passport.RenderCapabilitySummary.SupportedWorkKinds)
 	}
 }
 
 func TestBuildCapabilityPassportClonesSlices(t *testing.T) {
 	runnerKinds := []string{"managed_oci"}
-	workKinds := []string{"blender_render"}
+	workKinds := []string{"custom_runtime"}
 
 	passport, err := BuildCapabilityPassport(BuildPassportInput{
 		AgentVersion: "dev",
@@ -89,12 +86,12 @@ func TestBuildCapabilityPassportClonesSlices(t *testing.T) {
 	}
 
 	runnerKinds[0] = "custom"
-	workKinds[0] = "media_transcode"
+	workKinds[0] = "native_report"
 
 	if got := passport.RuntimeProfile.SupportedRunnerKinds[0]; got != "managed_oci" {
 		t.Fatalf("runner kind mutated through input slice: %q", got)
 	}
-	if got := passport.RenderCapabilitySummary.SupportedWorkKinds[0]; got != "blender_render" {
+	if got := passport.RenderCapabilitySummary.SupportedWorkKinds[0]; got != "custom_runtime" {
 		t.Fatalf("work kind mutated through input slice: %q", got)
 	}
 }

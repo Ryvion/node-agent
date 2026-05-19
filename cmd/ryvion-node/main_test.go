@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"testing"
+
+	"github.com/Ryvion/ryvion-node/internal/hw"
 )
 
 func TestParseConfigUsesLegacyDeviceTypeEnv(t *testing.T) {
@@ -48,6 +50,24 @@ func TestParseConfigTypeFlagAlias(t *testing.T) {
 	cfg := parseConfig()
 	if cfg.Device != "gpu" {
 		t.Fatalf("Device = %q, want deprecated -type alias", cfg.Device)
+	}
+}
+
+func TestRuntimeHealthMissingDoesNotAdvertiseOCI(t *testing.T) {
+	t.Setenv("RYV_RUNTIME_BINARY", "/definitely/not/present")
+	t.Setenv("RYV_RUNTIME_BACKEND_BINARY", "/definitely/not/present")
+	t.Setenv("RYV_RUNTIME_ENGINE_BINARY", "/definitely/not/present")
+	t.Setenv("RYV_ALLOW_DOCKER_FALLBACK", "0")
+
+	snapshot := detectRuntimeHealth(hw.CapSet{})
+	if snapshot.OCIAvailable {
+		t.Fatal("OCIAvailable = true, want false when no runtime is present")
+	}
+	if snapshot.Health != "missing" {
+		t.Fatalf("Health = %q, want missing", snapshot.Health)
+	}
+	if len(snapshot.SupportedRunnerKinds) != 0 {
+		t.Fatalf("SupportedRunnerKinds = %v, want empty", snapshot.SupportedRunnerKinds)
 	}
 }
 

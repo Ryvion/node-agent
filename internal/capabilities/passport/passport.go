@@ -1,6 +1,6 @@
 package capability
 
-const SchemaVersionV1 = "render.capability-passport.v1"
+const SchemaVersionV1 = "ryvion.capability-passport.v1"
 
 type CapabilityPassport struct {
 	SchemaVersion             string                    `json:"schema_version"`

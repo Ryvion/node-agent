@@ -24,6 +24,7 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hw"
 	"github.com/Ryvion/ryvion-node/internal/nodekey"
 	"github.com/Ryvion/ryvion-node/internal/runner"
+	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 	"github.com/Ryvion/ryvion-node/internal/sandbox"
 )
 
@@ -51,6 +52,16 @@ type nodeConfig struct {
 	MaxGPUUtil   float64
 	BindToken    string
 	HeartbeatDur time.Duration
+}
+
+type runtimeHealthSnapshot struct {
+	OCIAvailable         bool
+	GPUReady             bool
+	ManagedOCIGPUReady   bool
+	SupportedRunnerKinds []string
+	EngineKind           string
+	Health               string
+	Message              string
 }
 
 func main() {
@@ -159,17 +170,26 @@ func registerWithRetry(ctx context.Context, client *hub.Client, caps hw.CapSet, 
 func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, deviceType string, cfg nodeConfig) {
 	send := func(reason string) {
 		metrics := hw.SampleMetrics()
+		runtimeHealth := detectRuntimeHealth(caps)
 		cachedGPUUtil.Store(math.Float64bits(metrics.GPUUtil))
 		throttled := cfg.MaxGPUUtil > 0 && cfg.MaxGPUUtil < 100 && metrics.GPUUtil > cfg.MaxGPUUtil
 
 		var capsPayload *heartbeat.NodeHeartbeatPayload
 		if heartbeat.NodeCapsEnabledFromEnv() {
-			payload, err := buildNodeHeartbeatPayload(client.PublicKeyHex(), caps, deviceType, cfg.Country)
+			payload, err := buildNodeHeartbeatPayload(client.PublicKeyHex(), caps, deviceType, cfg.Country, runtimeHealth)
 			if err != nil {
 				slog.Warn("capability payload skipped", "error", err)
 			} else {
 				capsPayload = &payload
 			}
+		}
+
+		if err := client.SendHealthReport(ctx, hub.HealthReport{
+			GPUReady:   runtimeHealth.GPUReady,
+			RuntimeGPU: runtimeHealth.ManagedOCIGPUReady,
+			Message:    runtimeHealth.Message,
+		}); err != nil {
+			slog.Debug("health report failed", "reason", reason, "error", err)
 		}
 
 		_, err := client.Heartbeat(ctx, hub.Metrics{
@@ -201,7 +221,7 @@ func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 	}
 }
 
-func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, country string) (heartbeat.NodeHeartbeatPayload, error) {
+func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, country string, runtimeHealth runtimeHealthSnapshot) (heartbeat.NodeHeartbeatPayload, error) {
 	policy := sandbox.DefaultSandboxPolicy()
 	return heartbeat.BuildNodeHeartbeatPayload(heartbeat.BuildNodeHeartbeatPayloadInput{
 		AgentVersion:         version,
@@ -212,11 +232,11 @@ func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType 
 		DeclaredCountry:      country,
 		HardwareCapabilities: caps,
 		RuntimeProfile: capability.RuntimeProfile{
-			OCIAvailable:         true,
-			SupportedRunnerKinds: []string{"oci"},
+			OCIAvailable:         runtimeHealth.OCIAvailable,
+			SupportedRunnerKinds: runtimeHealth.SupportedRunnerKinds,
 		},
 		RenderCapabilitySummary: capability.RenderCapabilitySummary{
-			SupportsManagedOCI:     true,
+			SupportsManagedOCI:     runtimeHealth.OCIAvailable,
 			SupportsArtifactUpload: true,
 		},
 		SandboxCapabilitySummary: capability.SandboxCapabilitySummary{
@@ -232,6 +252,47 @@ func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType 
 			SupportsRuntimeHash:         false,
 		},
 	})
+}
+
+func detectRuntimeHealth(caps hw.CapSet) runtimeHealthSnapshot {
+	gpuReady := strings.TrimSpace(caps.GPUModel) != "" || caps.VRAMBytes > 0
+	snapshot := runtimeHealthSnapshot{
+		GPUReady: gpuReady,
+		Health:   "missing",
+	}
+	executor, err := runtimeexec.ResolveExecutor(runtime.GOOS, os.Getenv)
+	if err == nil {
+		snapshot.OCIAvailable = true
+		snapshot.EngineKind = runtimeexec.EngineKind(executor.BinaryPath)
+		if snapshot.EngineKind == "" {
+			snapshot.EngineKind = runtimeexec.EngineKind(executor.Command)
+		}
+		snapshot.Health = "ready"
+		snapshot.SupportedRunnerKinds = []string{"managed_oci"}
+	}
+	snapshot.ManagedOCIGPUReady = snapshot.OCIAvailable && gpuReady
+	snapshot.Message = runtimeHealthMessage(snapshot)
+	return snapshot
+}
+
+func runtimeHealthMessage(snapshot runtimeHealthSnapshot) string {
+	tokens := []string{
+		"runtime-ready:" + boolToken(snapshot.OCIAvailable),
+		"runtime-health:" + firstNonEmpty(snapshot.Health, "missing"),
+		"cap:managed_oci_cpu:" + boolToken(snapshot.OCIAvailable),
+		"cap:managed_oci_gpu:" + boolToken(snapshot.ManagedOCIGPUReady),
+	}
+	if strings.TrimSpace(snapshot.EngineKind) != "" {
+		tokens = append(tokens, "runtime-source:"+strings.TrimSpace(snapshot.EngineKind))
+	}
+	return strings.Join(tokens, ",")
+}
+
+func boolToken(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
 }
 
 func workLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, cfg nodeConfig) {
@@ -434,7 +495,8 @@ func receiptMetadataBase(work *hub.WorkAssignment, extras ...map[string]any) map
 	}
 	if work != nil {
 		metadata["job_id"] = work.JobID
-		// Compatibility receipt key; it carries the active work lease scope.
+		metadata["abort_scope_id"] = strings.TrimSpace(work.WorkScopeID)
+		// Compatibility receipt key; it carries the same active work lease scope.
 		metadata["workgraph_id"] = strings.TrimSpace(work.WorkScopeID)
 		metadata["work_kind"] = strings.TrimSpace(work.Kind)
 		metadata["assurance_class"] = strings.TrimSpace(work.AssuranceClass)

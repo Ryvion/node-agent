@@ -214,9 +214,10 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 	if strings.TrimSpace(out.JobID) == "" {
 		return nil, fmt.Errorf("work assignment missing job_id")
 	}
+	workScopeID := firstNonEmpty(out.AbortScopeID, out.WorkScopeID)
 	return &WorkAssignment{
 		JobID:               out.JobID,
-		WorkScopeID:         out.WorkScopeID,
+		WorkScopeID:         workScopeID,
 		JobPubkey:           out.JobPubkey,
 		Kind:                out.Kind,
 		PayloadURL:          out.PayloadURL,
@@ -243,6 +244,7 @@ func (c *Client) FetchAbortSignal(ctx context.Context, abortScopeID string) (*Ab
 	}
 	q := u.Query()
 	q.Set("pubkey", pubHex)
+	q.Set("abort_scope_id", abortScopeID)
 	q.Set("workgraph_id", abortScopeID)
 	u.RawQuery = q.Encode()
 
@@ -271,7 +273,7 @@ func (c *Client) FetchAbortSignal(ctx context.Context, abortScopeID string) (*Ab
 		return nil, nil
 	}
 	return &AbortSignal{
-		AbortScopeHash:  out.Abort.AbortScopeHash,
+		AbortScopeHash:  firstNonEmpty(out.Abort.AbortScopeHash, out.Abort.WorkgraphHash),
 		AbortEpoch:      out.Abort.AbortEpoch,
 		Reason:          out.Abort.Reason,
 		IssuedAt:        out.Abort.IssuedAt,
@@ -643,6 +645,15 @@ func boolAsInt(v bool) string {
 	return "0"
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 type Capabilities struct {
 	GPUModel          string
 	CPUModel          string
@@ -777,6 +788,8 @@ type heartbeatRequest struct {
 type workResponse struct {
 	HasWork *bool  `json:"has_work"`
 	JobID   string `json:"job_id"`
+	// abort_scope_id is the canonical active work lease scope.
+	AbortScopeID string `json:"abort_scope_id"`
 	// Deprecated wire field: the hub still sends workgraph_id as the active work lease scope.
 	WorkScopeID         string              `json:"workgraph_id"`
 	JobPubkey           string              `json:"job_pubkey"`
@@ -798,8 +811,9 @@ type abortSignalResponseWire struct {
 }
 
 type abortSignalWire struct {
+	AbortScopeHash string `json:"abort_scope_hash"`
 	// Deprecated wire field: workgraph_hash identifies the abort signal payload for this scope.
-	AbortScopeHash  string `json:"workgraph_hash"`
+	WorkgraphHash   string `json:"workgraph_hash"`
 	AbortEpoch      int64  `json:"abort_epoch"`
 	Reason          string `json:"reason"`
 	IssuedAt        string `json:"issued_at"`
