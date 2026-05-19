@@ -300,207 +300,6 @@ func (c *Client) SubmitReceipt(ctx context.Context, receipt Receipt) error {
 	return c.post(ctx, "/api/v1/node/receipt", body, nil)
 }
 
-func (c *Client) SubmitSpeculativeDraftPacket(ctx context.Context, windowID string, packet map[string]any) (DraftPacketDecision, error) {
-	windowID = strings.TrimSpace(windowID)
-	if windowID == "" {
-		return DraftPacketDecision{}, fmt.Errorf("window_id required")
-	}
-	if len(packet) == 0 {
-		return DraftPacketDecision{}, fmt.Errorf("draft packet required")
-	}
-	if c.useGRPCTransport() {
-		if batch, err := c.submitDraftPacketBatchGRPC(ctx, windowID, []map[string]any{packet}); err == nil {
-			if len(batch.Decisions) > 0 {
-				return batch.Decisions[0], nil
-			}
-			return DraftPacketDecision{
-				SchemaVersion: batch.SchemaVersion,
-				WindowID:      batch.WindowID,
-				Accepted:      batch.Accepted > 0,
-				Reason:        "accepted",
-			}, nil
-		} else if !c.shouldFallbackGRPC(err) {
-			return DraftPacketDecision{}, err
-		}
-	}
-	headers := map[string]string{
-		"X-Node-Token": c.NodeAuthToken(0),
-	}
-	if c.adminKey != "" {
-		headers["X-Admin-Key"] = c.adminKey
-	}
-	var out DraftPacketDecision
-	err := c.postWithHeaders(ctx, "/api/v1/speculative/windows/"+url.PathEscape(windowID)+"/draft-packets", packet, &out, headers)
-	return out, err
-}
-
-func (c *Client) SubmitSpeculativeDraftPacketBatch(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
-	windowID = strings.TrimSpace(windowID)
-	if windowID == "" {
-		return DraftPacketBatchDecision{}, fmt.Errorf("window_id required")
-	}
-	if len(packets) == 0 {
-		return DraftPacketBatchDecision{}, fmt.Errorf("draft packets required")
-	}
-	if c.useGRPCTransport() {
-		if out, err := c.submitDraftPacketBatchGRPC(ctx, windowID, packets); err == nil || !c.shouldFallbackGRPC(err) {
-			return out, err
-		}
-	}
-	headers := map[string]string{
-		"X-Node-Token": c.NodeAuthToken(0),
-	}
-	if c.adminKey != "" {
-		headers["X-Admin-Key"] = c.adminKey
-	}
-	var out DraftPacketBatchDecision
-	err := c.postWithHeaders(ctx, "/api/v1/speculative/windows/"+url.PathEscape(windowID)+"/draft-packets/batch", map[string]any{"packets": packets}, &out, headers)
-	return out, err
-}
-
-type SpeculativeLiveLabSessionCommand struct {
-	SchemaVersion       string         `json:"schema_version"`
-	Command             string         `json:"command"`
-	CommandID           string         `json:"command_id,omitempty"`
-	Role                string         `json:"role,omitempty"`
-	RunID               string         `json:"run_id,omitempty"`
-	JobID               string         `json:"job_id,omitempty"`
-	WorkGraphID         string         `json:"workgraph_id,omitempty"`
-	SessionID           string         `json:"session_id,omitempty"`
-	WindowID            string         `json:"window_id,omitempty"`
-	WaveIndex           int            `json:"wave_index,omitempty"`
-	RoleID              string         `json:"role_id,omitempty"`
-	TargetNodeID        string         `json:"target_node_id,omitempty"`
-	NodeID              string         `json:"node_id,omitempty"`
-	Prompt              string         `json:"prompt,omitempty"`
-	ParentPrefixHash    string         `json:"parent_prefix_hash,omitempty"`
-	BranchCount         int            `json:"branch_count,omitempty"`
-	Horizon             int            `json:"horizon,omitempty"`
-	DeadlineMs          int            `json:"deadline_ms,omitempty"`
-	FirstPacketTimeout  int            `json:"first_packet_timeout_ms,omitempty"`
-	ModelHash           string         `json:"model_hash,omitempty"`
-	DrafterModelID      string         `json:"drafter_model_id,omitempty"`
-	AcceptedTokensTotal int            `json:"accepted_tokens_total,omitempty"`
-	Reason              string         `json:"reason,omitempty"`
-	Tree                map[string]any `json:"tree,omitempty"`
-}
-
-type SpeculativeLiveLabVerifierResult struct {
-	JobID              string         `json:"job_id"`
-	WindowID           string         `json:"window_id"`
-	WaveIndex          int            `json:"wave_index"`
-	AcceptedLen        int            `json:"accepted_len"`
-	TreeCID            string         `json:"tree_cid,omitempty"`
-	DurationMs         int64          `json:"duration_ms,omitempty"`
-	AcceptedText       string         `json:"accepted_text,omitempty"`
-	AcceptedTextHash   string         `json:"accepted_text_hash,omitempty"`
-	AcceptedTextPublic bool           `json:"accepted_text_public,omitempty"`
-	EOS                bool           `json:"eos,omitempty"`
-	StopReason         string         `json:"stop_reason,omitempty"`
-	ProbeSummary       map[string]any `json:"probe_summary,omitempty"`
-}
-
-func (c *Client) FetchSpeculativeLiveLabDraftCommand(ctx context.Context, runID string, jobID string) (SpeculativeLiveLabSessionCommand, error) {
-	return c.fetchSpeculativeLiveLabSessionCommand(ctx, runID, jobID, "draft-command")
-}
-
-func (c *Client) FetchSpeculativeLiveLabVerifierCommand(ctx context.Context, runID string, jobID string) (SpeculativeLiveLabSessionCommand, error) {
-	return c.fetchSpeculativeLiveLabSessionCommand(ctx, runID, jobID, "verifier-command")
-}
-
-func (c *Client) fetchSpeculativeLiveLabSessionCommand(ctx context.Context, runID string, jobID string, commandPath string) (SpeculativeLiveLabSessionCommand, error) {
-	runID = strings.TrimSpace(runID)
-	if runID == "" {
-		return SpeculativeLiveLabSessionCommand{}, fmt.Errorf("run_id required")
-	}
-	if c.useGRPCTransport() {
-		role := "target_verifier"
-		if commandPath == "draft-command" {
-			role = "draft_worker"
-		}
-		if out, err := c.fetchSpeculativeLiveLabSessionCommandGRPC(ctx, runID, jobID, role); err == nil || !c.shouldFallbackGRPC(err) {
-			return out, err
-		}
-	}
-	u := "/api/v1/node/speculative/live-lab/runs/" + url.PathEscape(runID) + "/" + commandPath
-	if strings.TrimSpace(jobID) != "" {
-		u += "?job_id=" + url.QueryEscape(strings.TrimSpace(jobID))
-	}
-	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
-	var out SpeculativeLiveLabSessionCommand
-	if err := c.getWithHeaders(ctx, u, &out, headers); err != nil {
-		return SpeculativeLiveLabSessionCommand{}, err
-	}
-	return out, nil
-}
-
-func (c *Client) SubmitSpeculativeLiveLabVerifierResult(ctx context.Context, runID string, result SpeculativeLiveLabVerifierResult) error {
-	runID = strings.TrimSpace(runID)
-	if runID == "" {
-		return fmt.Errorf("run_id required")
-	}
-	result = sanitizeSpeculativeLiveLabVerifierResult(result)
-	if c.useGRPCTransport() {
-		if err := c.submitSpeculativeLiveLabVerifierResultGRPC(ctx, runID, result); err == nil || !c.shouldFallbackGRPC(err) {
-			return err
-		}
-	}
-	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
-	return c.postWithHeaders(ctx, "/api/v1/node/speculative/live-lab/runs/"+url.PathEscape(runID)+"/verifier-results", result, nil, headers)
-}
-
-func sanitizeSpeculativeLiveLabVerifierResult(result SpeculativeLiveLabVerifierResult) SpeculativeLiveLabVerifierResult {
-	if strings.TrimSpace(result.AcceptedText) != "" && strings.TrimSpace(result.AcceptedTextHash) == "" {
-		sum := sha256.Sum256([]byte(result.AcceptedText))
-		result.AcceptedTextHash = "sha256:" + hex.EncodeToString(sum[:])
-	}
-	result.AcceptedText = ""
-	return result
-}
-
-func (c *Client) SavePayout(ctx context.Context, stripeConnectID, currency string) error {
-	stripeConnectID = strings.TrimSpace(stripeConnectID)
-	if stripeConnectID == "" {
-		return fmt.Errorf("stripe_connect_id required")
-	}
-	if currency = strings.TrimSpace(currency); currency == "" {
-		currency = "CAD"
-	}
-	ts := time.Now().UnixMilli()
-	pubHex := c.pubHex()
-	body := payoutRequest{
-		PublicKeyHex:    pubHex,
-		StripeConnectID: stripeConnectID,
-		Currency:        strings.ToUpper(currency),
-		TimestampMs:     ts,
-	}
-	body.Signature = c.sign("payout", pubHex, stripeConnectID, strconv.FormatInt(ts, 10))
-	return c.post(ctx, "/api/v1/node/payout/save", body, nil)
-}
-
-// ReportAgentHealth sends a signed health check for a running agent deployment.
-func (c *Client) ReportAgentHealth(ctx context.Context, deploymentID string, uptimeSeconds int) (AgentHealthResponse, error) {
-	deploymentID = strings.TrimSpace(deploymentID)
-	if deploymentID == "" {
-		return AgentHealthResponse{}, fmt.Errorf("deployment_id required")
-	}
-	status := "healthy"
-	ts := time.Now().UnixMilli()
-	pubHex := c.pubHex()
-	body := agentHealthRequest{
-		PublicKeyHex:  pubHex,
-		TimestampMs:   ts,
-		Status:        status,
-		UptimeSeconds: uptimeSeconds,
-		Signature:     c.sign("agent_health", pubHex, deploymentID, strconv.FormatInt(ts, 10), strconv.Itoa(uptimeSeconds), status),
-	}
-	var out AgentHealthResponse
-	if err := c.post(ctx, "/api/v1/node/agent-health/"+deploymentID, body, &out); err != nil {
-		return AgentHealthResponse{}, err
-	}
-	return out, nil
-}
-
 func (c *Client) SolveChallenge(ctx context.Context) error {
 	var reqResp challengeResponse
 	if err := c.post(ctx, "/api/v1/node/challenge/request", challengeRequest{PublicKeyHex: c.pubHex()}, &reqResp); err != nil {
@@ -600,13 +399,6 @@ func (c *Client) NodeAuthToken(tsMs int64) string {
 	return c.pubHex() + ":" + tsStr + ":" + base64.StdEncoding.EncodeToString(sig)
 }
 
-func (c *Client) NodeModelSnapshotURL(modelID string) string {
-	if c == nil || strings.TrimSpace(modelID) == "" {
-		return ""
-	}
-	return c.absoluteURL("/api/v1/node/models/" + url.PathEscape(strings.TrimSpace(modelID)) + "/snapshot.tar.gz")
-}
-
 func (c *Client) PublicKeyHex() string {
 	return c.pubHex()
 }
@@ -700,59 +492,6 @@ func (c *Client) RedeemClaimCode(ctx context.Context, code string) error {
 	return c.postWithHeaders(ctx, "/api/v1/node/claim", body, nil, headers)
 }
 
-func (c *Client) CreateConnectAccount(ctx context.Context, email, country string) (string, error) {
-	email = strings.TrimSpace(email)
-	if email == "" {
-		return "", fmt.Errorf("email required")
-	}
-	country = strings.ToUpper(strings.TrimSpace(country))
-	if country == "" {
-		return "", fmt.Errorf("country required")
-	}
-	var out connectCreateResponse
-	if err := c.postWithHeaders(ctx, "/api/v1/node/connect/create", map[string]string{
-		"email":   email,
-		"country": country,
-	}, &out, map[string]string{"X-Node-Token": c.NodeAuthToken(0)}); err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(out.AccountID) == "" {
-		return "", fmt.Errorf("connect account response missing account_id")
-	}
-	return out.AccountID, nil
-}
-
-func (c *Client) ConnectOnboardingLink(ctx context.Context, accountID string) (string, error) {
-	accountID = strings.TrimSpace(accountID)
-	if accountID == "" {
-		return "", fmt.Errorf("account_id required")
-	}
-	var out connectOnboardingResponse
-	if err := c.postWithHeaders(ctx, "/api/v1/node/connect/onboarding-link", map[string]string{
-		"account_id": accountID,
-	}, &out, map[string]string{"X-Node-Token": c.NodeAuthToken(0)}); err != nil {
-		return "", err
-	}
-	if strings.TrimSpace(out.URL) == "" {
-		return "", fmt.Errorf("onboarding link response missing url")
-	}
-	return out.URL, nil
-}
-
-func (c *Client) ConnectStatus(ctx context.Context, accountID string) (bool, error) {
-	accountID = strings.TrimSpace(accountID)
-	if accountID == "" {
-		return false, fmt.Errorf("account_id required")
-	}
-	var out connectStatusResponse
-	if err := c.getWithHeaders(ctx, "/api/v1/node/connect/status?account_id="+url.QueryEscape(accountID), &out, map[string]string{
-		"X-Node-Token": c.NodeAuthToken(0),
-	}); err != nil {
-		return false, err
-	}
-	return out.Onboarded, nil
-}
-
 func (c *Client) AbsoluteURL(u string) string {
 	return c.absoluteURL(u)
 }
@@ -765,42 +504,6 @@ func (c *Client) BlobUploadHeaders(jobID string, size int64, tsMs int64) map[str
 		"X-Node-Timestamp": tsStr,
 		"X-Node-Signature": hex.EncodeToString(sig),
 	}
-}
-
-func (c *Client) StreamInference(ctx context.Context, jobID string, body io.Reader) error {
-	jobID = strings.TrimSpace(jobID)
-	if jobID == "" {
-		return fmt.Errorf("job_id required")
-	}
-	ts := time.Now().UnixMilli()
-	pubHex := c.pubHex()
-	tsStr := strconv.FormatInt(ts, 10)
-	sig := c.sign("stream", jobID, pubHex, tsStr)
-
-	path := "/api/v1/node/inference/stream/" + jobID
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.absoluteURL(path), body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "text/event-stream")
-	req.Header.Set("Transfer-Encoding", "chunked")
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("X-Node-Pubkey", pubHex)
-	req.Header.Set("X-Node-Timestamp", tsStr)
-	req.Header.Set("X-Node-Signature", hex.EncodeToString(sig))
-
-	// Send stream with no strict timeout so it can handle huge long-running models
-	streamClient := &http.Client{}
-	resp, err := streamClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("stream inference: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("stream inference %s: %d %s", path, resp.StatusCode, strings.TrimSpace(string(rb)))
-	}
-	return nil
 }
 
 func (c *Client) SignDigest(digest []byte) []byte {
@@ -983,18 +686,14 @@ type WorkGraphAbort struct {
 }
 
 type RuntimeRequirements struct {
-	NeedsGPU             bool     `json:"needs_gpu,omitempty"`
-	NeedsManagedOCI      bool     `json:"needs_managed_oci,omitempty"`
-	NeedsManagedOCIGPU   bool     `json:"needs_managed_oci_gpu,omitempty"`
-	NeedsRyvionRuntime   bool     `json:"needs_ryvion_runtime,omitempty"`
-	NeedsNativeStreaming bool     `json:"needs_native_streaming,omitempty"`
-	NeedsNativeReport    bool     `json:"needs_native_report,omitempty"`
-	NeedsAgentHosting    bool     `json:"needs_agent_hosting,omitempty"`
-	Tooling              []string `json:"tooling,omitempty"`
-	MinDiskGB            uint64   `json:"min_disk_gb,omitempty"`
-	MinVRAMMB            uint32   `json:"min_vram_mb,omitempty"`
-	Jurisdiction         string   `json:"jurisdiction,omitempty"`
-	TrustLevel           string   `json:"trust_level,omitempty"`
+	NeedsGPU           bool     `json:"needs_gpu,omitempty"`
+	NeedsManagedOCI    bool     `json:"needs_managed_oci,omitempty"`
+	NeedsManagedOCIGPU bool     `json:"needs_managed_oci_gpu,omitempty"`
+	Tooling            []string `json:"tooling,omitempty"`
+	MinDiskGB          uint64   `json:"min_disk_gb,omitempty"`
+	MinVRAMMB          uint32   `json:"min_vram_mb,omitempty"`
+	Jurisdiction       string   `json:"jurisdiction,omitempty"`
+	TrustLevel         string   `json:"trust_level,omitempty"`
 }
 
 type Receipt struct {
@@ -1004,35 +703,11 @@ type Receipt struct {
 	Metadata      map[string]any
 }
 
-type DraftPacketDecision struct {
-	SchemaVersion string `json:"schema_version"`
-	WindowID      string `json:"window_id"`
-	Accepted      bool   `json:"accepted"`
-	Reason        string `json:"reason"`
-	PacketID      string `json:"packet_id"`
-}
-
-type DraftPacketBatchDecision struct {
-	SchemaVersion string                `json:"schema_version"`
-	WindowID      string                `json:"window_id"`
-	Attempted     int                   `json:"attempted"`
-	Accepted      int                   `json:"accepted"`
-	Rejected      int                   `json:"rejected"`
-	Decisions     []DraftPacketDecision `json:"decisions"`
-}
-
 type HealthReport struct {
 	TimestampMs int64
 	GPUReady    bool
 	RuntimeGPU  bool
 	Message     string
-}
-
-type AgentHealthResponse struct {
-	OK         bool   `json:"ok"`
-	ShouldStop bool   `json:"should_stop"`
-	Status     string `json:"status"`
-	JobStatus  string `json:"job_status"`
 }
 
 type HeartbeatResponse struct {
@@ -1123,14 +798,6 @@ type receiptRequest struct {
 	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
-type payoutRequest struct {
-	PublicKeyHex    string `json:"public_key_hex"`
-	StripeConnectID string `json:"stripe_connect_id"`
-	Currency        string `json:"currency"`
-	TimestampMs     int64  `json:"timestamp_ms"`
-	Signature       []byte `json:"signature"`
-}
-
 type challengeResponse struct {
 	Nonce     string `json:"nonce"`
 	ExpiresMs int64  `json:"expires_ms"`
@@ -1155,14 +822,6 @@ type healthRequest struct {
 	Signature    []byte `json:"signature"`
 }
 
-type agentHealthRequest struct {
-	PublicKeyHex  string `json:"public_key_hex"`
-	TimestampMs   int64  `json:"timestamp_ms"`
-	Status        string `json:"status"`
-	UptimeSeconds int    `json:"uptime_seconds"`
-	Signature     []byte `json:"signature"`
-}
-
 type uploadPrepareRequest struct {
 	Pubkey      []byte `json:"pubkey"`
 	JobID       string `json:"job_id"`
@@ -1181,17 +840,4 @@ type blobPresignResponse struct {
 	OK        bool   `json:"ok"`
 	URL       string `json:"url"`
 	ExpiresAt string `json:"expires_at"`
-}
-
-type connectCreateResponse struct {
-	AccountID string `json:"account_id"`
-}
-
-type connectOnboardingResponse struct {
-	URL string `json:"url"`
-}
-
-type connectStatusResponse struct {
-	AccountID string `json:"account_id"`
-	Onboarded bool   `json:"onboarded"`
 }

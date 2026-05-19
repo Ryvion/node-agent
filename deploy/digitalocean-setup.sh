@@ -1,6 +1,6 @@
 set -e
 
-echo "Ryvion DePIN Node Agent - DigitalOcean Setup"
+echo "Ryvion Render Node Agent - DigitalOcean Setup"
 echo "=============================================="
 
 echo "Updating system packages..."
@@ -76,7 +76,7 @@ EOF
 
 cat > /etc/systemd/system/ryvion-node.service << 'EOF'
 [Unit]
-Description=Ryvion DePIN Node Agent
+Description=Ryvion Render Node Agent
 Requires=docker.service
 After=docker.service
 
@@ -115,4 +115,4 @@ echo ""
 echo "Droplet Requirements:"
 echo "- Minimum: 2GB RAM, 1 vCPU"
 echo "- Recommended: 4GB RAM, 2 vCPU"
-echo "- For AI workloads: 8GB+ RAM"
+echo "- For GPU render workloads: GPU droplet plus NVIDIA Container Toolkit"

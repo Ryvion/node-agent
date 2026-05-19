@@ -362,16 +362,6 @@ func TestStress_ServerErrorHandling(t *testing.T) {
 		}
 	})
 
-	// SavePayout should return error, not panic
-	t.Run("payout_500", func(t *testing.T) {
-		err := c.SavePayout(ctx, "acct_test123", "USD")
-		if err == nil {
-			t.Fatal("expected error from SavePayout with 500 server, got nil")
-		}
-		if !strings.Contains(err.Error(), "500") {
-			t.Errorf("expected error to contain 500, got: %v", err)
-		}
-	})
 }
 
 // ---------------------------------------------------------------------------

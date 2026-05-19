@@ -1,4 +1,4 @@
-# Ryvion DePIN Node Agent - DigitalOcean Deployment
+# Ryvion Render Node Agent - DigitalOcean Deployment
 
 ## Quick Start
 
@@ -53,10 +53,10 @@ docker exec ryvion-node pgrep ryvion-node
 │  │  ┌─────────────────────────┐    │    │
 │  │  │     Docker Engine       │    │    │
 │  │  │  ┌─────────────────┐    │    │    │
-│  │  │  │  AI Runners     │    │    │    │
-│  │  │  │  - LLM          │    │    │    │
-│  │  │  │  - Image Gen    │    │    │    │
-│  │  │  │  - Audio/Video  │    │    │    │
+│  │  │  │  Render Runners │    │    │    │
+│  │  │  │  - Blender      │    │    │    │
+│  │  │  │  - Transcode    │    │    │    │
+│  │  │  │  - Media tools  │    │    │    │
 │  │  │  └─────────────────┘    │    │    │
 │  │  └─────────────────────────┘    │    │
 │  └─────────────────────────────────┘    │
@@ -84,17 +84,17 @@ docker exec ryvion-node pgrep ryvion-node
 
 ## Node Operator Benefits
 
-### For Individual Operators
+### For Trusted Node Operators
 - **Easy Setup**: One-command deployment
 - **Low Cost**: $24/month for basic node
 - **Full Control**: Root access, custom configuration
 - **Monitoring**: Built-in health checks and logs
 
-### For Enterprise Operators
+### For Fleet Operators
 - **Scalable**: Deploy multiple nodes across regions
 - **Automated**: Systemd service management
 - **Secure**: Isolated environments per node
-- **Profitable**: Earn tokens for AI workload processing
+- **Auditable**: Signed heartbeats and receipts for each render job
 
 ## Troubleshooting
 
@@ -129,7 +129,7 @@ docker-compose -f /opt/ryvion/docker-compose.yml logs --tail=100
 ## Advanced Configuration
 
 ### GPU Support
-For AI workloads requiring GPU acceleration:
+For Blender or media workloads requiring GPU acceleration:
 
 1. **Create GPU Droplet** (when available)
 2. **Install NVIDIA Docker**:
@@ -151,12 +151,12 @@ For AI workloads requiring GPU acceleration:
      - NVIDIA_VISIBLE_DEVICES=all
    ```
 
-### Custom Runners
-Add your own AI model runners by mounting custom containers:
+### Custom Render Runners
+Add trusted render/media runners by mounting managed containers:
 
 ```yaml
 volumes:
-  - ./custom-runners:/custom-runners
+  - ./custom-runners:/custom-runners:ro
 environment:
   - RYV_CUSTOM_RUNNERS_PATH=/custom-runners
 ```
