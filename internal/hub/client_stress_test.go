@@ -18,7 +18,7 @@ import (
 	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 )
 
-func TestHeartbeatSendsNodeCapabilityPayloadWithLegacyAlias(t *testing.T) {
+func TestHeartbeatSendsCanonicalNodeCapabilityPayload(t *testing.T) {
 	t.Parallel()
 
 	pub, priv := testKeyPair()
@@ -57,8 +57,9 @@ func TestHeartbeatSendsNodeCapabilityPayloadWithLegacyAlias(t *testing.T) {
 	if _, ok := body["capability"]; !ok {
 		t.Fatal("heartbeat body missing capability payload")
 	}
-	if _, ok := body["v7"]; !ok {
-		t.Fatal("heartbeat body missing legacy v7 compatibility alias")
+	deprecatedAlias := "v" + "7"
+	if _, ok := body[deprecatedAlias]; ok {
+		t.Fatal("heartbeat body should not include deprecated compatibility alias")
 	}
 }
 

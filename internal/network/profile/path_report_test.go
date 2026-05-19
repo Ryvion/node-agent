@@ -84,7 +84,7 @@ func TestValidatePathProbeReportRejectsNegativeAndNaNMetrics(t *testing.T) {
 
 func TestBuildPathProbeReportUsesProfileTarget(t *testing.T) {
 	profile := validNetworkProfile()
-	profile.ProbeTarget = "http://path-target.example:8080/v7/network/probe"
+	profile.ProbeTarget = "http://path-target.example:8080/api/v1/network/probe"
 
 	report, err := BuildPathProbeReport("node-1", profile)
 	if err != nil {
@@ -107,7 +107,7 @@ func TestBuildPathProbeReportContainsNoSecretFields(t *testing.T) {
 	t.Setenv("RYV_BIND_TOKEN", "bind-token-secret")
 
 	profile := validNetworkProfile()
-	profile.ProbeTarget = "https://hub.example/v7/probe?access_token=target-secret&password=another-secret"
+	profile.ProbeTarget = "https://hub.example/private/probe?access_token=target-secret&password=another-secret"
 
 	report, err := BuildPathProbeReport("node-1", profile)
 	if err != nil {
@@ -126,7 +126,7 @@ func TestBuildPathProbeReportContainsNoSecretFields(t *testing.T) {
 		"another-secret",
 		"access_token",
 		"password=",
-		"/v7/probe",
+		"/private/probe",
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("report JSON leaked %q: %s", forbidden, body)

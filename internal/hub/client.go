@@ -136,7 +136,6 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (HeartbeatRespo
 		SystemTimezone: detectIANATimezone(),
 		NetworkProfile: metrics.NetworkProfile,
 		Capability:     metrics.NodeCapability,
-		V7:             metrics.NodeCapability,
 	}
 	body.Signature = c.sign(
 		"heartbeat",
@@ -781,9 +780,7 @@ type heartbeatRequest struct {
 	SystemTimezone string                          `json:"system_timezone,omitempty"`
 	NetworkProfile *netprofile.NetworkProfile      `json:"network_profile,omitempty"`
 	Capability     *heartbeat.NodeHeartbeatPayload `json:"capability,omitempty"`
-	// V7 is a deprecated wire alias kept for older hub heartbeat consumers.
-	V7        *heartbeat.NodeHeartbeatPayload `json:"v7,omitempty"`
-	Signature []byte                          `json:"signature"`
+	Signature      []byte                          `json:"signature"`
 }
 
 type workResponse struct {

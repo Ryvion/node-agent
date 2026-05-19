@@ -16,8 +16,6 @@ import (
 const (
 	SchemaVersionV1 = "ryvion.node-heartbeat.v1"
 	EnvNodeCaps     = "RYV_NODE_CAPS"
-	// EnvLegacyV7Caps is accepted only as a deprecated compatibility alias.
-	EnvLegacyV7Caps = "RYV_NODE_V7_CAPS"
 )
 
 type NodeHeartbeatPayload struct {
@@ -84,9 +82,6 @@ type SandboxPolicySummary struct {
 
 func NodeCapsEnabledFromEnv() bool {
 	value := strings.TrimSpace(os.Getenv(EnvNodeCaps))
-	if value == "" {
-		value = strings.TrimSpace(os.Getenv(EnvLegacyV7Caps))
-	}
 	switch strings.ToLower(value) {
 	case "0", "false", "no", "off", "disabled":
 		return false
