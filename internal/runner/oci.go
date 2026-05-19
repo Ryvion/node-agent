@@ -219,7 +219,7 @@ func stopContainerGracefully(ociExec ociExecutor, name string, grace time.Durati
 }
 
 // needsNetwork is an explicit escape hatch for trusted operator-controlled
-// workloads. Buyer render jobs should rely on prefetched inputs and remain
+// workloads. Managed render jobs should rely on prefetched inputs and remain
 // network-isolated.
 func needsNetwork(specJSON string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_ALLOW_JOB_NETWORK"))) {
@@ -235,8 +235,8 @@ func needsNetwork(specJSON string) bool {
 	return value
 }
 
-// prefetchPayloadURL parses specJSON for payload_url, training_data_url, or
-// audio_url fields and downloads them into workDir so the container (which
+// prefetchPayloadURL parses specJSON for render/media input URL fields and
+// downloads them into workDir so the container (which
 // runs with --network=none) can access them as local files.
 func prefetchPayloadURL(ctx context.Context, specJSON, workDir string) error {
 	var spec map[string]any
@@ -244,11 +244,9 @@ func prefetchPayloadURL(ctx context.Context, specJSON, workDir string) error {
 		return nil // not JSON, skip
 	}
 	downloads := map[string]string{
-		"payload_url":       "payload.bin",
-		"training_data_url": "training.jsonl",
-		"audio_url":         "input_audio",
-		"input_url":         "input.bin",
-		"model_url":         "model.bin",
+		"payload_url": "payload.bin",
+		"audio_url":   "input_audio",
+		"input_url":   "input.bin",
 	}
 	for field, filename := range downloads {
 		rawURL, ok := spec[field].(string)

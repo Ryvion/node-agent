@@ -95,8 +95,12 @@ func (c *Client) heartbeatGRPC(ctx context.Context, body heartbeatRequest) (Hear
 func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
 	var err error
 	var v7Struct *structpb.Struct
-	if body.V7 != nil {
-		v7Struct, err = structFromJSONValue(body.V7)
+	capabilityPayload := body.Capability
+	if capabilityPayload == nil {
+		capabilityPayload = body.V7
+	}
+	if capabilityPayload != nil {
+		v7Struct, err = structFromJSONValue(capabilityPayload)
 		if err != nil {
 			return HeartbeatResponse{}, err
 		}
@@ -206,7 +210,6 @@ func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts
 		JobPubkey:           assignment.GetJobPubkey(),
 		Kind:                assignment.GetKind(),
 		PayloadURL:          assignment.GetPayloadUrl(),
-		PricePerUnit:        assignment.GetPricePerUnit(),
 		Units:               assignment.GetUnits(),
 		Image:               assignment.GetImage(),
 		SpecJSON:            assignment.GetSpecJson(),

@@ -16,6 +16,7 @@ import (
 const (
 	SchemaVersionV1 = "render.node-heartbeat.v1"
 	EnvNodeCaps     = "RYV_NODE_CAPS"
+	EnvLegacyV7Caps = "RYV_NODE_V7_CAPS"
 )
 
 type V7HeartbeatPayload = NodeHeartbeatPayload
@@ -52,6 +53,8 @@ type BuildNodeHeartbeatPayloadInput struct {
 
 	HardwareCapacity *capshardware.CapacityInventory
 
+	RenderCapabilitySummary capability.RenderCapabilitySummary
+
 	CASCapabilitySummary capability.CASCapabilitySummary
 	CASSummary           *CASSummary
 
@@ -72,19 +75,25 @@ type CASSummary struct {
 }
 
 type SandboxPolicySummary struct {
-	RejectsUnsafePickle                   bool     `json:"rejects_unsafe_pickle"`
-	RunnerAllowlistEnabled                bool     `json:"runner_allowlist_enabled"`
-	NetworkIsolationSupported             bool     `json:"network_isolation_supported"`
-	FilesystemIsolationPlanned            bool     `json:"filesystem_isolation_planned"`
-	PythonSourceDecision                  string   `json:"python_source_decision,omitempty"`
-	NetworkAllowedRunnerKinds             []string `json:"network_allowed_runner_kinds,omitempty"`
-	FilesystemWriteAllowedRunnerKinds     []string `json:"filesystem_write_allowed_runner_kinds,omitempty"`
-	AllowsUnknownTrustedAllowlisted       bool     `json:"allows_unknown_trusted_allowlisted"`
-	AllowsPyTorchPickleTrustedAllowlisted bool     `json:"allows_pytorch_pickle_trusted_allowlisted"`
+	RejectsUntrustedCustomRunners     bool     `json:"rejects_untrusted_custom_runners"`
+	RunnerAllowlistEnabled            bool     `json:"runner_allowlist_enabled"`
+	NetworkIsolationSupported         bool     `json:"network_isolation_supported"`
+	FilesystemIsolationPlanned        bool     `json:"filesystem_isolation_planned"`
+	NetworkAllowedRunnerKinds         []string `json:"network_allowed_runner_kinds,omitempty"`
+	FilesystemWriteAllowedRunnerKinds []string `json:"filesystem_write_allowed_runner_kinds,omitempty"`
+	AllowsTrustedCustomRunners        bool     `json:"allows_trusted_custom_runners"`
 }
 
 func V7HeartbeatEnabledFromEnv() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvNodeCaps))) {
+	return NodeCapsEnabledFromEnv()
+}
+
+func NodeCapsEnabledFromEnv() bool {
+	value := strings.TrimSpace(os.Getenv(EnvNodeCaps))
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv(EnvLegacyV7Caps))
+	}
+	switch strings.ToLower(value) {
 	case "0", "false", "no", "off", "disabled":
 		return false
 	default:
@@ -152,6 +161,7 @@ func BuildNodeHeartbeatPayload(input BuildNodeHeartbeatPayloadInput) (NodeHeartb
 		HardwareProfile:           input.HardwareProfile,
 		RuntimeProfile:            runtimeProfile,
 		NetworkCapabilitySummary:  networkSummary,
+		RenderCapabilitySummary:   input.RenderCapabilitySummary,
 		SandboxCapabilitySummary:  sandboxSummary,
 		CASCapabilitySummary:      input.CASCapabilitySummary,
 		EvidenceCapabilitySummary: input.EvidenceCapabilitySummary,
@@ -193,15 +203,13 @@ func networkCapabilitySummaryFromProfile(profile netprofile.NetworkProfile) capa
 
 func summarizeSandboxPolicy(policy sandbox.SandboxPolicy, capabilitySummary capability.SandboxCapabilitySummary) SandboxPolicySummary {
 	return SandboxPolicySummary{
-		RejectsUnsafePickle:                   true,
-		RunnerAllowlistEnabled:                capabilitySummary.RunnerAllowlistEnabled,
-		NetworkIsolationSupported:             capabilitySummary.NetworkIsolationSupported,
-		FilesystemIsolationPlanned:            capabilitySummary.FilesystemIsolationPlanned,
-		PythonSourceDecision:                  string(policy.PythonSourceDecision),
-		NetworkAllowedRunnerKinds:             runnerKindStrings(policy.NetworkAllowedRunnerKinds),
-		FilesystemWriteAllowedRunnerKinds:     runnerKindStrings(policy.FilesystemWriteAllowedRunnerKinds),
-		AllowsUnknownTrustedAllowlisted:       policy.AllowUnknownTrustedAllowlisted,
-		AllowsPyTorchPickleTrustedAllowlisted: policy.AllowPyTorchPickleTrustedAllowlisted,
+		RejectsUntrustedCustomRunners:     true,
+		RunnerAllowlistEnabled:            capabilitySummary.RunnerAllowlistEnabled,
+		NetworkIsolationSupported:         capabilitySummary.NetworkIsolationSupported,
+		FilesystemIsolationPlanned:        capabilitySummary.FilesystemIsolationPlanned,
+		NetworkAllowedRunnerKinds:         runnerKindStrings(policy.NetworkAllowedRunnerKinds),
+		FilesystemWriteAllowedRunnerKinds: runnerKindStrings(policy.FilesystemWriteAllowedRunnerKinds),
+		AllowsTrustedCustomRunners:        policy.AllowTrustedCustomRunners,
 	}
 }
 

@@ -135,6 +135,7 @@ func (c *Client) Heartbeat(ctx context.Context, metrics Metrics) (HeartbeatRespo
 		GPUThrottled:   metrics.GPUThrottled,
 		SystemTimezone: detectIANATimezone(),
 		NetworkProfile: metrics.NetworkProfile,
+		Capability:     metrics.V7Heartbeat,
 		V7:             metrics.V7Heartbeat,
 	}
 	body.Signature = c.sign(
@@ -219,7 +220,6 @@ func (c *Client) FetchWork(ctx context.Context) (*WorkAssignment, error) {
 		JobPubkey:           out.JobPubkey,
 		Kind:                out.Kind,
 		PayloadURL:          out.PayloadURL,
-		PricePerUnit:        out.PricePerUnit,
 		Units:               out.Units,
 		Image:               out.Image,
 		SpecJSON:            out.SpecJSON,
@@ -485,7 +485,7 @@ func (c *Client) probeHubRTT(ctx context.Context, method string, path string) (t
 	return rtt, nil
 }
 
-// RedeemClaimCode sends a claim code to the hub to link this node to a buyer account.
+// RedeemClaimCode sends a claim code to the hub to link this node to an operator account.
 func (c *Client) RedeemClaimCode(ctx context.Context, code string) error {
 	body := map[string]string{"code": code}
 	headers := map[string]string{"X-Node-Token": c.NodeAuthToken(0)}
@@ -667,7 +667,6 @@ type WorkAssignment struct {
 	JobPubkey           string
 	Kind                string
 	PayloadURL          string
-	PricePerUnit        uint64
 	Units               uint32
 	Image               string
 	SpecJSON            string
@@ -762,6 +761,7 @@ type heartbeatRequest struct {
 	GPUThrottled   bool                          `json:"gpu_throttled"`
 	SystemTimezone string                        `json:"system_timezone,omitempty"`
 	NetworkProfile *netprofile.NetworkProfile    `json:"network_profile,omitempty"`
+	Capability     *heartbeat.V7HeartbeatPayload `json:"capability,omitempty"`
 	V7             *heartbeat.V7HeartbeatPayload `json:"v7,omitempty"`
 	Signature      []byte                        `json:"signature"`
 }
@@ -773,7 +773,6 @@ type workResponse struct {
 	JobPubkey           string              `json:"job_pubkey"`
 	Kind                string              `json:"kind"`
 	PayloadURL          string              `json:"payload_url"`
-	PricePerUnit        uint64              `json:"price_per_unit"`
 	Units               uint32              `json:"units"`
 	Image               string              `json:"image"`
 	SpecJSON            string              `json:"spec_json"`

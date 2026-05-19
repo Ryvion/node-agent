@@ -15,8 +15,6 @@ const (
 type RunnerRequest struct {
 	RunnerKind              RunnerKind       `json:"runner_kind"`
 	RunnerImageOrBinary     string           `json:"runner_image_or_binary,omitempty"`
-	ModelPath               string           `json:"model_path,omitempty"`
-	DeclaredModelFormat     string           `json:"declared_model_format,omitempty"`
 	RequiresNetwork         bool             `json:"requires_network"`
 	RequiresFilesystemWrite bool             `json:"requires_filesystem_write"`
 	SourceTrustLevel        SourceTrustLevel `json:"source_trust_level,omitempty"`
@@ -24,8 +22,6 @@ type RunnerRequest struct {
 
 func ValidateRunnerRequest(policy SandboxPolicy, allowlist RunnerAllowlist, request RunnerRequest) SandboxDecisionResult {
 	return EvaluateSandbox(policy, SandboxRequest{
-		ModelPath:               request.ModelPath,
-		DeclaredFormat:          request.DeclaredModelFormat,
 		RunnerKind:              request.RunnerKind,
 		RequiresNetwork:         request.RequiresNetwork,
 		RequiresFilesystemWrite: request.RequiresFilesystemWrite,

@@ -1,6 +1,6 @@
 package capability
 
-const SchemaVersionV1 = "v7.capability-passport.v1"
+const SchemaVersionV1 = "render.capability-passport.v1"
 
 type CapabilityPassport struct {
 	SchemaVersion             string                    `json:"schema_version"`
@@ -13,7 +13,7 @@ type CapabilityPassport struct {
 	HardwareProfile           HardwareProfile           `json:"hardware_profile"`
 	RuntimeProfile            RuntimeProfile            `json:"runtime_profile"`
 	NetworkCapabilitySummary  NetworkCapabilitySummary  `json:"network_capability_summary"`
-	ModelCapabilitySummary    ModelCapabilitySummary    `json:"model_capability_summary"`
+	RenderCapabilitySummary   RenderCapabilitySummary   `json:"render_capability_summary"`
 	SandboxCapabilitySummary  SandboxCapabilitySummary  `json:"sandbox_capability_summary"`
 	CASCapabilitySummary      CASCapabilitySummary      `json:"cas_capability_summary"`
 	EvidenceCapabilitySummary EvidenceCapabilitySummary `json:"evidence_capability_summary"`
@@ -32,11 +32,10 @@ type HardwareProfile struct {
 }
 
 type RuntimeProfile struct {
-	NativeInferenceSupported bool     `json:"native_inference_supported"`
-	OCIAvailable             bool     `json:"oci_available"`
-	LlamaServerAvailable     bool     `json:"llama_server_available"`
-	ImageRuntimeAvailable    bool     `json:"image_runtime_available"`
-	SupportedRunnerKinds     []string `json:"supported_runner_kinds,omitempty"`
+	OCIAvailable         bool     `json:"oci_available"`
+	BlenderAvailable     bool     `json:"blender_available,omitempty"`
+	MediaToolsAvailable  bool     `json:"media_tools_available,omitempty"`
+	SupportedRunnerKinds []string `json:"supported_runner_kinds,omitempty"`
 }
 
 type NetworkCapabilitySummary struct {
@@ -50,18 +49,17 @@ type NetworkCapabilitySummary struct {
 	LossRateP95     float64 `json:"loss_rate_p95"`
 }
 
-type ModelCapabilitySummary struct {
-	SupportedModelFormats []string `json:"supported_model_formats,omitempty"`
-	ResidentModelIDs      []string `json:"resident_model_ids,omitempty"`
-	MaxResidentModelBytes uint64   `json:"max_resident_model_bytes,omitempty"`
-	SupportsModelLease    bool     `json:"supports_model_lease"`
+type RenderCapabilitySummary struct {
+	SupportsManagedOCI     bool     `json:"supports_managed_oci"`
+	SupportsArtifactUpload bool     `json:"supports_artifact_upload"`
+	SupportedWorkKinds     []string `json:"supported_work_kinds,omitempty"`
 }
 
 type SandboxCapabilitySummary struct {
-	RejectsUnsafePickle        bool `json:"rejects_unsafe_pickle"`
-	RunnerAllowlistEnabled     bool `json:"runner_allowlist_enabled"`
-	FilesystemIsolationPlanned bool `json:"filesystem_isolation_planned"`
-	NetworkIsolationSupported  bool `json:"network_isolation_supported"`
+	RejectsUntrustedCustomRunners bool `json:"rejects_untrusted_custom_runners"`
+	RunnerAllowlistEnabled        bool `json:"runner_allowlist_enabled"`
+	FilesystemIsolationPlanned    bool `json:"filesystem_isolation_planned"`
+	NetworkIsolationSupported     bool `json:"network_isolation_supported"`
 }
 
 type CASCapabilitySummary struct {

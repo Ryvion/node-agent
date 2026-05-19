@@ -102,7 +102,6 @@ func TestClientFetchWorkUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
 		WorkgraphId:    "wg-gateway",
 		Kind:           "blender_render",
 		PayloadUrl:     "https://example.invalid/payload",
-		PricePerUnit:   9,
 		Units:          2,
 		Image:          "ghcr.io/ryvion/blender-runner",
 		SpecJson:       `{"task":"blender_render"}`,

@@ -6,94 +6,60 @@ func TestValidateRunnerRequestAllowlistedRunnerAccepted(t *testing.T) {
 	result := ValidateRunnerRequest(DefaultSandboxPolicy(), runnerAllowlistForTest(), RunnerRequest{
 		RunnerKind:          RunnerKindCustom,
 		RunnerImageOrBinary: "ghcr.io/ryvion/runner-safe:v1",
-		ModelPath:           "model.safetensors",
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonSafetensorsAllowlistedRunnerAllowed)
+	assertHasReason(t, result, SandboxReasonCustomRunnerAllowlisted)
 }
 
 func TestValidateRunnerRequestCustomNonAllowlistedRejected(t *testing.T) {
 	result := ValidateRunnerRequest(DefaultSandboxPolicy(), RunnerAllowlist{}, RunnerRequest{
 		RunnerKind:          RunnerKindCustom,
 		RunnerImageOrBinary: "ghcr.io/example/custom-runner:v1",
-		ModelPath:           "model.safetensors",
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionReject)
 	assertHasReason(t, result, SandboxReasonCustomRunnerNotAllowlisted)
 }
 
-func TestValidateRunnerRequestPyTorchPickleRejected(t *testing.T) {
-	result := ValidateRunnerRequest(DefaultSandboxPolicy(), runnerAllowlistForTest(), RunnerRequest{
-		RunnerKind:          RunnerKindCustom,
-		RunnerImageOrBinary: "ghcr.io/ryvion/runner-safe:v1",
-		ModelPath:           "checkpoint.pt",
-		SourceTrustLevel:    SourceTrustLevelTrusted,
-	})
-
-	assertSandboxDecision(t, result, SandboxDecisionReject)
-	assertHasReason(t, result, SandboxReasonPyTorchPickleRejected)
-}
-
-func TestValidateRunnerRequestGGUFNativeAccepted(t *testing.T) {
+func TestValidateRunnerRequestBuiltInRunnerAccepted(t *testing.T) {
 	result := ValidateRunnerRequest(DefaultSandboxPolicy(), RunnerAllowlist{}, RunnerRequest{
-		RunnerKind: RunnerKindNativeLlama,
-		ModelPath:  "llama.gguf",
+		RunnerKind: RunnerKindBlender,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonGGUFNativeLlamaAllowed)
+	assertHasReason(t, result, SandboxReasonBlenderRunnerAllowed)
 }
 
 func TestValidateRunnerRequestNetworkRequiresIsolation(t *testing.T) {
 	result := ValidateRunnerRequest(DefaultSandboxPolicy(), runnerAllowlistForTest(), RunnerRequest{
 		RunnerKind:          RunnerKindCustom,
 		RunnerImageOrBinary: "ghcr.io/ryvion/runner-safe:v1",
-		ModelPath:           "model.safetensors",
 		RequiresNetwork:     true,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionRequireIsolation)
 	assertHasReason(t, result, SandboxReasonNetworkRequiresIsolation)
-	assertHasReason(t, result, SandboxReasonSafetensorsAllowlistedRunnerAllowed)
-}
-
-func TestValidateRunnerRequestDeclaredModelFormatUsed(t *testing.T) {
-	result := ValidateRunnerRequest(DefaultSandboxPolicy(), runnerAllowlistForTest(), RunnerRequest{
-		RunnerKind:          RunnerKindCustom,
-		RunnerImageOrBinary: "ghcr.io/ryvion/runner-safe:v1",
-		ModelPath:           "model.bin",
-		DeclaredModelFormat: "safetensors",
-		SourceTrustLevel:    SourceTrustLevelUntrusted,
-	})
-
-	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	if result.ModelFormat != ModelFormatSafetensors {
-		t.Fatalf("ModelFormat = %q, want %q", result.ModelFormat, ModelFormatSafetensors)
-	}
+	assertHasReason(t, result, SandboxReasonCustomRunnerAllowlisted)
 }
 
 func TestValidateRunnerRequestUsesSourceTrustLevel(t *testing.T) {
 	policy := DefaultSandboxPolicy()
-	policy.AllowUnknownTrustedAllowlisted = true
+	policy.AllowTrustedCustomRunners = true
 
-	result := ValidateRunnerRequest(policy, runnerAllowlistForTest(), RunnerRequest{
-		RunnerKind:          RunnerKindCustom,
-		RunnerImageOrBinary: "ghcr.io/ryvion/runner-safe:v1",
-		ModelPath:           "model.weights",
-		SourceTrustLevel:    "verified",
+	result := ValidateRunnerRequest(policy, RunnerAllowlist{}, RunnerRequest{
+		RunnerKind:       RunnerKindCustom,
+		SourceTrustLevel: "verified",
 	})
 
-	assertSandboxDecision(t, result, SandboxDecisionRequireIsolation)
-	assertHasReason(t, result, SandboxReasonUnknownFormatTrustedAllowed)
+	assertSandboxDecision(t, result, SandboxDecisionAllow)
+	assertHasReason(t, result, SandboxReasonCustomRunnerTrustedAllowed)
 }
 
 func TestValidateRunnerRequestReasonCodesPresent(t *testing.T) {
 	result := ValidateRunnerRequest(DefaultSandboxPolicy(), runnerAllowlistForTest(), RunnerRequest{
 		RunnerKind:          RunnerKindCustom,
 		RunnerImageOrBinary: "ghcr.io/ryvion/runner-safe:v1",
-		ModelPath:           "model.safetensors",
 		RequiresNetwork:     true,
 	})
 

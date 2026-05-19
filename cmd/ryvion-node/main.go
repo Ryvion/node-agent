@@ -161,8 +161,8 @@ func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 		cachedGPUUtil.Store(math.Float64bits(metrics.GPUUtil))
 		throttled := cfg.MaxGPUUtil > 0 && cfg.MaxGPUUtil < 100 && metrics.GPUUtil > cfg.MaxGPUUtil
 
-		var capsPayload *heartbeat.V7HeartbeatPayload
-		if heartbeat.V7HeartbeatEnabledFromEnv() {
+		var capsPayload *heartbeat.NodeHeartbeatPayload
+		if heartbeat.NodeCapsEnabledFromEnv() {
 			payload, err := buildNodeHeartbeatPayload(client.PublicKeyHex(), caps, deviceType, cfg.Country)
 			if err != nil {
 				slog.Warn("capability payload skipped", "error", err)
@@ -200,9 +200,9 @@ func heartbeatLoop(ctx context.Context, client *hub.Client, caps hw.CapSet, devi
 	}
 }
 
-func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, country string) (heartbeat.V7HeartbeatPayload, error) {
+func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType string, country string) (heartbeat.NodeHeartbeatPayload, error) {
 	policy := sandbox.DefaultSandboxPolicy()
-	return heartbeat.BuildV7HeartbeatPayload(heartbeat.BuildV7HeartbeatPayloadInput{
+	return heartbeat.BuildNodeHeartbeatPayload(heartbeat.BuildNodeHeartbeatPayloadInput{
 		AgentVersion:         version,
 		NodePublicKey:        nodePublicKey,
 		OS:                   runtime.GOOS,
@@ -214,11 +214,15 @@ func buildNodeHeartbeatPayload(nodePublicKey string, caps hw.CapSet, deviceType 
 			OCIAvailable:         true,
 			SupportedRunnerKinds: []string{"oci"},
 		},
+		RenderCapabilitySummary: capability.RenderCapabilitySummary{
+			SupportsManagedOCI:     true,
+			SupportsArtifactUpload: true,
+		},
 		SandboxCapabilitySummary: capability.SandboxCapabilitySummary{
-			RejectsUnsafePickle:        true,
-			RunnerAllowlistEnabled:     true,
-			NetworkIsolationSupported:  true,
-			FilesystemIsolationPlanned: true,
+			RejectsUntrustedCustomRunners: true,
+			RunnerAllowlistEnabled:        true,
+			NetworkIsolationSupported:     true,
+			FilesystemIsolationPlanned:    true,
 		},
 		SandboxPolicy: &policy,
 		EvidenceCapabilitySummary: capability.EvidenceCapabilitySummary{
