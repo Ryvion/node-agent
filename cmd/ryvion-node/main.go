@@ -52,6 +52,7 @@ type nodeConfig struct {
 	KeyPath      string
 	MaxGPUUtil   float64
 	BindToken    string
+	UIPort       int
 	HeartbeatDur time.Duration
 	LlamaCPP     llamacpp.Config
 }
@@ -139,6 +140,7 @@ func parseConfig() nodeConfig {
 	flag.StringVar(&cfg.GPUs, "gpus", cfg.GPUs, "OCI GPU flag value, usually auto or all")
 	flag.StringVar(&cfg.KeyPath, "key", cfg.KeyPath, "node identity key path")
 	flag.Float64Var(&cfg.MaxGPUUtil, "max-gpu-util", envFloat("RYV_MAX_GPU_UTIL"), "skip work while GPU util is above this percentage")
+	flag.IntVar(&cfg.UIPort, "ui-port", envInt("RYV_UI_PORT"), "legacy local status UI port; accepted for compatibility")
 	flag.DurationVar(&cfg.HeartbeatDur, "heartbeat-interval", cfg.HeartbeatDur, "heartbeat interval")
 	flag.Parse()
 	cfg.LlamaCPP = llamacpp.ResolveConfig(os.Getenv)
@@ -706,6 +708,18 @@ func envFloat(name string) float64 {
 		return 0
 	}
 	out, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0
+	}
+	return out
+}
+
+func envInt(name string) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return 0
+	}
+	out, err := strconv.Atoi(value)
 	if err != nil {
 		return 0
 	}

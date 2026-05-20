@@ -61,6 +61,19 @@ func TestParseConfigTypeFlagAlias(t *testing.T) {
 	}
 }
 
+func TestParseConfigAcceptsLegacyUIPortFlag(t *testing.T) {
+	withArgs(t, "ryvion-node", "-ui-port", "45890", "-hub", "http://127.0.0.1:9999")
+	t.Setenv("RYV_UI_PORT", "")
+
+	cfg := parseConfig()
+	if cfg.UIPort != 45890 {
+		t.Fatalf("UIPort = %d, want legacy -ui-port value", cfg.UIPort)
+	}
+	if cfg.HubURL != "http://127.0.0.1:9999" {
+		t.Fatalf("HubURL = %q, want remaining flags parsed after -ui-port", cfg.HubURL)
+	}
+}
+
 func TestBuildHeartbeatPayloadDoesNotAdvertiseMissingOCI(t *testing.T) {
 	payload, err := buildNodeHeartbeatPayload("node-test", zeroCaps(), "cpu", "", runtimeHealthSnapshot{Health: "missing"})
 	if err != nil {
