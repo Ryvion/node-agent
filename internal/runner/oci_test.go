@@ -1,10 +1,14 @@
 package runner
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveWorkBasePrefersExplicitEnv(t *testing.T) {
@@ -223,5 +227,61 @@ func TestValidateDownloadURLRejectsLoopbackTargets(t *testing.T) {
 	}
 	if err := validateDownloadURL("http://127.0.0.1/file", true); err != nil {
 		t.Fatalf("expected loopback download target to be allowed when explicitly enabled, got %v", err)
+	}
+}
+
+func TestValidateDownloadURLRejectsPrivateAndUnsafeTargets(t *testing.T) {
+	t.Parallel()
+
+	for _, rawURL := range []string{
+		"http://example.com/file",
+		"file:///tmp/input.bin",
+		"https://10.0.0.1/file",
+		"https://169.254.169.254/latest/meta-data",
+		"https://100.64.0.1/file",
+	} {
+		if err := validateDownloadURL(rawURL, false); err == nil {
+			t.Fatalf("expected %q to be rejected", rawURL)
+		}
+	}
+}
+
+func TestRestrictedHTTPClientRejectsPublicHTTPRedirect(t *testing.T) {
+	t.Parallel()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://example.com/input.bin", http.StatusFound)
+	}))
+	defer source.Close()
+
+	client := restrictedHTTPClient(time.Second, true)
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		transport.TLSClientConfig = source.Client().Transport.(*http.Transport).TLSClientConfig
+	}
+	resp, err := client.Get(source.URL)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "download url must use https") {
+		t.Fatalf("expected http redirect to be rejected, got resp=%v err=%v", resp, err)
+	}
+}
+
+func TestDownloadToFileEnforcesMaxPrefetchBytes(t *testing.T) {
+	t.Setenv("RYV_ALLOW_LOOPBACK_DOWNLOADS", "1")
+	t.Setenv("RYV_MAX_PREFETCH_BYTES", "4")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("abcdef"))
+	}))
+	defer server.Close()
+
+	dest := filepath.Join(t.TempDir(), "input.bin")
+	err := downloadToFile(context.Background(), server.URL+"/input.bin", dest)
+	if err == nil || !strings.Contains(err.Error(), "download exceeds max size") {
+		t.Fatalf("expected max size error, got %v", err)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatalf("expected oversized partial file to be removed, statErr=%v", statErr)
 	}
 }

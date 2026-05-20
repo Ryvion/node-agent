@@ -20,6 +20,9 @@ Go 1.24 cross-platform agent. Runs natively on trusted machines and executes ass
 - Cross-compile check: `GOOS=windows go build ./...`
 - Zero external dependencies (Go stdlib + x/sys only)
 - Container security: --cap-drop=ALL, --network=none for managed OCI jobs
+- Managed OCI prefetch must keep inputs outside the container network path:
+  validate HTTPS/public hosts, re-check redirects and dial targets, keep loopback
+  behind explicit local env, and bound downloaded bytes before writing artifacts.
 - Keep AI inference local and explicit through llama.cpp; do not add V7/V8,
   benchmark-plane, model-warm, speculative, or mesh code to the active node path
 - Archive inactive surfaces in `ryvion-archive`; never import archive code back into production repos

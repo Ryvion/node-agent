@@ -7,13 +7,17 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
+const defaultMaxPrefetchBytes int64 = 1 << 30
+
 var blockedDownloadCIDRs = mustParseCIDRs(
 	"100.64.0.0/10",
 	"198.18.0.0/15",
+	"240.0.0.0/4",
 )
 
 func validateDownloadURL(raw string, allowLoopback bool) error {
@@ -38,54 +42,77 @@ func validateDownloadURL(raw string, allowLoopback bool) error {
 }
 
 func validateRemoteHost(ctx context.Context, host string, allowLoopback bool) error {
+	_, err := resolveDownloadIPs(ctx, host, allowLoopback)
+	return err
+}
+
+func resolveDownloadIPs(ctx context.Context, host string, allowLoopback bool) ([]net.IP, error) {
 	host = normalizeHost(host)
 	if host == "" {
-		return fmt.Errorf("host required")
+		return nil, fmt.Errorf("host required")
 	}
-	if host == "localhost" {
-		if allowLoopback {
-			return nil
-		}
-		return fmt.Errorf("host resolves to local/private address")
+	if host == "localhost" && !allowLoopback {
+		return nil, fmt.Errorf("host resolves to local/private address")
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		return validatePublicIP(ip, allowLoopback)
+		if err := validatePublicIP(ip, allowLoopback); err != nil {
+			return nil, err
+		}
+		return []net.IP{ip}, nil
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupIPAddr(lookupCtx, host)
 	if err != nil {
-		return fmt.Errorf("host lookup failed")
+		return nil, fmt.Errorf("host lookup failed")
 	}
 	if len(addrs) == 0 {
-		return fmt.Errorf("host lookup returned no addresses")
+		return nil, fmt.Errorf("host lookup returned no addresses")
 	}
+	ips := make([]net.IP, 0, len(addrs))
 	for _, addr := range addrs {
 		if err := validatePublicIP(addr.IP, allowLoopback); err != nil {
-			return err
+			return nil, err
 		}
+		ips = append(ips, addr.IP)
 	}
-	return nil
+	return ips, nil
 }
 
 func restrictedHTTPClient(timeout time.Duration, allowLoopback bool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, _, err := net.SplitHostPort(addr)
+		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
-			host = addr
-		}
-		if err := validateRemoteHost(ctx, host, allowLoopback); err != nil {
 			return nil, err
 		}
-		return dialer.DialContext(ctx, network, addr)
+		ips, err := resolveDownloadIPs(ctx, host, allowLoopback)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		return nil, lastErr
 	}
 	return &http.Client{
-		Timeout:   timeout,
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return validateDownloadURL(req.URL.String(), allowLoopback)
+		},
 		Transport: transport,
 	}
 }
@@ -104,6 +131,18 @@ func normalizeHost(host string) string {
 		host = parsedHost
 	}
 	return strings.TrimSuffix(host, ".")
+}
+
+func maxPrefetchBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("RYV_MAX_PREFETCH_BYTES"))
+	if raw == "" {
+		return defaultMaxPrefetchBytes
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || parsed <= 0 {
+		return defaultMaxPrefetchBytes
+	}
+	return parsed
 }
 
 func isLoopbackHost(host string) bool {

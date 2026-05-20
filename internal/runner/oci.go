@@ -280,13 +280,29 @@ func downloadToFile(ctx context.Context, rawURL, dest string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
+	maxBytes := maxPrefetchBytes()
+	if resp.ContentLength > maxBytes {
+		return fmt.Errorf("download exceeds max size")
+	}
 	f, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(dest)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(dest)
+		return closeErr
+	}
+	if written > maxBytes {
+		_ = os.Remove(dest)
+		return fmt.Errorf("download exceeds max size")
+	}
+	return nil
 }
 
 func fileSize(path string) int64 {
