@@ -2,36 +2,78 @@ package sandbox
 
 import "testing"
 
-func TestEvaluateSandboxManagedOCIAllowed(t *testing.T) {
+func TestEvaluateSandboxGGUFNativeLlamaAllowed(t *testing.T) {
 	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
-		RunnerKind: RunnerKindManagedOCI,
+		ModelPath:  "llama.gguf",
+		RunnerKind: RunnerKindNativeLlama,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonManagedOCIAllowed)
+	assertHasReason(t, result, SandboxReasonGGUFNativeLlamaAllowed)
 }
 
-func TestEvaluateSandboxLlamaCPPRunnerAllowed(t *testing.T) {
+func TestEvaluateSandboxSafetensorsAllowlistedAllowed(t *testing.T) {
 	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
-		RunnerKind: RunnerKindLlamaCPP,
-	})
-
-	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonLlamaCPPRunnerAllowed)
-}
-
-func TestEvaluateSandboxCustomAllowlistedAllowed(t *testing.T) {
-	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
-		RunnerKind:          RunnerKindCustom,
+		ModelPath:           "model.safetensors",
+		RunnerKind:          RunnerKindRyvionRuntime,
 		IsAllowlistedRunner: true,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonCustomRunnerAllowlisted)
+	assertHasReason(t, result, SandboxReasonSafetensorsAllowlistedRunnerAllowed)
+}
+
+func TestEvaluateSandboxPyTorchPickleRejected(t *testing.T) {
+	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
+		ModelPath:           "checkpoint.pt",
+		RunnerKind:          RunnerKindManagedOCI,
+		IsAllowlistedRunner: true,
+	})
+
+	assertSandboxDecision(t, result, SandboxDecisionReject)
+	assertHasReason(t, result, SandboxReasonPyTorchPickleRejected)
+}
+
+func TestEvaluateSandboxPythonSourceRequiresIsolationByDefault(t *testing.T) {
+	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
+		ModelPath:           "model.py",
+		RunnerKind:          RunnerKindManagedOCI,
+		IsAllowlistedRunner: true,
+	})
+
+	assertSandboxDecision(t, result, SandboxDecisionRequireIsolation)
+	assertHasReason(t, result, SandboxReasonPythonSourceRequiresIsolation)
+}
+
+func TestEvaluateSandboxPythonSourceCanBeRejectedByPolicy(t *testing.T) {
+	policy := DefaultSandboxPolicy()
+	policy.PythonSourceDecision = SandboxDecisionReject
+
+	result := EvaluateSandbox(policy, SandboxRequest{
+		ModelPath:           "model.py",
+		RunnerKind:          RunnerKindManagedOCI,
+		IsAllowlistedRunner: true,
+	})
+
+	assertSandboxDecision(t, result, SandboxDecisionReject)
+	assertHasReason(t, result, SandboxReasonPythonSourceRejected)
+}
+
+func TestEvaluateSandboxUnknownRejected(t *testing.T) {
+	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
+		ModelPath:           "model.weights",
+		RunnerKind:          RunnerKindRyvionRuntime,
+		IsAllowlistedRunner: true,
+		IsTrustedSource:     true,
+	})
+
+	assertSandboxDecision(t, result, SandboxDecisionReject)
+	assertHasReason(t, result, SandboxReasonUnknownFormatRejected)
 }
 
 func TestEvaluateSandboxCustomNonAllowlistedRejected(t *testing.T) {
 	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
+		ModelPath:       "model.safetensors",
 		RunnerKind:      RunnerKindCustom,
 		IsTrustedSource: true,
 	})
@@ -40,61 +82,68 @@ func TestEvaluateSandboxCustomNonAllowlistedRejected(t *testing.T) {
 	assertHasReason(t, result, SandboxReasonCustomRunnerNotAllowlisted)
 }
 
-func TestEvaluateSandboxTrustedCustomCanBeAllowedByPolicy(t *testing.T) {
-	policy := DefaultSandboxPolicy()
-	policy.AllowTrustedCustomRunners = true
-
-	result := EvaluateSandbox(policy, SandboxRequest{
-		RunnerKind:      RunnerKindCustom,
-		IsTrustedSource: true,
-	})
-
-	assertSandboxDecision(t, result, SandboxDecisionAllow)
-	assertHasReason(t, result, SandboxReasonCustomRunnerTrustedAllowed)
-}
-
 func TestEvaluateSandboxNetworkRequirementTriggersIsolation(t *testing.T) {
 	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
-		RunnerKind:      RunnerKindManagedOCI,
-		RequiresNetwork: true,
+		ModelPath:           "model.safetensors",
+		RunnerKind:          RunnerKindRyvionRuntime,
+		IsAllowlistedRunner: true,
+		RequiresNetwork:     true,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionRequireIsolation)
 	assertHasReason(t, result, SandboxReasonNetworkRequiresIsolation)
-	assertHasReason(t, result, SandboxReasonManagedOCIAllowed)
+	assertHasReason(t, result, SandboxReasonSafetensorsAllowlistedRunnerAllowed)
 }
 
-func TestEvaluateSandboxNetworkAllowedForRunner(t *testing.T) {
-	policy := DefaultSandboxPolicy()
-	policy.NetworkAllowedRunnerKinds = []RunnerKind{RunnerKindLlamaCPP}
-
-	result := EvaluateSandbox(policy, SandboxRequest{
-		RunnerKind:      RunnerKindLlamaCPP,
-		RequiresNetwork: true,
+func TestEvaluateSandboxNetworkAllowedForAgentHosting(t *testing.T) {
+	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
+		ModelPath:           "model.safetensors",
+		RunnerKind:          RunnerKindAgentHosting,
+		IsAllowlistedRunner: true,
+		RequiresNetwork:     true,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionAllow)
 	assertHasReason(t, result, SandboxReasonNetworkAllowedForRunner)
 }
 
-func TestEvaluateSandboxFilesystemWriteRequiresIsolation(t *testing.T) {
+func TestEvaluateSandboxTrustedSourceAloneDoesNotAllowPickle(t *testing.T) {
 	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
-		RunnerKind:              RunnerKindManagedOCI,
-		RequiresFilesystemWrite: true,
+		ModelPath:           "trusted.pt",
+		RunnerKind:          RunnerKindManagedOCI,
+		IsAllowlistedRunner: true,
+		IsTrustedSource:     true,
+	})
+
+	assertSandboxDecision(t, result, SandboxDecisionReject)
+	assertHasReason(t, result, SandboxReasonPyTorchPickleRejected)
+}
+
+func TestEvaluateSandboxPolicyCanRequireIsolationForTrustedAllowlistedPickle(t *testing.T) {
+	policy := DefaultSandboxPolicy()
+	policy.AllowPyTorchPickleTrustedAllowlisted = true
+
+	result := EvaluateSandbox(policy, SandboxRequest{
+		ModelPath:           "trusted.pt",
+		RunnerKind:          RunnerKindManagedOCI,
+		IsAllowlistedRunner: true,
+		IsTrustedSource:     true,
 	})
 
 	assertSandboxDecision(t, result, SandboxDecisionRequireIsolation)
-	assertHasReason(t, result, SandboxReasonFilesystemWriteRequiresIsolation)
+	assertHasReason(t, result, SandboxReasonPyTorchPickleRequiresIsolation)
 }
 
 func TestEvaluateSandboxReasonCodesIncluded(t *testing.T) {
 	result := EvaluateSandbox(DefaultSandboxPolicy(), SandboxRequest{
-		RunnerKind:      RunnerKindManagedOCI,
-		RequiresNetwork: true,
+		ModelPath:           "model.safetensors",
+		RunnerKind:          RunnerKindRyvionRuntime,
+		IsAllowlistedRunner: true,
+		RequiresNetwork:     true,
 	})
 
 	if len(result.ReasonCodes) < 2 {
-		t.Fatalf("reason codes = %v, want runner and isolation reasons", result.ReasonCodes)
+		t.Fatalf("reason codes = %v, want model and network reasons", result.ReasonCodes)
 	}
 }
 

@@ -1,6 +1,6 @@
 set -e
 
-echo "Ryvion AI Node Agent - DigitalOcean Setup"
+echo "Ryvion DePIN Node Agent - DigitalOcean Setup"
 echo "=============================================="
 
 echo "Updating system packages..."
@@ -50,7 +50,7 @@ services:
     restart: unless-stopped
     environment:
       - RYV_HUB_URL=https://api.ryvion.ai
-      - RYV_DEVICE=gpu
+      - RYV_DEVICE_TYPE=gpu
       - RYV_GPUS=auto
       - RYV_LOG_LEVEL=info
     volumes:
@@ -76,7 +76,7 @@ EOF
 
 cat > /etc/systemd/system/ryvion-node.service << 'EOF'
 [Unit]
-Description=Ryvion AI Node Agent
+Description=Ryvion DePIN Node Agent
 Requires=docker.service
 After=docker.service
 
@@ -115,5 +115,4 @@ echo ""
 echo "Droplet Requirements:"
 echo "- Minimum: 2GB RAM, 1 vCPU"
 echo "- Recommended: 4GB RAM, 2 vCPU"
-echo "- For GPU OCI workloads: GPU droplet plus NVIDIA Container Toolkit"
-echo "- For native inference: local llama.cpp server and RYV_LLAMA_CPP_SERVER_URL"
+echo "- For AI workloads: 8GB+ RAM"

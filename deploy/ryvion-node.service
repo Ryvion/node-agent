@@ -10,6 +10,7 @@ Restart=always
 RestartSec=5
 Environment=RYV_HUB_URL=https://api.ryvion.ai
 # Environment=RYV_BIND_TOKEN=your-token-here
+# Environment=RYV_WALLET=your-wallet-here
 WorkingDirectory=/var/lib/ryvion
 StandardOutput=journal
 StandardError=journal

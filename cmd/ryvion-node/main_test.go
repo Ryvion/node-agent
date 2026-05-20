@@ -3,197 +3,4006 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"flag"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	memorybench "github.com/Ryvion/ryvion-node/internal/benchmarks/memory"
+	tensorbench "github.com/Ryvion/ryvion-node/internal/benchmarks/tensor"
+	capshardware "github.com/Ryvion/ryvion-node/internal/capabilities/hardware"
+	capabilityprofile "github.com/Ryvion/ryvion-node/internal/capabilities/profile"
+	"github.com/Ryvion/ryvion-node/internal/diagnostics"
 	"github.com/Ryvion/ryvion-node/internal/hub"
+	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 	"github.com/Ryvion/ryvion-node/internal/hw"
-	"github.com/Ryvion/ryvion-node/internal/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/inference"
+	inferencebench "github.com/Ryvion/ryvion-node/internal/inference/benchmark"
+	routedinference "github.com/Ryvion/ryvion-node/internal/inference/routed"
+	modelbench "github.com/Ryvion/ryvion-node/internal/models/benchmark"
+	modelcache "github.com/Ryvion/ryvion-node/internal/models/cache"
+	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
+	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
+	kvprobe "github.com/Ryvion/ryvion-node/internal/runtimes/kvprobe"
+	llamacpp "github.com/Ryvion/ryvion-node/internal/runtimes/llamacpp"
+	"github.com/Ryvion/ryvion-node/internal/update"
 )
 
-func TestParseConfigUsesLegacyDeviceTypeEnv(t *testing.T) {
-	withArgs(t, "ryvion-node")
-	t.Setenv("RYV_DEVICE", "")
-	t.Setenv("RYV_DEVICE_TYPE", "gpu")
-
-	cfg := parseConfig()
-	if cfg.Device != "gpu" {
-		t.Fatalf("Device = %q, want legacy RYV_DEVICE_TYPE fallback", cfg.Device)
-	}
+// fakeClient implements a minimal receipt submitter that fails N times then succeeds.
+type fakeClient struct {
+	failCount   int
+	calls       atomic.Int32
+	lastReceipt hub.Receipt
 }
 
-func TestParseConfigPrefersDeviceEnv(t *testing.T) {
-	withArgs(t, "ryvion-node")
-	t.Setenv("RYV_DEVICE", "cpu")
-	t.Setenv("RYV_DEVICE_TYPE", "gpu")
-
-	cfg := parseConfig()
-	if cfg.Device != "cpu" {
-		t.Fatalf("Device = %q, want RYV_DEVICE to override RYV_DEVICE_TYPE", cfg.Device)
+func (f *fakeClient) SubmitReceipt(_ context.Context, receipt hub.Receipt) error {
+	f.lastReceipt = receipt
+	n := int(f.calls.Add(1))
+	if n <= f.failCount {
+		return fmt.Errorf("simulated failure %d", n)
 	}
+	return nil
 }
 
-func TestParseConfigDeviceFlagOverridesEnv(t *testing.T) {
-	withArgs(t, "ryvion-node", "-device", "gpu")
-	t.Setenv("RYV_DEVICE", "cpu")
-	t.Setenv("RYV_DEVICE_TYPE", "")
-
-	cfg := parseConfig()
-	if cfg.Device != "gpu" {
-		t.Fatalf("Device = %q, want -device flag", cfg.Device)
-	}
+func resetAutoUpdateTestState(t *testing.T) {
+	t.Helper()
+	autoUpdateInProgress.Store(0)
+	lastAutoUpdateAttemptMs.Store(0)
+	jobActive.Store(0)
+	applyAutoUpdate = update.Apply
+	restartAfterAutoUpdate = update.Restart
+	autoUpdateNow = time.Now
+	t.Cleanup(func() {
+		autoUpdateInProgress.Store(0)
+		lastAutoUpdateAttemptMs.Store(0)
+		jobActive.Store(0)
+		applyAutoUpdate = update.Apply
+		restartAfterAutoUpdate = update.Restart
+		autoUpdateNow = time.Now
+	})
 }
 
-func TestParseConfigTypeFlagAlias(t *testing.T) {
-	withArgs(t, "ryvion-node", "-type", "gpu")
-	t.Setenv("RYV_DEVICE", "")
-	t.Setenv("RYV_DEVICE_TYPE", "")
-
-	cfg := parseConfig()
-	if cfg.Device != "gpu" {
-		t.Fatalf("Device = %q, want deprecated -type alias", cfg.Device)
-	}
-}
-
-func TestParseConfigAcceptsLegacyUIPortFlag(t *testing.T) {
-	withArgs(t, "ryvion-node", "-ui-port", "45890", "-hub", "http://127.0.0.1:9999")
-	t.Setenv("RYV_UI_PORT", "")
-
-	cfg := parseConfig()
-	if cfg.UIPort != 45890 {
-		t.Fatalf("UIPort = %d, want legacy -ui-port value", cfg.UIPort)
-	}
-	if cfg.HubURL != "http://127.0.0.1:9999" {
-		t.Fatalf("HubURL = %q, want remaining flags parsed after -ui-port", cfg.HubURL)
-	}
-}
-
-func TestBuildHeartbeatPayloadDoesNotAdvertiseMissingOCI(t *testing.T) {
-	payload, err := buildNodeHeartbeatPayload("node-test", zeroCaps(), "cpu", "", runtimeHealthSnapshot{Health: "missing"})
-	if err != nil {
-		t.Fatalf("buildNodeHeartbeatPayload() error = %v", err)
-	}
-	runtimeProfile := payload.CapabilityPassport.RuntimeProfile
-	if runtimeProfile.OCIAvailable {
-		t.Fatal("OCIAvailable = true, want false for missing runtime")
-	}
-	if len(runtimeProfile.SupportedRunnerKinds) != 0 {
-		t.Fatalf("SupportedRunnerKinds = %v, want empty", runtimeProfile.SupportedRunnerKinds)
-	}
-}
-
-func TestRunWorkUsesRuntimeRequirementsForLlamaCPP(t *testing.T) {
-	work := &hub.WorkAssignment{
-		JobID: "job_runtime_requirement",
-		RuntimeRequirements: hub.RuntimeRequirements{
-			NeedsLlamaCPP: true,
-		},
-		Image: "ghcr.io/ryvion/runner:old",
-	}
-	got := failureExecutor(work)
-	if got != llamacpp.ExecutorKind {
-		t.Fatalf("failureExecutor() = %q, want %q", got, llamacpp.ExecutorKind)
-	}
-}
-
-func TestRunLlamaCPPWorkUploadFailureSubmitsFailureReceipt(t *testing.T) {
-	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
-			t.Fatalf("llama path = %q", r.URL.Path)
+func TestMaybeApplyAutoUpdateRunsFromHeartbeatPath(t *testing.T) {
+	resetAutoUpdateTestState(t)
+	var applyCalls int
+	var restartCalls int
+	applyAutoUpdate = func(_ context.Context, version string) error {
+		applyCalls++
+		if version != "v1.2.162" {
+			t.Fatalf("version = %q, want v1.2.162 (updater must receive the validated version, not the hub URL)", version)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"model": "local-model",
-			"choices": []map[string]any{{
-				"message":       map[string]any{"content": "answer"},
-				"finish_reason": "stop",
-			}},
-			"usage": map[string]any{
-				"completion_tokens": 4,
-				"total_tokens":      7,
-			},
+		return nil
+	}
+	restartAfterAutoUpdate = func() error {
+		restartCalls++
+		return nil
+	}
+
+	if !maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_periodic") {
+		t.Fatal("maybeApplyAutoUpdate() = false, want true")
+	}
+	if applyCalls != 1 || restartCalls != 1 {
+		t.Fatalf("apply/restart calls = %d/%d, want 1/1", applyCalls, restartCalls)
+	}
+}
+
+func TestMaybeApplyAutoUpdateDefersWhileJobActive(t *testing.T) {
+	resetAutoUpdateTestState(t)
+	jobActive.Store(1)
+	var applyCalls int
+	applyAutoUpdate = func(context.Context, string) error {
+		applyCalls++
+		return nil
+	}
+
+	if maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_periodic") {
+		t.Fatal("maybeApplyAutoUpdate() = true, want false while job active")
+	}
+	if applyCalls != 0 {
+		t.Fatalf("apply calls = %d, want 0", applyCalls)
+	}
+}
+
+func TestMaybeApplyAutoUpdateThrottlesAttempts(t *testing.T) {
+	resetAutoUpdateTestState(t)
+	now := time.Unix(100, 0)
+	autoUpdateNow = func() time.Time { return now }
+	var applyCalls int
+	applyAutoUpdate = func(context.Context, string) error {
+		applyCalls++
+		return nil
+	}
+	restartAfterAutoUpdate = func() error { return nil }
+
+	if !maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_startup") {
+		t.Fatal("first maybeApplyAutoUpdate() = false, want true")
+	}
+	if maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_periodic") {
+		t.Fatal("second maybeApplyAutoUpdate() = true, want throttled false")
+	}
+	if applyCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+}
+
+func TestImprovedHardwareCapsUpgradesCPUOnlyToGPU(t *testing.T) {
+	current := hw.CapSet{
+		CPUCores: 24,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	detected := hw.CapSet{
+		GPUModel:  "NVIDIA GeForce RTX 3090",
+		CPUCores:  24,
+		RAMBytes:  8 * 1024 * 1024 * 1024,
+		VRAMBytes: 24 * 1024 * 1024 * 1024,
+		Sensors:   "nvidia-driver:550 model:NVIDIA GeForce RTX 3090",
+	}
+
+	got, changed := improvedHardwareCaps(current, detected)
+	if !changed {
+		t.Fatal("expected CPU-only caps to upgrade when GPU is later detected")
+	}
+	if got.GPUModel != detected.GPUModel || got.VRAMBytes != detected.VRAMBytes {
+		t.Fatalf("upgraded caps = %+v, want GPU model and VRAM from detection", got)
+	}
+}
+
+func TestImprovedHardwareCapsDoesNotDowngradeExistingGPU(t *testing.T) {
+	current := hw.CapSet{
+		GPUModel:  "NVIDIA GeForce RTX 3090",
+		CPUCores:  24,
+		RAMBytes:  8 * 1024 * 1024 * 1024,
+		VRAMBytes: 24 * 1024 * 1024 * 1024,
+		Sensors:   "nvidia-driver:550 model:NVIDIA GeForce RTX 3090",
+	}
+	detected := hw.CapSet{
+		CPUCores: 24,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+
+	got, changed := improvedHardwareCaps(current, detected)
+	if changed {
+		t.Fatalf("expected no downgrade when later probe misses GPU, got %+v", got)
+	}
+	if got.GPUModel != current.GPUModel || got.VRAMBytes != current.VRAMBytes {
+		t.Fatalf("caps downgraded to %+v, want %+v", got, current)
+	}
+}
+
+func TestImprovedHardwareCapsDoesNotReplaceGPUWithLowerFidelityFallback(t *testing.T) {
+	current := hw.CapSet{
+		GPUModel:  "NVIDIA GeForce RTX 3090",
+		CPUCores:  24,
+		RAMBytes:  8 * 1024 * 1024 * 1024,
+		VRAMBytes: 24 * 1024 * 1024 * 1024,
+		Sensors:   "nvidia-driver:550 model:NVIDIA GeForce RTX 3090",
+	}
+	detected := hw.CapSet{
+		GPUModel: "Intel UHD Graphics",
+		CPUCores: 24,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+		Sensors:  "wmic model:Intel UHD Graphics",
+	}
+
+	got, changed := improvedHardwareCaps(current, detected)
+	if changed {
+		t.Fatalf("expected lower-fidelity fallback to be ignored, got %+v", got)
+	}
+	if got.GPUModel != current.GPUModel || got.VRAMBytes != current.VRAMBytes {
+		t.Fatalf("caps replaced with %+v, want %+v", got, current)
+	}
+}
+
+func TestRefreshCapabilityStateFromDetectionKeepsExplicitDeviceTypeAndGPUCaps(t *testing.T) {
+	state := newCapabilityState(hw.CapSet{CPUCores: 24}, "cpu")
+	detect := func(string) hw.CapSet {
+		return hw.CapSet{
+			GPUModel:  "NVIDIA GeForce RTX 3090",
+			CPUCores:  24,
+			VRAMBytes: 24 * 1024 * 1024 * 1024,
+		}
+	}
+
+	gotCaps, gotDeviceType, changed := refreshCapabilityStateFromDetection("cpu", state, detect)
+	if !changed {
+		t.Fatal("expected refreshed GPU caps")
+	}
+	if gotDeviceType != "cpu" {
+		t.Fatalf("device type = %q, want explicit cpu flag preserved", gotDeviceType)
+	}
+	if gotCaps.GPUModel != "NVIDIA GeForce RTX 3090" {
+		t.Fatalf("gpu model = %q, want RTX 3090", gotCaps.GPUModel)
+	}
+	storedCaps, storedDeviceType := state.Snapshot()
+	if storedDeviceType != gotDeviceType || storedCaps.GPUModel != gotCaps.GPUModel {
+		t.Fatalf("stored snapshot = (%+v, %q), want (%+v, %q)", storedCaps, storedDeviceType, gotCaps, gotDeviceType)
+	}
+}
+
+func TestBuildDashboardInferencePolicyUsesDerivedHardwarePolicy(t *testing.T) {
+	cacheDir := t.TempDir()
+	const gib = uint64(1024 * 1024 * 1024)
+	policy := buildDashboardInferencePolicy(func(key string) string {
+		if key == modelpolicy.EnvModelCacheDir {
+			return cacheDir
+		}
+		return ""
+	}, func(gotCacheDir string) capshardware.CapacityInventory {
+		if gotCacheDir != cacheDir {
+			t.Fatalf("hardware cache dir = %q, want %q", gotCacheDir, cacheDir)
+		}
+		return capshardware.NormalizeInventory(capshardware.CapacityInventory{
+			OS:              "windows",
+			Arch:            "amd64",
+			CPULogicalCores: 16,
+			SystemRAMBytes:  31 * gib,
+			GPUDetected:     true,
+			GPUVendor:       capshardware.GPUVendorNVIDIA,
+			GPUName:         "NVIDIA GeForce RTX 4070 Ti SUPER",
+			GPUVRAMBytes:    16 * gib,
+			CUDAAvailable:   true,
+			VulkanAvailable: true,
 		})
+	})
+
+	decision := modelpolicy.EvaluateRuntimeRequest(policy, modelpolicy.RuntimeRequest{
+		ModelID:                "phi-4-Q4_K_M.gguf",
+		Family:                 "phi",
+		ModelSizeBytes:         9 * gib,
+		ParameterCountBillions: 14,
+	})
+	if !decision.Allowed {
+		t.Fatalf("runtime decision = %+v, want derived RTX policy to allow Phi", decision)
+	}
+}
+
+func TestSubmitReceiptWithRetry_SucceedsAfterFailures(t *testing.T) {
+	fc := &fakeClient{failCount: 3}
+	receipt := hub.Receipt{JobID: "test-job-1", ResultHashHex: "abc123", MeteringUnits: 1}
+
+	err := submitReceiptWithRetryTestable(context.Background(), fc, receipt)
+	if err != nil {
+		t.Fatalf("expected success after transient failures, got: %v", err)
+	}
+	if got := int(fc.calls.Load()); got != 4 {
+		t.Fatalf("expected 4 calls (3 fail + 1 success), got %d", got)
+	}
+}
+
+func TestPrepareReceiptForSubmissionFlagOffDoesNotAttachV7Proof(t *testing.T) {
+	t.Setenv(v7ProofFlagEnv, "")
+	receipt := hub.Receipt{
+		JobID:         "job-no-proof",
+		ResultHashHex: strings.Repeat("a", 64),
+		MeteringUnits: 2,
+		Metadata: map[string]any{
+			"executor": "oci",
+		},
+	}
+
+	got := prepareReceiptForSubmission(receipt)
+	if _, ok := got.Metadata[v7ProofMetadataKey]; ok {
+		t.Fatalf("metadata contains %q with flag off: %+v", v7ProofMetadataKey, got.Metadata[v7ProofMetadataKey])
+	}
+	if got.Metadata["executor"] != "oci" {
+		t.Fatalf("metadata changed with flag off: %+v", got.Metadata)
+	}
+}
+
+func TestPrepareReceiptForSubmissionFlagOnWithOutputBytesAttachesV7Proof(t *testing.T) {
+	t.Setenv(v7ProofFlagEnv, "1")
+	rawOutput := []byte("raw runner output should not be serialized")
+	receipt := hub.Receipt{
+		JobID:         "job-proof-full",
+		ResultHashHex: strings.Repeat("b", 64),
+		MeteringUnits: 7,
+		Metadata: map[string]any{
+			v7ProofOutputBytesMetadataKey: rawOutput,
+			"executor":                    "oci",
+			"assignment_id":               "assignment-proof-full",
+			"node_id":                     "node-proof-full",
+			"model_id":                    "llama-3.1-8b.gguf",
+			"model_revision":              "rev-1",
+			"quantization_id":             "q4_k_m",
+			"artifact_kind":               "result_json",
+			"started_at_unix_ms":          int64(1_800_000_000_000),
+			"finished_at_unix_ms":         int64(1_800_000_001_000),
+		},
+	}
+
+	got := prepareReceiptForSubmission(receipt)
+	if _, ok := got.Metadata[v7ProofOutputBytesMetadataKey]; ok {
+		t.Fatalf("metadata still contains raw output source key %q", v7ProofOutputBytesMetadataKey)
+	}
+	proof, ok := got.Metadata[v7ProofMetadataKey].(map[string]any)
+	if !ok {
+		t.Fatalf("%q metadata type = %T, want map[string]any", v7ProofMetadataKey, got.Metadata[v7ProofMetadataKey])
+	}
+	if proof["proof_status"] != "complete" {
+		t.Fatalf("proof_status = %v, want complete", proof["proof_status"])
+	}
+	if gotHash, ok := proof["output_hash"].(string); !ok || !strings.HasPrefix(gotHash, "sha256:") {
+		t.Fatalf("output_hash = %v, want sha256 object id", proof["output_hash"])
+	}
+	if gotBytes, ok := proof["output_bytes"].(int64); !ok || gotBytes != int64(len(rawOutput)) {
+		t.Fatalf("output_bytes = %v, want %d", proof["output_bytes"], len(rawOutput))
+	}
+	if proof["artifact_manifest"] == nil {
+		t.Fatal("artifact_manifest is nil")
+	}
+	if proof["evidence_payload"] == nil {
+		t.Fatal("evidence_payload is nil")
+	}
+
+	encoded, err := json.Marshal(got.Metadata)
+	if err != nil {
+		t.Fatalf("json.Marshal(metadata) error = %v", err)
+	}
+	if strings.Contains(string(encoded), string(rawOutput)) {
+		t.Fatalf("V7 proof metadata contains raw output bytes: %s", encoded)
+	}
+}
+
+func TestPrepareReceiptForSubmissionFlagOnNoOutputBytesAttachesPartialProof(t *testing.T) {
+	t.Setenv(v7ProofFlagEnv, "1")
+	resultHash := strings.Repeat("c", 64)
+	receipt := hub.Receipt{
+		JobID:         "job-proof-partial",
+		ResultHashHex: resultHash,
+		MeteringUnits: 3,
+		Metadata: map[string]any{
+			"executor": "oci",
+		},
+	}
+
+	got := prepareReceiptForSubmission(receipt)
+	proof, ok := got.Metadata[v7ProofMetadataKey].(map[string]any)
+	if !ok {
+		t.Fatalf("%q metadata type = %T, want map[string]any", v7ProofMetadataKey, got.Metadata[v7ProofMetadataKey])
+	}
+	if proof["proof_status"] != "unavailable_no_output_bytes" {
+		t.Fatalf("proof_status = %v, want unavailable_no_output_bytes", proof["proof_status"])
+	}
+	if proof["result_hash"] != resultHash {
+		t.Fatalf("result_hash = %v, want %s", proof["result_hash"], resultHash)
+	}
+	if proof["output_hash"] != "sha256:"+resultHash {
+		t.Fatalf("output_hash = %v, want sha256 result hash", proof["output_hash"])
+	}
+	if proof["artifact_manifest"] != nil {
+		t.Fatalf("artifact_manifest = %v, want nil for partial proof", proof["artifact_manifest"])
+	}
+	if proof["evidence_payload"] != nil {
+		t.Fatalf("evidence_payload = %v, want nil for partial proof", proof["evidence_payload"])
+	}
+}
+
+func TestSubmitReceiptWithRetryTestableV7ProofBuildFailureStillSubmits(t *testing.T) {
+	t.Setenv(v7ProofFlagEnv, "1")
+	rawOutput := []byte("raw output from failed proof build")
+	fc := &fakeClient{}
+	receipt := hub.Receipt{
+		JobID:         "job-proof-build-failure",
+		ResultHashHex: strings.Repeat("d", 64),
+		MeteringUnits: 1,
+		Metadata: map[string]any{
+			v7ProofOutputBytesMetadataKey: rawOutput,
+			"executor":                    "oci",
+			"artifact_kind":               "invalid_kind",
+		},
+	}
+
+	err := submitReceiptWithRetryTestable(context.Background(), fc, receipt)
+	if err != nil {
+		t.Fatalf("submitReceiptWithRetryTestable() error = %v", err)
+	}
+	if got := int(fc.calls.Load()); got != 1 {
+		t.Fatalf("receipt submissions = %d, want 1", got)
+	}
+	proof, ok := fc.lastReceipt.Metadata[v7ProofMetadataKey].(map[string]any)
+	if !ok {
+		t.Fatalf("%q metadata type = %T, want map[string]any", v7ProofMetadataKey, fc.lastReceipt.Metadata[v7ProofMetadataKey])
+	}
+	if proof["proof_status"] != "build_failed" {
+		t.Fatalf("proof_status = %v, want build_failed", proof["proof_status"])
+	}
+	if _, ok := fc.lastReceipt.Metadata[v7ProofOutputBytesMetadataKey]; ok {
+		t.Fatalf("submitted metadata still contains raw output source key %q", v7ProofOutputBytesMetadataKey)
+	}
+
+	encoded, err := json.Marshal(fc.lastReceipt.Metadata)
+	if err != nil {
+		t.Fatalf("json.Marshal(metadata) error = %v", err)
+	}
+	if strings.Contains(string(encoded), string(rawOutput)) {
+		t.Fatalf("submitted metadata contains raw output bytes: %s", encoded)
+	}
+}
+
+func TestBuildOptionalV7HeartbeatPayloadDefaultsOnAndHonorsExplicitOff(t *testing.T) {
+	t.Setenv("RYV_DISABLE_OCI", "1")
+	t.Setenv("RYV_LLAMA_CPP_PROBE_MODEL", "")
+	caps := hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	runtimeMgr := newRuntimeManager("test", runtimeContractMetadata{})
+
+	t.Setenv("RYV_NODE_V7_CAPS", "0")
+	if payload := buildOptionalV7HeartbeatPayload("pubkey", caps, "cpu", "ca", nil, runtimeMgr); payload != nil {
+		t.Fatalf("payload = %+v, want nil when RYV_NODE_V7_CAPS is explicitly off", payload)
+	}
+
+	t.Setenv("RYV_NODE_V7_CAPS", "")
+	payload := buildOptionalV7HeartbeatPayload("pubkey", caps, "cpu", "ca", nil, runtimeMgr)
+	if payload == nil {
+		t.Fatal("payload = nil, want V7 payload by default")
+	}
+	if payload.CapabilityPassport.NodePublicKey != "pubkey" {
+		t.Fatalf("node public key = %q, want pubkey", payload.CapabilityPassport.NodePublicKey)
+	}
+	if payload.KVCapability == nil || payload.KVCapability.RuntimeKind != kvprobe.RuntimeKindNative {
+		t.Fatalf("kv capability = %+v, want native runtime capability probe", payload.KVCapability)
+	}
+	expectedTensorAccess := buildRuntimeTensorAccessStatus(nil)
+	if payload.TensorAccess != expectedTensorAccess {
+		t.Fatalf("tensor_access = %+v, want local status builder value %+v", payload.TensorAccess, expectedTensorAccess)
+	}
+	if payload.TensorAccess.KVAccessSupported ||
+		payload.TensorAccess.KVSnapshotSupported ||
+		payload.TensorAccess.HiddenStateAccessSupported ||
+		payload.TensorAccess.LogitsAccessSupported ||
+		payload.TensorAccess.AttentionHookSupported {
+		t.Fatalf("tensor_access should be reporting-only unsupported capability: %+v", payload.TensorAccess)
+	}
+	expectedRuntimeInventory := buildRuntimeInventoryStatus(operatorRuntimeInfo{}, expectedTensorAccess, nil)
+	if !reflect.DeepEqual(payload.RuntimeInventory, expectedRuntimeInventory) {
+		t.Fatalf("runtime_inventory = %+v, want local status builder value %+v", payload.RuntimeInventory, expectedRuntimeInventory)
+	}
+	if payload.RuntimeInventory.Provider != "noop" {
+		t.Fatalf("runtime_inventory provider = %q, want noop", payload.RuntimeInventory.Provider)
+	}
+	if payload.HardwareCapacity.OS == "" ||
+		payload.HardwareCapacity.Arch == "" ||
+		payload.HardwareCapacity.GPUName == "" ||
+		payload.HardwareCapacity.PowerProfile == "" ||
+		payload.HardwareCapacity.ThermalRisk == "" {
+		t.Fatalf("hardware_capacity missing safe status fields: %+v", payload.HardwareCapacity)
+	}
+	expectedBackendRuntimes := llamacpp.EnrichBackendRuntimes(llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}), expectedRuntimeInventory, payload.HardwareCapacity)
+	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
+		t.Fatalf("backend_runtimes = %+v, want default local builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
+	}
+	expectedBackendProbes := buildBackendProbeStatus()
+	if !reflect.DeepEqual(payload.BackendProbes, expectedBackendProbes) {
+		t.Fatalf("backend_probes = %+v, want local status builder value %+v", payload.BackendProbes, expectedBackendProbes)
+	}
+	if payload.CapabilityProfile.SchemaVersion == "" || payload.CapabilityProfile.Reason == "" {
+		t.Fatalf("capability_profile missing compact status: %+v", payload.CapabilityProfile)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"tensor_access"`) {
+		t.Fatalf("V7 heartbeat payload missing tensor_access: %s", raw)
+	}
+	for _, want := range []string{`"runtime_inventory"`, `"loaded_models"`, `"candidate_backends"`, `"backend_candidates"`, `"gguf_models"`, `"hardware_capacity"`, `"cpu_logical_cores"`, `"gpu_vram_bytes"`, `"model_policy"`, `"runtime_policy"`, `"model_cache"`, `"backend_probes"`, `"backend_runtimes"`, `"capability_profile"`, `"llama_cpp"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("V7 heartbeat payload missing %s: %s", want, raw)
+		}
+	}
+	if strings.Contains(string(raw), `"speculative_decoding"`) || strings.Contains(string(raw), `"speculative_profiles"`) {
+		t.Fatalf("V7 heartbeat payload should omit speculative fields by default: %s", raw)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "generated_text", "model_output", "output_text", "key_data", "value_data", "query_vector", "tensor_bytes", "raw_tensor", "weighted_value"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("V7 heartbeat payload contains forbidden marker %q: %s", forbidden, raw)
+		}
+	}
+}
+
+func TestBuildV7HeartbeatPayloadIncludesActiveBackendRuntime(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	t.Setenv("RYV_LLAMA_CPP_PROBE_MODEL", "")
+	caps := hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	backendRuntimes := llamacpp.BuildBackendRuntimes(llamacpp.LlamaCppSidecarStatus{
+		Enabled:                true,
+		Available:              true,
+		Running:                true,
+		Healthy:                true,
+		BaseURL:                "http://127.0.0.1:45910",
+		ModelPath:              "/tmp/ryvion-models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelFilename:          "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		ModelSizeBytes:         2019377696,
+		ModelFamilyHint:        "llama",
+		QuantizationHint:       "Q4_K_M",
+		Backend:                llamacpp.BackendName,
+		OpenAICompatible:       true,
+		SupportsTextGeneration: true,
+		SupportsStreaming:      true,
+	})
+
+	payload := buildOptionalV7HeartbeatPayloadWithBackendRuntimes("pubkey", caps, "cpu", "ca", nil, nil, backendRuntimes)
+	if payload == nil {
+		t.Fatal("payload = nil, want V7 payload")
+	}
+	expectedBackendRuntimes := llamacpp.EnrichBackendRuntimes(backendRuntimes, payload.RuntimeInventory, payload.HardwareCapacity)
+	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
+		t.Fatalf("backend_runtimes = %+v, want local builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
+	}
+	runtime := payload.BackendRuntimes.LlamaCPP
+	if !runtime.Loaded || !runtime.Warm || runtime.ModelID != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+		t.Fatalf("backend runtime residency = %+v, want loaded warm llama.cpp model", runtime)
+	}
+	if runtime.SupportsKVAccess || runtime.SupportsTensorHooks {
+		t.Fatalf("backend runtime should remain reporting-only without KV/tensor hooks: %+v", runtime)
+	}
+	if payload.CapabilityProfile.SpeculativeDecoding != nil {
+		t.Fatalf("speculative_decoding = %+v, want omitted from heartbeat by default", payload.CapabilityProfile.SpeculativeDecoding)
+	}
+	if len(payload.SpeculativeProfiles) != 0 {
+		t.Fatalf("speculative_profiles = %+v, want omitted from heartbeat", payload.SpeculativeProfiles)
+	}
+}
+
+func TestSummarizeV7HeartbeatPayloadCountsOnlyRealInventoryModels(t *testing.T) {
+	payload := &heartbeat.V7HeartbeatPayload{
+		ModelCache: modelcache.Status{
+			Models: []modelcache.Model{
+				{ModelID: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", Filename: "Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
+				{ModelID: "phi-4-Q5_K_M.gguf", Filename: "phi-4-Q5_K_M.gguf"},
+			},
+		},
+		CapabilityProfile: capabilityprofile.Profile{
+			SchemaVersion: "v7.capability-profile.v1",
+			TextOutput:    true,
+			Streaming:     true,
+			WarmModel: capabilityprofile.WarmModelSummary{
+				ModelID: "draft-profile-placeholder",
+				Warm:    true,
+			},
+			Models: []capabilityprofile.ModelCapability{
+				{ModelID: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", Resident: true, Warm: true, Runnable: true},
+				{ModelID: "phi-4-Q5_K_M.gguf", Resident: true, Runnable: false, BlockedReasons: []string{"family_denied"}},
+			},
+		},
+		BackendRuntimes: llamacpp.BackendRuntimes{
+			LlamaCPP: llamacpp.BackendRuntimeStatus{
+				Backend:       llamacpp.BackendName,
+				Available:     true,
+				ModelID:       "draft-profile-placeholder",
+				ModelFilename: "draft-profile-placeholder.gguf",
+				WarmModelID:   "mtp-head-placeholder",
+				Warm:          true,
+			},
+		},
+	}
+
+	summary := summarizeV7HeartbeatPayload(payload)
+	if summary.ModelCount != 2 {
+		t.Fatalf("model_count = %d, want only real model_cache/capability_profile models", summary.ModelCount)
+	}
+	if !summary.HasCapabilityProfile || !summary.TextOutput || !summary.Streaming {
+		t.Fatalf("payload summary lost base capability fields: %+v", summary)
+	}
+}
+
+func TestBuildV7HeartbeatPayloadRuntimeInventoryMatchesOperatorStatusBuilder(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	t.Setenv("RYV_LLAMA_CPP_PROBE_MODEL", "")
+	caps := hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	infMgr := inference.New(t.TempDir())
+	runtimeMgr := newRuntimeManager("test", runtimeContractMetadata{})
+
+	payload, err := buildV7HeartbeatPayloadForNode("pubkey", caps, "cpu", "ca", infMgr, runtimeMgr)
+	if err != nil {
+		t.Fatalf("buildV7HeartbeatPayloadForNode() error = %v", err)
+	}
+	expectedTensorAccess := buildRuntimeTensorAccessStatus(infMgr)
+	expectedRuntimeInventory := buildRuntimeInventoryStatus(operatorRuntimeInfo{
+		NativeInferenceReady: inference.NativeRuntimeAvailable() && infMgr.Healthy(),
+		NativeModel:          infMgr.ModelName(),
+	}, expectedTensorAccess, infMgr)
+	if !reflect.DeepEqual(payload.RuntimeInventory, expectedRuntimeInventory) {
+		t.Fatalf("runtime_inventory = %+v, want local status builder value %+v", payload.RuntimeInventory, expectedRuntimeInventory)
+	}
+	expectedBackendRuntimes := llamacpp.EnrichBackendRuntimes(llamacpp.NormalizeBackendRuntimes(llamacpp.BackendRuntimes{}), expectedRuntimeInventory, payload.HardwareCapacity)
+	if !reflect.DeepEqual(payload.BackendRuntimes, expectedBackendRuntimes) {
+		t.Fatalf("backend_runtimes = %+v, want local status builder value %+v", payload.BackendRuntimes, expectedBackendRuntimes)
+	}
+	if len(payload.RuntimeInventory.LoadedModels) != 1 {
+		t.Fatalf("runtime_inventory loaded_models = %+v, want one local native model entry", payload.RuntimeInventory.LoadedModels)
+	}
+	if payload.RuntimeInventory.LoadedModels[0].ModelID != infMgr.ModelName() {
+		t.Fatalf("loaded model id = %q, want %q", payload.RuntimeInventory.LoadedModels[0].ModelID, infMgr.ModelName())
+	}
+	expectedBackendProbes := buildBackendProbeStatus()
+	if !reflect.DeepEqual(payload.BackendProbes, expectedBackendProbes) {
+		t.Fatalf("backend_probes = %+v, want local status builder value %+v", payload.BackendProbes, expectedBackendProbes)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"runtime_inventory"`) ||
+		!strings.Contains(string(raw), `"candidate_backends"`) ||
+		!strings.Contains(string(raw), `"backend_candidates"`) ||
+		!strings.Contains(string(raw), `"gguf_models"`) ||
+		!strings.Contains(string(raw), `"hardware_capacity"`) ||
+		!strings.Contains(string(raw), `"model_policy"`) ||
+		!strings.Contains(string(raw), `"runtime_policy"`) ||
+		!strings.Contains(string(raw), `"model_cache"`) ||
+		!strings.Contains(string(raw), `"backend_probes"`) ||
+		!strings.Contains(string(raw), `"llama_cpp"`) {
+		t.Fatalf("V7 heartbeat payload missing runtime inventory fields: %s", raw)
+	}
+	if strings.Contains(string(raw), `"speculative_decoding"`) || strings.Contains(string(raw), `"speculative_profiles"`) {
+		t.Fatalf("V7 heartbeat payload should omit speculative fields by default: %s", raw)
+	}
+}
+
+func TestBuildOptionalV7HeartbeatPayloadDoesNotProbeRuntime(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	caps := hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+	runtimeMgr := newRuntimeManager("test", runtimeContractMetadata{
+		Binary:       "/opt/ryvion/runtime/ryvion-runtime",
+		Backend:      "/opt/ryvion/runtime/backend/ryvion-oci",
+		ManifestHash: "manifest-hash",
+	})
+
+	called := false
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		called = true
+		return runtimeexec.Status{CLIInstalled: true, Ready: true, GPUReady: true, Health: "ready"}, true
+	}
+	defer func() { probeManagedRuntimeStatus = prevProbe }()
+
+	payload := buildOptionalV7HeartbeatPayload("pubkey", caps, "cpu", "ca", nil, runtimeMgr)
+	if payload == nil {
+		t.Fatal("payload = nil, want V7 payload")
+	}
+	if called {
+		t.Fatal("V7 heartbeat payload construction should not probe managed runtime status")
+	}
+	if !payload.EvidenceCapabilitySummary.SupportsRuntimeHash {
+		t.Fatal("expected runtime hash support when runtime manifest hash is already available")
+	}
+}
+
+func TestSendHeartbeatOmitsV7WhenFlagOff(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "0")
+	client, gotV7, calls := heartbeatTestClient(t)
+
+	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want true")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("heartbeat calls = %d, want 1", calls.Load())
+	}
+	if gotV7.Load() {
+		t.Fatal("heartbeat sent V7 payload with RYV_NODE_V7_CAPS explicitly off")
+	}
+}
+
+func TestSendHeartbeatIncludesV7ByDefault(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "")
+	client, gotV7, calls := heartbeatTestClient(t)
+
+	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want true")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("heartbeat calls = %d, want 1", calls.Load())
+	}
+	if !gotV7.Load() {
+		t.Fatal("heartbeat did not send V7 payload by default")
+	}
+}
+
+func TestSendHeartbeatRecordsCapabilityHeartbeatStatus(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	llamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/v1/models":
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer llamaServer.Close()
 
-	var receipts []map[string]any
-	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/node/upload/prepare":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok":      true,
-				"put_url": "/api/v1/blob/job_upload_failure",
-				"key":     "artifacts/job_upload_failure/output.json",
-			})
-		case "/api/v1/blob/job_upload_failure":
-			http.Error(w, "upload unavailable", http.StatusInternalServerError)
-		case "/api/v1/node/receipt":
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatalf("decode receipt: %v", err)
-			}
-			receipts = append(receipts, body)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		default:
-			t.Fatalf("hub path = %q", r.URL.Path)
+	client, _, _ := heartbeatTestClient(t)
+	prevState := operatorRuntimeState
+	state := &operatorRuntime{
+		version:         "test",
+		hubURL:          "https://api.ryvion.ai",
+		deviceType:      "gpu",
+		publicKeyHex:    client.PublicKeyHex(),
+		llamaCppSidecar: testLlamaCppManagerForServer(t, llamaServer.URL),
+		caps:            validHeartbeatCaps(),
+	}
+	operatorRuntimeState = state
+	t.Cleanup(func() { operatorRuntimeState = prevState })
+
+	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "gpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want true")
+	}
+	status := state.statusSnapshot(defaultOperatorAPIPort).Heartbeat
+	if status.LastStartedAt == "" || status.LastCompletedAt == "" {
+		t.Fatalf("heartbeat timestamps missing: %+v", status)
+	}
+	if status.LastDurationMs < 0 {
+		t.Fatalf("last_duration_ms = %d, want non-negative", status.LastDurationMs)
+	}
+	if status.LastError != "" || status.SuccessCount != 1 || status.FailedCount != 0 {
+		t.Fatalf("heartbeat status = %+v, want one successful capability submission", status)
+	}
+	summary := status.LastPayloadSummary
+	if summary.ModelCount == 0 ||
+		summary.BackendCount == 0 ||
+		!summary.HasCapabilityProfile ||
+		!summary.TextOutput ||
+		!summary.Streaming ||
+		summary.WarmModelID != "tinyllama.Q4_K_M.gguf" {
+		t.Fatalf("payload summary = %+v, want compact active llama.cpp capability summary", summary)
+	}
+	responseSummary := status.LastResponseSummary
+	if responseSummary.V7SnapshotUpserted == nil ||
+		!*responseSummary.V7SnapshotUpserted ||
+		responseSummary.SnapshotModelCount != 1 ||
+		responseSummary.SnapshotBackendCount != 1 ||
+		!responseSummary.HasCapabilityProfile ||
+		responseSummary.HubInstanceID != "test-hub" ||
+		responseSummary.Warning != "" {
+		t.Fatalf("response summary = %+v, want confirmed V7 snapshot", responseSummary)
+	}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("json.Marshal(status) error = %v", err)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"raw_prompt", "prompt_text", "generated_text", "model_output", "output_text", "secret", "tensor_bytes", "raw_tensor"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("heartbeat status contains forbidden marker %q: %s", forbidden, raw)
 		}
+	}
+}
+
+func TestSendHeartbeatWarnsWhenV7SnapshotNotConfirmed(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ping" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			V7 json.RawMessage `json:"v7"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.V7) == 0 {
+			t.Error("heartbeat missing V7 payload")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
-	defer hubServer.Close()
+	defer ts.Close()
+	client := hub.New(ts.URL, pub, priv)
+	prevState := operatorRuntimeState
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       ts.URL,
+		deviceType:   "cpu",
+		publicKeyHex: client.PublicKeyHex(),
+		caps:         validHeartbeatCaps(),
+	}
+	operatorRuntimeState = state
+	t.Cleanup(func() { operatorRuntimeState = prevState })
+
+	result := sendHeartbeatDetailed(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
+	if !result.hubOK {
+		t.Fatal("hubOK = false, want HTTP heartbeat liveness success")
+	}
+	if result.capabilitySubmitted {
+		t.Fatal("capabilitySubmitted = true, want unconfirmed V7 snapshot treated as not confirmed")
+	}
+	status := state.statusSnapshot(defaultOperatorAPIPort).Heartbeat
+	if status.SuccessCount != 0 || status.FailedCount != 1 || status.LastError != "v7_snapshot_upserted_missing" {
+		t.Fatalf("heartbeat status = %+v, want V7 snapshot warning", status)
+	}
+	if status.LastResponseSummary.V7SnapshotUpserted != nil ||
+		status.LastResponseSummary.Warning != "v7_snapshot_upserted_missing" {
+		t.Fatalf("response summary = %+v, want missing snapshot warning", status.LastResponseSummary)
+	}
+	if state.statusSnapshot(defaultOperatorAPIPort).LastHeartbeatAt.IsZero() {
+		t.Fatal("heartbeat liveness should still be recorded after HTTP 200")
+	}
+}
+
+func TestSendHeartbeatRecordsCapabilityFailureWhenV7FallbackSucceeds(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	calls := &atomic.Int32{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ping" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		calls.Add(1)
+		var req struct {
+			V7 json.RawMessage `json:"v7"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.V7) > 0 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("temporary v7 ingest failure"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	client := hub.New(ts.URL, pub, priv)
+	prevState := operatorRuntimeState
+	state := &operatorRuntime{
+		version:      "test",
+		hubURL:       ts.URL,
+		deviceType:   "cpu",
+		publicKeyHex: client.PublicKeyHex(),
+		caps:         validHeartbeatCaps(),
+	}
+	operatorRuntimeState = state
+	t.Cleanup(func() { operatorRuntimeState = prevState })
+
+	ok := sendHeartbeat(context.Background(), client, validHeartbeatCaps(), "cpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want legacy heartbeat fallback success")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("heartbeat calls = %d, want V7 attempt plus legacy fallback", calls.Load())
+	}
+	status := state.statusSnapshot(defaultOperatorAPIPort).Heartbeat
+	if status.SuccessCount != 0 || status.FailedCount != 1 || status.LastError == "" {
+		t.Fatalf("heartbeat status = %+v, want recorded V7 capability failure", status)
+	}
+	if !status.LastPayloadSummary.HasCapabilityProfile {
+		t.Fatalf("payload summary missing from failed V7 attempt: %+v", status.LastPayloadSummary)
+	}
+	if state.statusSnapshot(defaultOperatorAPIPort).LastHeartbeatAt.IsZero() {
+		t.Fatal("legacy heartbeat liveness was not recorded after fallback success")
+	}
+}
+
+func TestSendHeartbeatFallsBackToLegacyWhenV7BuildFails(t *testing.T) {
+	t.Setenv("RYV_NODE_V7_CAPS", "1")
+	client, gotV7, calls := heartbeatTestClient(t)
+
+	ok := sendHeartbeat(context.Background(), client, hw.CapSet{}, "cpu", "ca", nil, nil)
+	if !ok {
+		t.Fatal("sendHeartbeat() = false, want true")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("heartbeat calls = %d, want 1", calls.Load())
+	}
+	if gotV7.Load() {
+		t.Fatal("heartbeat should fall back to legacy metrics when V7 payload build fails")
+	}
+}
+
+func TestSubmitReceiptWithRetry_ExhaustsRetries(t *testing.T) {
+	fc := &fakeClient{failCount: 10} // always fails
+	receipt := hub.Receipt{JobID: "test-job-2", ResultHashHex: "def456", MeteringUnits: 1}
+
+	err := submitReceiptWithRetryTestable(context.Background(), fc, receipt)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if got := int(fc.calls.Load()); got != 5 {
+		t.Fatalf("expected exactly 5 attempts, got %d", got)
+	}
+}
+
+func heartbeatTestClient(t *testing.T) (*hub.Client, *atomic.Bool, *atomic.Int32) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	gotV7 := &atomic.Bool{}
+	calls := &atomic.Int32{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ping" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path != "/api/v1/node/heartbeat" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		calls.Add(1)
+		var req struct {
+			V7 json.RawMessage `json:"v7"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		gotV7.Store(len(req.V7) > 0)
+		if len(req.V7) > 0 {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"v7_snapshot_upserted":   true,
+				"snapshot_model_count":   1,
+				"snapshot_backend_count": 1,
+				"has_capability_profile": true,
+				"hub_instance_id":        "test-hub",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	return hub.New(ts.URL, pub, priv), gotV7, calls
+}
+
+func validHeartbeatCaps() hw.CapSet {
+	return hw.CapSet{
+		CPUCores: 4,
+		RAMBytes: 8 * 1024 * 1024 * 1024,
+	}
+}
+
+func TestSubmitReceiptWithRetry_RespectsContextCancel(t *testing.T) {
+	fc := &fakeClient{failCount: 10}
+	receipt := hub.Receipt{JobID: "test-job-3", ResultHashHex: "ghi789", MeteringUnits: 1}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := submitReceiptWithRetryTestable(ctx, fc, receipt)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error on cancelled context")
+	}
+	// Should bail out within ~1 second, not wait for all 5 retries
+	if elapsed > 3*time.Second {
+		t.Fatalf("took too long (%v), context cancellation not respected", elapsed)
+	}
+}
+
+func TestJobActiveFlag_PreventsUpdate(t *testing.T) {
+	// Verify the atomic flag mechanism works
+	jobActive.Store(0)
+	if jobActive.Load() != 0 {
+		t.Fatal("expected jobActive=0 initially")
+	}
+	jobActive.Store(1)
+	if jobActive.Load() != 1 {
+		t.Fatal("expected jobActive=1 after store")
+	}
+	jobActive.Store(0)
+	if jobActive.Load() != 0 {
+		t.Fatal("expected jobActive=0 after reset")
+	}
+}
+
+func TestParseModelBenchSelfTestFlags(t *testing.T) {
+	config, jsonOutput, err := parseModelBenchSelfTestFlags([]string{
+		"--model", "tinyllama",
+		"--tokens", "8",
+		"--timeout", "1500ms",
+		"--json",
+	})
+	if err != nil {
+		t.Fatalf("parseModelBenchSelfTestFlags() error = %v", err)
+	}
+	if !jsonOutput {
+		t.Fatal("json output = false, want true")
+	}
+	if config.ModelID != "tinyllama" {
+		t.Fatalf("model_id = %q, want tinyllama", config.ModelID)
+	}
+	if config.MaxTokens != 8 {
+		t.Fatalf("max_tokens = %d, want 8", config.MaxTokens)
+	}
+	if config.TimeoutMs != 1500 {
+		t.Fatalf("timeout_ms = %d, want 1500", config.TimeoutMs)
+	}
+}
+
+func TestParseModelBenchTimeoutAcceptsRawMilliseconds(t *testing.T) {
+	got, err := parseModelBenchTimeoutMs("60000")
+	if err != nil {
+		t.Fatalf("parseModelBenchTimeoutMs() error = %v", err)
+	}
+	if got != 60_000 {
+		t.Fatalf("timeout_ms = %d, want 60000", got)
+	}
+}
+
+func TestParseLlamaCppBenchFlags(t *testing.T) {
+	config, jsonOutput, err := parseLlamaCppBenchFlags([]string{
+		"--json",
+		"--model", "tinyllama.Q4_K_M.gguf",
+		"--max-tokens", "16",
+		"--runs", "5",
+		"--warmup-runs", "2",
+		"--timeout", "1500ms",
+	})
+	if err != nil {
+		t.Fatalf("parseLlamaCppBenchFlags() error = %v", err)
+	}
+	if !jsonOutput {
+		t.Fatal("json output = false, want true")
+	}
+	if config.ModelID != "tinyllama.Q4_K_M.gguf" {
+		t.Fatalf("model_id = %q, want tinyllama.Q4_K_M.gguf", config.ModelID)
+	}
+	if config.MaxTokens != 16 || config.MeasuredRuns != 5 || config.WarmupRuns != 2 || config.TimeoutMs != 1500 {
+		t.Fatalf("config = %+v, want max_tokens/runs/warmups/timeout overrides", config)
+	}
+	if !config.Streaming {
+		t.Fatalf("streaming = false, want default true")
+	}
+}
+
+func TestParseLlamaCppBenchTimeoutAcceptsRawMilliseconds(t *testing.T) {
+	got, err := parseLlamaCppBenchTimeoutMs("60000")
+	if err != nil {
+		t.Fatalf("parseLlamaCppBenchTimeoutMs() error = %v", err)
+	}
+	if got != 60_000 {
+		t.Fatalf("timeout_ms = %d, want 60000", got)
+	}
+}
+
+func TestDetectManagedOCIBackendWithProbesWithoutDaemonRejectsCPUContainerWork(t *testing.T) {
+	cli, ready, gpu := detectManagedOCIBackendWithProbes(false,
+		func() string { return "/usr/bin/docker" },
+		func(string) bool { return false },
+		func(string) bool {
+			t.Fatal("gpu probe should not run when daemon is unavailable")
+			return false
+		},
+	)
+
+	if !cli {
+		t.Fatal("expected OCI backend CLI to be detected")
+	}
+	if ready {
+		t.Fatal("expected managed OCI backend to be unavailable")
+	}
+	if gpu {
+		t.Fatal("expected managed OCI GPU check to be false")
+	}
+}
+
+func TestDetectManagedOCIBackendWithProbesReportsGPUReadiness(t *testing.T) {
+	cli, ready, gpu := detectManagedOCIBackendWithProbes(true,
+		func() string { return "/usr/bin/docker" },
+		func(string) bool { return true },
+		func(bin string) bool {
+			if bin != "/usr/bin/docker" {
+				t.Fatalf("unexpected OCI backend bin %q", bin)
+			}
+			return true
+		},
+	)
+
+	if !cli || !ready || !gpu {
+		t.Fatalf("expected managed OCI backend and GPU to be ready, got cli=%v ready=%v gpu=%v", cli, ready, gpu)
+	}
+}
+
+func TestManagedOCIRuntimeUnavailableErrorMatchesNamedPipeFailure(t *testing.T) {
+	err := fmt.Errorf("docker run failed")
+	logs := "failed to connect to the docker API at npipe:////./pipe/oci_linux_adapter; check if the daemon is running"
+	if !managedOCIRuntimeUnavailableError(err, logs) {
+		t.Fatal("expected named pipe OCI backend failure to be detected")
+	}
+}
+
+func TestManagedOCIRuntimeUnavailableErrorIgnoresRegularContainerFailures(t *testing.T) {
+	err := fmt.Errorf("exit status 1")
+	logs := "Traceback: model weights missing"
+	if managedOCIRuntimeUnavailableError(err, logs) {
+		t.Fatal("expected ordinary container error to not be treated as OCI backend failure")
+	}
+}
+
+func TestPublicAIOptInEnabled(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	prevState := operatorRuntimeState
+	operatorRuntimeState = nil
+	defer func() {
+		operatorRuntimeState = prevState
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	if !publicAIOptInEnabled() {
+		t.Fatal("expected legacy missing public AI preference to preserve default-on participation")
+	}
+
+	t.Setenv("RYV_PUBLIC_AI", "1")
+	if !publicAIOptInEnabled() {
+		t.Fatal("expected public AI opt-in to enable on 1")
+	}
+
+	t.Setenv("RYV_PUBLIC_AI", "true")
+	if !publicAIOptInEnabled() {
+		t.Fatal("expected public AI opt-in to enable on true")
+	}
+
+	t.Setenv("RYV_PUBLIC_AI", "no")
+	if publicAIOptInEnabled() {
+		t.Fatal("expected public AI opt-in to disable on no")
+	}
+}
+
+func TestLegacyNativeInferenceManagerDefaultsIdleSafe(t *testing.T) {
+	getenv := map[string]string{}
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to stay stopped by default")
+	}
+	getenv[legacyNativeInferenceFlagEnv] = "1"
+	if !legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected explicit legacy inference opt-in to start manager")
+	}
+	getenv[legacyNativeInferenceFlagEnv] = "0"
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected explicit legacy inference opt-out to keep manager stopped")
+	}
+}
+
+func TestLegacyNativeInferenceManagerStaysIdleWhenV7Enabled(t *testing.T) {
+	// V7 dashboard inference availability must not imply boot-time model
+	// residency. The sidecar can be started by an actual job without keeping
+	// llama-server.exe resident immediately after login.
+	getenv := map[string]string{}
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to remain idle when V7 inference is enabled")
+	}
+	getenv[routedinference.DisableFlagEnv] = "1"
+	if legacyNativeInferenceManagerEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("expected legacy inference manager to remain idle when V7 inference is disabled")
+	}
+}
+
+func TestNativeInferenceBlockerToken(t *testing.T) {
+	if got := nativeInferenceBlockerToken(false, nil); got != string(inference.BlockerPlatformUnsupported) {
+		t.Fatalf("unsupported platform should report platform-unsupported, got %q", got)
+	}
+	if got := nativeInferenceBlockerToken(true, nil); got != string(inference.BlockerNotStarted) {
+		t.Fatalf("nil manager should report not-started, got %q", got)
+	}
+}
+
+func TestResolveInitialPublicAIOptInUsesSavedPreferences(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: true}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected saved operator preference to enable public AI opt-in")
+	}
+}
+
+func TestResolveInitialPublicAIOptInTreatsLegacySavedFalseAsDefaultOn(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: false}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected legacy saved false without opt-out marker to default public AI on")
+	}
+}
+
+func TestResolveInitialPublicAIOptInHonorsExplicitOptOut(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: false, PublicAIOptOut: true}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if got {
+		t.Fatal("expected explicit public AI opt-out marker to keep public AI disabled")
+	}
+}
+
+func TestResolveInitialPublicAIOptInPrefersEnvOverride(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	if err := saveOperatorPreferences(operatorPreferences{PublicAIOptIn: false}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	t.Setenv("RYV_PUBLIC_AI", "1")
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected env override to take precedence over saved preferences")
+	}
+}
+
+func TestResolveInitialPublicAIOptInDefaultOnWithNoConfig(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected default-on opt-in when no config and no env override is set")
+	}
+}
+
+func TestResolveInitialPublicAIOptInEnvZeroOptsOut(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	for _, raw := range []string{"0", "false", "no", "off"} {
+		t.Run("env="+raw, func(t *testing.T) {
+			t.Setenv("RYV_PUBLIC_AI", raw)
+			got, err := resolveInitialPublicAIOptIn()
+			if err != nil {
+				t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+			}
+			if got {
+				t.Fatalf("RYV_PUBLIC_AI=%q must opt out, got true", raw)
+			}
+		})
+	}
+}
+
+func TestResolveInitialDeclaredCountryUsesSavedPreferences(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_DECLARED_COUNTRY", "")
+	if err := saveOperatorPreferences(operatorPreferences{DeclaredCountry: "ca"}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveInitialDeclaredCountry("")
+	if err != nil {
+		t.Fatalf("resolveInitialDeclaredCountry() error = %v", err)
+	}
+	if got != "CA" {
+		t.Fatalf("declared country = %q, want %q", got, "CA")
+	}
+}
+
+func TestResolveInitialDeclaredCountryPrefersEnvOverride(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	if err := saveOperatorPreferences(operatorPreferences{DeclaredCountry: "CA"}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	t.Setenv("RYV_DECLARED_COUNTRY", "de")
+	got, err := resolveInitialDeclaredCountry("")
+	if err != nil {
+		t.Fatalf("resolveInitialDeclaredCountry() error = %v", err)
+	}
+	if got != "DE" {
+		t.Fatalf("declared country = %q, want %q", got, "DE")
+	}
+}
+
+func TestResolveRuntimeContractMetadataUsesSavedPreferences(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	t.Setenv("RYV_RUNTIME_CHANNEL", "")
+	t.Setenv("RYV_RUNTIME_CHANNEL_VERSION", "")
+	t.Setenv("RYV_RUNTIME_PROVIDER", "")
+	t.Setenv("RYV_RUNTIME_MODE", "")
+	t.Setenv("RYV_RUNTIME_SOURCE", "")
+	t.Setenv("RYV_RUNTIME_ARTIFACT", "")
+	t.Setenv("RYV_RUNTIME_BACKEND_BINARY", "")
+	t.Setenv("RYV_RUNTIME_ENGINE_BINARY", "")
+	t.Setenv("RYV_RUNTIME_ENGINE_KIND", "")
+	t.Setenv("RYV_RUNTIME_MANIFEST_HASH", "")
+
+	want := operatorPreferences{
+		PublicAIOptIn:         true,
+		RuntimeChannel:        "managed_oci_v1",
+		RuntimeChannelVersion: "2026.04.14",
+		RuntimeProvider:       "oci_linux_adapter",
+		RuntimeMode:           "host_package",
+		RuntimeSource:         "ryvion_runtime_kit",
+		RuntimeArtifact:       "ryvion-runtime-kit-linux-amd64-2026.04.14.tar.gz",
+		RuntimeBackendBinary:  "/opt/ryvion/runtime/backend/ryvion-oci",
+		RuntimeEngineBinary:   "/usr/bin/podman",
+		RuntimeEngineKind:     "podman",
+		RuntimeManifestHash:   "abc123",
+	}
+	if err := saveOperatorPreferences(want); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	got, err := resolveRuntimeContractMetadata("dev")
+	if err != nil {
+		t.Fatalf("resolveRuntimeContractMetadata() error = %v", err)
+	}
+	if got.Channel != want.RuntimeChannel || got.Version != want.RuntimeChannelVersion || got.Provider != want.RuntimeProvider || got.Mode != want.RuntimeMode || got.Source != want.RuntimeSource || got.Artifact != want.RuntimeArtifact || got.Backend != want.RuntimeBackendBinary || got.Engine != want.RuntimeEngineBinary || got.EngineKind != want.RuntimeEngineKind || got.ManifestHash != want.RuntimeManifestHash {
+		t.Fatalf("unexpected runtime metadata: %+v", got)
+	}
+}
+
+func TestResolveRuntimeContractMetadataPrefersEnvOverride(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) {
+		return configPath, nil
+	}
+	defer func() {
+		operatorConfigPathResolver = prevResolver
+	}()
+
+	if err := saveOperatorPreferences(operatorPreferences{
+		RuntimeChannel:        "managed_oci_v1",
+		RuntimeChannelVersion: "2026.04.14",
+		RuntimeProvider:       "oci_linux_adapter",
+		RuntimeMode:           "host_package",
+		RuntimeSource:         "ryvion_runtime_kit",
+		RuntimeArtifact:       "ryvion-runtime-kit-linux-amd64-2026.04.14.tar.gz",
+		RuntimeBackendBinary:  "/opt/ryvion/runtime/backend/ryvion-oci",
+		RuntimeEngineBinary:   "/usr/bin/podman",
+		RuntimeEngineKind:     "podman",
+		RuntimeManifestHash:   "abc123",
+	}); err != nil {
+		t.Fatalf("saveOperatorPreferences() error = %v", err)
+	}
+
+	t.Setenv("RYV_RUNTIME_PROVIDER", "oci_desktop_adapter")
+	t.Setenv("RYV_RUNTIME_MODE", "desktop")
+	t.Setenv("RYV_RUNTIME_SOURCE", "signed_release_channel")
+	t.Setenv("RYV_RUNTIME_ARTIFACT", "ryvion-runtime-kit-windows-amd64-2026.04.14.zip")
+	t.Setenv("RYV_RUNTIME_BACKEND_BINARY", `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd`)
+	t.Setenv("RYV_RUNTIME_ENGINE_BINARY", `C:\Program Files\RedHat\Podman\podman.exe`)
+	t.Setenv("RYV_RUNTIME_ENGINE_KIND", "podman")
+	got, err := resolveRuntimeContractMetadata("dev")
+	if err != nil {
+		t.Fatalf("resolveRuntimeContractMetadata() error = %v", err)
+	}
+	if got.Provider != "oci_desktop_adapter" || got.Mode != "desktop" || got.Source != "signed_release_channel" || got.Artifact != "ryvion-runtime-kit-windows-amd64-2026.04.14.zip" {
+		t.Fatalf("expected env override to win, got %+v", got)
+	}
+	if got.Backend != `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd` || got.Engine != `C:\Program Files\RedHat\Podman\podman.exe` || got.EngineKind != "podman" {
+		t.Fatalf("expected env override to win, got %+v", got)
+	}
+}
+
+func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		return runtimeexec.Status{
+			BinaryPath:   "/opt/ryvion/runtime/ryvion-runtime",
+			BackendPath:  "/opt/ryvion/runtime/backend/ryvion-oci",
+			EnginePath:   "/usr/bin/podman",
+			EngineKind:   "podman",
+			CLIInstalled: true,
+			Ready:        true,
+			GPUReady:     true,
+			Health:       "ready",
+		}, true
+	}
+	defer func() {
+		probeManagedRuntimeStatus = prevProbe
+	}()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Channel:      "managed_oci_v1",
+		Version:      "2026.04.14.1",
+		Provider:     "oci_linux_adapter",
+		Mode:         "host_package",
+		Source:       "ryvion_runtime_kit",
+		Artifact:     "ryvion-runtime-kit-linux-amd64-2026.04.14.1.tar.gz",
+		Binary:       "/opt/ryvion/runtime/ryvion-runtime",
+		Backend:      "/opt/ryvion/runtime/backend/ryvion-oci",
+		Engine:       "/usr/bin/podman",
+		EngineKind:   "podman",
+		ManifestHash: "abc123",
+	})
+
+	snap := runtimeMgr.Snapshot(true)
+	if !snap.Ready || !snap.GPUReady || !snap.CLIInstalled {
+		t.Fatalf("expected wrapper snapshot to be ready, got %+v", snap)
+	}
+	if snap.Binary != "/opt/ryvion/runtime/ryvion-runtime" || snap.Backend != "/opt/ryvion/runtime/backend/ryvion-oci" || snap.Engine != "/usr/bin/podman" || snap.EngineKind != "podman" {
+		t.Fatalf("unexpected wrapper paths: %+v", snap)
+	}
+
+	tokens := runtimeMgr.StatusTokens(true)
+	if !containsToken(tokens, "runtime-binary:/opt/ryvion/runtime/ryvion-runtime") {
+		t.Fatalf("expected runtime binary token, got %v", tokens)
+	}
+	if !containsToken(tokens, "runtime-backend:/opt/ryvion/runtime/backend/ryvion-oci") {
+		t.Fatalf("expected runtime backend token, got %v", tokens)
+	}
+	if !containsToken(tokens, "runtime-engine:/usr/bin/podman") {
+		t.Fatalf("expected runtime engine token, got %v", tokens)
+	}
+	if !containsToken(tokens, "runtime-engine-kind:podman") {
+		t.Fatalf("expected runtime engine kind token, got %v", tokens)
+	}
+}
+
+func TestResolveInitialPublicAIOptInAutoEnablesWhenOCIDisabled(t *testing.T) {
+	prevResolver := operatorConfigPathResolver
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	operatorConfigPathResolver = func() (string, error) { return configPath, nil }
+	defer func() { operatorConfigPathResolver = prevResolver }()
+
+	t.Setenv("RYV_PUBLIC_AI", "")
+	t.Setenv("RYV_DISABLE_OCI", "1")
+
+	got, err := resolveInitialPublicAIOptIn()
+	if err != nil {
+		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
+	}
+	if !got {
+		t.Fatal("expected disabled OCI lane to auto-opt the node into public AI streaming work")
+	}
+}
+
+func TestOCILaneDisabledSkipsManagedRuntimeProbe(t *testing.T) {
+	t.Setenv("RYV_DISABLE_OCI", "1")
+
+	called := false
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		called = true
+		return runtimeexec.Status{CLIInstalled: true, Ready: true, GPUReady: true, Health: "ready"}, true
+	}
+	defer func() { probeManagedRuntimeStatus = prevProbe }()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Channel: "managed_oci_v1",
+		Version: "2026.04.16.10",
+		Binary:  "/tmp/ryvion-runtime-test",
+	})
+	snap := runtimeMgr.Snapshot(true)
+	if called {
+		t.Fatal("managed runtime probe should be skipped when RYV_DISABLE_OCI=1")
+	}
+	if snap.Ready || snap.GPUReady || snap.CLIInstalled {
+		t.Fatalf("expected disabled snapshot to report no managed OCI capability, got %+v", snap)
+	}
+	if snap.Health != "disabled" || snap.Mode != "native_only" || snap.Source != "operator_opt_out" {
+		t.Fatalf("expected disabled/native-only snapshot, got %+v", snap)
+	}
+
+	tokens := runtimeMgr.StatusTokens(true)
+	if !containsToken(tokens, "oci-lane:disabled") {
+		t.Fatalf("expected oci-lane:disabled token, got %v", tokens)
+	}
+	if !containsToken(tokens, "runtime-health:disabled") {
+		t.Fatalf("expected runtime-health:disabled token, got %v", tokens)
+	}
+	if !containsToken(tokens, "cap:managed_oci_cpu:0") {
+		t.Fatalf("expected cap:managed_oci_cpu:0 token, got %v", tokens)
+	}
+}
+
+func TestRuntimeStatusTokensGateWorkCapsuleByEnv(t *testing.T) {
+	if !commandExists("git") {
+		t.Skip("git not available in test environment")
+	}
+	t.Setenv("RYV_ENABLE_WORK_CAPSULE", "")
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		return runtimeexec.Status{CLIInstalled: true, Ready: true, GPUReady: true, Health: "ready"}, true
+	}
+	defer func() { probeManagedRuntimeStatus = prevProbe }()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Channel: "managed_oci_v1",
+		Version: "2026.04.16.10",
+		Binary:  "/tmp/ryvion-runtime-test",
+	})
+	if tokens := runtimeMgr.StatusTokens(true); !containsToken(tokens, "cap:work_capsule:0") {
+		t.Fatalf("expected cap:work_capsule:0 without opt-in, got %v", tokens)
+	}
+
+	t.Setenv("RYV_ENABLE_WORK_CAPSULE", "1")
+	if tokens := runtimeMgr.StatusTokens(true); !containsToken(tokens, "cap:work_capsule:1") {
+		t.Fatalf("expected cap:work_capsule:1 after opt-in, got %v", tokens)
+	}
+}
+
+func TestRuntimeWarmingHeuristicWindowsPodman(t *testing.T) {
+	t.Parallel()
+
+	if !runtimeWarmingHeuristic("windows", true, false, "warming", `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd`, "podman") {
+		t.Fatal("expected explicit warming health to be preserved")
+	}
+	if runtimeWarmingHeuristic("windows", true, false, "degraded", `C:\Program Files\Ryvion\runtime\backend\ryvion-oci.cmd`, "podman") {
+		t.Fatal("did not expect degraded Windows runtime to be treated as warming")
+	}
+	if runtimeWarmingHeuristic("linux", true, false, "degraded", "/opt/ryvion/runtime/backend/ryvion-oci", "podman") {
+		t.Fatal("did not expect non-Windows runtime to be treated as warming")
+	}
+}
+
+func TestProcessOptionalV7MemoryBenchmarkRecordsLocalLifecycle(t *testing.T) {
+	oldState := operatorRuntimeState
+	oldDiagnostics := workLoopDiagnostics
+	status := memorybench.NewLocalStatus()
+	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	t.Cleanup(func() {
+		operatorRuntimeState = oldState
+		workLoopDiagnostics = oldDiagnostics
+	})
+	t.Setenv(memorybench.BenchmarkFlagEnv, "1")
 
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("GenerateKey() error = %v", err)
 	}
-	client := hub.New(hubServer.URL, pub, priv, hub.WithGRPCTransport("", "http", false))
-	result, err := runLlamaCPPWork(context.Background(), client, &hub.WorkAssignment{
-		JobID:    "job_upload_failure",
-		Kind:     llamacpp.Task,
-		SpecJSON: `{"task":"llama_cpp_inference","prompt":"hi"}`,
-	}, llamacpp.Config{ServerURL: llamaServer.URL, Model: "local-model"})
-	if err == nil || !strings.Contains(err.Error(), "artifact PUT failed") {
-		t.Fatalf("runLlamaCPPWork() error = %v, want artifact upload failure", err)
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID    string         `json:"job_id"`
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-bench-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := req.Metadata[memorybench.BenchmarkTask]; !ok {
+			t.Errorf("receipt metadata missing %q: %+v", memorybench.BenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	spec := map[string]any{
+		"task":               memorybench.BenchmarkTask,
+		"request_id":         "request-bench-local",
+		"job_id":             "job-bench-local",
+		"shard_id":           "shard-a",
+		"seed":               int64(7),
+		"token_count":        4,
+		"value_dim":          2,
+		"created_at_unix_ms": int64(1_800_000_000_123),
+		"prompt":             "raw prompt must not leak",
+		"output":             "raw output must not leak",
+		"weighted_value":     []float64{1, 2, 3},
 	}
-	if result == nil || result.MeteringUnits != 0 {
-		t.Fatalf("result = %+v, want zero-metered failure snapshot", result)
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
 	}
-	if len(receipts) != 1 {
-		t.Fatalf("receipts len = %d, want 1", len(receipts))
+	handled, result, err := processOptionalV7MemoryBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-bench-local",
+		Kind:     "benchmark",
+		SpecJSON: string(specJSON),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7MemoryBenchmark() error = %v", err)
 	}
-	receipt := receipts[0]
-	if got := receipt["metering_units"]; got != float64(0) {
-		t.Fatalf("metering_units = %#v, want 0", got)
+	if !handled {
+		t.Fatal("handled = false, want true")
 	}
-	metadata, ok := receipt["metadata"].(map[string]any)
-	if !ok {
-		t.Fatalf("metadata = %#v", receipt["metadata"])
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want hash", result)
 	}
-	if metadata["executor"] != llamacpp.ExecutorKind {
-		t.Fatalf("metadata.executor = %#v, want %q", metadata["executor"], llamacpp.ExecutorKind)
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
 	}
-	if metadata["reason"] != "artifact_upload_failed" {
-		t.Fatalf("metadata.reason = %#v, want artifact_upload_failed", metadata["reason"])
+
+	snapshot := status.Snapshot()
+	if snapshot.LastSeenBenchmarkJobID != "job-bench-local" || snapshot.LastSeenRequestID != "request-bench-local" {
+		t.Fatalf("seen status = %+v", snapshot)
+	}
+	if snapshot.LastExecutedJobID != "job-bench-local" {
+		t.Fatalf("last executed job id = %q", snapshot.LastExecutedJobID)
+	}
+	if snapshot.LastReceiptSubmittedJobID != "job-bench-local" {
+		t.Fatalf("last receipt submitted job id = %q", snapshot.LastReceiptSubmittedJobID)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+	if snapshot.Counters.ReceiptFailed != 0 || snapshot.Counters.Rejected != 0 {
+		t.Fatalf("unexpected failure counters: %+v", snapshot.Counters)
+	}
+
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, "receipt_build_start"); got != 1 {
+		t.Fatalf("receipt_build_start events = %d, want 1: %+v", got, workSnapshot.RecentEvents)
+	}
+	if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, "receipt_build_end"); got != 1 {
+		t.Fatalf("receipt_build_end events = %d, want 1: %+v", got, workSnapshot.RecentEvents)
+	}
+	if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, "receipt_metadata_start"); got != 1 {
+		t.Fatalf("receipt_metadata_start events = %d, want 1: %+v", got, workSnapshot.RecentEvents)
+	}
+	if workSnapshot.LastReceiptBuildMs != workSnapshot.LastReceiptTotalBuildMs || workSnapshot.LastReceiptTotalBuildUs <= 0 {
+		t.Fatalf("receipt build status did not use actual build timings: %+v", workSnapshot)
+	}
+	if workSnapshot.LastReceiptMetadataGapUs < 0 {
+		t.Fatalf("metadata gap = %d us, want non-negative", workSnapshot.LastReceiptMetadataGapUs)
+	}
+	if workSnapshot.LastReceiptReadyAt == "" || workSnapshot.LastReceiptReadyToSubmitUs < 0 || workSnapshot.LastReceiptSubmitQueueGapUs != workSnapshot.LastReceiptReadyToSubmitUs {
+		t.Fatalf("ready-to-submit gap not recorded separately: %+v", workSnapshot)
+	}
+	if workSnapshot.LastReceiptReadyToSubmitUs > 100_000 {
+		t.Fatalf("ready-to-submit gap = %d us, want near-zero fast-path submit", workSnapshot.LastReceiptReadyToSubmitUs)
+	}
+	for _, name := range []string{"receipt_ready", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end"} {
+		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
+		}
+	}
+	for _, name := range []string{"v7_fast_path_start", "v7_fast_path_receipt_ready", "v7_fast_path_submit_start", "v7_fast_path_submit_end", "pre_submit_block_start", "pre_submit_block_end"} {
+		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
+		}
+	}
+	if !mainWorkLoopEventOrder(workSnapshot.RecentEvents, "receipt_build_end", "receipt_ready", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end") {
+		t.Fatalf("receipt event timeline is out of order: %+v", workSnapshot.RecentEvents)
+	}
+	if !mainWorkLoopEventOrder(workSnapshot.RecentEvents, "v7_fast_path_receipt_ready", "receipt_ready", "v7_fast_path_submit_start", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end") {
+		t.Fatalf("fast-path receipt event timeline is out of order: %+v", workSnapshot.RecentEvents)
+	}
+	assertMainWorkLoopEventsChronological(t, workSnapshot.RecentEvents)
+	gapEvent := findMainWorkLoopEvent(workSnapshot.RecentEvents, "receipt_ready_to_submit_gap")
+	if gapEvent.SafeContext["gap_us"] == "" || gapEvent.SafeContext["job_id"] != "job-bench-local" || gapEvent.SafeContext["kind"] != "benchmark" || gapEvent.SafeContext["spec_task"] != memorybench.BenchmarkTask {
+		t.Fatalf("gap event safe context missing expected fields: %+v", gapEvent.SafeContext)
+	}
+	encodedWorkSnapshot, err := json.Marshal(workSnapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal(workSnapshot) error = %v", err)
+	}
+	for _, forbidden := range []string{"raw prompt must not leak", "raw output must not leak", `"weighted_value":[`} {
+		if strings.Contains(string(encodedWorkSnapshot), forbidden) {
+			t.Fatalf("work loop diagnostics leaked forbidden material %q: %s", forbidden, encodedWorkSnapshot)
+		}
 	}
 }
 
-func zeroCaps() hw.CapSet { return hw.CapSet{CPUCores: 1, RAMBytes: 1 << 30} }
-
-func withArgs(t *testing.T, args ...string) {
-	t.Helper()
-
-	oldArgs := os.Args
-	oldCommandLine := flag.CommandLine
-	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	flag.CommandLine = fs
-	os.Args = args
-
+func TestProcessOptionalV7MemoryBenchmarkFastPathSkipsRuntimeProbe(t *testing.T) {
+	oldState := operatorRuntimeState
+	oldDiagnostics := workLoopDiagnostics
+	oldProbe := probeManagedRuntimeStatus
+	status := memorybench.NewLocalStatus()
+	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	var probeCalls atomic.Int32
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		probeCalls.Add(1)
+		time.Sleep(200 * time.Millisecond)
+		return runtimeexec.Status{
+			BinaryPath:   "slow-wrapper",
+			BackendPath:  "slow-backend",
+			EnginePath:   "slow-engine",
+			EngineKind:   "podman",
+			CLIInstalled: true,
+			Ready:        true,
+			GPUReady:     true,
+			Health:       "ready",
+		}, true
+	}
 	t.Cleanup(func() {
-		os.Args = oldArgs
-		flag.CommandLine = oldCommandLine
+		operatorRuntimeState = oldState
+		workLoopDiagnostics = oldDiagnostics
+		probeManagedRuntimeStatus = oldProbe
 	})
+	t.Setenv(memorybench.BenchmarkFlagEnv, "1")
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		var req struct {
+			JobID    string         `json:"job_id"`
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-bench-fast" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := req.Metadata[memorybench.BenchmarkTask]; !ok {
+			t.Errorf("receipt metadata missing %q: %+v", memorybench.BenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.Metadata["runtime_version"] != "2026.05.test" || req.Metadata["runtime_binary"] != "slow-wrapper" || req.Metadata["runtime_engine_kind"] != "podman" {
+			t.Errorf("runtime metadata = %+v", req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Version:      "2026.05.test",
+		Binary:       "slow-wrapper",
+		Backend:      "slow-backend",
+		Engine:       "slow-engine",
+		EngineKind:   "podman",
+		ManifestHash: "manifest-fast",
+	})
+	handled, result, err := processOptionalV7MemoryBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-bench-fast",
+		Kind:     "benchmark",
+		SpecJSON: testV7MemoryBenchmarkSpecJSON(t, "job-bench-fast", "request-bench-fast"),
+	}, runtimeMgr, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7MemoryBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want hash", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if got := probeCalls.Load(); got != 0 {
+		t.Fatalf("managed runtime probe calls = %d, want 0 on V7 benchmark fast path", got)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.LastReceiptReadyToSubmitUs < 0 || workSnapshot.LastReceiptReadyToSubmitUs > 100_000 {
+		t.Fatalf("ready-to-submit gap = %d us, want near-zero fast-path submit", workSnapshot.LastReceiptReadyToSubmitUs)
+	}
+	if workSnapshot.ReceiptSubmittedCount != 1 || workSnapshot.ReceiptFailedCount != 0 {
+		t.Fatalf("unexpected receipt counters: %+v", workSnapshot)
+	}
+	for _, name := range []string{"v7_fast_path_start", "v7_fast_path_receipt_ready", "v7_fast_path_submit_start", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end"} {
+		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
+		}
+	}
+	if !mainWorkLoopEventOrder(workSnapshot.RecentEvents, "v7_fast_path_receipt_ready", "receipt_ready", "v7_fast_path_submit_start", "receipt_ready_to_submit_gap", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end") {
+		t.Fatalf("fast-path receipt event timeline is out of order: %+v", workSnapshot.RecentEvents)
+	}
+}
+
+func TestProcessOptionalV7MemoryBenchmarkSubmitFailureRecordsDiagnostics(t *testing.T) {
+	oldState := operatorRuntimeState
+	oldDiagnostics := workLoopDiagnostics
+	status := memorybench.NewLocalStatus()
+	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	t.Cleanup(func() {
+		operatorRuntimeState = oldState
+		workLoopDiagnostics = oldDiagnostics
+	})
+	t.Setenv(memorybench.BenchmarkFlagEnv, "1")
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	handled, result, err := processOptionalV7MemoryBenchmark(ctx, hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-bench-submit-fails",
+		Kind:     "benchmark",
+		SpecJSON: testV7MemoryBenchmarkSpecJSON(t, "job-bench-submit-fails", "request-bench-submit-fails"),
+	}, nil, false)
+	if err == nil {
+		t.Fatal("processOptionalV7MemoryBenchmark() error = nil, want submit error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want built receipt snapshot despite submit error", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1 before context stops retry backoff", got)
+	}
+
+	statusSnapshot := status.Snapshot()
+	if statusSnapshot.Counters.Seen != 1 || statusSnapshot.Counters.Executed != 1 || statusSnapshot.Counters.ReceiptSubmitted != 0 || statusSnapshot.Counters.ReceiptFailed != 1 {
+		t.Fatalf("unexpected local status counters: %+v", statusSnapshot.Counters)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.ReceiptSubmittedCount != 0 || workSnapshot.ReceiptFailedCount != 1 {
+		t.Fatalf("unexpected work-loop receipt counters: %+v", workSnapshot)
+	}
+	if workSnapshot.LastReceiptSubmitError == "" {
+		t.Fatalf("last receipt submit error not recorded: %+v", workSnapshot)
+	}
+	if workSnapshot.LastReceiptReadyToSubmitUs < 0 || workSnapshot.LastReceiptReadyToSubmitUs > 100_000 {
+		t.Fatalf("ready-to-submit gap = %d us, want near-zero first submit attempt", workSnapshot.LastReceiptReadyToSubmitUs)
+	}
+	if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, "receipt_submit_start"); got != 1 {
+		t.Fatalf("receipt_submit_start events = %d, want 1 before retry cancellation: %+v", got, workSnapshot.RecentEvents)
+	}
+}
+
+func TestProcessOptionalV7MemoryBenchmarkNormalJobDoesNotRecordStatus(t *testing.T) {
+	oldState := operatorRuntimeState
+	status := memorybench.NewLocalStatus()
+	operatorRuntimeState = &operatorRuntime{v7MemoryBenchmark: status}
+	t.Cleanup(func() {
+		operatorRuntimeState = oldState
+	})
+
+	handled, result, err := processOptionalV7MemoryBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-normal",
+		Kind:     "native_report",
+		SpecJSON: `{"task":"native_report","job_id":"job-normal"}`,
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7MemoryBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (memorybench.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed for normal job: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7TensorPlaneBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	t.Setenv(tensorbench.BenchmarkFlagEnv, "")
+	oldStatus := v7TensorPlaneBenchmarkStatus
+	status := tensorbench.NewLocalStatus()
+	v7TensorPlaneBenchmarkStatus = status
+	t.Cleanup(func() {
+		v7TensorPlaneBenchmarkStatus = oldStatus
+	})
+
+	handled, result, err := processOptionalV7TensorPlaneBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-tensorplane-local",
+		Kind:     "benchmark",
+		SpecJSON: testV7TensorPlaneBenchmarkSpecJSON(t, "job-tensorplane-local", "request-tensorplane-local"),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7TensorPlaneBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false when flag is off")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (tensorbench.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7TensorPlaneBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(tensorbench.BenchmarkFlagEnv, "1")
+	oldStatus := v7TensorPlaneBenchmarkStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := tensorbench.NewLocalStatus()
+	v7TensorPlaneBenchmarkStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	t.Cleanup(func() {
+		v7TensorPlaneBenchmarkStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-tensorplane-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[tensorbench.BenchmarkTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", tensorbench.BenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != tensorbench.ProofStatusTensorPlaneMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["correctness_status"] != tensorbench.CorrectnessStatusMatched {
+			t.Errorf("correctness_status = %v", metadata["correctness_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, key := range []string{"page_hash", "query_hash", "summary_hash"} {
+			value, ok := metadata[key].(string)
+			if !ok || !strings.HasPrefix(value, "sha256:") {
+				t.Errorf("%s = %#v, want sha256 hash", key, metadata[key])
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"key_data", "value_data", "query_vector", "prompt text", "generated output"} {
+			if strings.Contains(string(encoded), forbidden) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7TensorPlaneBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-tensorplane-local",
+		Kind:     "benchmark",
+		SpecJSON: testV7TensorPlaneBenchmarkSpecJSON(t, "job-tensorplane-local", "request-tensorplane-local"),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7TensorPlaneBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful tensorplane receipt", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+
+	snapshot := status.Snapshot()
+	if snapshot.LastJobID != "job-tensorplane-local" {
+		t.Fatalf("last_job_id = %q", snapshot.LastJobID)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.LastWorkSpecTask != tensorbench.BenchmarkTask {
+		t.Fatalf("last work spec task = %q", workSnapshot.LastWorkSpecTask)
+	}
+	for _, name := range []string{"v7_fast_path_start", "v7_fast_path_receipt_ready", "v7_fast_path_submit_start", "receipt_submit_start", "receipt_submit_end", "v7_fast_path_submit_end"} {
+		if got := countMainWorkLoopEvents(workSnapshot.RecentEvents, name); got != 1 {
+			t.Fatalf("%s events = %d, want 1: %+v", name, got, workSnapshot.RecentEvents)
+		}
+	}
+}
+
+func TestProcessOptionalV7TensorPlaneBenchmarkSubmitFailureRecordsDiagnostics(t *testing.T) {
+	t.Setenv(tensorbench.BenchmarkFlagEnv, "1")
+	oldStatus := v7TensorPlaneBenchmarkStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := tensorbench.NewLocalStatus()
+	v7TensorPlaneBenchmarkStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	t.Cleanup(func() {
+		v7TensorPlaneBenchmarkStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7TensorPlaneBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-tensorplane-fail",
+		Kind:     "benchmark",
+		SpecJSON: testV7TensorPlaneBenchmarkSpecJSON(t, "job-tensorplane-fail", "request-tensorplane-fail"),
+	}, nil, false)
+	if err == nil {
+		t.Fatal("processOptionalV7TensorPlaneBenchmark() error = nil, want submit error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want built receipt snapshot despite submit error", result)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 0 || snapshot.Counters.ReceiptFailed != 1 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+	if snapshot.LastError == "" {
+		t.Fatalf("last_error not recorded: %+v", snapshot)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.ReceiptSubmittedCount != 0 || workSnapshot.ReceiptFailedCount != 1 {
+		t.Fatalf("unexpected work-loop receipt counters: %+v", workSnapshot)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{result: testMeasuredModelBenchmarkResult()}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) modelbench.ModelBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-modelbench-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSpecJSON(t),
+	}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false when flag is off")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if fakeRunner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (modelbench.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7LlamaCppBackendBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	t.Setenv(llamacpp.BackendBenchmarkFlagEnv, "0")
+	oldStatus := v7BackendBenchmarkStatus
+	oldFactory := newV7LlamaCppBackendBenchmarkRunner
+	oldState := operatorRuntimeState
+	status := llamacpp.NewBackendBenchmarkLocalStatus()
+	fakeRunner := &fakeLlamaCppBackendBenchmarkRunner{snapshot: testLlamaCppBackendBenchmarkSnapshot(llamacpp.BenchmarkProofStatusMeasured)}
+	v7BackendBenchmarkStatus = status
+	operatorRuntimeState = nil
+	newV7LlamaCppBackendBenchmarkRunner = func() llamacpp.BackendBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7BackendBenchmarkStatus = oldStatus
+		newV7LlamaCppBackendBenchmarkRunner = oldFactory
+		operatorRuntimeState = oldState
+	})
+
+	handled, result, err := processOptionalV7LlamaCppBackendBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-llamacpp-backend-local",
+		Kind:     "benchmark",
+		SpecJSON: testLlamaCppBackendBenchmarkSpecJSON(t),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7LlamaCppBackendBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false when flag is off")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if fakeRunner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (llamacpp.BackendBenchmarkLocalStatusCounters{}) {
+		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7BackendInferenceBenchmarkFlagOffDoesNotHandle(t *testing.T) {
+	t.Setenv(inferencebench.BenchmarkFlagEnv, "")
+	oldFactory := newV7BackendInferenceBenchmarkRunner
+	oldStatus := v7InferenceBenchmarkStatus
+	status := inferencebench.NewLocalStatus()
+	v7InferenceBenchmarkStatus = status
+	fakeRunner := &fakeBackendInferenceBenchmarkRunner{result: testBackendInferenceBenchmarkResult(inferencebench.ProofStatusMeasured)}
+	newV7BackendInferenceBenchmarkRunner = func() inferencebench.BenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7BackendInferenceBenchmarkRunner = oldFactory
+		v7InferenceBenchmarkStatus = oldStatus
+	})
+
+	handled, result, err := processOptionalV7BackendInferenceBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-backend-inference-local",
+		Kind:     "benchmark",
+		SpecJSON: testBackendInferenceBenchmarkSpecJSON(t),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7BackendInferenceBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false when flag is off")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if fakeRunner.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", fakeRunner.calls)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (inferencebench.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed with flag off: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7BackendInferenceBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(inferencebench.BenchmarkFlagEnv, "1")
+	oldFactory := newV7BackendInferenceBenchmarkRunner
+	oldStatus := v7InferenceBenchmarkStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := inferencebench.NewLocalStatus()
+	fakeRunner := &fakeBackendInferenceBenchmarkRunner{result: testBackendInferenceBenchmarkResult(inferencebench.ProofStatusMeasured)}
+	v7InferenceBenchmarkStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7BackendInferenceBenchmarkRunner = func() inferencebench.BenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7BackendInferenceBenchmarkRunner = oldFactory
+		v7InferenceBenchmarkStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-backend-inference-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[inferencebench.BenchmarkTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", inferencebench.BenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != inferencebench.ProofStatusMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, key := range []string{"prompt_hash", "output_hash"} {
+			value, ok := metadata[key].(string)
+			if !ok || !strings.HasPrefix(value, "sha256:") {
+				t.Errorf("%s = %#v, want sha256 hash", key, metadata[key])
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		if metadata["tokens_generated"] != float64(12) || metadata["p50_ttft_ms"] != float64(100) || metadata["p95_ttft_ms"] != float64(100) {
+			t.Errorf("metrics metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["p50_decode_tps"] != float64(20) || metadata["p50_end_to_end_tps"] != float64(17.143) {
+			t.Errorf("tps metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, forbiddenKey := range []string{"output_bytes", "total_time_ms", "ttft_ms", "decode_tps", "end_to_end_tps", "prompt", "messages", "output_text", "generated_text", "raw_output", "tokens", "key_data", "value_data", "query_vector", "tensor_bytes"} {
+			if _, ok := metadata[forbiddenKey]; ok {
+				t.Errorf("metadata includes forbidden key %q: %+v", forbiddenKey, metadata)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"secret measured output", "distributed computing", "output_text", "generated_text", "raw_output", "token_logprobs", "raw_tensor"} {
+			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7BackendInferenceBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-backend-inference-local",
+		Kind:     "benchmark",
+		SpecJSON: testBackendInferenceBenchmarkSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7BackendInferenceBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful backend inference benchmark receipt", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	statusSnapshot := status.Snapshot()
+	if statusSnapshot.LastJobID != "job-backend-inference-local" || statusSnapshot.LastError != "" {
+		t.Fatalf("unexpected local inference benchmark status: %+v", statusSnapshot)
+	}
+	if statusSnapshot.Counters.Seen != 1 || statusSnapshot.Counters.Executed != 1 || statusSnapshot.Counters.ReceiptSubmitted != 1 || statusSnapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected local inference benchmark counters: %+v", statusSnapshot.Counters)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.ReceiptSubmittedCount != 1 || workSnapshot.ReceiptFailedCount != 0 {
+		t.Fatalf("unexpected work-loop receipt counters: %+v", workSnapshot)
+	}
+}
+
+func TestProcessOptionalV7DashboardInferenceSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(routedinference.FlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := routedinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(routedinference.ProofStatusMeasured)}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "v7dashboardinfer_job" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[routedinference.Task].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", routedinference.Task, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != routedinference.ProofStatusMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["request_id"] != "dashboardinfer_request" || metadata["run_id"] != "dashboardinfer_run" {
+			t.Errorf("request/run metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["backend"] != llamacpp.BackendName || metadata["model_id"] != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+			t.Errorf("backend/model metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		outputHash, ok := metadata["output_hash"].(string)
+		if !ok || !strings.HasPrefix(outputHash, "sha256:") {
+			t.Errorf("output_hash = %#v, want sha256 hash", metadata["output_hash"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["output_bytes"] != float64(len("dashboard measured output")) || metadata["tokens_generated"] != float64(9) {
+			t.Errorf("output metric metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["ttft_ms"] != float64(120) || metadata["total_time_ms"] != float64(720) {
+			t.Errorf("timing metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["decode_tps"] != float64(15) || metadata["end_to_end_tps"] != float64(12.5) {
+			t.Errorf("tps metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"dashboard measured output", "raw_prompt", "prompt_text", "messages", "input_text", "output_text", `"generated_text":`, "raw_output", "completion", "token_logprobs", "key_data", "value_data", "query_vector", "tensor_bytes", "secret"} {
+			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7DashboardInference() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful dashboard inference receipt", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.LastRunID != "dashboardinfer_run" || snapshot.LastJobID != "v7dashboardinfer_job" || snapshot.LastError != "" {
+		t.Fatalf("unexpected dashboard inference status: %+v", snapshot)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 || snapshot.Counters.Rejected != 0 {
+		t.Fatalf("unexpected dashboard inference counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7DashboardInferenceSubmitsOptInGeneratedText(t *testing.T) {
+	t.Setenv(routedinference.FlagEnv, "1")
+	t.Setenv(routedinference.TextOutputFlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := routedinference.NewLocalStatus()
+	result := testDashboardInferenceResult(routedinference.ProofStatusMeasured)
+	result.Spec = routedinference.Spec{}
+	result.GeneratedText = "Ryvion routes AI work to warm, ready nodes."
+	fakeRunner := &fakeDashboardInferenceRunner{result: result}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		var req struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[routedinference.Task].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", routedinference.Task, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["generated_text"] != "Ryvion routes AI work to warm, ready nodes." || metadata["generated_text_truncated"] != false {
+			t.Errorf("generated text metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["output_hash"] == "" || metadata["tokens_generated"] != float64(9) || metadata["ttft_ms"] != float64(120) {
+			t.Errorf("metadata missing hash/timing: %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"private dashboard prompt", "raw_prompt", "prompt_text", "messages", "input_text", "output_text", "raw_output", "completion", "token_logprobs", "key_data", "value_data", "query_vector", "tensor_bytes", "secret"} {
+			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, processResult, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceTextSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7DashboardInference() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if processResult == nil || processResult.ResultHashHex == "" || processResult.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful dashboard inference receipt", processResult)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+}
+
+func TestProcessOptionalV7DashboardInferenceSendsProgressBeforeReceipt(t *testing.T) {
+	t.Setenv(routedinference.FlagEnv, "1")
+	t.Setenv(routedinference.TextOutputFlagEnv, "1")
+	t.Setenv(routedinference.StreamingFlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := routedinference.NewLocalStatus()
+	generated := "Ryvion streams"
+	fakeRunner := &fakeDashboardInferenceProgressRunner{generated: generated}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		events = append(events, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/v1/node/inference/chunks":
+			var req struct {
+				RunID    string `json:"run_id"`
+				JobID    string `json:"job_id"`
+				NodeID   string `json:"node_id"`
+				SeqStart int64  `json:"seq_start"`
+				Chunks   []struct {
+					Seq  int64  `json:"seq"`
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"chunks"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode chunks: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if req.RunID != "dashboardinfer_run" || req.JobID != "v7dashboardinfer_job" || req.NodeID != "node-dashboard-local" || req.SeqStart != 1 {
+				t.Errorf("chunk identity = %+v", req)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if len(req.Chunks) != 2 || req.Chunks[0].Seq != 1 || req.Chunks[0].Text != "Ryvion" || req.Chunks[1].Seq != 2 || req.Chunks[1].Text != " streams" {
+				t.Errorf("chunks = %+v", req.Chunks)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"accepted":true}`))
+		case "/api/v1/node/receipt":
+			var req struct {
+				Metadata map[string]any `json:"metadata"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode receipt: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			metadata := req.Metadata[routedinference.Task].(map[string]any)
+			if metadata["generated_text"] != generated {
+				t.Errorf("receipt generated_text = %#v, want %q", metadata["generated_text"], generated)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	handled, processResult, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceTextSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7DashboardInference() error = %v", err)
+	}
+	if !handled || processResult == nil || processResult.ExitCode != 0 {
+		t.Fatalf("handled=%v result=%+v, want successful process result", handled, processResult)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 2 || events[0] != "/api/v1/node/inference/chunks" || events[1] != "/api/v1/node/receipt" {
+		t.Fatalf("events = %+v, want chunks before receipt", events)
+	}
+}
+
+func TestProcessOptionalV7DashboardInferenceRecordsRejectedCounter(t *testing.T) {
+	t.Setenv(routedinference.FlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := routedinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(routedinference.ProofStatusRejected)}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceSpecJSON(t),
+	}, nil, true)
+	if err == nil {
+		t.Fatal("processOptionalV7DashboardInference() error = nil, want safe rejection error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ExitCode != 1 {
+		t.Fatalf("result = %+v, want rejected dashboard inference receipt snapshot", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.LastRunID != "dashboardinfer_run" || snapshot.LastJobID != "v7dashboardinfer_job" {
+		t.Fatalf("unexpected dashboard inference status: %+v", snapshot)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 0 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 || snapshot.Counters.Rejected != 1 {
+		t.Fatalf("unexpected dashboard inference counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7DashboardInferenceRecordsReceiptFailureCounter(t *testing.T) {
+	t.Setenv(routedinference.FlagEnv, "1")
+	oldFactory := newV7DashboardInferenceRunner
+	oldStatus := v7DashboardInferenceStatus
+	oldDiagnostics := workLoopDiagnostics
+	status := routedinference.NewLocalStatus()
+	fakeRunner := &fakeDashboardInferenceRunner{result: testDashboardInferenceResult(routedinference.ProofStatusMeasured)}
+	v7DashboardInferenceStatus = status
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7DashboardInferenceRunner = func() routedinference.Runner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		newV7DashboardInferenceRunner = oldFactory
+		v7DashboardInferenceStatus = oldStatus
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7DashboardInference(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "v7dashboardinfer_job",
+		Kind:     "inference",
+		SpecJSON: testDashboardInferenceSpecJSON(t),
+	}, nil, true)
+	if err == nil {
+		t.Fatal("processOptionalV7DashboardInference() error = nil, want submit error")
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want measured dashboard inference receipt snapshot despite submit error", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.LastRunID != "dashboardinfer_run" || snapshot.LastJobID != "v7dashboardinfer_job" {
+		t.Fatalf("unexpected dashboard inference status: %+v", snapshot)
+	}
+	if snapshot.LastError == "" {
+		t.Fatalf("last_error not recorded: %+v", snapshot)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 0 || snapshot.Counters.ReceiptFailed != 1 || snapshot.Counters.Rejected != 0 {
+		t.Fatalf("unexpected dashboard inference counters: %+v", snapshot.Counters)
+	}
+	workSnapshot := workLoopDiagnostics.Snapshot()
+	if workSnapshot.ReceiptSubmittedCount != 0 || workSnapshot.ReceiptFailedCount != 1 {
+		t.Fatalf("unexpected work-loop receipt counters: %+v", workSnapshot)
+	}
+}
+
+func TestProcessOptionalV7LlamaCppBackendBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(llamacpp.BackendBenchmarkFlagEnv, "1")
+	oldStatus := v7BackendBenchmarkStatus
+	oldFactory := newV7LlamaCppBackendBenchmarkRunner
+	oldState := operatorRuntimeState
+	oldDiagnostics := workLoopDiagnostics
+	status := llamacpp.NewBackendBenchmarkLocalStatus()
+	fakeRunner := &fakeLlamaCppBackendBenchmarkRunner{snapshot: testLlamaCppBackendBenchmarkSnapshot(llamacpp.BenchmarkProofStatusMeasured)}
+	v7BackendBenchmarkStatus = status
+	operatorRuntimeState = nil
+	workLoopDiagnostics = diagnostics.NewWorkLoopDiagnostics()
+	newV7LlamaCppBackendBenchmarkRunner = func() llamacpp.BackendBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7BackendBenchmarkStatus = oldStatus
+		newV7LlamaCppBackendBenchmarkRunner = oldFactory
+		operatorRuntimeState = oldState
+		workLoopDiagnostics = oldDiagnostics
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-llamacpp-backend-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[llamacpp.BackendBenchmarkTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", llamacpp.BackendBenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != llamacpp.BenchmarkProofStatusMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, key := range []string{"prompt_hash", "output_hash"} {
+			value, ok := metadata[key].(string)
+			if !ok || !strings.HasPrefix(value, "sha256:") {
+				t.Errorf("%s = %#v, want sha256 hash", key, metadata[key])
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		if metadata["p50_ttft_ms"] != float64(100) || metadata["p95_total_time_ms"] != float64(1100) {
+			t.Errorf("timing metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["tokens_generated"] != float64(16) || metadata["acceleration"] != "cpu" || metadata["streaming_supported"] != true {
+			t.Errorf("routing metadata = %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"secret llama output", "distributed computing", "output_text", "generated_text", "raw_output", "token_logprobs", "raw_tensor"} {
+			if strings.Contains(strings.ToLower(string(encoded)), strings.ToLower(forbidden)) {
+				t.Errorf("metadata leaked forbidden material %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7LlamaCppBackendBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-llamacpp-backend-local",
+		Kind:     "benchmark",
+		SpecJSON: testLlamaCppBackendBenchmarkSpecJSON(t),
+	}, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7LlamaCppBackendBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful backend benchmark receipt", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.LastJobID != "job-llamacpp-backend-local" {
+		t.Fatalf("last_job_id = %q", snapshot.LastJobID)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkSubmitsMeasuredReceipt(t *testing.T) {
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{result: testMeasuredModelBenchmarkResult()}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, gpuDetected bool) modelbench.ModelBenchmarkRunner {
+		if !gpuDetected {
+			t.Fatal("gpuDetected = false, want true")
+		}
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-modelbench-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[modelbench.ModelBenchmarkTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", modelbench.ModelBenchmarkTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != string(modelbench.ModelBenchmarkProofStatusMeasured) {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := metadata["output_hash"]; !ok {
+			t.Errorf("measured metadata missing output_hash: %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		if strings.Contains(string(encoded), "secret completion text") {
+			t.Errorf("metadata leaked raw output: %s", encoded)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-modelbench-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSpecJSON(t),
+	}, nil, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" {
+		t.Fatalf("result = %+v, want hash", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 1 {
+		t.Fatalf("runner calls = %d, want 1", fakeRunner.calls)
+	}
+
+	snapshot := status.Snapshot()
+	if snapshot.LastSeenBenchmarkJobID != "job-modelbench-local" || snapshot.LastSeenRequestID != "request-modelbench-local" {
+		t.Fatalf("seen status = %+v", snapshot)
+	}
+	if snapshot.LastExecutedJobID != "job-modelbench-local" {
+		t.Fatalf("last executed job id = %q", snapshot.LastExecutedJobID)
+	}
+	if snapshot.LastReceiptSubmittedJobID != "job-modelbench-local" {
+		t.Fatalf("last receipt submitted job id = %q", snapshot.LastReceiptSubmittedJobID)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableReceipt(t *testing.T) {
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{result: testUnavailableModelBenchmarkResult()}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) modelbench.ModelBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata := req.Metadata[modelbench.ModelBenchmarkTask].(map[string]any)
+		if metadata["proof_status"] != string(modelbench.ModelBenchmarkProofStatusUnavailable) {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, ok := metadata["output_hash"]; ok {
+			t.Errorf("unavailable metadata contains output_hash: %+v", metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		runtimeMeta := metadata["runtime"].(map[string]any)
+		if runtimeMeta["native_inference_ready"] != false || runtimeMeta["model_loaded"] != false {
+			t.Errorf("runtime metadata = %+v, want native/model not ready", runtimeMeta)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-modelbench-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSpecJSON(t),
+	}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful unavailable receipt", result)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkSubmitsSeriesReceipt(t *testing.T) {
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{
+		results: []modelbench.ModelBenchmarkResult{
+			testMeasuredModelBenchmarkSeriesResult(9_999, 10_999, 99, 99),
+			testMeasuredModelBenchmarkSeriesResult(100, 1_100, 11, 10),
+			testMeasuredModelBenchmarkSeriesResult(200, 1_200, 11, 9.17),
+		},
+	}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) modelbench.ModelBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var receiptCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receiptCalls.Add(1)
+		var req struct {
+			JobID         string         `json:"job_id"`
+			ResultHashHex string         `json:"result_hash_hex"`
+			Metadata      map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.JobID != "job-modelbench-series-local" {
+			t.Errorf("receipt job_id = %q", req.JobID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(req.ResultHashHex) != 64 {
+			t.Errorf("result_hash_hex = %q, want 64 hex chars", req.ResultHashHex)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata, ok := req.Metadata[modelbench.ModelBenchmarkSeriesTask].(map[string]any)
+		if !ok {
+			t.Errorf("receipt metadata missing %q: %+v", modelbench.ModelBenchmarkSeriesTask, req.Metadata)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if metadata["proof_status"] != modelbench.ModelBenchmarkSeriesProofStatusMeasured {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		summary := metadata["summary"].(map[string]any)
+		if summary["successful_measured_runs"] != float64(2) || summary["p50_ttft_ms"] != float64(100) || summary["p95_ttft_ms"] != float64(200) {
+			t.Errorf("summary = %+v, want measured-only p50/p95 and 2 successes", summary)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		trials := metadata["trials"].([]any)
+		if len(trials) != 3 {
+			t.Errorf("trials len = %d, want 3", len(trials))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		encoded, _ := json.Marshal(req.Metadata)
+		for _, forbidden := range []string{"secret series completion text", "Continue the numbered sequence", "prompt_text", "output_text", "error_message"} {
+			if strings.Contains(string(encoded), forbidden) {
+				t.Errorf("metadata leaked raw series content %q: %s", forbidden, encoded)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-modelbench-series-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSeriesSpecJSON(t, 1, 2),
+	}, nil, nil, true)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ResultHashHex == "" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful series hash", result)
+	}
+	if got := receiptCalls.Load(); got != 1 {
+		t.Fatalf("receipt calls = %d, want 1", got)
+	}
+	if fakeRunner.calls != 3 {
+		t.Fatalf("runner calls = %d, want 3", fakeRunner.calls)
+	}
+
+	snapshot := status.Snapshot()
+	if snapshot.LastSeenBenchmarkJobID != "job-modelbench-series-local" || snapshot.LastSeenRequestID != "request-modelbench-series-local" {
+		t.Fatalf("seen status = %+v", snapshot)
+	}
+	if snapshot.Counters.Seen != 1 || snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkSubmitsUnavailableSeriesReceipt(t *testing.T) {
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
+	oldStatus := v7ModelBenchmarkStatus
+	oldFactory := newV7ModelBenchmarkRunner
+	status := modelbench.NewLocalStatus()
+	fakeRunner := &fakeModelBenchmarkRunner{
+		results: []modelbench.ModelBenchmarkResult{
+			testUnavailableModelBenchmarkSeriesResult(),
+			testUnavailableModelBenchmarkSeriesResult(),
+		},
+	}
+	v7ModelBenchmarkStatus = status
+	newV7ModelBenchmarkRunner = func(_ *inference.Manager, _ bool) modelbench.ModelBenchmarkRunner {
+		return fakeRunner
+	}
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+		newV7ModelBenchmarkRunner = oldFactory
+	})
+
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode receipt: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		metadata := req.Metadata[modelbench.ModelBenchmarkSeriesTask].(map[string]any)
+		if metadata["proof_status"] != modelbench.ModelBenchmarkSeriesProofStatusUnavailable {
+			t.Errorf("proof_status = %v", metadata["proof_status"])
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		summary := metadata["summary"].(map[string]any)
+		if summary["successful_measured_runs"] != float64(0) {
+			t.Errorf("summary = %+v, want 0 successful measured runs", summary)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		trials := metadata["trials"].([]any)
+		measured := trials[1].(map[string]any)
+		if measured["output_hash"] != "" || measured["output_bytes"] != float64(0) {
+			t.Errorf("unavailable measured trial exposed output fields: %+v", measured)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), hub.New(ts.URL, pub, priv), &hub.WorkAssignment{
+		JobID:    "job-modelbench-series-local",
+		Kind:     "benchmark",
+		SpecJSON: testModelBenchmarkSeriesSpecJSON(t, 1, 1),
+	}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if result == nil || result.ExitCode != 0 {
+		t.Fatalf("result = %+v, want successful unavailable series receipt", result)
+	}
+	if fakeRunner.calls != 2 {
+		t.Fatalf("runner calls = %d, want 2", fakeRunner.calls)
+	}
+	snapshot := status.Snapshot()
+	if snapshot.Counters.Executed != 1 || snapshot.Counters.ReceiptSubmitted != 1 || snapshot.Counters.ReceiptFailed != 0 {
+		t.Fatalf("unexpected counters: %+v", snapshot.Counters)
+	}
+}
+
+func TestProcessOptionalV7ModelBenchmarkNormalJobDoesNotRecordStatus(t *testing.T) {
+	oldStatus := v7ModelBenchmarkStatus
+	status := modelbench.NewLocalStatus()
+	v7ModelBenchmarkStatus = status
+	t.Cleanup(func() {
+		v7ModelBenchmarkStatus = oldStatus
+	})
+	t.Setenv(modelbench.ModelBenchmarkFlagEnv, "1")
+
+	handled, result, err := processOptionalV7ModelBenchmark(context.Background(), nil, &hub.WorkAssignment{
+		JobID:    "job-normal",
+		Kind:     "native_report",
+		SpecJSON: `{"task":"native_report","job_id":"job-normal"}`,
+	}, nil, nil, false)
+	if err != nil {
+		t.Fatalf("processOptionalV7ModelBenchmark() error = %v", err)
+	}
+	if handled {
+		t.Fatal("handled = true, want false")
+	}
+	if result != nil {
+		t.Fatalf("result = %+v, want nil", result)
+	}
+	if snapshot := status.Snapshot(); snapshot.Counters != (modelbench.LocalStatusCounters{}) {
+		t.Fatalf("status counters changed for normal job: %+v", snapshot.Counters)
+	}
+}
+
+type fakeLlamaCppBackendBenchmarkRunner struct {
+	snapshot llamacpp.BenchmarkStatusSnapshot
+	configs  []llamacpp.BenchmarkConfig
+	calls    int
+}
+
+func (f *fakeLlamaCppBackendBenchmarkRunner) Run(_ context.Context, config llamacpp.BenchmarkConfig) llamacpp.BenchmarkStatusSnapshot {
+	f.calls++
+	f.configs = append(f.configs, config)
+	return f.snapshot
+}
+
+func testLlamaCppBackendBenchmarkSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := llamacpp.BackendBenchmarkSpec{
+		Task:            llamacpp.BackendBenchmarkTask,
+		RequestID:       "request-llamacpp-backend-local",
+		JobID:           "job-llamacpp-backend-local",
+		Backend:         llamacpp.BackendName,
+		ModelID:         "tinyllama.Q4_K_M.gguf",
+		MaxTokens:       16,
+		WarmupRuns:      1,
+		MeasuredRuns:    3,
+		TimeoutMs:       30_000,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testLlamaCppBackendBenchmarkSnapshot(proofStatus string) llamacpp.BenchmarkStatusSnapshot {
+	available := proofStatus == llamacpp.BenchmarkProofStatusMeasured
+	outputHash := testSHA256ObjectID("secret llama output")
+	outputBytes := int64(len("secret llama output"))
+	status := llamacpp.BenchmarkStatusCompleted
+	if !available {
+		outputHash = ""
+		outputBytes = 0
+		status = llamacpp.BenchmarkStatusFailed
+	}
+	return llamacpp.BenchmarkStatusSnapshot{
+		LastRunAt: time.Unix(1_800_000_001, 0),
+		Status:    status,
+		Metrics: llamacpp.BenchmarkMetrics{
+			Available:        available,
+			SidecarHealthy:   available,
+			ModelLoaded:      available,
+			ModelID:          "tinyllama.Q4_K_M.gguf",
+			PromptHash:       llamacpp.HashBenchmarkPrompt(),
+			OutputHash:       outputHash,
+			OutputBytes:      outputBytes,
+			WarmupRuns:       1,
+			MeasuredRuns:     3,
+			P50TTFTMs:        100,
+			P95TTFTMs:        200,
+			P50TotalTimeMs:   800,
+			P95TotalTimeMs:   1100,
+			P50DecodeTPS:     20.5,
+			P95DecodeTPS:     21.5,
+			P50EndToEndTPS:   18.25,
+			P95EndToEndTPS:   19.75,
+			TokensGenerated:  16,
+			PromptTokens:     8,
+			CompletionTokens: 16,
+			Backend:          llamacpp.BackendName,
+			RuntimeKind:      llamacpp.BackendName,
+			Acceleration:     "cpu",
+			ProofStatus:      proofStatus,
+			Streaming:        true,
+		},
+	}
+}
+
+type fakeBackendInferenceBenchmarkRunner struct {
+	result inferencebench.BenchmarkExecutionResult
+	err    error
+	specs  []inferencebench.BenchmarkSpec
+	calls  int
+}
+
+func (f *fakeBackendInferenceBenchmarkRunner) RunBackendInferenceBenchmark(_ context.Context, spec inferencebench.BenchmarkSpec) (inferencebench.BenchmarkExecutionResult, error) {
+	f.calls++
+	f.specs = append(f.specs, spec)
+	if f.err != nil {
+		return inferencebench.BenchmarkExecutionResult{}, f.err
+	}
+	return f.result, nil
+}
+
+func testBackendInferenceBenchmarkSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := inferencebench.BenchmarkSpec{
+		Task:            inferencebench.BenchmarkTask,
+		RequestID:       "request-backend-inference-local",
+		BenchmarkID:     "benchmark-backend-inference-local",
+		JobID:           "job-backend-inference-local",
+		Backend:         llamacpp.BackendName,
+		ModelID:         "tinyllama.Q4_K_M.gguf",
+		TargetNodeID:    "node-backend-inference-local",
+		PromptHash:      llamacpp.HashBenchmarkPrompt(),
+		PromptProfileID: inferencebench.BenchmarkPromptProfileID,
+		MaxTokens:       16,
+		TimeoutMs:       30_000,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testBackendInferenceBenchmarkResult(proofStatus string) inferencebench.BenchmarkExecutionResult {
+	spec := inferencebench.BenchmarkSpec{
+		Task:            inferencebench.BenchmarkTask,
+		RequestID:       "request-backend-inference-local",
+		BenchmarkID:     "benchmark-backend-inference-local",
+		JobID:           "job-backend-inference-local",
+		Backend:         llamacpp.BackendName,
+		ModelID:         "tinyllama.Q4_K_M.gguf",
+		TargetNodeID:    "node-backend-inference-local",
+		PromptHash:      llamacpp.HashBenchmarkPrompt(),
+		PromptProfileID: inferencebench.BenchmarkPromptProfileID,
+		MaxTokens:       16,
+		TimeoutMs:       30_000,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	result := inferencebench.BenchmarkExecutionResult{
+		Spec:            spec,
+		Backend:         llamacpp.BackendName,
+		ModelID:         "tinyllama.Q4_K_M.gguf",
+		PromptHash:      llamacpp.HashBenchmarkPrompt(),
+		OutputHash:      testSHA256ObjectID("secret measured output"),
+		OutputBytes:     int64(len("secret measured output")),
+		TokensGenerated: 12,
+		TTFTMs:          100,
+		P95TTFTMs:       100,
+		TotalTimeMs:     700,
+		DecodeTPS:       20,
+		EndToEndTPS:     17.143,
+		ProofStatus:     proofStatus,
+	}
+	if proofStatus != inferencebench.ProofStatusMeasured {
+		result.OutputHash = ""
+		result.OutputBytes = 0
+		result.TokensGenerated = 0
+		result.TTFTMs = 0
+		result.TotalTimeMs = 0
+		result.DecodeTPS = 0
+		result.EndToEndTPS = 0
+		result.ErrorCode = "backend_inference_failed"
+	}
+	return result
+}
+
+type fakeDashboardInferenceRunner struct {
+	result routedinference.ExecutionResult
+	err    error
+	specs  []routedinference.Spec
+	calls  int
+}
+
+func (f *fakeDashboardInferenceRunner) RunDashboardInference(_ context.Context, spec routedinference.Spec) (routedinference.ExecutionResult, error) {
+	f.calls++
+	f.specs = append(f.specs, spec)
+	if f.err != nil {
+		return routedinference.ExecutionResult{}, f.err
+	}
+	result := f.result
+	if result.Spec.Task == "" {
+		result.Spec = spec
+	}
+	return result, nil
+}
+
+type fakeDashboardInferenceProgressRunner struct {
+	generated string
+	calls     int
+}
+
+func (f *fakeDashboardInferenceProgressRunner) RunDashboardInference(ctx context.Context, spec routedinference.Spec) (routedinference.ExecutionResult, error) {
+	return f.RunDashboardInferenceWithProgress(ctx, spec, nil)
+}
+
+func (f *fakeDashboardInferenceProgressRunner) RunDashboardInferenceWithProgress(ctx context.Context, spec routedinference.Spec, progress routedinference.ProgressSender) (routedinference.ExecutionResult, error) {
+	f.calls++
+	if progress != nil {
+		if err := progress.SendDashboardInferenceProgress(ctx, routedinference.ProgressBatch{
+			RunID:    spec.RunID,
+			JobID:    spec.JobID,
+			NodeID:   spec.TargetNodeID,
+			SeqStart: 1,
+			Chunks: []routedinference.ProgressChunk{
+				{Seq: 1, Type: "delta", Text: "Ryvion"},
+				{Seq: 2, Type: "delta", Text: " streams"},
+			},
+		}); err != nil {
+			return routedinference.ExecutionResult{}, err
+		}
+	}
+	output := []byte(f.generated)
+	return routedinference.ExecutionResult{
+		Spec:            spec,
+		Backend:         spec.Backend,
+		ModelID:         spec.ModelID,
+		OutputHash:      routedinference.HashOutput(spec.JobID, output),
+		OutputBytes:     int64(len(output)),
+		TokensGenerated: 2,
+		TTFTMs:          100,
+		TotalTimeMs:     300,
+		DecodeTPS:       10,
+		EndToEndTPS:     6.667,
+		ProofStatus:     routedinference.ProofStatusMeasured,
+		GeneratedText:   f.generated,
+	}, nil
+}
+
+func testDashboardInferenceSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := routedinference.Spec{
+		Task:            routedinference.Task,
+		RequestID:       "dashboardinfer_request",
+		RunID:           "dashboardinfer_run",
+		JobID:           "v7dashboardinfer_job",
+		Backend:         llamacpp.BackendName,
+		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		TargetNodeID:    "node-dashboard-local",
+		MaxTokens:       32,
+		Stream:          true,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testDashboardInferenceTextSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := routedinference.Spec{
+		Task:            routedinference.Task,
+		RequestID:       "dashboardinfer_request",
+		RunID:           "dashboardinfer_run",
+		JobID:           "v7dashboardinfer_job",
+		Backend:         llamacpp.BackendName,
+		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		TargetNodeID:    "node-dashboard-local",
+		Prompt:          "private dashboard prompt",
+		ReturnText:      true,
+		MaxReturnChars:  8192,
+		MaxTokens:       32,
+		Stream:          true,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testDashboardInferenceResult(proofStatus string) routedinference.ExecutionResult {
+	spec := routedinference.Spec{
+		Task:            routedinference.Task,
+		RequestID:       "dashboardinfer_request",
+		RunID:           "dashboardinfer_run",
+		JobID:           "v7dashboardinfer_job",
+		Backend:         llamacpp.BackendName,
+		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		TargetNodeID:    "node-dashboard-local",
+		MaxTokens:       32,
+		Stream:          true,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	result := routedinference.ExecutionResult{
+		Spec:            spec,
+		Backend:         llamacpp.BackendName,
+		ModelID:         "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		OutputHash:      testSHA256ObjectID("dashboard measured output"),
+		OutputBytes:     int64(len("dashboard measured output")),
+		TokensGenerated: 9,
+		TTFTMs:          120,
+		TotalTimeMs:     720,
+		DecodeTPS:       15,
+		EndToEndTPS:     12.5,
+		ProofStatus:     proofStatus,
+	}
+	if proofStatus != routedinference.ProofStatusMeasured {
+		result.OutputHash = routedinference.HashOutput(spec.JobID, nil)
+		result.OutputBytes = 0
+		result.TokensGenerated = 0
+		result.TTFTMs = 0
+		result.TotalTimeMs = 0
+		result.DecodeTPS = 0
+		result.EndToEndTPS = 0
+		result.ErrorCode = "dashboard_inference_failed"
+	}
+	return result
+}
+
+type fakeModelBenchmarkRunner struct {
+	result  modelbench.ModelBenchmarkResult
+	results []modelbench.ModelBenchmarkResult
+	err     error
+	errs    []error
+	calls   int
+}
+
+func (f *fakeModelBenchmarkRunner) RunModelBenchmark(_ context.Context, _ modelbench.ModelBenchmarkSpec) (modelbench.ModelBenchmarkResult, error) {
+	index := f.calls
+	f.calls++
+	result := f.result
+	if index < len(f.results) {
+		result = f.results[index]
+	}
+	err := f.err
+	if index < len(f.errs) {
+		err = f.errs[index]
+	}
+	return result, err
+}
+
+func testModelBenchmarkSpecJSON(t *testing.T) string {
+	t.Helper()
+	spec := modelbench.ModelBenchmarkSpec{
+		Task:            modelbench.ModelBenchmarkTask,
+		RequestID:       "request-modelbench-local",
+		JobID:           "job-modelbench-local",
+		ModelID:         "ryvion-llama-3.2-3b",
+		PromptLabel:     "fixed-readiness-smoke",
+		PromptHash:      testSHA256ObjectID("prompt"),
+		MaxTokens:       16,
+		Temperature:     0.1,
+		TimeoutMs:       30_000,
+		CreatedAtUnixMs: 1_800_000_000_123,
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testMeasuredModelBenchmarkResult() modelbench.ModelBenchmarkResult {
+	return modelbench.ModelBenchmarkResult{
+		RequestID:  "request-modelbench-local",
+		JobID:      "job-modelbench-local",
+		ModelID:    "ryvion-llama-3.2-3b",
+		PromptHash: testSHA256ObjectID("prompt"),
+		RuntimeInfo: modelbench.ModelBenchmarkRuntimeInfo{
+			AgentVersion:             "test",
+			OS:                       "darwin",
+			Arch:                     "arm64",
+			NativeInferenceSupported: true,
+			NativeInferenceReady:     true,
+			RuntimeKind:              modelbench.ModelBenchmarkRuntimeKindNativeLocal,
+			ModelID:                  "ryvion-llama-3.2-3b",
+			ModelLoaded:              true,
+			GPUDetected:              true,
+			GPUModel:                 "test-gpu",
+		},
+		Metrics: modelbench.ModelBenchmarkMetrics{
+			StartedAtUnixMs:    1_800_000_000_123,
+			FinishedAtUnixMs:   1_800_000_001_357,
+			WallTimeMs:         1234,
+			TimeToFirstTokenMs: 200,
+			TokensGenerated:    16,
+			TokensPerSecond:    12.3,
+			ModelLoadState:     modelbench.ModelBenchmarkModelLoadStateLoaded,
+		},
+		OutputHash:  testSHA256ObjectID("secret completion text"),
+		OutputBytes: int64(len("secret completion text")),
+		ProofStatus: modelbench.ModelBenchmarkProofStatusMeasured,
+	}
+}
+
+func testUnavailableModelBenchmarkResult() modelbench.ModelBenchmarkResult {
+	result := testMeasuredModelBenchmarkResult()
+	result.RuntimeInfo.NativeInferenceReady = false
+	result.RuntimeInfo.ModelLoaded = false
+	result.Metrics.TimeToFirstTokenMs = 0
+	result.Metrics.TokensGenerated = 0
+	result.Metrics.TokensPerSecond = 0
+	result.Metrics.ModelLoadState = modelbench.ModelBenchmarkModelLoadStateUnavailable
+	result.Metrics.ErrorCode = "native_model_unavailable"
+	result.OutputHash = ""
+	result.OutputBytes = 0
+	result.ProofStatus = modelbench.ModelBenchmarkProofStatusUnavailable
+	return result
+}
+
+func testModelBenchmarkSeriesSpecJSON(t *testing.T, warmupRuns int, measuredRuns int) string {
+	t.Helper()
+	profile, err := modelbench.GetBenchmarkPromptProfile(string(modelbench.BenchmarkPromptProfileLongDecodeProbe))
+	if err != nil {
+		t.Fatalf("GetBenchmarkPromptProfile() error = %v", err)
+	}
+	spec := map[string]any{
+		"task":               modelbench.ModelBenchmarkSeriesTask,
+		"request_id":         "request-modelbench-series-local",
+		"job_id":             "job-modelbench-series-local",
+		"model_id":           "ryvion-llama-3.2-3b",
+		"prompt_profile_id":  string(profile.ID),
+		"prompt_hash":        modelbench.BenchmarkPromptHash(profile),
+		"max_tokens":         32,
+		"timeout_ms":         30_000,
+		"warmup_runs":        warmupRuns,
+		"measured_runs":      measuredRuns,
+		"created_at_unix_ms": int64(1_800_000_000_123),
+	}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(encoded)
+}
+
+func testMeasuredModelBenchmarkSeriesResult(ttftMs int64, wallMs int64, tokens int64, tps float64) modelbench.ModelBenchmarkResult {
+	profile, _ := modelbench.GetBenchmarkPromptProfile(string(modelbench.BenchmarkPromptProfileLongDecodeProbe))
+	result := testMeasuredModelBenchmarkResult()
+	result.RequestID = "request-modelbench-series-local"
+	result.JobID = "job-modelbench-series-local"
+	result.PromptHash = modelbench.BenchmarkPromptHash(profile)
+	result.Metrics.TimeToFirstTokenMs = ttftMs
+	result.Metrics.WallTimeMs = wallMs
+	result.Metrics.TokensGenerated = tokens
+	result.Metrics.TokensPerSecond = tps
+	result.OutputHash = testSHA256ObjectID(fmt.Sprintf("secret series completion text %d", ttftMs))
+	result.OutputBytes = int64(len("secret series completion text"))
+	return result
+}
+
+func testUnavailableModelBenchmarkSeriesResult() modelbench.ModelBenchmarkResult {
+	result := testMeasuredModelBenchmarkSeriesResult(0, 25, 0, 0)
+	result.RuntimeInfo.NativeInferenceReady = false
+	result.RuntimeInfo.ModelLoaded = false
+	result.Metrics.TimeToFirstTokenMs = 0
+	result.Metrics.TokensGenerated = 0
+	result.Metrics.TokensPerSecond = 0
+	result.Metrics.ModelLoadState = modelbench.ModelBenchmarkModelLoadStateUnavailable
+	result.Metrics.ErrorCode = "native_runtime_unavailable"
+	result.OutputHash = ""
+	result.OutputBytes = 0
+	result.ProofStatus = modelbench.ModelBenchmarkProofStatusUnavailable
+	return result
+}
+
+func testSHA256ObjectID(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func containsToken(tokens []string, want string) bool {
+	for _, token := range tokens {
+		if token == want {
+			return true
+		}
+	}
+	return false
+}
+
+func countMainWorkLoopEvents(events []diagnostics.WorkLoopEvent, name string) int {
+	count := 0
+	for _, event := range events {
+		if event.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+func findMainWorkLoopEvent(events []diagnostics.WorkLoopEvent, name string) diagnostics.WorkLoopEvent {
+	for _, event := range events {
+		if event.Name == name {
+			return event
+		}
+	}
+	return diagnostics.WorkLoopEvent{}
+}
+
+func mainWorkLoopEventOrder(events []diagnostics.WorkLoopEvent, names ...string) bool {
+	next := 0
+	for _, event := range events {
+		if next < len(names) && event.Name == names[next] {
+			next++
+		}
+	}
+	return next == len(names)
+}
+
+func assertMainWorkLoopEventsChronological(t *testing.T, events []diagnostics.WorkLoopEvent) {
+	t.Helper()
+	var previous time.Time
+	for i, event := range events {
+		parsed, err := time.Parse(time.RFC3339Nano, event.At)
+		if err != nil {
+			t.Fatalf("event[%d] time parse error: %v; event=%+v", i, err, event)
+		}
+		if !previous.IsZero() && parsed.Before(previous) {
+			t.Fatalf("event[%d] time %s before previous %s; events=%+v", i, event.At, previous.Format(time.RFC3339Nano), events)
+		}
+		previous = parsed
+	}
+}
+
+func testV7TensorPlaneBenchmarkSpecJSON(t *testing.T, jobID, requestID string) string {
+	t.Helper()
+	spec := map[string]any{
+		"task":               tensorbench.BenchmarkTask,
+		"request_id":         requestID,
+		"job_id":             jobID,
+		"model_id":           "model-fixture",
+		"layer_index":        2,
+		"dtype":              string(tensorbench.TensorDTypeFloat32),
+		"tokens":             8,
+		"head_dim":           4,
+		"value_dim":          3,
+		"seed":               int64(99),
+		"timeout_ms":         int64(5_000),
+		"created_at_unix_ms": int64(1_800_000_000_123),
+		"prompt_text":        "prompt text must not leak",
+		"generated_output":   "generated output must not leak",
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(specJSON)
+}
+
+func testV7MemoryBenchmarkSpecJSON(t *testing.T, jobID, requestID string) string {
+	t.Helper()
+	spec := map[string]any{
+		"task":               memorybench.BenchmarkTask,
+		"request_id":         requestID,
+		"job_id":             jobID,
+		"shard_id":           "shard-a",
+		"seed":               int64(7),
+		"token_count":        4,
+		"value_dim":          2,
+		"created_at_unix_ms": int64(1_800_000_000_123),
+		"weighted_value":     []float64{1, 2, 3},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("json.Marshal(spec) error = %v", err)
+	}
+	return string(specJSON)
+}
+
+// submitReceiptWithRetryTestable is the same logic as submitReceiptWithRetry
+// but accepts an interface so we can inject a fake client.
+type receiptSubmitter interface {
+	SubmitReceipt(ctx context.Context, receipt hub.Receipt) error
+}
+
+func submitReceiptWithRetryTestable(ctx context.Context, client receiptSubmitter, receipt hub.Receipt) error {
+	receipt = prepareReceiptForSubmission(receipt)
+	const maxAttempts = 5
+	delay := 2 * time.Millisecond // fast for tests
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		if err := client.SubmitReceipt(ctx, receipt); err != nil {
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during receipt retry: %w", lastErr)
+			case <-time.After(delay):
+			}
+			delay = time.Duration(float64(delay) * 2)
+			if delay > 30*time.Millisecond {
+				delay = 30 * time.Millisecond
+			}
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
 }

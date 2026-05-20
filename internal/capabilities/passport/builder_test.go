@@ -23,12 +23,16 @@ func TestBuildCapabilityPassportFromFacts(t *testing.T) {
 			TEEType:      "tdx",
 		},
 		RuntimeProfile: RuntimeProfile{
-			OCIAvailable:         true,
-			SupportedRunnerKinds: []string{"managed_oci"},
+			NativeInferenceSupported: true,
+			OCIAvailable:             true,
+			LlamaServerAvailable:     true,
+			ImageRuntimeAvailable:    true,
+			SupportedRunnerKinds:     []string{"native_streaming", "managed_oci"},
 		},
-		WorkCapabilitySummary: WorkCapabilitySummary{
-			SupportsManagedOCI:     true,
-			SupportsArtifactUpload: true,
+		ModelCapabilitySummary: ModelCapabilitySummary{
+			ResidentModelIDs:      []string{"ryvion-llama-3.2-3b"},
+			MaxResidentModelBytes: 8 * 1024 * 1024 * 1024,
+			SupportsModelLease:    true,
 		},
 		CreatedAtUnixMs: 123,
 	})
@@ -50,20 +54,22 @@ func TestBuildCapabilityPassportFromFacts(t *testing.T) {
 	if passport.HardwareProfile.DriverVersion != "555.85" {
 		t.Fatalf("driver version = %q, want 555.85", passport.HardwareProfile.DriverVersion)
 	}
-	if !passport.SandboxCapabilitySummary.RejectsUntrustedCustomRunners {
-		t.Fatal("builder should default to rejecting untrusted custom runners")
+	if !passport.SandboxCapabilitySummary.RejectsUnsafePickle {
+		t.Fatal("builder should default to rejecting unsafe pickle")
 	}
 	if !passport.SandboxCapabilitySummary.NetworkIsolationSupported {
 		t.Fatal("OCI availability should advertise network isolation support")
 	}
-	if !containsString(passport.WorkCapabilitySummary.SupportedWorkKinds, "custom_runtime") {
-		t.Fatalf("default work kinds = %v, want generic runtime kind", passport.WorkCapabilitySummary.SupportedWorkKinds)
+	if !containsString(passport.ModelCapabilitySummary.SupportedModelFormats, "gguf") ||
+		!containsString(passport.ModelCapabilitySummary.SupportedModelFormats, "safetensors") {
+		t.Fatalf("default formats = %v, want gguf and safetensors", passport.ModelCapabilitySummary.SupportedModelFormats)
 	}
 }
 
 func TestBuildCapabilityPassportClonesSlices(t *testing.T) {
-	runnerKinds := []string{"managed_oci"}
-	workKinds := []string{"custom_runtime"}
+	runnerKinds := []string{"native_streaming"}
+	formats := []string{"GGUF"}
+	residentModels := []string{"model-a"}
 
 	passport, err := BuildCapabilityPassport(BuildPassportInput{
 		AgentVersion: "dev",
@@ -76,8 +82,9 @@ func TestBuildCapabilityPassportClonesSlices(t *testing.T) {
 		RuntimeProfile: RuntimeProfile{
 			SupportedRunnerKinds: runnerKinds,
 		},
-		WorkCapabilitySummary: WorkCapabilitySummary{
-			SupportedWorkKinds: workKinds,
+		ModelCapabilitySummary: ModelCapabilitySummary{
+			SupportedModelFormats: formats,
+			ResidentModelIDs:      residentModels,
 		},
 		CreatedAtUnixMs: 123,
 	})
@@ -85,14 +92,18 @@ func TestBuildCapabilityPassportClonesSlices(t *testing.T) {
 		t.Fatalf("BuildCapabilityPassport() error = %v", err)
 	}
 
-	runnerKinds[0] = "custom"
-	workKinds[0] = "native_report"
+	runnerKinds[0] = "managed_oci"
+	formats[0] = "pickle"
+	residentModels[0] = "model-b"
 
-	if got := passport.RuntimeProfile.SupportedRunnerKinds[0]; got != "managed_oci" {
+	if got := passport.RuntimeProfile.SupportedRunnerKinds[0]; got != "native_streaming" {
 		t.Fatalf("runner kind mutated through input slice: %q", got)
 	}
-	if got := passport.WorkCapabilitySummary.SupportedWorkKinds[0]; got != "custom_runtime" {
-		t.Fatalf("work kind mutated through input slice: %q", got)
+	if got := passport.ModelCapabilitySummary.SupportedModelFormats[0]; got != "gguf" {
+		t.Fatalf("format mutated through input slice: %q", got)
+	}
+	if got := passport.ModelCapabilitySummary.ResidentModelIDs[0]; got != "model-a" {
+		t.Fatalf("resident model mutated through input slice: %q", got)
 	}
 }
 

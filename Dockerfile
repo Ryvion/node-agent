@@ -30,7 +30,7 @@ COPY start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/ryvion-node /usr/local/bin/cosign /usr/local/bin/start.sh
 
 ENV RYV_HUB_URL="https://api.ryvion.ai"
-ENV RYV_DEVICE="cpu"
+ENV RYV_DEVICE_TYPE="cpu"
 ENV RYV_GPUS="auto"
 
 USER appuser

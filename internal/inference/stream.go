@@ -1,0 +1,541 @@
+package inference
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"math"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/Ryvion/ryvion-node/internal/hub"
+)
+
+// chatRequest is the OpenAI-compatible request to local llama-server.
+type chatRequest struct {
+	Model       string        `json:"model"`
+	Messages    []chatMessage `json:"messages"`
+	Stream      bool          `json:"stream"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
+}
+
+// chatMessage carries either a plain string OR an OpenAI multimodal
+// content array, e.g.:
+//
+//	{"role":"user","content":[
+//	  {"type":"text","text":"What's in this image?"},
+//	  {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}
+//	]}
+//
+// Content is `json.RawMessage` so the multimodal payload survives the
+// hub → spec_json → node-agent → llama-server hop verbatim. llama-server
+// (with `--mmproj` loaded for vision-capable models like Gemma 4 26B
+// or Nemotron 3 Nano Omni) consumes the OpenAI multimodal format
+// directly — re-decoding the bytes as a Go `string` would corrupt
+// the array form and crash the unmarshal step.
+type chatMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// MessageText returns the text content of a message, treating
+// multimodal arrays as the concatenation of their text parts. Used
+// only for diagnostics + non-content code paths (logging, metrics);
+// the actual chat payload is forwarded to llama-server as raw JSON.
+func (m chatMessage) MessageText() string {
+	if len(m.Content) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(m.Content, &s); err == nil {
+		return s
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(m.Content, &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.Type == "text" && p.Text != "" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
+}
+
+// specPayload is what the hub sends as spec_json for inference jobs.
+type specPayload struct {
+	Messages    []chatMessage `json:"messages"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	Model       string        `json:"model,omitempty"`
+	ModelURL    string        `json:"model_url,omitempty"`    // Presigned download URL for custom models
+	ModelFormat string        `json:"model_format,omitempty"` // "gguf", "onnx", etc.
+	ModelName   string        `json:"model_name,omitempty"`   // Human-readable name
+	Task        string        `json:"task,omitempty"`         // "custom_inference", "embedding"
+	Input       string        `json:"input,omitempty"`        // Text input for embedding tasks
+}
+
+// IsEmbeddingJob returns true when the hub-provided spec_json asks the node
+// to produce an embedding vector rather than a chat completion.
+func IsEmbeddingJob(specJSON string) bool {
+	var s specPayload
+	if err := json.Unmarshal([]byte(specJSON), &s); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(s.Task), "embedding")
+}
+
+// StreamingMetrics summarises the latency / throughput numbers a single
+// streaming inference job observed locally. The /v8 verifier (and hub
+// dashboards) read these from the receipt's MetadataJSON via the keys
+// p50_ttft_ms, p50_decode_tps, p50_end_to_end_tps, etc. Zero values mean the
+// metric was not measurable for this job (e.g. the request errored before the
+// first token arrived); callers must treat them as "unknown" rather than 0.
+type StreamingMetrics struct {
+	// TTFTMs is wall-clock milliseconds between dispatching the request to
+	// llama-server and observing the first content delta on the SSE stream.
+	TTFTMs int64
+	// DecodeTPS is generated tokens per second measured between the first
+	// content delta and the end of the stream — i.e. excludes prefill / TTFT.
+	DecodeTPS float64
+	// EndToEndTPS is generated tokens per second measured against the full
+	// wall-clock duration of the job (includes prefill / TTFT).
+	EndToEndTPS float64
+	// CompletionTokens is the count llama-server reported in its terminal
+	// `usage` chunk; falls back to a per-chunk content count when absent.
+	CompletionTokens int64
+}
+
+// RunStreamingJob handles an inference job by calling the local llama-server
+// with streaming, and relaying chunks to the hub.
+func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string, metadataExtras ...map[string]any) error {
+	start := time.Now()
+	var (
+		firstTokenAt  time.Time
+		usageTokens   int64 // from llama-server's terminal usage chunk
+		chunkTokens   int64 // fallback: count of chunks with non-empty delta
+		hasFirstToken bool
+	)
+
+	var spec specPayload
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return fmt.Errorf("parse spec_json: %w", err)
+	}
+	if len(spec.Messages) == 0 {
+		return fmt.Errorf("spec_json has no messages")
+	}
+
+	maxTokens := spec.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 2048
+	}
+
+	modelName := strings.TrimSpace(spec.Model)
+
+	// Custom model: download from URL and load it
+	if spec.Task == "custom_inference" && spec.ModelURL != "" {
+		customName := strings.TrimSpace(spec.ModelName)
+		if customName == "" {
+			customName = "custom-model"
+		}
+		slog.Info("custom model inference requested", "model_name", customName, "format", spec.ModelFormat)
+		if err := m.EnsureCustomModel(ctx, customName, spec.ModelURL); err != nil {
+			return fmt.Errorf("ensure custom model %s: %w", customName, err)
+		}
+		modelName = customName
+	} else {
+		if modelName == "" {
+			modelName = "ryvion-llama-3.2-3b"
+		}
+		if err := m.EnsureModel(ctx, modelName); err != nil {
+			return fmt.Errorf("ensure model %s: %w", modelName, err)
+		}
+	}
+
+	reqBody := chatRequest{
+		Model:       modelName,
+		Messages:    spec.Messages,
+		Stream:      true,
+		MaxTokens:   maxTokens,
+		Temperature: spec.Temperature,
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	url := m.ServerURL() + "/v1/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("llama-server request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("llama-server returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Set up pipe: read SSE from llama-server, relay to hub as chunked POST
+	pr, pw := io.Pipe()
+
+	// Start hub stream upload in background
+	streamErr := make(chan error, 1)
+	go func() {
+		streamErr <- hubClient.StreamInference(ctx, jobID, pr)
+	}()
+
+	// Read SSE lines from llama-server, relay as-is to hub
+	var fullContent strings.Builder
+	hash := sha256.New()
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			pw.Write([]byte("data: [DONE]\n\n"))
+			break
+		}
+
+		// Check if llama-server emitted an internal error stream chunk
+		var errChunk struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(data), &errChunk); err == nil && errChunk.Error.Message != "" {
+			writeHubStreamError(pw, "llama-server stream error: "+errChunk.Error.Message)
+			pw.Close()
+			<-streamErr
+			return fmt.Errorf("llama-server stream error: %s", errChunk.Error.Message)
+		}
+
+		// Extract content for hash/receipt + capture llama-server's terminal
+		// `usage` object when emitted (some llama.cpp builds attach it to the
+		// final non-[DONE] chunk; others emit a standalone usage frame).
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Usage *struct {
+				PromptTokens     int64 `json:"prompt_tokens"`
+				CompletionTokens int64 `json:"completion_tokens"`
+				TotalTokens      int64 `json:"total_tokens"`
+			} `json:"usage,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+			if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
+				usageTokens = chunk.Usage.CompletionTokens
+			}
+			if len(chunk.Choices) > 0 {
+				content := chunk.Choices[0].Delta.Content
+				if content != "" {
+					if !hasFirstToken {
+						firstTokenAt = time.Now()
+						hasFirstToken = true
+					}
+					chunkTokens++
+					fullContent.WriteString(content)
+					hash.Write([]byte(content))
+				}
+			}
+		}
+
+		// Relay SSE line to hub
+		pw.Write([]byte(line + "\n\n"))
+	}
+
+	if err := scanner.Err(); err != nil {
+		writeHubStreamError(pw, fmt.Sprintf("reading llama-server stream failed: %v", err))
+		pw.Close()
+		<-streamErr
+		return fmt.Errorf("reading llama-server stream failed: %w", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		writeHubStreamError(pw, fmt.Sprintf("job context cancelled (timeout limit reached): %v", err))
+		pw.Close()
+		<-streamErr
+		return fmt.Errorf("job context cancelled: %w", err)
+	}
+
+	if fullContent.Len() == 0 {
+		writeHubStreamError(pw, "llama-server returned empty output (context window or memory exceeded)")
+		pw.Close()
+		<-streamErr
+		return fmt.Errorf("llama-server returned empty inference generation")
+	}
+
+	pw.Close()
+
+	// Wait for hub stream to finish
+	if err := <-streamErr; err != nil {
+		slog.Warn("hub stream relay error", "job_id", jobID, "error", err)
+	}
+
+	finishedAt := time.Now()
+	duration := finishedAt.Sub(start)
+	resultHash := hex.EncodeToString(hash.Sum(nil))
+
+	// Compute streaming-timing metrics. Prefer llama-server's usage count for
+	// the token total; fall back to per-chunk counting if absent. Decode TPS
+	// excludes prefill (TTFT); end-to-end TPS includes it. The /v8 verifier
+	// reads p50_* and *_tps keys to populate its TTFT/DECODE TPS columns;
+	// emitting only the keys we measured keeps zero from being mistaken for a
+	// real value downstream.
+	tokensGenerated := usageTokens
+	if tokensGenerated == 0 {
+		tokensGenerated = chunkTokens
+	}
+	metrics := StreamingMetrics{CompletionTokens: tokensGenerated}
+	if hasFirstToken {
+		metrics.TTFTMs = firstTokenAt.Sub(start).Milliseconds()
+		decodeWindow := finishedAt.Sub(firstTokenAt).Seconds()
+		if tokensGenerated > 0 && decodeWindow > 0 {
+			metrics.DecodeTPS = float64(tokensGenerated) / decodeWindow
+		}
+	}
+	endToEndWindow := duration.Seconds()
+	if tokensGenerated > 0 && endToEndWindow > 0 {
+		metrics.EndToEndTPS = float64(tokensGenerated) / endToEndWindow
+	}
+
+	// Submit receipt — truncate response tail to avoid bloating metadata.
+	tail := fullContent.String()
+	if len(tail) > 4096 {
+		tail = tail[len(tail)-4096:]
+	}
+	meta := mergeReceiptMetadata(metadataExtras...)
+	meta["executor"] = "llama-server"
+	meta["model"] = m.ModelName()
+	meta["duration_ms"] = duration.Milliseconds()
+	meta["exit_code"] = 0
+	meta["response_length"] = fullContent.Len()
+	meta["stderr_tail"] = tail
+	applyStreamingMetricsToMetadata(meta, metrics)
+	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
+		JobID:         jobID,
+		ResultHashHex: resultHash,
+		MeteringUnits: 1,
+		Metadata:      meta,
+	}); err != nil {
+		slog.Warn("submit receipt failed", "job_id", jobID, "error", err)
+		return fmt.Errorf("submit receipt: %w", err)
+	}
+
+	slog.Info("streaming inference complete",
+		"job_id", jobID,
+		"duration", duration,
+		"tokens", tokensGenerated,
+		"ttft_ms", metrics.TTFTMs,
+		"decode_tps", metrics.DecodeTPS,
+		"end_to_end_tps", metrics.EndToEndTPS,
+	)
+	return nil
+}
+
+// applyStreamingMetricsToMetadata writes the streaming-timing keys the hub
+// verifier expects into the receipt metadata map. Only non-zero metrics are
+// written so the hub can keep treating absence as "not measured" rather than
+// surfacing 0 ms / 0 tps in the dashboard. Speculative-decoding keys are
+// intentionally not emitted here: the streaming path does not currently run a
+// drafter, so the hub's missing-key fallback (false / 0) is the correct value.
+func applyStreamingMetricsToMetadata(meta map[string]any, metrics StreamingMetrics) {
+	if meta == nil {
+		return
+	}
+	if metrics.TTFTMs > 0 {
+		meta["p50_ttft_ms"] = metrics.TTFTMs
+		meta["ttft_ms"] = metrics.TTFTMs
+	}
+	if metrics.DecodeTPS > 0 {
+		meta["p50_decode_tps"] = metrics.DecodeTPS
+		meta["decode_tps"] = metrics.DecodeTPS
+		meta["tps"] = metrics.DecodeTPS
+	}
+	if metrics.EndToEndTPS > 0 {
+		meta["p50_end_to_end_tps"] = metrics.EndToEndTPS
+		meta["end_to_end_tps"] = metrics.EndToEndTPS
+	}
+	if metrics.CompletionTokens > 0 {
+		meta["completion_tokens"] = metrics.CompletionTokens
+	}
+}
+
+func writeHubStreamError(w io.Writer, message string) {
+	payload, err := json.Marshal(map[string]any{
+		"error": map[string]string{
+			"message": strings.TrimSpace(message),
+			"type":    "node_error",
+		},
+	})
+	if err != nil {
+		payload = []byte(`{"error":{"message":"streaming inference failed","type":"node_error"}}`)
+	}
+	_, _ = w.Write([]byte("data: " + string(payload) + "\n\n"))
+}
+
+// embedRequest and embedResponse are the OpenAI-compatible shapes that
+// llama-server speaks at its /v1/embeddings endpoint.
+type embedRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+type embedResponse struct {
+	Object string `json:"object"`
+	Data   []struct {
+		Object    string    `json:"object"`
+		Index     int       `json:"index"`
+		Embedding []float32 `json:"embedding"`
+	} `json:"data"`
+	Model string `json:"model"`
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
+}
+
+// RunEmbeddingJob handles a native embedding job. The manager hot-swaps to
+// the requested embedding model (if not already loaded), posts to the local
+// llama-server /v1/embeddings endpoint, and submits a receipt with the
+// vector inline in metadata. No SSE relay — embeddings are one-shot.
+func (m *Manager) RunEmbeddingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string, metadataExtras ...map[string]any) error {
+	start := time.Now()
+
+	var spec specPayload
+	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+		return fmt.Errorf("parse spec_json: %w", err)
+	}
+	input := strings.TrimSpace(spec.Input)
+	if input == "" {
+		return fmt.Errorf("embedding spec missing input")
+	}
+	modelName := strings.TrimSpace(spec.Model)
+	if modelName == "" {
+		modelName = "nomic-embed-text-v1.5"
+	}
+	if cfg, ok := NativeModels[modelName]; !ok || cfg.Mode != ModeEmbedding {
+		return fmt.Errorf("model %q is not a registered native embedding model", modelName)
+	}
+	if err := m.EnsureModel(ctx, modelName); err != nil {
+		return fmt.Errorf("ensure embedding model %s: %w", modelName, err)
+	}
+
+	reqBody, err := json.Marshal(embedRequest{Model: modelName, Input: input})
+	if err != nil {
+		return fmt.Errorf("marshal embed request: %w", err)
+	}
+	url := m.ServerURL() + "/v1/embeddings"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return fmt.Errorf("llama-server embed request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("llama-server embed returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return fmt.Errorf("read embed response: %w", err)
+	}
+	var embResp embedResponse
+	if err := json.Unmarshal(body, &embResp); err != nil {
+		return fmt.Errorf("decode embed response: %w", err)
+	}
+	if len(embResp.Data) == 0 || len(embResp.Data[0].Embedding) == 0 {
+		return fmt.Errorf("llama-server returned empty embedding")
+	}
+	vector := embResp.Data[0].Embedding
+
+	// Hash the raw vector bytes for the receipt — buyer can reverify by
+	// recomputing sha256(float32 little-endian of returned vector).
+	hasher := sha256.New()
+	for _, v := range vector {
+		var buf [4]byte
+		binaryLittleEndianPutFloat32(buf[:], v)
+		hasher.Write(buf[:])
+	}
+	resultHash := hex.EncodeToString(hasher.Sum(nil))
+	duration := time.Since(start)
+
+	meta := mergeReceiptMetadata(metadataExtras...)
+	meta["executor"] = "llama-server"
+	meta["task"] = "embedding"
+	meta["model"] = modelName
+	meta["duration_ms"] = duration.Milliseconds()
+	meta["exit_code"] = 0
+	meta["dimensions"] = len(vector)
+	meta["prompt_tokens"] = embResp.Usage.PromptTokens
+	meta["embedding"] = vector
+
+	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
+		JobID:         jobID,
+		ResultHashHex: resultHash,
+		MeteringUnits: 1,
+		Metadata:      meta,
+	}); err != nil {
+		return fmt.Errorf("submit embed receipt: %w", err)
+	}
+
+	slog.Info("native embedding complete", "job_id", jobID, "model", modelName, "dims", len(vector), "duration", duration)
+	return nil
+}
+
+func mergeReceiptMetadata(extras ...map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, extra := range extras {
+		for key, value := range extra {
+			if strings.TrimSpace(key) != "" {
+				out[key] = value
+			}
+		}
+	}
+	return out
+}
+
+// binaryLittleEndianPutFloat32 writes a float32 in little-endian bytes.
+// Used for deterministic receipt hashing of the output vector.
+func binaryLittleEndianPutFloat32(dst []byte, v float32) {
+	bits := math.Float32bits(v)
+	dst[0] = byte(bits)
+	dst[1] = byte(bits >> 8)
+	dst[2] = byte(bits >> 16)
+	dst[3] = byte(bits >> 24)
+}

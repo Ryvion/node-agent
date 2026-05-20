@@ -9,7 +9,7 @@ services:
     restart: unless-stopped
     environment:
       - RYV_HUB_URL=https://api.ryvion.ai
-      - RYV_DEVICE=gpu
+      - RYV_DEVICE_TYPE=gpu
       - RYV_GPUS=auto
       - RYV_LOG_LEVEL=info
       - DOCKER_HOST=unix:///var/run/docker.sock

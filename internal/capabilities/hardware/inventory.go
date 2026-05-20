@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-func DetectInventory(workCacheDir string) CapacityInventory {
-	return BuildInventory(Detector{WorkCacheDir: workCacheDir})
+func DetectInventory(modelCacheDir string) CapacityInventory {
+	return BuildInventory(Detector{ModelCacheDir: modelCacheDir})
 }
 
 func BuildInventory(detector Detector) CapacityInventory {
@@ -47,9 +47,9 @@ func BuildInventory(detector Detector) CapacityInventory {
 	}
 	inventory.VulkanAvailable = detectVulkanAvailable(detector)
 
-	if strings.TrimSpace(detector.WorkCacheDir) != "" && detector.DiskFreeBytes != nil {
-		if free, err := detector.DiskFreeBytes(detector.WorkCacheDir); err == nil {
-			inventory.DiskFreeBytesWorkCache = free
+	if strings.TrimSpace(detector.ModelCacheDir) != "" && detector.DiskFreeBytes != nil {
+		if free, err := detector.DiskFreeBytes(detector.ModelCacheDir); err == nil {
+			inventory.DiskFreeBytesModelCache = free
 		}
 	}
 	return NormalizeInventory(inventory)

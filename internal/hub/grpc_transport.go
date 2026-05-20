@@ -2,17 +2,22 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	experimentsv1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/experiments/v1"
 	nodev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/node/v1"
+	speculativev1 "github.com/Ryvion/ryvion-protocol/gen/go/ryvion/speculative/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -39,6 +44,7 @@ type grpcTransport struct {
 	gatewayClient  nodev1.NodeGatewayClient
 	gatewayStream  nodev1.NodeGateway_ConnectClient
 	gatewayPending map[string]chan nodeGatewayResponse
+	liveLabGateway experimentsv1.ExperimentalLiveLabGatewayClient
 }
 
 type nodeGatewayResponse struct {
@@ -94,10 +100,9 @@ func (c *Client) heartbeatGRPC(ctx context.Context, body heartbeatRequest) (Hear
 
 func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatRequest) (HeartbeatResponse, error) {
 	var err error
-	var capabilityStruct *structpb.Struct
-	capabilityPayload := body.Capability
-	if capabilityPayload != nil {
-		capabilityStruct, err = structFromJSONValue(capabilityPayload)
+	var v7Struct *structpb.Struct
+	if body.V7 != nil {
+		v7Struct, err = structFromJSONValue(body.V7)
 		if err != nil {
 			return HeartbeatResponse{}, err
 		}
@@ -125,7 +130,7 @@ func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatReq
 				PowerWatts:        body.PowerWatts,
 				GpuThrottled:      body.GPUThrottled,
 				SystemTimezone:    body.SystemTimezone,
-				CapabilityPayload: capabilityStruct,
+				CapabilityPayload: v7Struct,
 				NetworkProfile:    networkStruct,
 			},
 		},
@@ -142,20 +147,20 @@ func (c *Client) heartbeatNodeGatewayGRPC(ctx context.Context, body heartbeatReq
 	if ack == nil {
 		return HeartbeatResponse{}, status.Error(codes.Internal, "heartbeat ack missing")
 	}
-	upserted := ack.GetCapabilityProfileUpserted()
+	upserted := ack.GetV7SnapshotUpserted()
 	return HeartbeatResponse{
-		LatestVersion:             ack.GetLatestVersion(),
-		NodeID:                    ack.GetNodeId(),
-		CountryCode:               ack.GetCountryCode(),
-		LocationApproved:          ack.GetLocationApproved(),
-		SovereignVerified:         ack.GetSovereignVerified(),
-		VerificationSource:        ack.GetVerificationSource(),
-		TrustReason:               ack.GetTrustReason(),
-		CapabilityProfileUpserted: &upserted,
-		ProfileRuntimeCount:       int(ack.GetProfileRuntimeCount()),
-		ProfileBackendCount:       int(ack.GetProfileBackendCount()),
-		HasCapabilityProfile:      ack.GetHasCapabilityProfile(),
-		HubInstanceID:             ack.GetHubInstanceId(),
+		LatestVersion:        ack.GetLatestVersion(),
+		NodeID:               ack.GetNodeId(),
+		CountryCode:          ack.GetCountryCode(),
+		LocationApproved:     ack.GetLocationApproved(),
+		SovereignVerified:    ack.GetSovereignVerified(),
+		VerificationSource:   ack.GetVerificationSource(),
+		TrustReason:          ack.GetTrustReason(),
+		V7SnapshotUpserted:   &upserted,
+		SnapshotModelCount:   int(ack.GetSnapshotModelCount()),
+		SnapshotBackendCount: int(ack.GetSnapshotBackendCount()),
+		HasCapabilityProfile: ack.GetHasCapabilityProfile(),
+		HubInstanceID:        ack.GetHubInstanceId(),
 	}, nil
 }
 
@@ -203,10 +208,11 @@ func (c *Client) fetchWorkNodeGatewayGRPC(ctx context.Context, pubHex string, ts
 	}
 	return &WorkAssignment{
 		JobID:               assignment.GetJobId(),
-		WorkScopeID:         assignment.GetAbortScopeId(),
+		WorkGraphID:         assignment.GetWorkgraphId(),
 		JobPubkey:           assignment.GetJobPubkey(),
 		Kind:                assignment.GetKind(),
 		PayloadURL:          assignment.GetPayloadUrl(),
+		PricePerUnit:        assignment.GetPricePerUnit(),
 		Units:               assignment.GetUnits(),
 		Image:               assignment.GetImage(),
 		SpecJSON:            assignment.GetSpecJson(),
@@ -266,6 +272,208 @@ func (c *Client) submitReceiptNodeGatewayGRPC(ctx context.Context, body receiptR
 	return nil
 }
 
+func (c *Client) submitDraftPacketBatchGRPC(ctx context.Context, windowID string, packets []map[string]any) (DraftPacketBatchDecision, error) {
+	protoPackets := make([]*speculativev1.DraftPacket, 0, len(packets))
+	for _, packet := range packets {
+		packetProto, err := draftPacketProtoFromMap(packet)
+		if err != nil {
+			return DraftPacketBatchDecision{}, err
+		}
+		protoPackets = append(protoPackets, packetProto)
+	}
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := c.nodeGatewayRoundTrip(ctx, &nodev1.NodeToHub{
+		NodeId:          pubHex,
+		MessageId:       fmt.Sprintf("draft-packets-%s-%d", windowID, ts),
+		CreatedAtUnixMs: ts,
+		Payload: &nodev1.NodeToHub_DraftPacketBatch{
+			DraftPacketBatch: &nodev1.DraftPacketBatch{
+				WindowId: windowID,
+				Packets:  protoPackets,
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     pubHex,
+			Algorithm: "ed25519-node-auth",
+			Signature: c.sign("node_auth", pubHex, strconv.FormatInt(ts, 10)),
+		},
+	})
+	if err != nil {
+		return DraftPacketBatchDecision{}, err
+	}
+	ack := resp.GetDraftPacketBatchAck()
+	if ack == nil {
+		return DraftPacketBatchDecision{}, status.Error(codes.Internal, "draft packet batch ack missing")
+	}
+	decisions := make([]DraftPacketDecision, 0, len(ack.GetDecisions()))
+	for _, decision := range ack.GetDecisions() {
+		if decision == nil {
+			continue
+		}
+		decisions = append(decisions, DraftPacketDecision{
+			PacketID: decision.GetPacketId(),
+			Accepted: decision.GetAccepted(),
+			Reason:   decision.GetReason(),
+		})
+	}
+	return DraftPacketBatchDecision{
+		SchemaVersion: ack.GetSchemaVersion(),
+		WindowID:      ack.GetWindowId(),
+		Attempted:     int(ack.GetAttempted()),
+		Accepted:      int(ack.GetAccepted()),
+		Rejected:      int(ack.GetRejected()),
+		Decisions:     decisions,
+	}, nil
+}
+
+func (c *Client) fetchSpeculativeLiveLabSessionCommandGRPC(ctx context.Context, runID string, jobID string, role string) (SpeculativeLiveLabSessionCommand, error) {
+	client, err := c.experimentalLiveLabGatewayClient(ctx)
+	if err != nil {
+		return SpeculativeLiveLabSessionCommand{}, err
+	}
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 10*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return SpeculativeLiveLabSessionCommand{}, err
+	}
+	if err := stream.Send(&experimentsv1.LiveLabNodeToHub{
+		NodeId:          pubHex,
+		MessageId:       fmt.Sprintf("live-lab-command-%s-%d", runID, ts),
+		CreatedAtUnixMs: ts,
+		Payload: &experimentsv1.LiveLabNodeToHub_CommandRequest{
+			CommandRequest: &experimentsv1.LiveLabCommandRequest{
+				RunId: runID,
+				JobId: strings.TrimSpace(jobID),
+				Role:  strings.TrimSpace(role),
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     pubHex,
+			Algorithm: "ed25519-node-auth",
+			Signature: c.sign("node_auth", pubHex, strconv.FormatInt(ts, 10)),
+		},
+	}); err != nil {
+		return SpeculativeLiveLabSessionCommand{}, err
+	}
+	resp, err := stream.Recv()
+	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return SpeculativeLiveLabSessionCommand{}, err
+	}
+	command := resp.GetCommand()
+	if command == nil {
+		return SpeculativeLiveLabSessionCommand{}, status.Error(codes.Internal, "live lab command missing")
+	}
+	payload := map[string]any{}
+	if command.GetPayload() != nil {
+		payload = command.GetPayload().AsMap()
+	}
+	payload["schema_version"] = command.GetSchemaVersion()
+	payload["run_id"] = command.GetRunId()
+	payload["job_id"] = command.GetJobId()
+	payload["role"] = command.GetRole()
+	payload["command"] = command.GetCommand()
+	payload["command_id"] = command.GetCommandId()
+	payload["reason"] = command.GetReason()
+	var out SpeculativeLiveLabSessionCommand
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return SpeculativeLiveLabSessionCommand{}, err
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return SpeculativeLiveLabSessionCommand{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) submitSpeculativeLiveLabVerifierResultGRPC(ctx context.Context, runID string, result SpeculativeLiveLabVerifierResult) error {
+	client, err := c.experimentalLiveLabGatewayClient(ctx)
+	if err != nil {
+		return err
+	}
+	var probeSummary *structpb.Struct
+	if result.ProbeSummary != nil {
+		probeSummary, err = structFromJSONValue(result.ProbeSummary)
+		if err != nil {
+			return err
+		}
+	}
+	acceptedTextHash := ""
+	if strings.TrimSpace(result.AcceptedTextHash) != "" {
+		acceptedTextHash = strings.TrimSpace(result.AcceptedTextHash)
+	}
+	if strings.TrimSpace(result.AcceptedText) != "" {
+		sum := sha256.Sum256([]byte(result.AcceptedText))
+		acceptedTextHash = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	ts := time.Now().UnixMilli()
+	pubHex := c.pubHex()
+	ctx, cancel := context.WithTimeout(c.grpcMetadataContext(ctx), 10*time.Second)
+	defer cancel()
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(&experimentsv1.LiveLabNodeToHub{
+		NodeId:          pubHex,
+		MessageId:       fmt.Sprintf("live-lab-verifier-result-%s-%d", runID, ts),
+		CreatedAtUnixMs: ts,
+		Payload: &experimentsv1.LiveLabNodeToHub_VerifierResult{
+			VerifierResult: &experimentsv1.LiveLabVerifierResult{
+				RunId:              runID,
+				JobId:              result.JobID,
+				WindowId:           result.WindowID,
+				WaveIndex:          nonNegativeUint32(result.WaveIndex),
+				AcceptedLen:        nonNegativeUint32(result.AcceptedLen),
+				TreeCid:            result.TreeCID,
+				DurationMs:         result.DurationMs,
+				AcceptedTextHash:   acceptedTextHash,
+				AcceptedTextPublic: result.AcceptedTextPublic,
+				Eos:                result.EOS,
+				StopReason:         result.StopReason,
+				ProbeSummary:       probeSummary,
+			},
+		},
+		Signature: &nodev1.Signature{
+			KeyId:     pubHex,
+			Algorithm: "ed25519-node-auth",
+			Signature: c.sign("node_auth", pubHex, strconv.FormatInt(ts, 10)),
+		},
+	}); err != nil {
+		return err
+	}
+	resp, err := stream.Recv()
+	if closeErr := stream.CloseSend(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	ack := resp.GetVerifierResultAck()
+	if ack == nil {
+		return status.Error(codes.Internal, "live lab verifier result ack missing")
+	}
+	if statusText := strings.TrimSpace(ack.GetStatus()); statusText != "" && statusText != "accepted" && statusText != "duplicate" && statusText != "ok" {
+		return fmt.Errorf("live lab verifier result rejected: %s", statusText)
+	}
+	return nil
+}
+
+func nonNegativeUint32(value int) uint32 {
+	if value <= 0 {
+		return 0
+	}
+	return uint32(value)
+}
+
 func (c *Client) nodeGatewayRoundTrip(ctx context.Context, msg *nodev1.NodeToHub) (*nodev1.HubToNode, error) {
 	if c == nil || c.grpc == nil || !c.grpc.enabled() {
 		return nil, status.Error(codes.Unavailable, "gRPC transport disabled")
@@ -278,6 +486,13 @@ func (c *Client) nodeGatewayRoundTrip(ctx context.Context, msg *nodev1.NodeToHub
 		return nil, status.Error(codes.InvalidArgument, "node gateway message_id required")
 	}
 	return c.grpc.gatewayRoundTrip(ctx, c.grpcMetadataContext(context.Background()), msg, "ack_"+messageID)
+}
+
+func (c *Client) experimentalLiveLabGatewayClient(ctx context.Context) (experimentsv1.ExperimentalLiveLabGatewayClient, error) {
+	if c == nil || c.grpc == nil || !c.grpc.enabled() {
+		return nil, status.Error(codes.Unavailable, "gRPC transport disabled")
+	}
+	return c.grpc.liveLabGatewayClientFor(ctx)
 }
 
 func (c *Client) Close() error {
@@ -317,6 +532,7 @@ func (t *grpcTransport) close() error {
 	err := t.conn.Close()
 	t.conn = nil
 	t.gatewayClient = nil
+	t.liveLabGateway = nil
 	t.mu.Unlock()
 	for _, ch := range pending {
 		if ch != nil {
@@ -332,6 +548,20 @@ func (t *grpcTransport) enabled() bool {
 
 func (t *grpcTransport) required() bool {
 	return t != nil && t.mode == hubTransportGRPC
+}
+
+func (t *grpcTransport) liveLabGatewayClientFor(ctx context.Context) (experimentsv1.ExperimentalLiveLabGatewayClient, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.liveLabGateway != nil {
+		return t.liveLabGateway, nil
+	}
+	conn, err := t.connForLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	t.liveLabGateway = experimentsv1.NewExperimentalLiveLabGatewayClient(conn)
+	return t.liveLabGateway, nil
 }
 
 func (t *grpcTransport) gatewayRoundTrip(ctx context.Context, streamCtx context.Context, msg *nodev1.NodeToHub, responseID string) (*nodev1.HubToNode, error) {
@@ -503,16 +733,147 @@ func runtimeRequirementsFromNodeProto(req *nodev1.RuntimeRequirements) RuntimeRe
 		return RuntimeRequirements{}
 	}
 	return RuntimeRequirements{
-		NeedsGPU:           req.GetNeedsGpu(),
-		NeedsManagedOCI:    req.GetNeedsManagedOci(),
-		NeedsManagedOCIGPU: req.GetNeedsManagedOciGpu(),
-		NeedsLlamaCPP:      req.GetNeedsLlamaCpp(),
-		Tooling:            append([]string(nil), req.GetTooling()...),
-		MinDiskGB:          req.GetMinDiskGb(),
-		MinVRAMMB:          req.GetMinVramMb(),
-		Jurisdiction:       req.GetJurisdiction(),
-		TrustLevel:         req.GetTrustLevel(),
+		NeedsGPU:             req.GetNeedsGpu(),
+		NeedsManagedOCI:      req.GetNeedsManagedOci(),
+		NeedsManagedOCIGPU:   req.GetNeedsManagedOciGpu(),
+		NeedsRyvionRuntime:   req.GetNeedsRyvionRuntime(),
+		NeedsNativeStreaming: req.GetNeedsNativeStreaming(),
+		NeedsNativeReport:    req.GetNeedsNativeReport(),
+		NeedsAgentHosting:    req.GetNeedsAgentHosting(),
+		Tooling:              append([]string(nil), req.GetTooling()...),
+		MinDiskGB:            req.GetMinDiskGb(),
+		MinVRAMMB:            req.GetMinVramMb(),
+		Jurisdiction:         req.GetJurisdiction(),
+		TrustLevel:           req.GetTrustLevel(),
 	}
+}
+
+func draftPacketProtoFromMap(packet map[string]any) (*speculativev1.DraftPacket, error) {
+	if packet == nil {
+		return nil, fmt.Errorf("draft packet required")
+	}
+	return &speculativev1.DraftPacket{
+		PacketId:         stringFromMap(packet, "packet_id"),
+		WindowId:         stringFromMap(packet, "window_id"),
+		WorkgraphId:      stringFromMap(packet, "workgraph_id"),
+		RoleId:           stringFromMap(packet, "role_id"),
+		NodeId:           stringFromMap(packet, "node_id"),
+		ParentPrefixHash: stringFromMap(packet, "parent_prefix_hash"),
+		CandidateTokens:  int32SliceFromMap(packet, "candidate_tokens"),
+		ModelHash:        stringFromMap(packet, "model_hash"),
+		DrafterModelId:   stringFromMap(packet, "drafter_model_id"),
+		Horizon:          uint32(nonNegativeInt64(int64FromMap(packet, "horizon"))),
+		ConfidenceBps:    int64FromMap(packet, "confidence_bps"),
+		DeadlineMs:       int64FromMap(packet, "deadline_ms"),
+		EnergyMwh:        int64FromMap(packet, "energy_mwh"),
+		Signature:        stringFromMap(packet, "signature"),
+		ProductionValid:  boolFromMap(packet, "production_valid"),
+		TestAdapter:      boolFromMap(packet, "test_adapter"),
+		BillingStatus:    stringFromMap(packet, "billing_status"),
+	}, nil
+}
+
+func stringFromMap(packet map[string]any, key string) string {
+	value, ok := packet[key]
+	if !ok || value == nil {
+		return ""
+	}
+	if typed, ok := value.(string); ok {
+		return strings.TrimSpace(typed)
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func int32SliceFromMap(packet map[string]any, key string) []int32 {
+	value, ok := packet[key]
+	if !ok || value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []int:
+		out := make([]int32, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int32(item))
+		}
+		return out
+	case []int32:
+		return append([]int32(nil), typed...)
+	case []int64:
+		out := make([]int32, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int32(item))
+		}
+		return out
+	case []float64:
+		out := make([]int32, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int32(item))
+		}
+		return out
+	case []any:
+		out := make([]int32, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int32(int64FromAny(item)))
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func int64FromMap(packet map[string]any, key string) int64 {
+	return int64FromAny(packet[key])
+}
+
+func int64FromAny(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case uint32:
+		return int64(typed)
+	case uint64:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case float32:
+		return int64(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func boolFromMap(packet map[string]any, key string) bool {
+	value, ok := packet[key]
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func nonNegativeInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func structFromJSONValue(v any) (*structpb.Struct, error) {

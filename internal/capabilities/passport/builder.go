@@ -22,7 +22,7 @@ type BuildPassportInput struct {
 	RuntimeProfile       RuntimeProfile
 
 	NetworkCapabilitySummary  NetworkCapabilitySummary
-	WorkCapabilitySummary     WorkCapabilitySummary
+	ModelCapabilitySummary    ModelCapabilitySummary
 	SandboxCapabilitySummary  SandboxCapabilitySummary
 	CASCapabilitySummary      CASCapabilitySummary
 	EvidenceCapabilitySummary EvidenceCapabilitySummary
@@ -53,21 +53,16 @@ func BuildCapabilityPassport(input BuildPassportInput) (CapabilityPassport, erro
 	runtimeProfile := input.RuntimeProfile
 	runtimeProfile.SupportedRunnerKinds = cloneCleanStrings(runtimeProfile.SupportedRunnerKinds)
 
-	workSummary := input.WorkCapabilitySummary
-	if len(workSummary.SupportedWorkKinds) == 0 {
-		workSummary.SupportedWorkKinds = defaultWorkKinds(runtimeProfile)
+	modelSummary := input.ModelCapabilitySummary
+	if len(modelSummary.SupportedModelFormats) == 0 {
+		modelSummary.SupportedModelFormats = defaultModelFormats(runtimeProfile)
 	} else {
-		workSummary.SupportedWorkKinds = cloneCleanStrings(workSummary.SupportedWorkKinds)
+		modelSummary.SupportedModelFormats = cloneModelFormats(modelSummary.SupportedModelFormats)
 	}
-	if runtimeProfile.OCIAvailable {
-		workSummary.SupportsManagedOCI = true
-	}
-	if runtimeProfile.LlamaCPPAvailable {
-		workSummary.SupportsLlamaCPP = true
-	}
+	modelSummary.ResidentModelIDs = cloneCleanStrings(modelSummary.ResidentModelIDs)
 
 	sandboxSummary := input.SandboxCapabilitySummary
-	sandboxSummary.RejectsUntrustedCustomRunners = true
+	sandboxSummary.RejectsUnsafePickle = true
 	if runtimeProfile.OCIAvailable {
 		sandboxSummary.NetworkIsolationSupported = true
 	}
@@ -83,7 +78,7 @@ func BuildCapabilityPassport(input BuildPassportInput) (CapabilityPassport, erro
 		HardwareProfile:           buildHardwareProfile(input.HardwareCapabilities, input.HardwareProfile),
 		RuntimeProfile:            runtimeProfile,
 		NetworkCapabilitySummary:  input.NetworkCapabilitySummary,
-		WorkCapabilitySummary:     workSummary,
+		ModelCapabilitySummary:    modelSummary,
 		SandboxCapabilitySummary:  sandboxSummary,
 		CASCapabilitySummary:      input.CASCapabilitySummary,
 		EvidenceCapabilitySummary: input.EvidenceCapabilitySummary,
@@ -122,15 +117,15 @@ func buildHardwareProfile(caps hw.CapSet, override HardwareProfile) HardwareProf
 	return out
 }
 
-func defaultWorkKinds(runtimeProfile RuntimeProfile) []string {
-	out := []string{}
-	if runtimeProfile.LlamaCPPAvailable {
-		out = append(out, "llama_cpp_inference")
+func defaultModelFormats(runtimeProfile RuntimeProfile) []string {
+	formats := make([]string, 0, 2)
+	if runtimeProfile.NativeInferenceSupported || runtimeProfile.LlamaServerAvailable {
+		formats = append(formats, "gguf")
 	}
-	if runtimeProfile.OCIAvailable {
-		out = append(out, "custom_runtime")
+	if runtimeProfile.ImageRuntimeAvailable {
+		formats = append(formats, "safetensors")
 	}
-	return out
+	return formats
 }
 
 func cloneCleanStrings(values []string) []string {
@@ -143,6 +138,26 @@ func cloneCleanStrings(values []string) []string {
 		if value != "" {
 			out = append(out, value)
 		}
+	}
+	return out
+}
+
+func cloneModelFormats(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = normalizedModelFormat(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	return out
 }

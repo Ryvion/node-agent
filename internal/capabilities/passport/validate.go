@@ -30,11 +30,15 @@ func ValidateCapabilityPassport(passport CapabilityPassport) error {
 	if err := validateNetworkMetrics(passport.NetworkCapabilitySummary); err != nil {
 		errs = append(errs, err)
 	}
-	if passport.WorkCapabilitySummary.SupportsManagedOCI && !passport.RuntimeProfile.OCIAvailable {
-		errs = append(errs, fmt.Errorf("managed OCI support requires OCI runtime availability"))
+	for _, format := range passport.ModelCapabilitySummary.SupportedModelFormats {
+		if unsafeModelFormat(format) {
+			errs = append(errs, fmt.Errorf("unsafe model format %q is not allowed by default", format))
+		}
 	}
-	if passport.WorkCapabilitySummary.SupportsLlamaCPP && !passport.RuntimeProfile.LlamaCPPAvailable {
-		errs = append(errs, fmt.Errorf("llama.cpp support requires llama.cpp runtime availability"))
+	if passport.ModelCapabilitySummary.SupportsModelLease &&
+		strings.TrimSpace(passport.HardwareProfile.GPUModel) == "" &&
+		passport.HardwareProfile.VRAMBytes == 0 {
+		errs = append(errs, fmt.Errorf("model lease support requires a gpu model or vram bytes"))
 	}
 	if err := validateNoObviousSecrets(passport); err != nil {
 		errs = append(errs, err)
@@ -63,6 +67,26 @@ func validateNetworkMetrics(summary NetworkCapabilitySummary) error {
 		errs = append(errs, fmt.Errorf("loss rate p95 must not exceed 1"))
 	}
 	return errors.Join(errs...)
+}
+
+func unsafeModelFormat(format string) bool {
+	format = normalizedModelFormat(format)
+	if format == "" {
+		return false
+	}
+	switch format {
+	case "pickle", "pkl":
+		return true
+	default:
+		return strings.Contains(format, "pickle")
+	}
+}
+
+func normalizedModelFormat(format string) string {
+	format = strings.ToLower(strings.TrimSpace(format))
+	format = strings.TrimPrefix(format, ".")
+	format = strings.ReplaceAll(format, "_", "-")
+	return format
 }
 
 func validateNoObviousSecrets(passport CapabilityPassport) error {

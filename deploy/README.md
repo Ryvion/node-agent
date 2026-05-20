@@ -1,51 +1,168 @@
-# Ryvion AI Node Agent - DigitalOcean Deployment
+# Ryvion DePIN Node Agent - DigitalOcean Deployment
 
 ## Quick Start
 
-1. Create an Ubuntu 22.04 LTS droplet.
-2. Run the setup script:
+### 1. Create DigitalOcean Droplet
+
+**Recommended Configuration:**
+- **Image**: Ubuntu 22.04 LTS
+- **Size**: Basic - 4GB RAM, 2 vCPUs ($24/month)
+- **Region**: Choose closest to your location
+- **Additional Options**: 
+  - ✅ Monitoring
+  - ✅ IPv6
+  - 🔑 Add your SSH key
+
+### 2. Deploy Node Agent
 
 ```bash
+# SSH into your droplet
+ssh root@YOUR_DROPLET_IP
+
+# Download and run setup script
 curl -fsSL https://raw.githubusercontent.com/Ryvion/ryvion-node/main/deploy/digitalocean-setup.sh | bash
+
+# Start the service
 systemctl start ryvion-node
+
+# Check status
 systemctl status ryvion-node
 ```
 
-3. Configure a local llama.cpp server when the node should accept native
-   inference jobs:
+### 3. Verify Installation
 
 ```bash
-export RYV_LLAMA_CPP_SERVER_URL=http://127.0.0.1:8080
-export RYV_LLAMA_CPP_MODEL=local-model
-```
-
-## Runtime Model
-
-The node reports two active execution lanes:
-
-- `llama_cpp`: local OpenAI-compatible llama.cpp server for AI inference jobs.
-- `managed_oci`: isolated container execution for trusted custom/code workloads.
-
-Managed OCI jobs run with network isolation by default. Native llama.cpp jobs do
-not send prompts or generated text in receipt metadata; the node records hashes,
-token counts, model id, timing, and uploaded artifact references.
-
-## Verification
-
-```bash
+# Check if containers are running
 docker ps
-docker-compose -f /opt/ryvion/docker-compose.yml logs --tail=100
+
+# View logs
+docker-compose -f /opt/ryvion/docker-compose.yml logs -f
+
+# Verify the node process is healthy
 docker exec ryvion-node pgrep ryvion-node
 ```
 
-Connectivity check:
+## Architecture
 
-```bash
-curl -I https://api.ryvion.ai/health
+```
+┌─────────────────────────────────────────┐
+│           DigitalOcean Droplet          │
+├─────────────────────────────────────────┤
+│  ┌─────────────────────────────────┐    │
+│  │         Node Agent              │    │
+│  │  ┌─────────────────────────┐    │    │
+│  │  │     Docker Engine       │    │    │
+│  │  │  ┌─────────────────┐    │    │    │
+│  │  │  │  AI Runners     │    │    │    │
+│  │  │  │  - LLM          │    │    │    │
+│  │  │  │  - Image Gen    │    │    │    │
+│  │  │  │  - Audio/Video  │    │    │    │
+│  │  │  └─────────────────┘    │    │    │
+│  │  └─────────────────────────┘    │    │
+│  └─────────────────────────────────┘    │
+└─────────────────────────────────────────┘
+           │
+           │ HTTPS
+           ▼
+┌─────────────────────────────────────────┐
+│              Render                     │
+│  ┌─────────────────────────────────┐    │
+│  │        Hub Orchestrator         │    │
+│  │         + Database              │    │
+│  └─────────────────────────────────┘    │
+└─────────────────────────────────────────┘
 ```
 
-## GPU Hosts
+## Pricing Comparison
 
-GPU hosts can use NVIDIA Container Toolkit for managed OCI workloads. llama.cpp
-GPU acceleration is configured in the local llama.cpp server itself; the node
-only probes the local server and advertises readiness when it is reachable.
+| Provider | Config | Monthly Cost | Docker-in-Docker | GPU Support |
+|----------|--------|-------------|------------------|-------------|
+| **DigitalOcean** | 4GB/2CPU | $24 | ✅ Yes | Available |
+| Render | Standard | $25 | ❌ No | ❌ No |
+| AWS EC2 | t3.medium | ~$30 | ✅ Yes | Extra cost |
+| Railway | 4GB/2CPU | ~$35 | ✅ Yes | ❌ No |
+
+## Node Operator Benefits
+
+### For Individual Operators
+- **Easy Setup**: One-command deployment
+- **Low Cost**: $24/month for basic node
+- **Full Control**: Root access, custom configuration
+- **Monitoring**: Built-in health checks and logs
+
+### For Enterprise Operators
+- **Scalable**: Deploy multiple nodes across regions
+- **Automated**: Systemd service management
+- **Secure**: Isolated environments per node
+- **Profitable**: Earn tokens for AI workload processing
+
+## Troubleshooting
+
+### Common Issues
+
+**Node not connecting to hub:**
+```bash
+# Check hub URL configuration in compose env
+grep RYV_HUB_URL /opt/ryvion/docker-compose.yml
+
+# Test connectivity
+curl -I https://ryvion-hub.onrender.com/health
+```
+
+**Docker containers not starting:**
+```bash
+# Check Docker daemon
+systemctl status docker
+
+# Check privileges
+docker run --rm --privileged hello-world
+```
+
+**Port not accessible:**
+```bash
+# This node runtime does not expose a local HTTP UI by default.
+# Validate health via process and logs instead:
+docker exec ryvion-node pgrep ryvion-node
+docker-compose -f /opt/ryvion/docker-compose.yml logs --tail=100
+```
+
+## Advanced Configuration
+
+### GPU Support
+For AI workloads requiring GPU acceleration:
+
+1. **Create GPU Droplet** (when available)
+2. **Install NVIDIA Docker**:
+   ```bash
+   # Add NVIDIA package repositories
+   distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+   curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | apt-key add -
+   curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | tee /etc/apt/sources.list.d/nvidia-docker.list
+   
+   # Install nvidia-docker2
+   apt-get update && apt-get install -y nvidia-docker2
+   systemctl restart docker
+   ```
+
+3. **Update docker-compose.yml**:
+   ```yaml
+   runtime: nvidia
+   environment:
+     - NVIDIA_VISIBLE_DEVICES=all
+   ```
+
+### Custom Runners
+Add your own AI model runners by mounting custom containers:
+
+```yaml
+volumes:
+  - ./custom-runners:/custom-runners
+environment:
+  - RYV_CUSTOM_RUNNERS_PATH=/custom-runners
+```
+
+## Support
+
+- **Documentation**: [docs.ryvion.io](https://docs.ryvion.io)
+- **Discord**: [discord.gg/ryvion](https://discord.gg/ryvion)
+- **GitHub Issues**: [github.com/Ryvion/ryvion-node/issues](https://github.com/Ryvion/ryvion-node/issues)

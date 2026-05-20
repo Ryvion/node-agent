@@ -14,54 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	heartbeat "github.com/Ryvion/ryvion-node/internal/hub/heartbeat"
 )
-
-func TestHeartbeatSendsCanonicalNodeCapabilityPayload(t *testing.T) {
-	t.Parallel()
-
-	pub, priv := testKeyPair()
-	capabilityPayload := &heartbeat.NodeHeartbeatPayload{
-		SchemaVersion:   heartbeat.SchemaVersionV1,
-		NodeID:          "node-test",
-		CreatedAtUnixMs: 123,
-	}
-
-	var body map[string]json.RawMessage
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/node/heartbeat" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"latest_version":"1.0.0"}`))
-	}))
-	defer ts.Close()
-
-	c := New(ts.URL, pub, priv)
-	_, err := c.Heartbeat(context.Background(), Metrics{
-		TimestampMs:    time.Now().UnixMilli(),
-		CPUUtil:        1,
-		MemUtil:        2,
-		NodeCapability: capabilityPayload,
-	})
-	if err != nil {
-		t.Fatalf("Heartbeat() error = %v", err)
-	}
-
-	if _, ok := body["capability"]; !ok {
-		t.Fatal("heartbeat body missing capability payload")
-	}
-	deprecatedAlias := "v" + "7"
-	if _, ok := body[deprecatedAlias]; ok {
-		t.Fatal("heartbeat body should not include deprecated compatibility alias")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // 1. TestStress_ConcurrentHeartbeats
@@ -409,6 +362,16 @@ func TestStress_ServerErrorHandling(t *testing.T) {
 		}
 	})
 
+	// SavePayout should return error, not panic
+	t.Run("payout_500", func(t *testing.T) {
+		err := c.SavePayout(ctx, "acct_test123", "USD")
+		if err == nil {
+			t.Fatal("expected error from SavePayout with 500 server, got nil")
+		}
+		if !strings.Contains(err.Error(), "500") {
+			t.Errorf("expected error to contain 500, got: %v", err)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

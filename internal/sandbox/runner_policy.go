@@ -3,17 +3,19 @@ package sandbox
 type RunnerKind string
 
 const (
+	RunnerKindNativeLlama   RunnerKind = "native_llama"
 	RunnerKindManagedOCI    RunnerKind = "managed_oci"
 	RunnerKindRyvionRuntime RunnerKind = "ryvion_runtime"
-	RunnerKindLlamaCPP      RunnerKind = "llama_cpp"
+	RunnerKindAgentHosting  RunnerKind = "agent_hosting"
 	RunnerKindCustom        RunnerKind = "custom"
 )
 
 func validRunnerKind(kind RunnerKind) bool {
 	switch kind {
-	case RunnerKindManagedOCI,
+	case RunnerKindNativeLlama,
+		RunnerKindManagedOCI,
 		RunnerKindRyvionRuntime,
-		RunnerKindLlamaCPP,
+		RunnerKindAgentHosting,
 		RunnerKindCustom:
 		return true
 	default:

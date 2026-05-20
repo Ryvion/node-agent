@@ -18,6 +18,7 @@ func TestValidGPUPassportPasses(t *testing.T) {
 	passport.HardwareProfile.GPUModel = "NVIDIA GeForce RTX 4090"
 	passport.HardwareProfile.GPUVendor = "nvidia"
 	passport.HardwareProfile.VRAMBytes = 24 * 1024 * 1024 * 1024
+	passport.ModelCapabilitySummary.SupportsModelLease = true
 	if err := ValidateCapabilityPassport(passport); err != nil {
 		t.Fatalf("ValidateCapabilityPassport() error = %v", err)
 	}
@@ -58,12 +59,19 @@ func TestZeroCPURejected(t *testing.T) {
 	}
 }
 
-func TestManagedOCIWithoutRuntimeRejected(t *testing.T) {
+func TestUnsafePickleFormatRejectedByDefault(t *testing.T) {
 	passport := validCPUPassport()
-	passport.RuntimeProfile.OCIAvailable = false
-	passport.WorkCapabilitySummary.SupportsManagedOCI = true
-	if err := ValidateCapabilityPassport(passport); err == nil || !strings.Contains(err.Error(), "managed OCI support") {
-		t.Fatalf("ValidateCapabilityPassport() error = %v, want managed OCI runtime error", err)
+	passport.ModelCapabilitySummary.SupportedModelFormats = []string{"gguf", "pickle"}
+	if err := ValidateCapabilityPassport(passport); err == nil || !strings.Contains(err.Error(), "unsafe model format") {
+		t.Fatalf("ValidateCapabilityPassport() error = %v, want unsafe model format error", err)
+	}
+}
+
+func TestModelLeaseWithoutGPURejected(t *testing.T) {
+	passport := validCPUPassport()
+	passport.ModelCapabilitySummary.SupportsModelLease = true
+	if err := ValidateCapabilityPassport(passport); err == nil || !strings.Contains(err.Error(), "model lease support") {
+		t.Fatalf("ValidateCapabilityPassport() error = %v, want model lease gpu error", err)
 	}
 }
 
@@ -83,7 +91,7 @@ func TestPassportContainsNoObviousSecretFields(t *testing.T) {
 
 func validCPUPassport() CapabilityPassport {
 	return CapabilityPassport{
-		SchemaVersion: SchemaVersionV1,
+		SchemaVersion: "v7.capability-passport.v1",
 		AgentVersion:  "dev",
 		OS:            "linux",
 		Arch:          "amd64",
@@ -93,15 +101,15 @@ func validCPUPassport() CapabilityPassport {
 			RAMBytes: 32 * 1024 * 1024 * 1024,
 		},
 		RuntimeProfile: RuntimeProfile{
-			OCIAvailable:         true,
-			SupportedRunnerKinds: []string{"managed_oci"},
+			NativeInferenceSupported: true,
+			LlamaServerAvailable:     true,
+			SupportedRunnerKinds:     []string{"native_streaming", "native_report"},
 		},
-		WorkCapabilitySummary: WorkCapabilitySummary{
-			SupportsManagedOCI:     true,
-			SupportsArtifactUpload: true,
+		ModelCapabilitySummary: ModelCapabilitySummary{
+			SupportedModelFormats: []string{"gguf", "safetensors"},
 		},
 		SandboxCapabilitySummary: SandboxCapabilitySummary{
-			RejectsUntrustedCustomRunners: true,
+			RejectsUnsafePickle: true,
 		},
 		CreatedAtUnixMs: 1,
 	}
