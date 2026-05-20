@@ -92,6 +92,7 @@ func main() {
 
 func runNode(ctx context.Context) {
 	cfg := parseConfig()
+	startManagedLlamaCPP(ctx, cfg.LlamaCPP)
 	pub, priv, err := nodekey.LoadOrCreate(cfg.KeyPath)
 	if err != nil {
 		slog.Error("failed to load node key", "error", err)
@@ -119,6 +120,53 @@ func runNode(ctx context.Context) {
 
 	go heartbeatLoop(ctx, client, caps, deviceType, cfg)
 	workLoop(ctx, client, caps, cfg)
+}
+
+func startManagedLlamaCPP(ctx context.Context, cfg llamacpp.Config) {
+	if !cfg.ManagedServerEnabled() {
+		return
+	}
+	go func() {
+		backoff := 5 * time.Second
+		for {
+			if health := llamacpp.Probe(ctx, cfg, nil); health.Available {
+				backoff = 5 * time.Second
+				if !sleepOrDone(ctx, 30*time.Second) {
+					return
+				}
+				continue
+			}
+			cmd, err := llamacpp.StartManagedServer(ctx, cfg, os.Stderr)
+			if err != nil {
+				slog.Warn("llama.cpp server start skipped", "error", err)
+				if !sleepOrDone(ctx, backoff) {
+					return
+				}
+				if backoff < time.Minute {
+					backoff *= 2
+				}
+				continue
+			}
+			slog.Info("started llama.cpp server", "url", cfg.ServerURL, "model", cfg.Model)
+			errCh := make(chan error, 1)
+			go func() { errCh <- cmd.Wait() }()
+			select {
+			case <-ctx.Done():
+				return
+			case err := <-errCh:
+				if ctx.Err() != nil {
+					return
+				}
+				slog.Warn("llama.cpp server exited", "error", err)
+			}
+			if !sleepOrDone(ctx, backoff) {
+				return
+			}
+			if backoff < time.Minute {
+				backoff *= 2
+			}
+		}
+	}()
 }
 
 func parseConfig() nodeConfig {

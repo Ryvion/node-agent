@@ -47,6 +47,12 @@ All configuration is via flags or environment variables:
 | — | `RYV_CONTAINER_MEMORY` | — | Memory limit for containers |
 | — | `RYV_LLAMA_CPP_SERVER_URL` | — | Local llama.cpp server URL, for example `http://127.0.0.1:8080` |
 | — | `RYV_LLAMA_CPP_MODEL` | — | Model id sent to `/v1/chat/completions` when a job does not specify one |
+| — | `RYV_LLAMA_CPP_ENABLED` | `0` | Start a local `llama-server` sidecar when server/model paths are configured |
+| — | `RYV_LLAMA_CPP_SERVER_PATH` | — | Path to the local `llama-server` binary |
+| — | `RYV_LLAMA_CPP_MODEL_PATH` | — | Path to the local `.gguf` model for the managed sidecar |
+| — | `RYV_LLAMA_CPP_HOST` | `127.0.0.1` | Local bind host for the managed sidecar; non-local hosts are rejected |
+| — | `RYV_LLAMA_CPP_PORT` | `45910` | Local bind port for the managed sidecar |
+| — | `RYV_LLAMA_CPP_CTX_SIZE` | `4096` | Context size passed to `llama-server` when the sidecar is managed by the node |
 | — | `RYV_LLAMA_CPP_PROBE_TIMEOUT` | `2s` | llama.cpp health probe timeout |
 | — | `RYV_LLAMA_CPP_HTTP_TIMEOUT` | `10m` | llama.cpp inference request timeout |
 | — | `RYV_JOB_TIMEOUT` | `10m` | Maximum job execution time |
