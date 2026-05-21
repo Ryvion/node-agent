@@ -16,6 +16,45 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
+func TestDefaultGRPCTransportPrefersNodeGatewayEnvAliases(t *testing.T) {
+	t.Setenv("RYV_NODE_GATEWAY_GRPC_ADDR", "gateway.internal:9443")
+	t.Setenv("RYV_NODE_HUB_GRPC_ADDR", "legacy-node.internal:9443")
+	t.Setenv("RYV_HUB_GRPC_ADDR", "legacy-hub.internal:9443")
+	t.Setenv("RYV_NODE_GATEWAY_TRANSPORT", "grpc")
+	t.Setenv("RYV_NODE_HUB_TRANSPORT", "http")
+	t.Setenv("RYV_NODE_GATEWAY_GRPC_INSECURE", "yes")
+
+	transport := defaultGRPCTransport()
+
+	if transport.target != "gateway.internal:9443" {
+		t.Fatalf("target = %q, want preferred NodeGateway alias", transport.target)
+	}
+	if transport.mode != hubTransportGRPC {
+		t.Fatalf("mode = %q, want grpc", transport.mode)
+	}
+	if !transport.insecure {
+		t.Fatal("insecure = false, want true from preferred NodeGateway alias")
+	}
+}
+
+func TestDefaultGRPCTransportAcceptsLegacyHubEnvAliases(t *testing.T) {
+	t.Setenv("RYV_NODE_HUB_GRPC_ADDR", "legacy-node.internal:9443")
+	t.Setenv("RYV_NODE_HUB_TRANSPORT", "auto")
+	t.Setenv("RYV_HUB_GRPC_INSECURE", "true")
+
+	transport := defaultGRPCTransport()
+
+	if transport.target != "legacy-node.internal:9443" {
+		t.Fatalf("target = %q, want legacy node hub alias", transport.target)
+	}
+	if transport.mode != hubTransportAuto {
+		t.Fatalf("mode = %q, want auto", transport.mode)
+	}
+	if !transport.insecure {
+		t.Fatal("insecure = false, want true from legacy hub alias")
+	}
+}
+
 func TestClientHeartbeatUsesNodeGatewayStreamWhenAvailable(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {

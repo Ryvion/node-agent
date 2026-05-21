@@ -53,12 +53,12 @@ type nodeGatewayResponse struct {
 }
 
 func defaultGRPCTransport() *grpcTransport {
-	target := firstNonEmptyEnv("RYV_NODE_HUB_GRPC_ADDR", "RYV_HUB_GRPC_ADDR")
-	mode := normalizeHubTransportMode(os.Getenv("RYV_NODE_HUB_TRANSPORT"), target)
+	target := firstNonEmptyEnv("RYV_NODE_GATEWAY_GRPC_ADDR", "RYV_NODE_HUB_GRPC_ADDR", "RYV_HUB_GRPC_ADDR")
+	mode := normalizeHubTransportMode(firstNonEmptyEnv("RYV_NODE_GATEWAY_TRANSPORT", "RYV_NODE_HUB_TRANSPORT"), target)
 	return &grpcTransport{
 		target:   strings.TrimSpace(target),
 		mode:     mode,
-		insecure: parseBoolEnv("RYV_NODE_HUB_GRPC_INSECURE") || parseBoolEnv("RYV_HUB_GRPC_INSECURE"),
+		insecure: firstTrueEnv("RYV_NODE_GATEWAY_GRPC_INSECURE", "RYV_NODE_HUB_GRPC_INSECURE", "RYV_HUB_GRPC_INSECURE"),
 	}
 }
 
@@ -923,4 +923,13 @@ func parseBoolEnv(name string) bool {
 	default:
 		return false
 	}
+}
+
+func firstTrueEnv(names ...string) bool {
+	for _, name := range names {
+		if parseBoolEnv(name) {
+			return true
+		}
+	}
+	return false
 }
