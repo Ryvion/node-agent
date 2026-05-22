@@ -119,6 +119,10 @@ type StreamingMetrics struct {
 	// CompletionTokens is the count llama-server reported in its terminal
 	// `usage` chunk; falls back to a per-chunk content count when absent.
 	CompletionTokens int64
+	// SpeculativeTokensDrafted/Accepted are emitted by recent llama-server
+	// builds when the server runs with draft-model or native-MTP speculation.
+	SpeculativeTokensDrafted  int64
+	SpeculativeTokensAccepted int64
 }
 
 // RunStreamingJob handles an inference job by calling the local llama-server
@@ -126,10 +130,12 @@ type StreamingMetrics struct {
 func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jobID, specJSON string, metadataExtras ...map[string]any) error {
 	start := time.Now()
 	var (
-		firstTokenAt  time.Time
-		usageTokens   int64 // from llama-server's terminal usage chunk
-		chunkTokens   int64 // fallback: count of chunks with non-empty delta
-		hasFirstToken bool
+		firstTokenAt              time.Time
+		usageTokens               int64 // from llama-server's terminal usage chunk
+		chunkTokens               int64 // fallback: count of chunks with non-empty delta
+		hasFirstToken             bool
+		speculativeTokensDrafted  int64
+		speculativeTokensAccepted int64
 	)
 
 	var spec specPayload
@@ -255,6 +261,14 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 			if chunk.Usage != nil && chunk.Usage.CompletionTokens > 0 {
 				usageTokens = chunk.Usage.CompletionTokens
 			}
+			if drafted, accepted := streamingSpeculativeCountsFromPayload([]byte(data)); drafted > 0 || accepted > 0 {
+				if drafted > speculativeTokensDrafted {
+					speculativeTokensDrafted = drafted
+				}
+				if accepted > speculativeTokensAccepted {
+					speculativeTokensAccepted = accepted
+				}
+			}
 			if len(chunk.Choices) > 0 {
 				content := chunk.Choices[0].Delta.Content
 				if content != "" {
@@ -315,7 +329,11 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	if tokensGenerated == 0 {
 		tokensGenerated = chunkTokens
 	}
-	metrics := StreamingMetrics{CompletionTokens: tokensGenerated}
+	metrics := StreamingMetrics{
+		CompletionTokens:          tokensGenerated,
+		SpeculativeTokensDrafted:  speculativeTokensDrafted,
+		SpeculativeTokensAccepted: speculativeTokensAccepted,
+	}
 	if hasFirstToken {
 		metrics.TTFTMs = firstTokenAt.Sub(start).Milliseconds()
 		decodeWindow := finishedAt.Sub(firstTokenAt).Seconds()
@@ -341,6 +359,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	meta["response_length"] = fullContent.Len()
 	meta["stderr_tail"] = tail
 	applyStreamingMetricsToMetadata(meta, metrics)
+	applyStreamingSpeculativeMetadata(meta, m.streamingSpeculativeLaunch(), metrics)
 	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
 		JobID:         jobID,
 		ResultHashHex: resultHash,
@@ -358,6 +377,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		"ttft_ms", metrics.TTFTMs,
 		"decode_tps", metrics.DecodeTPS,
 		"end_to_end_tps", metrics.EndToEndTPS,
+		"speculative_method", m.streamingSpeculativeLaunch().Method,
 	)
 	return nil
 }

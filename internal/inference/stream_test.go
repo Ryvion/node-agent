@@ -85,6 +85,71 @@ func TestApplyStreamingMetricsToMetadataPopulatesHubKeys(t *testing.T) {
 	}
 }
 
+func TestStreamingSpeculativeLaunchEnablesNativeMTPForMTPModel(t *testing.T) {
+	launch := streamingSpeculativeLaunchForModel(
+		`C:\models\Qwen3.6-27B-MTP-Q5_K_M.gguf`,
+		"",
+		func(key string) string {
+			if key == envStreamingNativeMTP {
+				return "auto"
+			}
+			return ""
+		},
+	)
+	if launch.Method != speculativeMethodNativeMTP {
+		t.Fatalf("method = %q, want native MTP", launch.Method)
+	}
+	joined := strings.Join(launch.Args, " ")
+	for _, want := range []string{"--spec-type draft-mtp", "--spec-draft-n-max 3"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing %q", joined, want)
+		}
+	}
+}
+
+func TestStreamingSpeculativeLaunchSkipsNativeMTPForPlainModel(t *testing.T) {
+	launch := streamingSpeculativeLaunchForModel(
+		`C:\models\Llama-3.2-3B-Instruct-Q4_K_M.gguf`,
+		"",
+		func(key string) string {
+			if key == envStreamingNativeMTP {
+				return "1"
+			}
+			return ""
+		},
+	)
+	if launch.Method != "" || strings.Join(launch.Args, " ") != "" {
+		t.Fatalf("launch = %+v, want no speculative flags for a plain model", launch)
+	}
+}
+
+func TestApplyStreamingSpeculativeMetadata(t *testing.T) {
+	meta := map[string]any{}
+	launch := streamingSpeculativeLaunch{
+		Method:         speculativeMethodNativeMTP,
+		DraftMaxTokens: 3,
+	}
+	applyStreamingSpeculativeMetadata(meta, launch, StreamingMetrics{
+		CompletionTokens:          10,
+		SpeculativeTokensDrafted:  8,
+		SpeculativeTokensAccepted: 5,
+	})
+
+	if meta["speculative_enabled"] != true || meta["speculative_method"] != speculativeMethodNativeMTP {
+		t.Fatalf("flat speculative metadata = %#v", meta)
+	}
+	block, ok := meta["speculative"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing speculative block: %#v", meta)
+	}
+	if block["tokens_drafted"] != int64(8) || block["tokens_accepted"] != int64(5) {
+		t.Fatalf("speculative counts = %#v", block)
+	}
+	if block["estimated_speedup_ratio"] != 2.0 || meta["speculative_speedup"] != 2.0 {
+		t.Fatalf("speculative speedup = block %#v flat %#v", block["estimated_speedup_ratio"], meta["speculative_speedup"])
+	}
+}
+
 // TestRunStreamingJobCapturesTimingMetrics drives RunStreamingJob against a
 // fake llama-server that emits a few SSE chunks with a measurable TTFT, then
 // inspects the receipt the manager submits to a fake hub.
@@ -117,7 +182,7 @@ func TestRunStreamingJobCapturesTimingMetrics(t *testing.T) {
 		time.Sleep(interToken)
 		writeChunk(`{"choices":[{"delta":{"content":"!"}}]}`)
 		// Terminal usage frame — llama-server emits this on recent builds.
-		writeChunk(`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":4,"completion_tokens":7,"total_tokens":11}}`)
+		writeChunk(`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":4,"completion_tokens":7,"total_tokens":11},"timings":{"n_drafted":11,"n_accepted":7}}`)
 		writeChunk("[DONE]")
 	}))
 	defer llamaSrv.Close()
@@ -176,6 +241,7 @@ func TestRunStreamingJobCapturesTimingMetrics(t *testing.T) {
 		dataDir:         t.TempDir(),
 		port:            llamaPort,
 		activeModelName: "ryvion-llama-3.2-3b",
+		speculative:     streamingSpeculativeLaunch{Method: speculativeMethodNativeMTP, DraftMaxTokens: 3},
 		healthy:         true,
 	}
 
@@ -260,6 +326,16 @@ func TestRunStreamingJobCapturesTimingMetrics(t *testing.T) {
 	}
 	if got := numericAsFloat(t, metaRaw["p50_end_to_end_tps"]); got != e2eTPS {
 		t.Fatalf("p50_end_to_end_tps = %v, want %v", got, e2eTPS)
+	}
+	if metaRaw["speculative_enabled"] != true || metaRaw["speculative_method"] != speculativeMethodNativeMTP {
+		t.Fatalf("flat speculative metadata = %#v", metaRaw)
+	}
+	specBlock, ok := metaRaw["speculative"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata missing speculative block: %#v", metaRaw)
+	}
+	if specBlock["tokens_drafted"] != float64(11) || specBlock["tokens_accepted"] != float64(7) {
+		t.Fatalf("speculative block = %#v", specBlock)
 	}
 }
 

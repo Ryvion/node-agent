@@ -933,7 +933,7 @@ func TestGPUOffloadRequestedButServerReportsCPUOnly(t *testing.T) {
 	t.Parallel()
 
 	if !gpuOffloadRequestedButServerReportsCPUOnly(LlamaCppSidecarConfig{GPULayers: 999}, &LlamaCppServerProperties{
-		BuildInfo:            "llama.cpp b8106",
+		BuildInfo:            "llama.cpp b9180",
 		ReportedAcceleration: []string{"cpu"},
 	}) {
 		t.Fatal("gpuOffloadRequestedButServerReportsCPUOnly() = false, want CPU-only warning")
@@ -964,7 +964,7 @@ func TestEnrichBackendRuntimesDoesNotPromoteActiveCPUOnlySidecarToCUDA(t *testin
 			ConfiguredGPULayers: DefaultGPULayers,
 		},
 		ServerProperties: &LlamaCppServerProperties{
-			BuildInfo:            "llama.cpp b8106",
+			BuildInfo:            "llama.cpp b9180",
 			ReportedAcceleration: []string{"cpu"},
 		},
 		BaseURL:                "http://127.0.0.1:45910",

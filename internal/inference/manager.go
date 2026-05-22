@@ -187,17 +187,17 @@ func meetsModelVRAMRequirement(vramBytes, minVRAMBytes uint64) bool {
 
 // platformServerURL returns the correct llama.cpp release URL for the current OS/arch.
 func platformServerURL() string {
-	const base = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/"
+	const base = "https://github.com/ggml-org/llama.cpp/releases/download/b9180/"
 	switch runtime.GOOS + "/" + runtime.GOARCH {
 	case "darwin/arm64":
-		return base + "llama-b8106-bin-macos-arm64.tar.gz"
+		return base + "llama-b9180-bin-macos-arm64.tar.gz"
 	case "darwin/amd64":
-		return base + "llama-b8106-bin-macos-x64.tar.gz"
+		return base + "llama-b9180-bin-macos-x64.tar.gz"
 	case "linux/amd64":
 		// CUDA 12 build for Linux GPU nodes
-		return base + "llama-b8106-bin-ubuntu-x64.tar.gz"
+		return base + "llama-b9180-bin-ubuntu-x64.tar.gz"
 	case "linux/arm64":
-		return base + "llama-b8106-bin-ubuntu-arm64.tar.gz"
+		return base + "llama-b9180-bin-ubuntu-arm64.tar.gz"
 	case "windows/amd64":
 		accelerator := strings.TrimSpace(os.Getenv("RYV_LLAMA_CPP_WINDOWS_ACCELERATOR"))
 		if accelerator == "" {
@@ -205,17 +205,17 @@ func platformServerURL() string {
 		}
 		accelerator = strings.ToLower(accelerator)
 		if accelerator == "vulkan" {
-			return base + "llama-b8106-bin-win-vulkan-x64.zip"
+			return base + "llama-b9180-bin-win-vulkan-x64.zip"
 		}
 		if accelerator == "cuda" || accelerator == "nvidia" {
-			return base + "llama-b8106-bin-win-cuda-12.4-x64.zip"
+			return base + "llama-b9180-bin-win-cuda-12.4-x64.zip"
 		}
 		if _, err := exec.LookPath("nvidia-smi"); err == nil {
-			return base + "llama-b8106-bin-win-cuda-12.4-x64.zip"
+			return base + "llama-b9180-bin-win-cuda-12.4-x64.zip"
 		}
-		return base + "llama-b8106-bin-win-vulkan-x64.zip"
+		return base + "llama-b9180-bin-win-vulkan-x64.zip"
 	case "windows/arm64":
-		return base + "llama-b8106-bin-win-cpu-arm64.zip"
+		return base + "llama-b9180-bin-win-cpu-arm64.zip"
 	default:
 		// Windows or unsupported — caller should check
 		return ""
@@ -269,6 +269,7 @@ type Manager struct {
 	activeModelName string
 	activeModelPath string
 	activeModelMode ModelMode
+	speculative     streamingSpeculativeLaunch
 }
 
 func (m *Manager) SetHubAuth(hubURL string, nodeAuthToken func(int64) string) {
@@ -631,6 +632,7 @@ func (m *Manager) setBlockerReason(reason BlockerReason) {
 
 func (m *Manager) runServer(ctx context.Context) error {
 	m.setHealthy(false)
+	m.setStreamingSpeculativeLaunch(streamingSpeculativeLaunch{})
 
 	m.mu.RLock()
 	modelPath := m.activeModelPath
@@ -825,6 +827,12 @@ func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) e
 		args = append(args, "--embedding", "--pooling", "mean")
 	}
 
+	speculative := streamingSpeculativeLaunchForModel(modelPath, filepath.Join(m.dataDir, "models"), os.Getenv)
+	if len(speculative.Args) > 0 {
+		args = append(args, speculative.Args...)
+		m.setStreamingSpeculativeLaunch(speculative)
+	}
+
 	// GPU offloading: Metal on macOS, CUDA on Linux/Windows
 	// --n-gpu-layers=99 offloads all layers to GPU when available.
 	// llama.cpp gracefully falls back to CPU if no GPU is detected.
@@ -873,6 +881,7 @@ func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) e
 		"threads", m.threads,
 		"gpu_layers", m.gpuLayers,
 		"ctx_size", m.ctxSize,
+		"speculative_method", speculative.Method,
 		"os", runtime.GOOS,
 		"arch", runtime.GOARCH,
 	)
@@ -1095,7 +1104,7 @@ func serverBinaryName() string {
 }
 
 const serverSourceMarkerName = ".llama-server-source"
-const windowsCUDARuntimeURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/cudart-llama-bin-win-cuda-12.4-x64.zip"
+const windowsCUDARuntimeURL = "https://github.com/ggml-org/llama.cpp/releases/download/b9180/cudart-llama-bin-win-cuda-12.4-x64.zip"
 
 func serverSourceMarkerPath(serverPath string) string {
 	return filepath.Join(filepath.Dir(serverPath), serverSourceMarkerName)

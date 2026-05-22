@@ -94,7 +94,7 @@ func TestShouldInstallServerRefreshesUnmarkedWindowsCUDABundle(t *testing.T) {
 	install, reason := shouldInstallServer(
 		serverPath,
 		serverSourceMarkerPath(serverPath),
-		"https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip",
+		"https://github.com/ggml-org/llama.cpp/releases/download/b9180/llama-b9180-bin-win-cuda-12.4-x64.zip",
 		false,
 	)
 	if !install || reason != "missing_source_marker_for_windows_gpu_runtime" {
@@ -111,7 +111,7 @@ func TestShouldInstallServerKeepsExplicitOperatorServer(t *testing.T) {
 	install, reason := shouldInstallServer(
 		serverPath,
 		serverSourceMarkerPath(serverPath),
-		"https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip",
+		"https://github.com/ggml-org/llama.cpp/releases/download/b9180/llama-b9180-bin-win-cuda-12.4-x64.zip",
 		true,
 	)
 	if install || reason != "" {
@@ -123,7 +123,7 @@ func TestShouldInstallServerUsesSourceMarker(t *testing.T) {
 	dir := t.TempDir()
 	serverPath := filepath.Join(dir, "llama-server.exe")
 	markerPath := serverSourceMarkerPath(serverPath)
-	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
+	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b9180/llama-b9180-bin-win-cuda-12.4-x64.zip"
 	if err := os.WriteFile(serverPath, []byte("current server"), 0o755); err != nil {
 		t.Fatalf("write server: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestShouldInstallServerUsesSourceMarker(t *testing.T) {
 }
 
 func TestExpectedServerSourceMarkerIncludesWindowsCUDARuntime(t *testing.T) {
-	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
+	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b9180/llama-b9180-bin-win-cuda-12.4-x64.zip"
 	marker := expectedServerSourceMarker(sourceURL)
 	if !containsAll(marker, sourceURL, windowsCUDARuntimeURL, "installer=ryvion-managed-llama-v3") {
 		t.Fatalf("expected Windows CUDA marker to include server/runtime/v3 marker, got %q", marker)
@@ -151,7 +151,7 @@ func TestExpectedServerSourceMarkerIncludesWindowsCUDARuntime(t *testing.T) {
 }
 
 func TestExpectedServerSourceMarkerIncludesWindowsVulkanMarker(t *testing.T) {
-	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-vulkan-x64.zip"
+	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b9180/llama-b9180-bin-win-vulkan-x64.zip"
 	marker := expectedServerSourceMarker(sourceURL)
 	if !containsAll(marker, sourceURL, "windows_accelerator=vulkan", "installer=ryvion-managed-llama-v4") {
 		t.Fatalf("expected Windows Vulkan marker to include source/vulkan/v4 marker, got %q", marker)
@@ -162,7 +162,7 @@ func TestShouldInstallServerRefreshesLegacySourceOnlyMarker(t *testing.T) {
 	dir := t.TempDir()
 	serverPath := filepath.Join(dir, "llama-server.exe")
 	markerPath := serverSourceMarkerPath(serverPath)
-	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
+	sourceURL := "https://github.com/ggml-org/llama.cpp/releases/download/b9180/llama-b9180-bin-win-cuda-12.4-x64.zip"
 	if err := os.WriteFile(serverPath, []byte("server"), 0o755); err != nil {
 		t.Fatalf("write server: %v", err)
 	}

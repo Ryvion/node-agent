@@ -16,9 +16,9 @@ import (
 
 const EnvWindowsAccelerator = "RYV_LLAMA_CPP_WINDOWS_ACCELERATOR"
 
-const managedWindowsCUDAServerURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-cuda-12.4-x64.zip"
-const managedWindowsCUDARuntimeURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/cudart-llama-bin-win-cuda-12.4-x64.zip"
-const managedWindowsVulkanServerURL = "https://github.com/ggml-org/llama.cpp/releases/download/b8106/llama-b8106-bin-win-vulkan-x64.zip"
+const managedWindowsCUDAServerURL = "https://github.com/ggml-org/llama.cpp/releases/download/b9180/llama-b9180-bin-win-cuda-12.4-x64.zip"
+const managedWindowsCUDARuntimeURL = "https://github.com/ggml-org/llama.cpp/releases/download/b9180/cudart-llama-bin-win-cuda-12.4-x64.zip"
+const managedWindowsVulkanServerURL = "https://github.com/ggml-org/llama.cpp/releases/download/b9180/llama-b9180-bin-win-vulkan-x64.zip"
 const managedServerSourceMarkerName = ".llama-server-source"
 
 type managedWindowsGPUBundle struct {
