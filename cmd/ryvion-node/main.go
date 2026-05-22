@@ -823,6 +823,9 @@ func runNode(ctx context.Context) {
 		slog.Error("hub URL is required")
 		return
 	}
+	if err := update.ReconcileWindowsCanonicalBinary(); err != nil {
+		slog.Warn("Windows canonical binary reconciliation failed", "error", err)
+	}
 
 	pub, priv, err := nodekey.LoadOrCreate(strings.TrimSpace(os.Getenv("RYV_KEY_PATH")))
 	if err != nil {

@@ -233,6 +233,26 @@ func TestWindowsCanonicalRefreshCommandCopiesStagedUpdateToPathBinary(t *testing
 	}
 }
 
+func TestWindowsRunningFromStagedUpdate(t *testing.T) {
+	if !windowsRunningFromStagedUpdate(`C:\Program Files\Ryvion\updates\ryvion-node-abcd.exe`) {
+		t.Fatal("expected staged update path to be detected")
+	}
+	if windowsRunningFromStagedUpdate(`C:\Program Files\Ryvion\ryvion-node.exe`) {
+		t.Fatal("expected canonical path not to be detected as staged")
+	}
+}
+
+func TestWindowsCanonicalServiceImagePathPreservesArgs(t *testing.T) {
+	got := windowsCanonicalServiceImagePath(
+		`"C:\Program Files\Ryvion\updates\ryvion-node-abcd.exe" -hub https://api.ryvion.ai -ui-port 45890`,
+		`C:\Program Files\Ryvion\ryvion-node.exe`,
+	)
+	want := `"C:\Program Files\Ryvion\ryvion-node.exe" -hub https://api.ryvion.ai -ui-port 45890`
+	if got != want {
+		t.Fatalf("image path = %q, want %q", got, want)
+	}
+}
+
 func TestWindowsServiceStartCommandQuotesServiceName(t *testing.T) {
 	args := windowsServiceStartCommand(`Ryvion'Node`)
 	got := strings.Join(args, "\x00")

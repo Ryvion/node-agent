@@ -354,12 +354,105 @@ func replaceWindows(exePath string, data []byte) error {
 	return nil
 }
 
+// ReconcileWindowsCanonicalBinary repairs the PATH-visible Program Files binary
+// after a staged Windows auto-update. Older updaters can restart the service
+// from Program Files\Ryvion\updates\ryvion-node-*.exe while leaving
+// Program Files\Ryvion\ryvion-node.exe stale; this lets the newly started
+// version complete that first-hop migration itself.
+func ReconcileWindowsCanonicalBinary() error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(exePath); err == nil && strings.TrimSpace(resolved) != "" {
+		exePath = resolved
+	}
+	if !windowsRunningFromStagedUpdate(exePath) {
+		return nil
+	}
+	installRoot := windowsInstallRootFromExe(exePath)
+	canonicalTarget := windowsCanonicalExePath(installRoot)
+	if strings.EqualFold(strings.TrimSpace(exePath), strings.TrimSpace(canonicalTarget)) {
+		return nil
+	}
+	data, err := os.ReadFile(exePath)
+	if err != nil {
+		return fmt.Errorf("read staged Windows binary: %w", err)
+	}
+	if err := writeWindowsCanonicalBinary(canonicalTarget, data); err != nil {
+		if scheduleErr := scheduleWindowsCanonicalBinaryRefresh(exePath, canonicalTarget); scheduleErr != nil {
+			slog.Warn("could not schedule delayed Windows canonical binary refresh", "target", canonicalTarget, "staged", exePath, "error", scheduleErr)
+		}
+		return fmt.Errorf("write canonical Windows binary: %w", err)
+	}
+	serviceName := windowsServiceName()
+	currentImagePath, err := queryWindowsServiceImagePath(serviceName)
+	if err != nil {
+		slog.Warn("could not query Windows service path while reconciling canonical binary", "service", serviceName, "error", err)
+		return nil
+	}
+	nextImagePath := windowsCanonicalServiceImagePath(currentImagePath, canonicalTarget)
+	if strings.TrimSpace(nextImagePath) == "" {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(currentImagePath), strings.TrimSpace(nextImagePath)) {
+		if err := setWindowsServiceImagePath(serviceName, nextImagePath); err != nil {
+			return fmt.Errorf("set Windows service path to canonical binary: %w", err)
+		}
+	}
+	slog.Info("reconciled Windows canonical node binary", "service", serviceName, "target", canonicalTarget)
+	return nil
+}
+
+func writeWindowsCanonicalBinary(target string, data []byte) error {
+	dir := windowsDirName(target)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create canonical binary dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".ryvion-node-canonical-*.exe")
+	if err != nil {
+		return fmt.Errorf("create canonical temp binary: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write canonical temp binary: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close canonical temp binary: %w", err)
+	}
+	_ = os.Remove(target)
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("install canonical binary: %w", err)
+	}
+	return nil
+}
+
 func windowsCanonicalExePath(installRoot string) string {
 	installRoot = strings.TrimRight(strings.TrimSpace(installRoot), `\/`)
 	if installRoot == "" {
 		return "ryvion-node.exe"
 	}
 	return installRoot + `\ryvion-node.exe`
+}
+
+func windowsRunningFromStagedUpdate(exePath string) bool {
+	dir := windowsDirName(exePath)
+	return strings.EqualFold(windowsBaseName(dir), "updates")
+}
+
+func windowsCanonicalServiceImagePath(currentImagePath, canonicalTarget string) string {
+	canonicalTarget = strings.TrimSpace(canonicalTarget)
+	if canonicalTarget == "" {
+		return ""
+	}
+	return quoteWindowsArg(canonicalTarget) + splitWindowsServiceImageArgs(currentImagePath)
 }
 
 func windowsInstallRootFromExe(exePath string) string {
