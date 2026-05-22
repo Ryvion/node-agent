@@ -388,6 +388,31 @@ func TestMissingBinaryReturnsUnavailableStatus(t *testing.T) {
 	}
 }
 
+func TestStoppedOnDemandStatusSuppressesProbeFailure(t *testing.T) {
+	t.Parallel()
+
+	serverPath, modelPath := sidecarFixtureFiles(t)
+	manager := NewManager(LlamaCppSidecarConfig{
+		Enabled:     true,
+		ServerPath:  serverPath,
+		ModelPath:   modelPath,
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ContextSize: DefaultContextSize,
+	}, WithHealthClient(errorHealthClient{err: errors.New("connection refused")}), WithHealthTimeout(time.Millisecond))
+
+	status := manager.Status(context.Background())
+	if !status.Enabled || !status.Available || status.Running || status.Healthy {
+		t.Fatalf("status = %+v, want available stopped on-demand sidecar", status)
+	}
+	if status.LastError != "" {
+		t.Fatalf("last_error = %q, want empty for idle on-demand sidecar", status.LastError)
+	}
+	if status.Reason != "llama.cpp sidecar stopped; starts on inference demand" {
+		t.Fatalf("reason = %q", status.Reason)
+	}
+}
+
 func TestMockedBinaryStartRecordsRunningState(t *testing.T) {
 	t.Parallel()
 

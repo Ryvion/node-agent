@@ -489,6 +489,10 @@ func (m *Manager) applyHealthLocked(health HealthResult) {
 		if strings.TrimSpace(m.lastError) != "" {
 			return
 		}
+		// A stopped on-demand sidecar is expected when keep-warm is disabled.
+		// Preserve real process/startup errors, but do not surface a routine
+		// connection refusal from probing an intentionally idle llama-server.
+		return
 	}
 	m.lastError = cleanStatusText(health.Error, maxStatusReasonLen)
 }
@@ -526,6 +530,8 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		reason = "llama.cpp sidecar running; health not confirmed"
 	} else if m.lastError != "" {
 		reason = m.lastError
+	} else {
+		reason = "llama.cpp sidecar stopped; starts on inference demand"
 	}
 
 	nativeMTP := nativeMTPUsable(cfg)
