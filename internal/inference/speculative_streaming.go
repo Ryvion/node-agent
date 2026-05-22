@@ -19,6 +19,7 @@ const (
 	envStreamingNativeMTP      = "RYV_LLAMA_CPP_NATIVE_MTP"
 	envStreamingSpecType       = "RYV_LLAMA_CPP_SPEC_TYPE"
 	envStreamingAutoNGram      = "RYV_LLAMA_CPP_AUTO_NGRAM"
+	envStreamingNGramMaxTokens = "RYV_LLAMA_CPP_NGRAM_MAX_TOKENS"
 
 	speculativeMethodBackendLocalDraft = "backend_local_draft_model"
 	speculativeMethodNativeMTP         = "native_mtp"
@@ -153,7 +154,9 @@ func streamingNGramSpeculativeLaunch(getenv func(string) string, draftMax int, d
 	if !streamingSpecTypeIsDraftless(specType) {
 		return streamingSpeculativeLaunch{}
 	}
-	if draftMax == 0 {
+	if ngramMax := envIntDefault(getenv(envStreamingNGramMaxTokens), 0); ngramMax > 0 {
+		draftMax = ngramMax
+	} else if draftMax == 0 || draftMax == defaultStreamingNativeMTPMaxTokens {
 		draftMax = defaultStreamingNGramMaxTokens
 	}
 	args := []string{"--spec-type", specType, "--spec-draft-n-max", strconv.Itoa(draftMax)}

@@ -532,7 +532,8 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 	draftMeta := modelMetadata(cfg.DraftModelPath)
 	draftReady := cfg.DraftModelPath != "" && draftMeta.readable && !nativeMTP
 	speculativeMethod := speculativeMethodFromConfig(cfg, draftReady)
-	speculativeReady := speculativeMethod != "" && running && healthy
+	speculativeConfigured := speculativeMethod != "" && cfg.Enabled && serverOK && modelOK
+	speculativeActive := speculativeConfigured && running && healthy
 	acceleration, accelerationReason := sidecarAccelerationStatus(cfg, m.serverProps)
 	if running && healthy {
 		if suffix := sidecarAccelerationReasonSuffix(accelerationReason); suffix != "" {
@@ -571,7 +572,8 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		Reason:                 cleanStatusText(reason, maxStatusReasonLen),
 
 		// V8 speculative decoding (Level 0).
-		SpeculativeEnabled:   speculativeReady,
+		SpeculativeEnabled:   speculativeConfigured,
+		SpeculativeActive:    speculativeActive,
 		SpeculativeMethod:    speculativeMethod,
 		NativeMTP:            nativeMTP,
 		DraftModelPath:       draftPathForStatus(cfg, draftReady),

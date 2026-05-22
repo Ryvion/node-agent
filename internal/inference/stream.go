@@ -386,8 +386,8 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 // verifier expects into the receipt metadata map. Only non-zero metrics are
 // written so the hub can keep treating absence as "not measured" rather than
 // surfacing 0 ms / 0 tps in the dashboard. Speculative-decoding keys are
-// intentionally not emitted here: the streaming path does not currently run a
-// drafter, so the hub's missing-key fallback (false / 0) is the correct value.
+// emitted separately by applyStreamingSpeculativeMetadata because they depend
+// on the selected launch mode as well as optional runtime timing counters.
 func applyStreamingMetricsToMetadata(meta map[string]any, metrics StreamingMetrics) {
 	if meta == nil {
 		return

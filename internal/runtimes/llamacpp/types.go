@@ -31,6 +31,7 @@ const (
 	EnvNativeMTP      = "RYV_LLAMA_CPP_NATIVE_MTP"
 	EnvSpecType       = "RYV_LLAMA_CPP_SPEC_TYPE"
 	EnvAutoNGram      = "RYV_LLAMA_CPP_AUTO_NGRAM"
+	EnvNGramMaxTokens = "RYV_LLAMA_CPP_NGRAM_MAX_TOKENS"
 
 	SpeculativeMethodBackendLocalDraft = "backend_local_draft_model"
 	SpeculativeMethodNativeMTP         = "native_mtp"
@@ -120,6 +121,7 @@ type LlamaCppSidecarStatus struct {
 
 	// V8 speculative decoding (Level 0 - backend-local).
 	SpeculativeEnabled   bool   `json:"speculative_enabled"`
+	SpeculativeActive    bool   `json:"speculative_active"`
 	SpeculativeMethod    string `json:"speculative_method,omitempty"`
 	NativeMTP            bool   `json:"native_mtp,omitempty"`
 	DraftModelPath       string `json:"draft_model_path,omitempty"`

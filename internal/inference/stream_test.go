@@ -132,6 +132,49 @@ func TestStreamingSpeculativeLaunchFallsBackToNGramForPlainModel(t *testing.T) {
 	}
 }
 
+func TestStreamingSpeculativeLaunchDoesNotInheritMTPDepthForNGram(t *testing.T) {
+	launch := streamingSpeculativeLaunchForModel(
+		`C:\models\nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf`,
+		"",
+		func(key string) string {
+			switch key {
+			case envStreamingNativeMTP:
+				return "1"
+			case envStreamingDraftMaxTokens:
+				return "3"
+			default:
+				return ""
+			}
+		},
+	)
+	if launch.Method != speculativeMethodNGramSimple {
+		t.Fatalf("method = %q, want ngram fallback", launch.Method)
+	}
+	if launch.DraftMaxTokens != defaultStreamingNGramMaxTokens {
+		t.Fatalf("DraftMaxTokens = %d, want ngram default %d", launch.DraftMaxTokens, defaultStreamingNGramMaxTokens)
+	}
+}
+
+func TestStreamingSpeculativeLaunchUsesDedicatedNGramDepth(t *testing.T) {
+	launch := streamingSpeculativeLaunchForModel(
+		`C:\models\nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf`,
+		"",
+		func(key string) string {
+			switch key {
+			case envStreamingDraftMaxTokens:
+				return "3"
+			case envStreamingNGramMaxTokens:
+				return "5"
+			default:
+				return ""
+			}
+		},
+	)
+	if launch.DraftMaxTokens != 5 {
+		t.Fatalf("DraftMaxTokens = %d, want dedicated ngram depth", launch.DraftMaxTokens)
+	}
+}
+
 func TestStreamingSpeculativeLaunchCanDisableDraftlessFallback(t *testing.T) {
 	launch := streamingSpeculativeLaunchForModel(
 		`C:\models\Llama-3.2-3B-Instruct-Q4_K_M.gguf`,

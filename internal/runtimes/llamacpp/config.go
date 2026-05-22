@@ -75,6 +75,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	explicitServerPath := strings.TrimSpace(source.Getenv(EnvServer)) != ""
 	gpuLayersRaw := source.Getenv(EnvGPULayers)
 	fastDefaultsRaw := source.Getenv(EnvFastDefaults)
+	ngramMaxRaw := source.Getenv(EnvNGramMaxTokens)
 	nativeMTPEnabled, nativeMTPAuto := parseNativeMTPSetting(source.Getenv(EnvNativeMTP))
 	cfg := LlamaCppSidecarConfig{
 		Enabled:              envBoolDefault(source.Getenv(EnvEnabled), true),
@@ -111,6 +112,13 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	}
 	if cfg.SpecType == "" && envBoolDefault(source.Getenv(EnvAutoNGram), true) {
 		cfg.SpecType = SpeculativeMethodNGramSimple
+	}
+	if draftlessSpecType(cfg.SpecType) {
+		if ngramMax := envInt(ngramMaxRaw, 0); ngramMax > 0 {
+			cfg.DraftMaxTokens = ngramMax
+		} else if cfg.ModelPath != "" && cfg.DraftModelPath == "" && !modelSupportsNativeMTP(cfg.ModelPath) && (cfg.DraftMaxTokens == 0 || cfg.DraftMaxTokens == DefaultNativeMTPMaxTokens) {
+			cfg.DraftMaxTokens = DefaultNGramMaxTokens
+		}
 	}
 	cfg.LaunchProfile = deriveLaunchProfile(cfg)
 	return normalizeConfig(cfg)

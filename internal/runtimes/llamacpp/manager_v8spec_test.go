@@ -440,6 +440,53 @@ func TestConfigFromEnvDefaultsDraftlessNGramSpeculation(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvDoesNotInheritMTPDepthForDefaultNGram(t *testing.T) {
+	t.Parallel()
+	model := filepath.Join(t.TempDir(), "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf")
+	if err := os.WriteFile(model, []byte("model"), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			switch name {
+			case EnvModel:
+				return model
+			case EnvNativeMTP:
+				return "1"
+			case EnvDraftMaxTokens:
+				return "3"
+			default:
+				return ""
+			}
+		},
+	})
+	if cfg.SpecType != SpeculativeMethodNGramSimple {
+		t.Fatalf("SpecType = %q, want ngram-simple", cfg.SpecType)
+	}
+	if cfg.DraftMaxTokens != DefaultNGramMaxTokens {
+		t.Fatalf("DraftMaxTokens = %d, want ngram default %d", cfg.DraftMaxTokens, DefaultNGramMaxTokens)
+	}
+}
+
+func TestConfigFromEnvUsesDedicatedNGramDepth(t *testing.T) {
+	t.Parallel()
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			switch name {
+			case EnvDraftMaxTokens:
+				return "3"
+			case EnvNGramMaxTokens:
+				return "5"
+			default:
+				return ""
+			}
+		},
+	})
+	if cfg.DraftMaxTokens != 5 {
+		t.Fatalf("DraftMaxTokens = %d, want dedicated ngram depth", cfg.DraftMaxTokens)
+	}
+}
+
 func TestConfigFromEnvCanDisableDraftlessNGramSpeculation(t *testing.T) {
 	t.Parallel()
 	cfg := ConfigFromEnvWith(ConfigSource{
@@ -574,8 +621,11 @@ func TestStatusReportsNativeMTPConfiguration(t *testing.T) {
 	if st.DraftModelPath != "" || st.DraftModelFilename != "" {
 		t.Fatalf("native MTP status should not expose draft model fields: %+v", st)
 	}
-	if st.SpeculativeEnabled {
-		t.Fatal("SpeculativeEnabled true on uninitialised manager")
+	if !st.SpeculativeEnabled {
+		t.Fatal("SpeculativeEnabled false for configured native MTP")
+	}
+	if st.SpeculativeActive {
+		t.Fatal("SpeculativeActive true on uninitialised manager")
 	}
 }
 
@@ -669,9 +719,9 @@ func TestStatusReportsSpeculativeReadiness(t *testing.T) {
 		DraftModelPath: draft,
 		DraftMaxTokens: 8,
 	})
-	// Manager's status surfaces draft fields independently of process
-	// state - the SpeculativeEnabled flag also requires running+healthy,
-	// which is exercised in higher-level integration tests.
+	// Manager's status surfaces draft fields independently of process state.
+	// SpeculativeEnabled means the next launch is configured for speculation;
+	// SpeculativeActive requires a running healthy sidecar.
 	st := m.statusLocked()
 	if st.DraftModelPath != draft {
 		t.Errorf("status.DraftModelPath = %q, want %q", st.DraftModelPath, draft)
@@ -685,9 +735,10 @@ func TestStatusReportsSpeculativeReadiness(t *testing.T) {
 	if st.DraftModelFamilyHint != "llama" {
 		t.Errorf("status.DraftModelFamilyHint = %q, want llama", st.DraftModelFamilyHint)
 	}
-	// SpeculativeEnabled requires running+healthy, which a freshly
-	// constructed manager does not satisfy until Start succeeds.
-	if st.SpeculativeEnabled {
-		t.Errorf("SpeculativeEnabled true on uninitialised manager")
+	if !st.SpeculativeEnabled {
+		t.Errorf("SpeculativeEnabled false for configured draft model")
+	}
+	if st.SpeculativeActive {
+		t.Errorf("SpeculativeActive true on uninitialised manager")
 	}
 }
