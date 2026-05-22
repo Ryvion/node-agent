@@ -29,6 +29,7 @@ type SpeculativeMetadata struct {
 
 const (
 	speculativeMethodBackendLocalDraft = "backend_local_draft_model"
+	speculativeMethodNativeMTP         = "native_mtp"
 )
 
 // SpeculativeMetadataFromStatus derives the static portion of the
@@ -40,14 +41,20 @@ func SpeculativeMetadataFromStatus(status llamacpp.LlamaCppSidecarStatus) Specul
 	if !status.SpeculativeEnabled {
 		return SpeculativeMetadata{}
 	}
+	method := strings.ToLower(strings.TrimSpace(status.SpeculativeMethod))
+	if method == "" {
+		method = speculativeMethodBackendLocalDraft
+	}
 	meta := SpeculativeMetadata{
-		Enabled:          true,
-		Method:           speculativeMethodBackendLocalDraft,
-		DrafterFilename:  cleanText(status.DraftModelFilename, maxModelIDLen),
-		DrafterFamily:    strings.ToLower(strings.TrimSpace(status.DraftModelFamilyHint)),
-		DrafterSizeBytes: status.DraftModelSizeBytes,
-		DraftMaxTokens:   status.DraftMaxTokens,
-		DraftMinTokens:   status.DraftMinTokens,
+		Enabled:        true,
+		Method:         method,
+		DraftMaxTokens: status.DraftMaxTokens,
+		DraftMinTokens: status.DraftMinTokens,
+	}
+	if method != speculativeMethodNativeMTP {
+		meta.DrafterFilename = cleanText(status.DraftModelFilename, maxModelIDLen)
+		meta.DrafterFamily = strings.ToLower(strings.TrimSpace(status.DraftModelFamilyHint))
+		meta.DrafterSizeBytes = status.DraftModelSizeBytes
 	}
 	if meta.DrafterSizeBytes < 0 {
 		meta.DrafterSizeBytes = 0

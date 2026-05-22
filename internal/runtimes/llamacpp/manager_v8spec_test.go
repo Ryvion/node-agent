@@ -87,6 +87,56 @@ func TestBuildServerArgsSilentlyDropsMissingDraftFile(t *testing.T) {
 	}
 }
 
+func TestBuildServerArgsEmitsNativeMTPFlagsWhenEnabled(t *testing.T) {
+	t.Parallel()
+	cfg := LlamaCppSidecarConfig{
+		ServerPath:     "/usr/local/bin/llama-server",
+		ModelPath:      "/models/Qwen3.6-27B-MTP-Q5_K_M.gguf",
+		Host:           DefaultHost,
+		Port:           45910,
+		ContextSize:    8192,
+		NativeMTP:      true,
+		DraftMaxTokens: 3,
+	}
+	args := buildServerArgs(cfg)
+	joined := strings.Join(args, " ")
+
+	for _, want := range []string{
+		"--spec-type draft-mtp",
+		"--spec-draft-n-max 3",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("buildServerArgs missing %q\nfull: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "--model-draft") {
+		t.Fatalf("native MTP must use the target model heads, not --model-draft: %s", joined)
+	}
+}
+
+func TestBuildServerArgsNativeMTPPreservesExplicitSpecTypeExtraArg(t *testing.T) {
+	t.Parallel()
+	cfg := LlamaCppSidecarConfig{
+		ServerPath:  "/usr/local/bin/llama-server",
+		ModelPath:   "/models/Qwen3.6-27B-MTP-Q5_K_M.gguf",
+		Host:        DefaultHost,
+		Port:        45910,
+		ContextSize: 8192,
+		NativeMTP:   true,
+		ExtraArgs:   []string{"--spec-type", "draft-mtp,ngram-mod"},
+	}
+	args := buildServerArgs(cfg)
+	count := 0
+	for _, arg := range args {
+		if arg == "--spec-type" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("--spec-type count = %d, want 1 in args: %v", count, args)
+	}
+}
+
 func TestNormalizeConfigClampsDraftParameters(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -181,6 +231,14 @@ func TestNormalizeConfigClampsDraftParameters(t *testing.T) {
 	}
 }
 
+func TestNormalizeConfigDefaultsNativeMTPDepth(t *testing.T) {
+	t.Parallel()
+	cfg := normalizeConfig(LlamaCppSidecarConfig{NativeMTP: true})
+	if cfg.DraftMaxTokens != DefaultNativeMTPMaxTokens {
+		t.Fatalf("Native MTP draft max = %d, want %d", cfg.DraftMaxTokens, DefaultNativeMTPMaxTokens)
+	}
+}
+
 func TestConfigFromEnvLoadsDraftFields(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -223,6 +281,28 @@ func TestConfigFromEnvLoadsDraftFields(t *testing.T) {
 	}
 	if cfg.DraftGPULayers != 20 {
 		t.Errorf("DraftGPULayers = %d, want 20", cfg.DraftGPULayers)
+	}
+}
+
+func TestConfigFromEnvLoadsNativeMTP(t *testing.T) {
+	t.Parallel()
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			switch name {
+			case EnvNativeMTP:
+				return "1"
+			case EnvDraftMaxTokens:
+				return "2"
+			default:
+				return ""
+			}
+		},
+	})
+	if !cfg.NativeMTP {
+		t.Fatal("NativeMTP = false, want true")
+	}
+	if cfg.DraftMaxTokens != 2 {
+		t.Fatalf("DraftMaxTokens = %d, want 2", cfg.DraftMaxTokens)
 	}
 }
 
@@ -280,6 +360,72 @@ func TestConfigFromEnvAutoDiscoversDraftWhenEnabled(t *testing.T) {
 	}
 	if cfg.DraftMaxTokens != DefaultDraftMaxTokens {
 		t.Fatalf("draft max tokens = %d, want %d", cfg.DraftMaxTokens, DefaultDraftMaxTokens)
+	}
+}
+
+func TestStatusReportsNativeMTPConfiguration(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	model := filepath.Join(dir, "Qwen3.6-27B-MTP-Q5_K_M.gguf")
+	server := filepath.Join(dir, "llama-server")
+	for _, p := range []struct {
+		path  string
+		body  []byte
+		perms os.FileMode
+	}{
+		{model, []byte("model"), 0o644},
+		{server, []byte("server"), 0o755},
+	} {
+		if err := os.WriteFile(p.path, p.body, p.perms); err != nil {
+			t.Fatalf("write %s: %v", p.path, err)
+		}
+	}
+
+	m := NewManager(LlamaCppSidecarConfig{
+		Enabled:        true,
+		ServerPath:     server,
+		ModelPath:      model,
+		Host:           DefaultHost,
+		Port:           45910,
+		NativeMTP:      true,
+		DraftMaxTokens: 3,
+	})
+	st := m.statusLocked()
+	if st.SpeculativeMethod != SpeculativeMethodNativeMTP {
+		t.Fatalf("SpeculativeMethod = %q, want %q", st.SpeculativeMethod, SpeculativeMethodNativeMTP)
+	}
+	if !st.NativeMTP {
+		t.Fatal("NativeMTP = false, want true")
+	}
+	if st.DraftModelPath != "" || st.DraftModelFilename != "" {
+		t.Fatalf("native MTP status should not expose draft model fields: %+v", st)
+	}
+	if st.SpeculativeEnabled {
+		t.Fatal("SpeculativeEnabled true on uninitialised manager")
+	}
+}
+
+func TestBuildBackendRuntimesSurfacesNativeMTPCapability(t *testing.T) {
+	t.Parallel()
+	runtimes := BuildBackendRuntimes(LlamaCppSidecarStatus{
+		Enabled:                true,
+		Available:              true,
+		Running:                true,
+		Healthy:                true,
+		Backend:                BackendName,
+		BaseURL:                "http://127.0.0.1:45910",
+		ModelPath:              "/models/Qwen3.6-27B-MTP-Q5_K_M.gguf",
+		ModelFilename:          "Qwen3.6-27B-MTP-Q5_K_M.gguf",
+		OpenAICompatible:       true,
+		SupportsTextGeneration: true,
+		SupportsStreaming:      true,
+		SpeculativeEnabled:     true,
+		SpeculativeMethod:      SpeculativeMethodNativeMTP,
+		NativeMTP:              true,
+	})
+	caps := runtimes.LlamaCPP.OptimizationCapabilities
+	if len(caps) != 1 || caps[0].Name != SpeculativeMethodNativeMTP || !caps[0].Supported || !caps[0].Enabled {
+		t.Fatalf("OptimizationCapabilities = %+v, want enabled native_mtp", caps)
 	}
 }
 

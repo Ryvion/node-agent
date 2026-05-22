@@ -527,8 +527,11 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		reason = m.lastError
 	}
 
+	nativeMTP := nativeMTPConfigured(cfg)
 	draftMeta := modelMetadata(cfg.DraftModelPath)
-	speculativeReady := cfg.DraftModelPath != "" && draftMeta.readable && running && healthy
+	draftReady := cfg.DraftModelPath != "" && draftMeta.readable && !nativeMTP
+	speculativeMethod := speculativeMethodFromConfig(cfg, draftReady)
+	speculativeReady := speculativeMethod != "" && running && healthy
 	acceleration, accelerationReason := sidecarAccelerationStatus(cfg, m.serverProps)
 	if running && healthy {
 		if suffix := sidecarAccelerationReasonSuffix(accelerationReason); suffix != "" {
@@ -568,10 +571,12 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 
 		// V8 speculative decoding (Level 0).
 		SpeculativeEnabled:   speculativeReady,
-		DraftModelPath:       cfg.DraftModelPath,
-		DraftModelFilename:   draftMeta.filename,
-		DraftModelSizeBytes:  draftMeta.sizeBytes,
-		DraftModelFamilyHint: draftMeta.familyHint,
+		SpeculativeMethod:    speculativeMethod,
+		NativeMTP:            nativeMTP,
+		DraftModelPath:       draftPathForStatus(cfg, draftReady),
+		DraftModelFilename:   draftFilenameForStatus(draftMeta, draftReady),
+		DraftModelSizeBytes:  draftSizeForStatus(draftMeta, draftReady),
+		DraftModelFamilyHint: draftFamilyForStatus(draftMeta, draftReady),
 		DraftMaxTokens:       cfg.DraftMaxTokens,
 		DraftMinTokens:       cfg.DraftMinTokens,
 	}
@@ -580,31 +585,32 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 func BuildBackendRuntimes(status LlamaCppSidecarStatus) BackendRuntimes {
 	return NormalizeBackendRuntimes(BackendRuntimes{
 		LlamaCPP: BackendRuntimeStatus{
-			Enabled:                status.Enabled,
-			Available:              status.Available,
-			Running:                status.Running,
-			Healthy:                status.Healthy,
-			Backend:                firstNonEmptyRuntimeText(status.Backend, BackendName),
-			BaseURL:                status.BaseURL,
-			ModelID:                status.ModelFilename,
-			ModelPath:              status.ModelPath,
-			MaxContextTokens:       status.ContextSize,
-			ModelFilename:          status.ModelFilename,
-			ModelSizeBytes:         status.ModelSizeBytes,
-			ModelFamilyHint:        status.ModelFamilyHint,
-			QuantizationHint:       status.QuantizationHint,
-			OpenAICompatible:       status.OpenAICompatible,
-			SupportsTextGeneration: status.SupportsTextGeneration,
-			SupportsStreaming:      status.SupportsStreaming,
-			Acceleration:           statusAccelerationOrDefault(status),
-			AccelerationReason:     statusAccelerationReasonOrDefault(status),
-			GPUArchitecture:        gpuArchitectureFromHardware(capshardware.CapacityInventory{}),
-			SupportsKVAccess:       status.SupportsKVAccess,
-			SupportsTensorHooks:    status.SupportsTensorHooks,
-			LastHealthAtUnixMs:     unixMilliOrZero(status.LastHealthAt),
-			LastError:              status.LastError,
-			Launch:                 cloneLaunchConfig(status.Launch),
-			ServerProperties:       cloneServerProperties(status.ServerProperties),
+			Enabled:                  status.Enabled,
+			Available:                status.Available,
+			Running:                  status.Running,
+			Healthy:                  status.Healthy,
+			Backend:                  firstNonEmptyRuntimeText(status.Backend, BackendName),
+			BaseURL:                  status.BaseURL,
+			ModelID:                  status.ModelFilename,
+			ModelPath:                status.ModelPath,
+			MaxContextTokens:         status.ContextSize,
+			ModelFilename:            status.ModelFilename,
+			ModelSizeBytes:           status.ModelSizeBytes,
+			ModelFamilyHint:          status.ModelFamilyHint,
+			QuantizationHint:         status.QuantizationHint,
+			OpenAICompatible:         status.OpenAICompatible,
+			SupportsTextGeneration:   status.SupportsTextGeneration,
+			SupportsStreaming:        status.SupportsStreaming,
+			Acceleration:             statusAccelerationOrDefault(status),
+			AccelerationReason:       statusAccelerationReasonOrDefault(status),
+			GPUArchitecture:          gpuArchitectureFromHardware(capshardware.CapacityInventory{}),
+			SupportsKVAccess:         status.SupportsKVAccess,
+			SupportsTensorHooks:      status.SupportsTensorHooks,
+			LastHealthAtUnixMs:       unixMilliOrZero(status.LastHealthAt),
+			LastError:                status.LastError,
+			Launch:                   cloneLaunchConfig(status.Launch),
+			ServerProperties:         cloneServerProperties(status.ServerProperties),
+			OptimizationCapabilities: statusOptimizationCapabilities(status),
 		},
 	})
 }
@@ -635,6 +641,81 @@ func buildLaunchConfig(cfg LlamaCppSidecarConfig, managed bool, attached bool) *
 		ConfiguredDraftGPULayers: cfg.DraftGPULayers,
 		Profile:                  cfg.LaunchProfile,
 	})
+}
+
+func speculativeMethodFromConfig(cfg LlamaCppSidecarConfig, draftReady bool) string {
+	cfg = normalizeConfig(cfg)
+	if nativeMTPConfigured(cfg) {
+		return SpeculativeMethodNativeMTP
+	}
+	if draftReady {
+		return SpeculativeMethodBackendLocalDraft
+	}
+	return ""
+}
+
+func nativeMTPConfigured(cfg LlamaCppSidecarConfig) bool {
+	cfg.ExtraArgs = sanitizeExtraArgs(strings.Join(cfg.ExtraArgs, " "))
+	return cfg.NativeMTP || specTypeExtraArgContains(cfg.ExtraArgs, "draft-mtp")
+}
+
+func specTypeExtraArgContains(args []string, want string) bool {
+	want = strings.ToLower(strings.TrimSpace(want))
+	if want == "" {
+		return false
+	}
+	for i, arg := range args {
+		if strings.TrimSpace(arg) != "--spec-type" || i+1 >= len(args) {
+			continue
+		}
+		for _, part := range strings.Split(args[i+1], ",") {
+			if strings.EqualFold(strings.TrimSpace(part), want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func draftPathForStatus(cfg LlamaCppSidecarConfig, draftReady bool) string {
+	if !draftReady {
+		return ""
+	}
+	return cfg.DraftModelPath
+}
+
+func draftFilenameForStatus(meta modelMeta, draftReady bool) string {
+	if !draftReady {
+		return ""
+	}
+	return meta.filename
+}
+
+func draftSizeForStatus(meta modelMeta, draftReady bool) int64 {
+	if !draftReady {
+		return 0
+	}
+	return meta.sizeBytes
+}
+
+func draftFamilyForStatus(meta modelMeta, draftReady bool) string {
+	if !draftReady {
+		return ""
+	}
+	return meta.familyHint
+}
+
+func statusOptimizationCapabilities(status LlamaCppSidecarStatus) []OptimizationCapability {
+	if !status.NativeMTP && status.SpeculativeMethod != SpeculativeMethodNativeMTP {
+		return []OptimizationCapability{}
+	}
+	return normalizeOptimizationCapabilities([]OptimizationCapability{{
+		Name:      SpeculativeMethodNativeMTP,
+		Supported: true,
+		Enabled:   status.SpeculativeEnabled && status.SpeculativeMethod == SpeculativeMethodNativeMTP,
+		Backend:   BackendName,
+		Notes:     "Uses llama.cpp --spec-type draft-mtp with native model MTP heads.",
+	}}, BackendName, "")
 }
 
 func BuildBackendRuntimesWithInventory(status LlamaCppSidecarStatus, inventory runtimeinventory.Inventory, hardware capshardware.CapacityInventory) BackendRuntimes {
@@ -1223,11 +1304,19 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 		args = appendGPUFastDefaults(args, cfg.ExtraArgs)
 	}
 	// V8 speculative decoding (Level 0).
-	// llama-server runs target+draft as a single process and produces
-	// speculative-accelerated tokens via its built-in draft/target loop.
-	// The drafter must be tokenizer-compatible with the target model;
-	// we enforce family compatibility at config-discovery time.
-	if cfg.DraftModelPath != "" && draftModelReadable(cfg.DraftModelPath) {
+	// Native MTP uses the target model's own MTP heads. The older
+	// --model-draft path remains the default when only DraftModelPath is set.
+	if nativeMTPConfigured(cfg) {
+		if !hasArgFlag(cfg.ExtraArgs, "--spec-type") {
+			args = append(args, "--spec-type", "draft-mtp")
+		}
+		if cfg.DraftMaxTokens > 0 && !hasArgFlag(cfg.ExtraArgs, "--spec-draft-n-max") {
+			args = append(args, "--spec-draft-n-max", strconv.Itoa(cfg.DraftMaxTokens))
+		}
+		if cfg.DraftMinTokens > 0 && !hasArgFlag(cfg.ExtraArgs, "--spec-draft-n-min") {
+			args = append(args, "--spec-draft-n-min", strconv.Itoa(cfg.DraftMinTokens))
+		}
+	} else if cfg.DraftModelPath != "" && draftModelReadable(cfg.DraftModelPath) {
 		args = append(args, "--model-draft", cfg.DraftModelPath)
 		if cfg.DraftMaxTokens > 0 {
 			args = append(args, "--spec-draft-n-max", strconv.Itoa(cfg.DraftMaxTokens))

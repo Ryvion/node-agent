@@ -78,6 +78,68 @@ func TestBuildReportDraftModelRequiresDraftPolicyAndPairMemory(t *testing.T) {
 	}
 }
 
+func TestBuildReportIncludesNativeMTPForConfiguredLlamaCppRuntime(t *testing.T) {
+	t.Parallel()
+
+	report := BuildReport(BuildInput{
+		Hardware: capshardware.NormalizeInventory(capshardware.CapacityInventory{
+			OS:                "linux",
+			Arch:              "amd64",
+			CPULogicalCores:   16,
+			SystemRAMBytes:    96 * gib,
+			AvailableRAMBytes: 80 * gib,
+			GPUDetected:       true,
+			GPUVendor:         capshardware.GPUVendorNVIDIA,
+			GPUName:           "NVIDIA GeForce RTX 4090",
+			GPUVRAMBytes:      24 * gib,
+			CUDAAvailable:     true,
+		}),
+		Policy: modelpolicy.Policy{
+			RuntimePolicy: modelpolicy.RuntimePolicy{
+				AllowRuntimeExecution:            true,
+				MaxRuntimeModelBytes:             80 * gib,
+				MaxRuntimeParameterCountBillions: 80,
+				AllowLargeModels:                 true,
+				AllowFamilies:                    []string{"qwen"},
+			},
+		},
+		BackendRuntimes: llamacpp.BackendRuntimes{
+			LlamaCPP: llamacpp.BackendRuntimeStatus{
+				Enabled:                true,
+				Available:              true,
+				Running:                true,
+				Healthy:                true,
+				Loaded:                 true,
+				Warm:                   true,
+				Backend:                llamacpp.BackendName,
+				ModelID:                "Qwen3.6-27B-MTP-Q5_K_M.gguf",
+				ModelPath:              "/models/Qwen3.6-27B-MTP-Q5_K_M.gguf",
+				ModelFilename:          "Qwen3.6-27B-MTP-Q5_K_M.gguf",
+				ModelFamilyHint:        "qwen",
+				ModelSizeBytes:         int64(22 * gib),
+				OpenAICompatible:       true,
+				SupportsTextGeneration: true,
+				SupportsStreaming:      true,
+				OptimizationCapabilities: []llamacpp.OptimizationCapability{{
+					Name:      llamacpp.SpeculativeMethodNativeMTP,
+					Supported: true,
+					Enabled:   true,
+				}},
+			},
+		},
+		Getenv: func(string) string { return "" },
+	})
+
+	if !containsString(report.SpeculativeDecoding.Methods, MethodNativeMTP) {
+		t.Fatalf("methods = %v, want native_mtp", report.SpeculativeDecoding.Methods)
+	}
+	profile := profileByTargetMethod(t, report.SpeculativeProfiles, "Qwen3.6-27B-MTP-Q5_K_M.gguf", MethodNativeMTP)
+	if !profile.Runnable || !profile.TargetResident || !profile.WarmPair {
+		t.Fatalf("native_mtp profile = %+v, want runnable warm target", profile)
+	}
+	assertJSONSafe(t, report)
+}
+
 func TestBuildReportSpeculativeOptOutDisablesRunnableProfiles(t *testing.T) {
 	t.Parallel()
 

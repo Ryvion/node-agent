@@ -91,6 +91,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 		FastDefaultsExplicit: strings.TrimSpace(fastDefaultsRaw) != "",
 		AccelerationHints:    configAccelerationHints(source),
 		DraftModelPath:       cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
+		NativeMTP:            envBool(source.Getenv(EnvNativeMTP)),
 		DraftMaxTokens:       envInt(source.Getenv(EnvDraftMaxTokens), 0),
 		DraftMinTokens:       envInt(source.Getenv(EnvDraftMinTokens), 0),
 		DraftPMin:            envFloat(source.Getenv(EnvDraftPMin), 0),
@@ -151,7 +152,9 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 	}
 	// If draft model is set without explicit max tokens, default to 16
 	// (the llama.cpp default and a safe consumer-hardware setting).
-	if cfg.DraftModelPath != "" && cfg.DraftMaxTokens == 0 {
+	if cfg.NativeMTP && cfg.DraftMaxTokens == 0 {
+		cfg.DraftMaxTokens = DefaultNativeMTPMaxTokens
+	} else if cfg.DraftModelPath != "" && cfg.DraftMaxTokens == 0 {
 		cfg.DraftMaxTokens = DefaultDraftMaxTokens
 	}
 	return cfg

@@ -50,6 +50,33 @@ func TestSpeculativeMetadataFromStatusActive(t *testing.T) {
 	}
 }
 
+func TestSpeculativeMetadataFromStatusNativeMTP(t *testing.T) {
+	t.Parallel()
+	st := llamacpp.LlamaCppSidecarStatus{
+		SpeculativeEnabled: true,
+		SpeculativeMethod:  llamacpp.SpeculativeMethodNativeMTP,
+		NativeMTP:          true,
+		DraftMaxTokens:     3,
+	}
+	got := SpeculativeMetadataFromStatus(st)
+	if !got.Enabled {
+		t.Fatal("Enabled = false, want true")
+	}
+	if got.Method != speculativeMethodNativeMTP {
+		t.Fatalf("Method = %q, want %q", got.Method, speculativeMethodNativeMTP)
+	}
+	if got.DrafterFilename != "" || got.DrafterSizeBytes != 0 {
+		t.Fatalf("native MTP metadata must not invent a drafter: %+v", got)
+	}
+	m := got.Map()
+	if m["method"] != speculativeMethodNativeMTP {
+		t.Fatalf("map method = %v, want %q", m["method"], speculativeMethodNativeMTP)
+	}
+	if _, ok := m["drafter_filename"]; ok {
+		t.Fatalf("native MTP map should omit drafter_filename: %v", m)
+	}
+}
+
 func TestMergeRuntimeCounts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

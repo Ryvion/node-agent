@@ -28,14 +28,19 @@ const (
 	EnvDraftMinTokens = "RYV_LLAMA_CPP_DRAFT_MIN_TOKENS"
 	EnvDraftPMin      = "RYV_LLAMA_CPP_DRAFT_P_MIN"
 	EnvDraftGPULayers = "RYV_LLAMA_CPP_DRAFT_GPU_LAYERS"
+	EnvNativeMTP      = "RYV_LLAMA_CPP_NATIVE_MTP"
 
-	DefaultHost            = "127.0.0.1"
-	DefaultPort            = 45910
-	DefaultContextSize     = 4096
-	DefaultGPULayers       = 999
-	DefaultDraftMaxTokens  = 16
-	DefaultDraftMinTokens  = 0
-	DefaultDraftPMinMillis = 0 // 0 = use llama.cpp default (0.75)
+	SpeculativeMethodBackendLocalDraft = "backend_local_draft_model"
+	SpeculativeMethodNativeMTP         = "native_mtp"
+
+	DefaultHost               = "127.0.0.1"
+	DefaultPort               = 45910
+	DefaultContextSize        = 4096
+	DefaultGPULayers          = 999
+	DefaultDraftMaxTokens     = 16
+	DefaultNativeMTPMaxTokens = 3
+	DefaultDraftMinTokens     = 0
+	DefaultDraftPMinMillis    = 0 // 0 = use llama.cpp default (0.75)
 
 	LaunchProfileDefault     = "default"
 	LaunchProfileCUDAFast    = "cuda_fast"
@@ -64,6 +69,9 @@ type LlamaCppSidecarConfig struct {
 	// DraftModelPath, when non-empty, enables backend-local speculative
 	// decoding by passing --model-draft to llama-server.
 	DraftModelPath string
+	// NativeMTP enables llama.cpp's native MTP-head speculative path via
+	// --spec-type draft-mtp. It does not require a separate draft model.
+	NativeMTP      bool
 	DraftMaxTokens int     // --spec-draft-n-max (default 16 when DraftModelPath set)
 	DraftMinTokens int     // --spec-draft-n-min
 	DraftPMin      float64 // --draft-p-min (0 = llama.cpp default 0.75)
@@ -102,6 +110,8 @@ type LlamaCppSidecarStatus struct {
 
 	// V8 speculative decoding (Level 0 - backend-local).
 	SpeculativeEnabled   bool   `json:"speculative_enabled"`
+	SpeculativeMethod    string `json:"speculative_method,omitempty"`
+	NativeMTP            bool   `json:"native_mtp,omitempty"`
 	DraftModelPath       string `json:"draft_model_path,omitempty"`
 	DraftModelFilename   string `json:"draft_model_filename,omitempty"`
 	DraftModelSizeBytes  int64  `json:"draft_model_size_bytes,omitempty"`

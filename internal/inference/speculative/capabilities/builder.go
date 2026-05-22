@@ -226,6 +226,7 @@ func buildNgramProfile(target targetModel, backend backendMethodSupport, getenv 
 		Acceleration:        backend.Acceleration,
 		Runnable:            len(reasons) == 0,
 		TargetResident:      target.Resident,
+		WarmPair:            target.Warm,
 		TokenizerCompatible: true,
 		MemoryEstimateBytes: uint64NonNegative(target.SizeBytes),
 		BlockedReasons:      reasons,
@@ -288,6 +289,7 @@ func buildBackendLocalProfile(target targetModel, backend backendMethodSupport, 
 		Acceleration:        backend.Acceleration,
 		Runnable:            len(reasons) == 0,
 		TargetResident:      target.Resident,
+		WarmPair:            target.Warm,
 		TokenizerCompatible: true,
 		MemoryEstimateBytes: uint64NonNegative(target.SizeBytes),
 		BlockedReasons:      reasons,
@@ -455,6 +457,9 @@ func llamaMethodSupport(probes backendprobe.Probes, runtimes llamacpp.BackendRun
 	methods := []string{}
 	if available && serverAvailable {
 		methods = append(methods, MethodNgram, MethodDraftModel)
+		if runtimeOptimizationSupports(runtime, MethodNativeMTP) {
+			methods = append(methods, MethodNativeMTP)
+		}
 	}
 	return backendMethodSupport{
 		Backend:           llamacpp.BackendName,
