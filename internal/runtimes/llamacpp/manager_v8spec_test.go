@@ -420,6 +420,66 @@ func TestConfigFromEnvDisablesNativeMTPWithOff(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvDefaultsDraftlessNGramSpeculation(t *testing.T) {
+	t.Parallel()
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string { return "" },
+	})
+	if cfg.SpecType != SpeculativeMethodNGramSimple {
+		t.Fatalf("SpecType = %q, want default ngram-simple", cfg.SpecType)
+	}
+	if cfg.DraftMaxTokens != DefaultNGramMaxTokens {
+		t.Fatalf("DraftMaxTokens = %d, want %d", cfg.DraftMaxTokens, DefaultNGramMaxTokens)
+	}
+	args := buildServerArgs(cfg)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--spec-type ngram-simple", "--spec-draft-n-max 16"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing %q", joined, want)
+		}
+	}
+}
+
+func TestConfigFromEnvCanDisableDraftlessNGramSpeculation(t *testing.T) {
+	t.Parallel()
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			switch name {
+			case EnvSpecType:
+				return "none"
+			default:
+				return ""
+			}
+		},
+	})
+	if cfg.SpecType != "none" {
+		t.Fatalf("SpecType = %q, want none", cfg.SpecType)
+	}
+	if joined := strings.Join(buildServerArgs(cfg), " "); strings.Contains(joined, "--spec-type") {
+		t.Fatalf("args = %q, want no draftless spec args", joined)
+	}
+}
+
+func TestBuildServerArgsEmitsExplicitDraftlessNGramMode(t *testing.T) {
+	t.Parallel()
+	cfg := LlamaCppSidecarConfig{
+		ServerPath:     "/usr/local/bin/llama-server",
+		ModelPath:      "/models/nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
+		Host:           DefaultHost,
+		Port:           45910,
+		ContextSize:    8192,
+		SpecType:       SpeculativeMethodNGramMod,
+		DraftMaxTokens: 24,
+	}
+	args := buildServerArgs(cfg)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--spec-type ngram-mod", "--spec-draft-n-max 24"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing %q", joined, want)
+		}
+	}
+}
+
 func TestConfigFromEnvDoesNotAutoDiscoverDraftByDefault(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

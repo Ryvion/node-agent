@@ -652,6 +652,9 @@ func speculativeMethodFromConfig(cfg LlamaCppSidecarConfig, draftReady bool) str
 	if draftReady {
 		return SpeculativeMethodBackendLocalDraft
 	}
+	if draftlessSpecType(cfg.SpecType) {
+		return cfg.SpecType
+	}
 	return ""
 }
 
@@ -672,6 +675,15 @@ func modelSupportsNativeMTP(modelPath string) bool {
 		return false
 	}
 	return nativeMTPModelPattern.MatchString(filepath.Base(modelPath))
+}
+
+func draftlessSpecType(specType string) bool {
+	switch normalizeSpecType(specType) {
+	case SpeculativeMethodNGramSimple, SpeculativeMethodNGramMapK, SpeculativeMethodNGramMapK4V, SpeculativeMethodNGramMod, SpeculativeMethodNGramCache:
+		return true
+	default:
+		return false
+	}
 }
 
 func specTypeExtraArgContains(args []string, want string) bool {
@@ -1345,6 +1357,14 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 		}
 		if cfg.DraftGPULayers > 0 {
 			args = append(args, "--n-gpu-layers-draft", strconv.Itoa(cfg.DraftGPULayers))
+		}
+	} else if draftlessSpecType(cfg.SpecType) && !hasArgFlag(extraArgs, "--spec-type") {
+		args = append(args, "--spec-type", cfg.SpecType)
+		if cfg.DraftMaxTokens > 0 {
+			args = append(args, "--spec-draft-n-max", strconv.Itoa(cfg.DraftMaxTokens))
+		}
+		if cfg.DraftMinTokens > 0 {
+			args = append(args, "--spec-draft-n-min", strconv.Itoa(cfg.DraftMinTokens))
 		}
 	}
 	args = append(args, extraArgs...)

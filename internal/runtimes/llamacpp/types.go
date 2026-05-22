@@ -29,9 +29,16 @@ const (
 	EnvDraftPMin      = "RYV_LLAMA_CPP_DRAFT_P_MIN"
 	EnvDraftGPULayers = "RYV_LLAMA_CPP_DRAFT_GPU_LAYERS"
 	EnvNativeMTP      = "RYV_LLAMA_CPP_NATIVE_MTP"
+	EnvSpecType       = "RYV_LLAMA_CPP_SPEC_TYPE"
+	EnvAutoNGram      = "RYV_LLAMA_CPP_AUTO_NGRAM"
 
 	SpeculativeMethodBackendLocalDraft = "backend_local_draft_model"
 	SpeculativeMethodNativeMTP         = "native_mtp"
+	SpeculativeMethodNGramSimple       = "ngram-simple"
+	SpeculativeMethodNGramMapK         = "ngram-map-k"
+	SpeculativeMethodNGramMapK4V       = "ngram-map-k4v"
+	SpeculativeMethodNGramMod          = "ngram-mod"
+	SpeculativeMethodNGramCache        = "ngram-cache"
 
 	DefaultHost               = "127.0.0.1"
 	DefaultPort               = 45910
@@ -39,6 +46,7 @@ const (
 	DefaultGPULayers          = 999
 	DefaultDraftMaxTokens     = 16
 	DefaultNativeMTPMaxTokens = 3
+	DefaultNGramMaxTokens     = 16
 	DefaultDraftMinTokens     = 0
 	DefaultDraftPMinMillis    = 0 // 0 = use llama.cpp default (0.75)
 
@@ -73,6 +81,7 @@ type LlamaCppSidecarConfig struct {
 	// --spec-type draft-mtp. It does not require a separate draft model.
 	NativeMTP      bool
 	NativeMTPAuto  bool
+	SpecType       string
 	DraftMaxTokens int     // --spec-draft-n-max (default 16 when DraftModelPath set)
 	DraftMinTokens int     // --spec-draft-n-min
 	DraftPMin      float64 // --draft-p-min (0 = llama.cpp default 0.75)

@@ -17,12 +17,20 @@ const (
 	envStreamingDraftPMin      = "RYV_LLAMA_CPP_DRAFT_P_MIN"
 	envStreamingDraftGPULayers = "RYV_LLAMA_CPP_DRAFT_GPU_LAYERS"
 	envStreamingNativeMTP      = "RYV_LLAMA_CPP_NATIVE_MTP"
+	envStreamingSpecType       = "RYV_LLAMA_CPP_SPEC_TYPE"
+	envStreamingAutoNGram      = "RYV_LLAMA_CPP_AUTO_NGRAM"
 
 	speculativeMethodBackendLocalDraft = "backend_local_draft_model"
 	speculativeMethodNativeMTP         = "native_mtp"
+	speculativeMethodNGramSimple       = "ngram-simple"
+	speculativeMethodNGramMapK         = "ngram-map-k"
+	speculativeMethodNGramMapK4V       = "ngram-map-k4v"
+	speculativeMethodNGramMod          = "ngram-mod"
+	speculativeMethodNGramCache        = "ngram-cache"
 
 	defaultStreamingDraftMaxTokens     = 16
 	defaultStreamingNativeMTPMaxTokens = 3
+	defaultStreamingNGramMaxTokens     = 16
 )
 
 var streamingMTPModelPattern = regexp.MustCompile(`(?i)(?:^|[._\-\s])mtp(?:[._\-\s]|$)`)
@@ -34,6 +42,7 @@ type streamingSpeculativeLaunch struct {
 	DraftModelFilename string
 	DraftMaxTokens     int
 	DraftMinTokens     int
+	SpecType           string
 }
 
 type streamingSpeculativeTimings struct {
@@ -108,7 +117,7 @@ func streamingSpeculativeLaunchForModel(modelPath string, modelDir string, geten
 		draftPath = discoverStreamingDraftModel(modelDir, modelPath)
 	}
 	if !fileReadable(draftPath) {
-		return streamingSpeculativeLaunch{}
+		return streamingNGramSpeculativeLaunch(getenv, draftMax, draftMin)
 	}
 	if draftMax == 0 {
 		draftMax = defaultStreamingDraftMaxTokens
@@ -133,6 +142,33 @@ func streamingSpeculativeLaunchForModel(modelPath string, modelDir string, geten
 	}
 }
 
+func streamingNGramSpeculativeLaunch(getenv func(string) string, draftMax int, draftMin int) streamingSpeculativeLaunch {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	specType := normalizeStreamingSpecType(getenv(envStreamingSpecType))
+	if specType == "" && envBoolDefault(getenv(envStreamingAutoNGram), true) {
+		specType = speculativeMethodNGramSimple
+	}
+	if !streamingSpecTypeIsDraftless(specType) {
+		return streamingSpeculativeLaunch{}
+	}
+	if draftMax == 0 {
+		draftMax = defaultStreamingNGramMaxTokens
+	}
+	args := []string{"--spec-type", specType, "--spec-draft-n-max", strconv.Itoa(draftMax)}
+	if draftMin > 0 {
+		args = append(args, "--spec-draft-n-min", strconv.Itoa(draftMin))
+	}
+	return streamingSpeculativeLaunch{
+		Method:         specType,
+		Args:           args,
+		DraftMaxTokens: draftMax,
+		DraftMinTokens: draftMin,
+		SpecType:       specType,
+	}
+}
+
 func parseStreamingNativeMTPSetting(raw string) (enabled bool, auto bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "auto", "default", "0":
@@ -152,6 +188,36 @@ func streamingModelSupportsNativeMTP(modelPath string) bool {
 		return false
 	}
 	return streamingMTPModelPattern.MatchString(filepath.Base(modelPath))
+}
+
+func normalizeStreamingSpecType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "auto", "default":
+		return ""
+	case "0", "none", "off", "false", "disabled", "disable":
+		return "none"
+	case speculativeMethodNGramSimple:
+		return speculativeMethodNGramSimple
+	case speculativeMethodNGramMapK:
+		return speculativeMethodNGramMapK
+	case speculativeMethodNGramMapK4V:
+		return speculativeMethodNGramMapK4V
+	case speculativeMethodNGramMod:
+		return speculativeMethodNGramMod
+	case speculativeMethodNGramCache:
+		return speculativeMethodNGramCache
+	default:
+		return ""
+	}
+}
+
+func streamingSpecTypeIsDraftless(specType string) bool {
+	switch normalizeStreamingSpecType(specType) {
+	case speculativeMethodNGramSimple, speculativeMethodNGramMapK, speculativeMethodNGramMapK4V, speculativeMethodNGramMod, speculativeMethodNGramCache:
+		return true
+	default:
+		return false
+	}
 }
 
 func discoverStreamingDraftModel(modelDir string, targetModelPath string) string {
@@ -239,6 +305,9 @@ func (s streamingSpeculativeLaunch) receiptMetadata(metrics StreamingMetrics) ma
 	}
 	if s.DraftMinTokens > 0 {
 		out["draft_min_tokens"] = s.DraftMinTokens
+	}
+	if s.SpecType != "" {
+		out["spec_type"] = s.SpecType
 	}
 	if metrics.SpeculativeTokensDrafted > 0 {
 		out["tokens_drafted"] = metrics.SpeculativeTokensDrafted

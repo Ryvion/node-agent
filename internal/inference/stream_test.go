@@ -107,7 +107,7 @@ func TestStreamingSpeculativeLaunchEnablesNativeMTPForMTPModel(t *testing.T) {
 	}
 }
 
-func TestStreamingSpeculativeLaunchSkipsNativeMTPForPlainModel(t *testing.T) {
+func TestStreamingSpeculativeLaunchFallsBackToNGramForPlainModel(t *testing.T) {
 	launch := streamingSpeculativeLaunchForModel(
 		`C:\models\Llama-3.2-3B-Instruct-Q4_K_M.gguf`,
 		"",
@@ -118,8 +118,56 @@ func TestStreamingSpeculativeLaunchSkipsNativeMTPForPlainModel(t *testing.T) {
 			return ""
 		},
 	)
+	if launch.Method != speculativeMethodNGramSimple {
+		t.Fatalf("method = %q, want draftless ngram fallback", launch.Method)
+	}
+	joined := strings.Join(launch.Args, " ")
+	if strings.Contains(joined, "draft-mtp") {
+		t.Fatalf("plain model args = %q, should not force native MTP", joined)
+	}
+	for _, want := range []string{"--spec-type ngram-simple", "--spec-draft-n-max 16"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing %q", joined, want)
+		}
+	}
+}
+
+func TestStreamingSpeculativeLaunchCanDisableDraftlessFallback(t *testing.T) {
+	launch := streamingSpeculativeLaunchForModel(
+		`C:\models\Llama-3.2-3B-Instruct-Q4_K_M.gguf`,
+		"",
+		func(key string) string {
+			if key == envStreamingSpecType {
+				return "none"
+			}
+			return ""
+		},
+	)
 	if launch.Method != "" || strings.Join(launch.Args, " ") != "" {
-		t.Fatalf("launch = %+v, want no speculative flags for a plain model", launch)
+		t.Fatalf("launch = %+v, want no speculative flags when spec type is none", launch)
+	}
+}
+
+func TestStreamingSpeculativeLaunchUsesExplicitNGramMode(t *testing.T) {
+	launch := streamingSpeculativeLaunchForModel(
+		`C:\models\nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf`,
+		"",
+		func(key string) string {
+			switch key {
+			case envStreamingSpecType:
+				return speculativeMethodNGramMod
+			case envStreamingDraftMaxTokens:
+				return "24"
+			default:
+				return ""
+			}
+		},
+	)
+	if launch.Method != speculativeMethodNGramMod {
+		t.Fatalf("method = %q, want explicit ngram-mod", launch.Method)
+	}
+	if joined := strings.Join(launch.Args, " "); !strings.Contains(joined, "--spec-type ngram-mod") || !strings.Contains(joined, "--spec-draft-n-max 24") {
+		t.Fatalf("args = %q, want explicit ngram mode", joined)
 	}
 }
 

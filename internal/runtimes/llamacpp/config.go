@@ -94,6 +94,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 		DraftModelPath:       cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
 		NativeMTP:            nativeMTPEnabled,
 		NativeMTPAuto:        nativeMTPAuto,
+		SpecType:             normalizeSpecType(source.Getenv(EnvSpecType)),
 		DraftMaxTokens:       envInt(source.Getenv(EnvDraftMaxTokens), 0),
 		DraftMinTokens:       envInt(source.Getenv(EnvDraftMinTokens), 0),
 		DraftPMin:            envFloat(source.Getenv(EnvDraftPMin), 0),
@@ -107,6 +108,9 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	}
 	if cfg.DraftModelPath == "" && envBool(source.Getenv(EnvDraftAuto)) {
 		cfg.DraftModelPath = discoverDraftModelPath(source, cfg.ModelPath)
+	}
+	if cfg.SpecType == "" && envBoolDefault(source.Getenv(EnvAutoNGram), true) {
+		cfg.SpecType = SpeculativeMethodNGramSimple
 	}
 	cfg.LaunchProfile = deriveLaunchProfile(cfg)
 	return normalizeConfig(cfg)
@@ -148,6 +152,7 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 	if cfg.DraftGPULayers < 0 {
 		cfg.DraftGPULayers = 0
 	}
+	cfg.SpecType = normalizeSpecType(cfg.SpecType)
 	cfg.LaunchProfile = normalizeLaunchProfile(cfg.LaunchProfile)
 	if cfg.LaunchProfile == "" {
 		cfg.LaunchProfile = deriveLaunchProfile(cfg)
@@ -158,8 +163,31 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 		cfg.DraftMaxTokens = DefaultNativeMTPMaxTokens
 	} else if cfg.DraftModelPath != "" && cfg.DraftMaxTokens == 0 {
 		cfg.DraftMaxTokens = DefaultDraftMaxTokens
+	} else if draftlessSpecType(cfg.SpecType) && cfg.DraftMaxTokens == 0 {
+		cfg.DraftMaxTokens = DefaultNGramMaxTokens
 	}
 	return cfg
+}
+
+func normalizeSpecType(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "auto", "default":
+		return ""
+	case "0", "none", "off", "false", "disabled", "disable":
+		return "none"
+	case SpeculativeMethodNGramSimple:
+		return SpeculativeMethodNGramSimple
+	case SpeculativeMethodNGramMapK:
+		return SpeculativeMethodNGramMapK
+	case SpeculativeMethodNGramMapK4V:
+		return SpeculativeMethodNGramMapK4V
+	case SpeculativeMethodNGramMod:
+		return SpeculativeMethodNGramMod
+	case SpeculativeMethodNGramCache:
+		return SpeculativeMethodNGramCache
+	default:
+		return ""
+	}
 }
 
 func parseNativeMTPSetting(raw string) (enabled bool, auto bool) {
