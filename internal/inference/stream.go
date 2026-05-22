@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -171,6 +172,10 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		if err := m.EnsureModel(ctx, modelName); err != nil {
 			return fmt.Errorf("ensure model %s: %w", modelName, err)
 		}
+	}
+	servedModelIDs, err := m.verifyLoadedModel(ctx, modelName)
+	if err != nil {
+		return err
 	}
 
 	reqBody := chatRequest{
@@ -354,6 +359,12 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	meta := mergeReceiptMetadata(metadataExtras...)
 	meta["executor"] = "llama-server"
 	meta["model"] = m.ModelName()
+	meta["model_id"] = modelName
+	meta["requested_model_id"] = modelName
+	if len(servedModelIDs) > 0 {
+		meta["served_model_ids"] = servedModelIDs
+		meta["served_model_id"] = servedModelIDs[0]
+	}
 	meta["duration_ms"] = duration.Milliseconds()
 	meta["exit_code"] = 0
 	meta["response_length"] = fullContent.Len()
@@ -380,6 +391,121 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		"speculative_method", m.streamingSpeculativeLaunch().Method,
 	)
 	return nil
+}
+
+func (m *Manager) verifyLoadedModel(ctx context.Context, modelName string) ([]string, error) {
+	cfg, ok := NativeModels[strings.TrimSpace(modelName)]
+	if !ok {
+		return nil, nil
+	}
+	verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	ids, err := m.loadedModelIDs(verifyCtx)
+	if err != nil {
+		return ids, fmt.Errorf("verify loaded model %s: %w", modelName, err)
+	}
+	if len(ids) == 0 {
+		return ids, fmt.Errorf("verify loaded model %s: llama-server returned no model ids", modelName)
+	}
+	if loadedModelIDsMatch(modelName, cfg, ids) {
+		return ids, nil
+	}
+	return ids, fmt.Errorf("loaded model mismatch: requested %s (%s), llama-server reports %s", modelName, cfg.FileName, strings.Join(ids, ","))
+}
+
+func (m *Manager) loadedModelIDs(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.ServerURL()+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("llama-server /v1/models returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode llama-server /v1/models: %w", err)
+	}
+	ids := make([]string, 0, len(payload.Data))
+	for _, row := range payload.Data {
+		if id := strings.TrimSpace(row.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+func loadedModelIDsMatch(modelName string, cfg ModelConfig, ids []string) bool {
+	aliases := modelMatchAliases(modelName, cfg)
+	for _, id := range ids {
+		for _, candidate := range modelIDMatchCandidates(id) {
+			if aliases[candidate] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func modelMatchAliases(modelName string, cfg ModelConfig) map[string]bool {
+	aliases := map[string]bool{}
+	for _, value := range []string{modelName, cfg.FileName} {
+		for _, candidate := range modelIDMatchCandidates(value) {
+			if candidate != "" {
+				aliases[candidate] = true
+			}
+		}
+	}
+	return aliases
+}
+
+func modelIDMatchCandidates(value string) []string {
+	normalized := normalizeModelIDForMatch(value)
+	if normalized == "" {
+		return nil
+	}
+	base := normalizeModelIDForMatch(filepath.Base(strings.ReplaceAll(normalized, "\\", "/")))
+	out := []string{normalized}
+	if base != "" && base != normalized {
+		out = append(out, base)
+	}
+	for _, candidate := range []string{normalized, base} {
+		if strings.HasSuffix(candidate, ".gguf") {
+			out = append(out, strings.TrimSuffix(candidate, ".gguf"))
+		}
+	}
+	return dedupeStrings(out)
+}
+
+func normalizeModelIDForMatch(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.Trim(value, `"'`)
+	value = strings.TrimPrefix(value, "local/")
+	return value
+}
+
+func dedupeStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 // applyStreamingMetricsToMetadata writes the streaming-timing keys the hub

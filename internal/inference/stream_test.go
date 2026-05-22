@@ -253,6 +253,11 @@ func TestRunStreamingJobCapturesTimingMetrics(t *testing.T) {
 	// Fake llama-server: sleeps to create observable TTFT, then streams
 	// content chunks, then a usage chunk + [DONE].
 	llamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"Llama-3.2-3B-Instruct-Q4_K_M.gguf","object":"model"}]}`))
+			return
+		}
 		if r.URL.Path != "/v1/chat/completions" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -427,6 +432,63 @@ func TestRunStreamingJobCapturesTimingMetrics(t *testing.T) {
 	}
 	if specBlock["tokens_drafted"] != float64(11) || specBlock["tokens_accepted"] != float64(7) {
 		t.Fatalf("speculative block = %#v", specBlock)
+	}
+	if metaRaw["model_id"] != "ryvion-llama-3.2-3b" || metaRaw["requested_model_id"] != "ryvion-llama-3.2-3b" {
+		t.Fatalf("receipt model metadata = %#v", metaRaw)
+	}
+	served, ok := metaRaw["served_model_ids"].([]any)
+	if !ok || len(served) != 1 || served[0] != "Llama-3.2-3B-Instruct-Q4_K_M.gguf" {
+		t.Fatalf("served_model_ids = %#v", metaRaw["served_model_ids"])
+	}
+}
+
+func TestRunStreamingJobRejectsLoadedModelMismatch(t *testing.T) {
+	var chatCalled bool
+	llamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"Llama-3.2-3B-Instruct-Q4_K_M.gguf","object":"model"}]}`))
+		case "/v1/chat/completions":
+			chatCalled = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer llamaSrv.Close()
+
+	llamaURL, err := url.Parse(llamaSrv.URL)
+	if err != nil {
+		t.Fatalf("parse llama server url: %v", err)
+	}
+	_, llamaPort, err := net.SplitHostPort(llamaURL.Host)
+	if err != nil {
+		t.Fatalf("split llama port: %v", err)
+	}
+	mgr := &Manager{
+		dataDir:         t.TempDir(),
+		port:            llamaPort,
+		activeModelName: "gpt-oss-20b",
+		healthy:         true,
+	}
+	specJSON, err := json.Marshal(map[string]any{
+		"model":      "gpt-oss-20b",
+		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+		"max_tokens": 16,
+	})
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = mgr.RunStreamingJob(ctx, nil, "job-test-mismatch", string(specJSON))
+	if err == nil || !strings.Contains(err.Error(), "loaded model mismatch") {
+		t.Fatalf("RunStreamingJob error = %v, want loaded model mismatch", err)
+	}
+	if chatCalled {
+		t.Fatal("chat endpoint was called despite loaded model mismatch")
 	}
 }
 
