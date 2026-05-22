@@ -235,6 +235,8 @@ func inferModelFamily(modelID string) string {
 		return "phi"
 	case strings.Contains(lower, "qwen"):
 		return "qwen"
+	case strings.Contains(lower, "gpt-oss"), strings.Contains(lower, "gptoss"):
+		return "gpt-oss"
 	case strings.Contains(lower, "gemma"):
 		return "gemma"
 	default:

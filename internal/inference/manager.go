@@ -94,6 +94,20 @@ type ModelConfig struct {
 var NativeModels = map[string]ModelConfig{
 	"ryvion-llama-3.2-3b": {FileName: "Llama-3.2-3B-Instruct-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"},
 	"phi-4":               {FileName: "phi-4-Q4_K_M.gguf", URL: "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf", MinVRAMBytes: 8 * 1024 * 1024 * 1024},
+	"qwen3-8b-reasoning": {
+		FileName:                "Qwen3-8B-Q4_K_M.gguf",
+		URL:                     "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+		PlatformPath:            "/api/v1/node/models/qwen3-8b-reasoning/download",
+		MinVRAMBytes:            8 * 1024 * 1024 * 1024,
+		RequiresHuggingFaceAuth: false,
+	},
+	"gpt-oss-20b": {
+		FileName:                "gpt-oss-20b-mxfp4.gguf",
+		URL:                     "https://huggingface.co/ggml-org/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-mxfp4.gguf",
+		PlatformPath:            "/api/v1/node/models/gpt-oss-20b/download",
+		MinVRAMBytes:            16 * 1024 * 1024 * 1024,
+		RequiresHuggingFaceAuth: false,
+	},
 	"gemma-4-26b-a4b-it": {
 		FileName: "gemma-4-26B-A4B-it-Q4_K_M.gguf",
 		URL:      "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-Q4_K_M.gguf",

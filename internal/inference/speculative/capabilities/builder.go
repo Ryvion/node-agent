@@ -727,7 +727,10 @@ func normalizeBenchmark(summary BenchmarkSummary) BenchmarkSummary {
 
 func normalizeFamily(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "llama", "phi", "qwen", "gemma":
+	case "llama", "phi", "qwen", "gemma", "gpt-oss", "gptoss":
+		if strings.ToLower(strings.TrimSpace(value)) == "gptoss" {
+			return "gpt-oss"
+		}
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "unknown"

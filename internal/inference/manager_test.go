@@ -30,17 +30,50 @@ func TestSupportedNativeChatModelsGatesGemmaByVRAM(t *testing.T) {
 	}
 }
 
+func TestSupportedNativeChatModelsIncludesQwenReasoning(t *testing.T) {
+	models := SupportedNativeChatModels(8 * 1024 * 1024 * 1024)
+	for _, model := range models {
+		if model == "qwen3-8b-reasoning" {
+			return
+		}
+	}
+	t.Fatal("expected Qwen3 reasoning to be supported by the native model registry")
+}
+
+func TestSupportedNativeChatModelsGatesGPTOSSByVRAM(t *testing.T) {
+	lowVRAM := SupportedNativeChatModels(12 * 1024 * 1024 * 1024)
+	for _, model := range lowVRAM {
+		if model == "gpt-oss-20b" {
+			t.Fatal("expected GPT-OSS 20B to be hidden below 16GB VRAM")
+		}
+	}
+
+	models := SupportedNativeChatModels(16 * 1024 * 1024 * 1024)
+	for _, model := range models {
+		if model == "gpt-oss-20b" {
+			return
+		}
+	}
+	t.Fatal("expected GPT-OSS 20B to advertise on 16GB VRAM nodes")
+}
+
 func TestSupportedNativeChatModelsAllowsDriverReservedVRAMOn16GBCards(t *testing.T) {
 	t.Setenv("HF_TOKEN", "test-token")
 
 	reportedVRAM := uint64(17171480576) // RTX 4070 Ti SUPER can report just under exact 16 GiB.
 	models := SupportedNativeChatModels(reportedVRAM)
+	foundGemma := false
+	foundGPTOSS := false
 	for _, model := range models {
-		if model == "gemma-4-26b-a4b-it" {
-			return
-		}
+		foundGemma = foundGemma || model == "gemma-4-26b-a4b-it"
+		foundGPTOSS = foundGPTOSS || model == "gpt-oss-20b"
 	}
-	t.Fatalf("expected Gemma 4 to be advertised for 16GB-class GPU with %d reported bytes", reportedVRAM)
+	if !foundGemma {
+		t.Fatalf("expected Gemma 4 to be advertised for 16GB-class GPU with %d reported bytes", reportedVRAM)
+	}
+	if !foundGPTOSS {
+		t.Fatalf("expected GPT-OSS 20B to be advertised for 16GB-class GPU with %d reported bytes", reportedVRAM)
+	}
 }
 
 func TestSupportedNativeChatModelsAdvertisesGemmaWithoutHFToken(t *testing.T) {

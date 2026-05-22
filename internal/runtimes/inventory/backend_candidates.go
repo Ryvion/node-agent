@@ -25,6 +25,7 @@ const (
 	ggufModelFamilyPhi     = "phi"
 	ggufModelFamilyGemma   = "gemma"
 	ggufModelFamilyQwen    = "qwen"
+	ggufModelFamilyGPTOSS  = "gpt-oss"
 	ggufModelFamilyUnknown = "unknown"
 
 	maxBackendCandidates       = 8
@@ -584,6 +585,8 @@ func inferGGUFModelFamily(filename string) string {
 		return ggufModelFamilyGemma
 	case strings.Contains(lower, "qwen"):
 		return ggufModelFamilyQwen
+	case strings.Contains(lower, "gpt-oss"), strings.Contains(lower, "gptoss"):
+		return ggufModelFamilyGPTOSS
 	default:
 		return ggufModelFamilyUnknown
 	}
@@ -599,6 +602,8 @@ func normalizeGGUFModelFamily(value string) string {
 		return ggufModelFamilyGemma
 	case ggufModelFamilyQwen:
 		return ggufModelFamilyQwen
+	case ggufModelFamilyGPTOSS, "gptoss":
+		return ggufModelFamilyGPTOSS
 	default:
 		return ggufModelFamilyUnknown
 	}

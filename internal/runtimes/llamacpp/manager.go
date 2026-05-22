@@ -1348,10 +1348,10 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	if cfg.FastDefaults && cfg.GPULayers > 0 {
 		args = appendGPUFastDefaults(args, extraArgs)
 	}
+	if jinjaTemplateRequiredForModel(cfg.ModelPath) && !hasArgFlag(extraArgs, "--jinja") {
+		args = append(args, "--jinja")
+	}
 	if reasoningFormat := reasoningFormatForModel(cfg.ModelPath); reasoningFormat != "" {
-		if !hasArgFlag(extraArgs, "--jinja") {
-			args = append(args, "--jinja")
-		}
 		if !hasArgFlag(extraArgs, "--reasoning-format") {
 			args = append(args, "--reasoning-format", reasoningFormat)
 		}
@@ -1394,6 +1394,16 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	}
 	args = append(args, extraArgs...)
 	return args
+}
+
+func jinjaTemplateRequiredForModel(modelPath string) bool {
+	meta := modelMetadata(modelPath)
+	switch meta.familyHint {
+	case "qwen", "deepseek", "gpt-oss":
+		return true
+	default:
+		return false
+	}
 }
 
 func reasoningFormatForModel(modelPath string) string {
@@ -1542,6 +1552,8 @@ func inferModelFamily(filename string) string {
 		return "phi"
 	case strings.Contains(lower, "qwen"):
 		return "qwen"
+	case strings.Contains(lower, "gpt-oss"), strings.Contains(lower, "gptoss"):
+		return "gpt-oss"
 	case strings.Contains(lower, "gemma"):
 		return "gemma"
 	default:

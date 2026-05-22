@@ -350,6 +350,24 @@ func TestBuildServerArgsAddsReasoningFormatForQwen(t *testing.T) {
 	}
 }
 
+func TestBuildServerArgsAddsHarmonyJinjaForGPTOSS(t *testing.T) {
+	t.Parallel()
+
+	args := buildServerArgs(LlamaCppSidecarConfig{
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ModelPath:   "/models/gpt-oss-20b-mxfp4.gguf",
+		ContextSize: DefaultContextSize,
+	})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--jinja") {
+		t.Fatalf("args = %q, missing GPT-OSS Jinja chat-template flag", joined)
+	}
+	if strings.Contains(joined, "--reasoning-format") {
+		t.Fatalf("args = %q, GPT-OSS should use Harmony/Jinja without DeepSeek reasoning format", joined)
+	}
+}
+
 func TestConfigDiscoversKnownDirServerAndModel(t *testing.T) {
 	t.Parallel()
 

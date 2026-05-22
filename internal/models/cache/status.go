@@ -149,6 +149,8 @@ func normalizeFamily(value string) string {
 		return "phi"
 	case "qwen":
 		return "qwen"
+	case "gpt-oss", "gptoss":
+		return "gpt-oss"
 	case "gemma":
 		return "gemma"
 	default:
