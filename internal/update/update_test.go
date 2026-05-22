@@ -207,6 +207,28 @@ func TestWindowsInstallRootFromExe(t *testing.T) {
 	}
 }
 
+func TestWindowsServiceStartCommandQuotesServiceName(t *testing.T) {
+	args := windowsServiceStartCommand(`Ryvion'Node`)
+	got := strings.Join(args, "\x00")
+	if !strings.Contains(got, "cmd.exe\x00/C\x00start\x00\x00powershell.exe") {
+		t.Fatalf("unexpected command prefix: %#v", args)
+	}
+	if !strings.Contains(got, "Start-Service -Name 'Ryvion''Node'") {
+		t.Fatalf("service name was not PowerShell single-quoted safely: %#v", args)
+	}
+}
+
+func TestWindowsServiceNameDefaultAndOverride(t *testing.T) {
+	t.Setenv("RYVION_WINDOWS_SERVICE", "")
+	if got := windowsServiceName(); got != "RyvionNode" {
+		t.Fatalf("default service name = %q, want RyvionNode", got)
+	}
+	t.Setenv("RYVION_WINDOWS_SERVICE", "CustomRyvionNode")
+	if got := windowsServiceName(); got != "CustomRyvionNode" {
+		t.Fatalf("override service name = %q, want CustomRyvionNode", got)
+	}
+}
+
 func TestSecureHexEqual(t *testing.T) {
 	a := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	if !secureHexEqual(a, a) {

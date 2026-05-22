@@ -459,12 +459,75 @@ func Restart() error {
 		}
 		return lastErr
 	case "windows":
-		slog.Info("exiting for Windows service recovery restart")
+		serviceName := windowsServiceName()
+		if err := configureWindowsServiceRecovery(serviceName); err != nil {
+			slog.Warn("could not confirm Windows service recovery before update restart", "service", serviceName, "error", err)
+		}
+		if err := scheduleWindowsServiceStart(serviceName); err != nil {
+			slog.Warn("could not schedule Windows service start after update restart", "service", serviceName, "error", err)
+		}
+		slog.Info("exiting for Windows service restart", "service", serviceName)
 		os.Exit(1)
 		return nil // unreachable
 	default:
 		return fmt.Errorf("unsupported platform for restart: %s", runtime.GOOS)
 	}
+}
+
+func windowsServiceName() string {
+	serviceName := strings.TrimSpace(os.Getenv("RYVION_WINDOWS_SERVICE"))
+	if serviceName == "" {
+		serviceName = "RyvionNode"
+	}
+	return serviceName
+}
+
+func configureWindowsServiceRecovery(serviceName string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	if err := runWindowsServiceCommand("sc.exe", "failure", serviceName, "reset= 86400", "actions= restart/5000/restart/10000/restart/30000"); err != nil {
+		return err
+	}
+	return runWindowsServiceCommand("sc.exe", "failureflag", serviceName, "1")
+}
+
+func scheduleWindowsServiceStart(serviceName string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	return startWindowsServiceCommand(windowsServiceStartCommand(serviceName)...)
+}
+
+func windowsServiceStartCommand(serviceName string) []string {
+	command := fmt.Sprintf("Start-Sleep -Seconds 3; Start-Service -Name %s", quotePowerShellSingle(serviceName))
+	return []string{"cmd.exe", "/C", "start", "", "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command}
+}
+
+func quotePowerShellSingle(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+var runWindowsServiceCommand = func(name string, args ...string) error {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s failed: %w: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+var startWindowsServiceCommand = func(args ...string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("missing Windows service start command")
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if cmd.Process != nil {
+		return cmd.Process.Release()
+	}
+	return nil
 }
 
 // isValidReleaseVersion rejects anything that is not a clean semver, which also
