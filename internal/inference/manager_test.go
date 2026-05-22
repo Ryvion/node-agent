@@ -1,10 +1,17 @@
 package inference
 
 import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSupportedNativeChatModelsGatesGemmaByVRAM(t *testing.T) {
@@ -116,6 +123,78 @@ func TestSupportedNativeChatModelsAdvertisesGemmaEvenWithPlatformDownloadsDisabl
 		}
 	}
 	t.Fatal("expected Gemma model to advertise without HF_TOKEN even when platform-managed downloads are disabled")
+}
+
+func TestEnsureModelRestartsWhenServedModelMismatchesActiveName(t *testing.T) {
+	var restartCount atomic.Int32
+	llamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if restartCount.Load() == 0 {
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"Llama-3.2-3B-Instruct-Q4_K_M.gguf","object":"model"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-oss-20b-mxfp4.gguf","object":"model"}]}`))
+	}))
+	defer llamaSrv.Close()
+
+	mgr := &Manager{
+		dataDir:         t.TempDir(),
+		port:            testServerPort(t, llamaSrv.URL),
+		activeModelName: "gpt-oss-20b",
+		healthy:         true,
+	}
+	mgr.cancel = func() {
+		restartCount.Add(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := mgr.EnsureModel(ctx, "gpt-oss-20b"); err != nil {
+		t.Fatalf("EnsureModel returned error: %v", err)
+	}
+	if restartCount.Load() == 0 {
+		t.Fatal("expected EnsureModel to restart stale llama-server after loaded model mismatch")
+	}
+}
+
+func TestEnsureModelClearsCustomModelPathWhenSwitchingToRegistryModel(t *testing.T) {
+	llamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"Llama-3.2-3B-Instruct-Q4_K_M.gguf","object":"model"}]}`))
+	}))
+	defer llamaSrv.Close()
+
+	var restarted atomic.Bool
+	mgr := &Manager{
+		dataDir:         t.TempDir(),
+		port:            testServerPort(t, llamaSrv.URL),
+		activeModelName: "custom-model-abc.gguf",
+		activeModelPath: filepath.Join(t.TempDir(), "custom-model-abc.gguf"),
+		healthy:         true,
+	}
+	mgr.cancel = func() {
+		restarted.Store(true)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := mgr.EnsureModel(ctx, "ryvion-llama-3.2-3b"); err != nil {
+		t.Fatalf("EnsureModel returned error: %v", err)
+	}
+	if !restarted.Load() {
+		t.Fatal("expected registry switch to restart llama-server")
+	}
+	if mgr.activeModelPath != "" {
+		t.Fatalf("activeModelPath = %q, want cleared for registry model", mgr.activeModelPath)
+	}
 }
 
 func TestShouldInstallServerRefreshesUnmarkedWindowsCUDABundle(t *testing.T) {
@@ -289,4 +368,17 @@ func TestResolvedStartupTimeoutDefaultAndOverride(t *testing.T) {
 	if got := resolvedStartupTimeout(); got != defaultStartupTimeout {
 		t.Fatalf("non-positive override must fall back to default, got %v", got)
 	}
+}
+
+func testServerPort(t *testing.T, rawURL string) string {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	_, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("split server port: %v", err)
+	}
+	return port
 }

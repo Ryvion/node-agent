@@ -471,9 +471,7 @@ func (m *Manager) Start(ctx context.Context) error {
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.cancel != nil {
-		m.cancel()
-	}
+	m.stopServerLocked()
 	m.healthy = false
 }
 
@@ -513,47 +511,76 @@ func (m *Manager) ModelName() string {
 }
 
 func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
-	m.mu.RLock()
-	current := m.activeModelName
-	m.mu.RUnlock()
-
-	if current == modelName {
-		return nil
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		modelName = "ryvion-llama-3.2-3b"
 	}
-
-	_, ok := NativeModels[modelName]
+	cfg, ok := NativeModels[modelName]
 	if !ok {
 		return fmt.Errorf("model %s not supported in native registry", modelName)
 	}
 
-	slog.Info("switching native model", "from", current, "to", modelName)
+	m.mu.RLock()
+	current := m.activeModelName
+	m.mu.RUnlock()
 
-	m.mu.Lock()
-	m.activeModelName = modelName
-	m.healthy = false
-	m.blockerReason = BlockerStarting
-	if m.cancel != nil {
-		m.cancel() // Stop the server, it will restart with the new model
+	if current != modelName {
+		slog.Info("switching native model", "from", current, "to", modelName)
+
+		m.mu.Lock()
+		m.activeModelName = modelName
+		m.activeModelPath = ""
+		m.activeModelMode = cfg.Mode
+		m.healthy = false
+		m.blockerReason = BlockerStarting
+		m.stopServerLocked()
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 
-	// Wait for the new model's server to become healthy
-	for i := 0; i < 300; i++ {
+	restartRequested := current != modelName
+	deadline := time.NewTimer(300 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	var lastMismatchIDs []string
+
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		ok, ids, err := m.loadedModelMatches(probeCtx, modelName)
+		cancel()
+		if ok {
+			return nil
+		} else if err == nil && len(ids) > 0 && !restartRequested {
+			lastMismatchIDs = append(lastMismatchIDs[:0], ids...)
+			slog.Warn("native model state mismatch; restarting llama-server",
+				"requested_model", modelName,
+				"served_models", strings.Join(ids, ","),
+			)
+			m.mu.Lock()
+			m.healthy = false
+			m.blockerReason = BlockerStarting
+			m.stopServerLocked()
+			m.mu.Unlock()
+			restartRequested = true
+		} else if err == nil && len(ids) > 0 {
+			lastMismatchIDs = append(lastMismatchIDs[:0], ids...)
+		}
+
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(1 * time.Second):
-			m.mu.RLock()
-			hc := m.healthy
-			am := m.activeModelName
-			m.mu.RUnlock()
-			if hc && am == modelName {
-				return nil
+			if len(lastMismatchIDs) > 0 {
+				return fmt.Errorf("model %s not ready before context deadline; last loaded model mismatch: requested %s (%s), llama-server reports %s: %w", modelName, modelName, cfg.FileName, strings.Join(lastMismatchIDs, ","), ctx.Err())
 			}
+			return ctx.Err()
+		case <-deadline.C:
+			m.setBlockerReason(BlockerStartupTimeout)
+			if len(lastMismatchIDs) > 0 {
+				return fmt.Errorf("timeout waiting for %s to start; last loaded model mismatch: requested %s (%s), llama-server reports %s", modelName, modelName, cfg.FileName, strings.Join(lastMismatchIDs, ","))
+			}
+			return fmt.Errorf("timeout waiting for %s to start", modelName)
+		case <-ticker.C:
 		}
 	}
-	m.setBlockerReason(BlockerStartupTimeout)
-	return fmt.Errorf("timeout waiting for %s to start", modelName)
 }
 
 // EnsureCustomModel downloads a custom GGUF model from a URL and hot-swaps the server to use it.
@@ -617,6 +644,15 @@ func (m *Manager) EnsureCustomModel(ctx context.Context, modelName, modelURL str
 		}
 	}
 	return fmt.Errorf("timeout waiting for custom model %s to start", modelName)
+}
+
+func (m *Manager) stopServerLocked() {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.cmd != nil && m.cmd.Process != nil {
+		_ = m.cmd.Process.Kill()
+	}
 }
 
 func (m *Manager) setHealthy(v bool) {

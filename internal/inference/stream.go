@@ -401,17 +401,29 @@ func (m *Manager) verifyLoadedModel(ctx context.Context, modelName string) ([]st
 	verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	ids, err := m.loadedModelIDs(verifyCtx)
+	ok, ids, err := m.loadedModelMatches(verifyCtx, modelName)
 	if err != nil {
 		return ids, fmt.Errorf("verify loaded model %s: %w", modelName, err)
 	}
 	if len(ids) == 0 {
 		return ids, fmt.Errorf("verify loaded model %s: llama-server returned no model ids", modelName)
 	}
-	if loadedModelIDsMatch(modelName, cfg, ids) {
+	if ok {
 		return ids, nil
 	}
 	return ids, fmt.Errorf("loaded model mismatch: requested %s (%s), llama-server reports %s", modelName, cfg.FileName, strings.Join(ids, ","))
+}
+
+func (m *Manager) loadedModelMatches(ctx context.Context, modelName string) (bool, []string, error) {
+	cfg, ok := NativeModels[strings.TrimSpace(modelName)]
+	if !ok {
+		return true, nil, nil
+	}
+	ids, err := m.loadedModelIDs(ctx)
+	if err != nil {
+		return false, ids, err
+	}
+	return loadedModelIDsMatch(modelName, cfg, ids), ids, nil
 }
 
 func (m *Manager) loadedModelIDs(ctx context.Context) ([]string, error) {
