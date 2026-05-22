@@ -114,6 +114,55 @@ func TestBuildServerArgsEmitsNativeMTPFlagsWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestBuildServerArgsSkipsNativeMTPForPlainModel(t *testing.T) {
+	t.Parallel()
+	cfg := LlamaCppSidecarConfig{
+		ServerPath:     "/usr/local/bin/llama-server",
+		ModelPath:      "/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		Host:           DefaultHost,
+		Port:           45910,
+		ContextSize:    8192,
+		NativeMTP:      true,
+		DraftMaxTokens: 3,
+	}
+	args := buildServerArgs(cfg)
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--spec-type") || strings.Contains(joined, "draft-mtp") {
+		t.Fatalf("plain model args = %q, should not enable native MTP without an MTP-head model", joined)
+	}
+}
+
+func TestBuildServerArgsFallsBackToDraftModelWhenNativeMTPRequestedForPlainModel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	draftPath := filepath.Join(dir, "tinyllama-1.1b.gguf")
+	if err := os.WriteFile(draftPath, []byte("draft"), 0o644); err != nil {
+		t.Fatalf("write draft model: %v", err)
+	}
+	cfg := LlamaCppSidecarConfig{
+		ServerPath:     "/usr/local/bin/llama-server",
+		ModelPath:      "/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		Host:           DefaultHost,
+		Port:           45910,
+		ContextSize:    8192,
+		NativeMTP:      true,
+		DraftModelPath: draftPath,
+		DraftMaxTokens: 8,
+		DraftMinTokens: 2,
+		DraftGPULayers: 12,
+	}
+	args := buildServerArgs(cfg)
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--spec-type draft-mtp") {
+		t.Fatalf("plain model args = %q, should not force native MTP", joined)
+	}
+	if !strings.Contains(joined, "--model-draft "+draftPath) ||
+		!strings.Contains(joined, "--spec-draft-n-max 8") ||
+		!strings.Contains(joined, "--n-gpu-layers-draft 12") {
+		t.Fatalf("plain model args = %q, want readable draft model fallback", joined)
+	}
+}
+
 func TestBuildServerArgsNativeMTPPreservesExplicitSpecTypeExtraArg(t *testing.T) {
 	t.Parallel()
 	cfg := LlamaCppSidecarConfig{
@@ -402,6 +451,43 @@ func TestStatusReportsNativeMTPConfiguration(t *testing.T) {
 	}
 	if st.SpeculativeEnabled {
 		t.Fatal("SpeculativeEnabled true on uninitialised manager")
+	}
+}
+
+func TestStatusDoesNotReportNativeMTPForPlainModel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	model := filepath.Join(dir, "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+	server := filepath.Join(dir, "llama-server")
+	for _, p := range []struct {
+		path  string
+		body  []byte
+		perms os.FileMode
+	}{
+		{model, []byte("model"), 0o644},
+		{server, []byte("server"), 0o755},
+	} {
+		if err := os.WriteFile(p.path, p.body, p.perms); err != nil {
+			t.Fatalf("write %s: %v", p.path, err)
+		}
+	}
+
+	m := NewManager(LlamaCppSidecarConfig{
+		Enabled:        true,
+		ServerPath:     server,
+		ModelPath:      model,
+		Host:           DefaultHost,
+		Port:           45910,
+		NativeMTP:      true,
+		DraftMaxTokens: 3,
+	})
+	st := m.statusLocked()
+	if st.SpeculativeMethod == SpeculativeMethodNativeMTP || st.NativeMTP {
+		t.Fatalf("plain model status = %+v, should not advertise native_mtp", st)
+	}
+	caps := BuildBackendRuntimes(st).LlamaCPP.OptimizationCapabilities
+	if len(caps) != 0 {
+		t.Fatalf("plain model optimization caps = %+v, want none", caps)
 	}
 }
 

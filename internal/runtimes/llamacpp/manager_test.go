@@ -458,6 +458,23 @@ func TestBuildServerArgsAddsGPUFastDefaults(t *testing.T) {
 	}
 }
 
+func TestAppendGPUFastDefaultsForWindowsAvoidsUnsupportedBackendFlags(t *testing.T) {
+	t.Parallel()
+
+	args := appendGPUFastDefaultsForGOOS([]string{}, nil, "windows")
+	joined := strings.Join(args, " ")
+	for _, forbidden := range []string{"--flash-attn", "--cache-type-k", "--cache-type-v"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("windows fast defaults = %q, should not include backend-sensitive flag %q", joined, forbidden)
+		}
+	}
+	for _, want := range []string{"--batch-size 512", "--ubatch-size 512"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("windows fast defaults = %q, missing safe launch flag %q", joined, want)
+		}
+	}
+}
+
 func TestRestartWithModelSafeCUDAKeepsGPUOffloadWithoutFastFlags(t *testing.T) {
 	t.Parallel()
 

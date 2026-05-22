@@ -31,6 +31,7 @@ const (
 )
 
 var ggufQuantizationPattern = regexp.MustCompile(`(?i)(?:^|[._\-\s])((?:IQ|Q)[0-9](?:_[A-Z0-9]+){0,3}|BF16|F16|F32)(?:[._\-\s]|$)`)
+var nativeMTPModelPattern = regexp.MustCompile(`(?i)(?:^|[._\-\s])mtp(?:[._\-\s]|$)`)
 
 type managedProcess interface {
 	PID() int
@@ -527,7 +528,7 @@ func (m *Manager) statusLocked() LlamaCppSidecarStatus {
 		reason = m.lastError
 	}
 
-	nativeMTP := nativeMTPConfigured(cfg)
+	nativeMTP := nativeMTPUsable(cfg)
 	draftMeta := modelMetadata(cfg.DraftModelPath)
 	draftReady := cfg.DraftModelPath != "" && draftMeta.readable && !nativeMTP
 	speculativeMethod := speculativeMethodFromConfig(cfg, draftReady)
@@ -645,7 +646,7 @@ func buildLaunchConfig(cfg LlamaCppSidecarConfig, managed bool, attached bool) *
 
 func speculativeMethodFromConfig(cfg LlamaCppSidecarConfig, draftReady bool) string {
 	cfg = normalizeConfig(cfg)
-	if nativeMTPConfigured(cfg) {
+	if nativeMTPUsable(cfg) {
 		return SpeculativeMethodNativeMTP
 	}
 	if draftReady {
@@ -657,6 +658,18 @@ func speculativeMethodFromConfig(cfg LlamaCppSidecarConfig, draftReady bool) str
 func nativeMTPConfigured(cfg LlamaCppSidecarConfig) bool {
 	cfg.ExtraArgs = sanitizeExtraArgs(strings.Join(cfg.ExtraArgs, " "))
 	return cfg.NativeMTP || specTypeExtraArgContains(cfg.ExtraArgs, "draft-mtp")
+}
+
+func nativeMTPUsable(cfg LlamaCppSidecarConfig) bool {
+	return nativeMTPConfigured(cfg) && modelSupportsNativeMTP(cfg.ModelPath)
+}
+
+func modelSupportsNativeMTP(modelPath string) bool {
+	modelPath = strings.TrimSpace(modelPath)
+	if modelPath == "" {
+		return false
+	}
+	return nativeMTPModelPattern.MatchString(filepath.Base(modelPath))
 }
 
 func specTypeExtraArgContains(args []string, want string) bool {
@@ -1300,20 +1313,21 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	if cfg.GPULayers > 0 {
 		args = append(args, "--n-gpu-layers", strconv.Itoa(cfg.GPULayers))
 	}
+	extraArgs := cfg.ExtraArgs
 	if cfg.FastDefaults && cfg.GPULayers > 0 {
-		args = appendGPUFastDefaults(args, cfg.ExtraArgs)
+		args = appendGPUFastDefaults(args, extraArgs)
 	}
 	// V8 speculative decoding (Level 0).
 	// Native MTP uses the target model's own MTP heads. The older
 	// --model-draft path remains the default when only DraftModelPath is set.
-	if nativeMTPConfigured(cfg) {
-		if !hasArgFlag(cfg.ExtraArgs, "--spec-type") {
+	if nativeMTPUsable(cfg) {
+		if !hasArgFlag(extraArgs, "--spec-type") {
 			args = append(args, "--spec-type", "draft-mtp")
 		}
-		if cfg.DraftMaxTokens > 0 && !hasArgFlag(cfg.ExtraArgs, "--spec-draft-n-max") {
+		if cfg.DraftMaxTokens > 0 && !hasArgFlag(extraArgs, "--spec-draft-n-max") {
 			args = append(args, "--spec-draft-n-max", strconv.Itoa(cfg.DraftMaxTokens))
 		}
-		if cfg.DraftMinTokens > 0 && !hasArgFlag(cfg.ExtraArgs, "--spec-draft-n-min") {
+		if cfg.DraftMinTokens > 0 && !hasArgFlag(extraArgs, "--spec-draft-n-min") {
 			args = append(args, "--spec-draft-n-min", strconv.Itoa(cfg.DraftMinTokens))
 		}
 	} else if cfg.DraftModelPath != "" && draftModelReadable(cfg.DraftModelPath) {
@@ -1331,17 +1345,25 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 			args = append(args, "--n-gpu-layers-draft", strconv.Itoa(cfg.DraftGPULayers))
 		}
 	}
-	args = append(args, cfg.ExtraArgs...)
+	args = append(args, extraArgs...)
 	return args
 }
 
 func appendGPUFastDefaults(args []string, extraArgs []string) []string {
+	return appendGPUFastDefaultsForGOOS(args, extraArgs, runtime.GOOS)
+}
+
+func appendGPUFastDefaultsForGOOS(args []string, extraArgs []string, goos string) []string {
 	defaults := [][]string{
-		{"--flash-attn"},
 		{"--batch-size", "512"},
 		{"--ubatch-size", "512"},
-		{"--cache-type-k", "q8_0"},
-		{"--cache-type-v", "q8_0"},
+	}
+	if !windowsGOOS(goos) {
+		defaults = append([][]string{{"--flash-attn"}}, defaults...)
+		defaults = append(defaults,
+			[]string{"--cache-type-k", "q8_0"},
+			[]string{"--cache-type-v", "q8_0"},
+		)
 	}
 	for _, flag := range defaults {
 		if len(flag) == 0 || hasArgFlag(extraArgs, flag[0]) {
@@ -1350,6 +1372,10 @@ func appendGPUFastDefaults(args []string, extraArgs []string) []string {
 		args = append(args, flag...)
 	}
 	return args
+}
+
+func windowsGOOS(goos string) bool {
+	return strings.EqualFold(strings.TrimSpace(goos), "windows")
 }
 
 func hasArgFlag(args []string, flag string) bool {
