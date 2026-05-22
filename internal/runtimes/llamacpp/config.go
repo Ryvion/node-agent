@@ -75,6 +75,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	explicitServerPath := strings.TrimSpace(source.Getenv(EnvServer)) != ""
 	gpuLayersRaw := source.Getenv(EnvGPULayers)
 	fastDefaultsRaw := source.Getenv(EnvFastDefaults)
+	nativeMTPEnabled, nativeMTPAuto := parseNativeMTPSetting(source.Getenv(EnvNativeMTP))
 	cfg := LlamaCppSidecarConfig{
 		Enabled:              envBoolDefault(source.Getenv(EnvEnabled), true),
 		ServerPath:           cleanConfigText(source.Getenv(EnvServer), maxConfigTextLen),
@@ -91,7 +92,8 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 		FastDefaultsExplicit: strings.TrimSpace(fastDefaultsRaw) != "",
 		AccelerationHints:    configAccelerationHints(source),
 		DraftModelPath:       cleanConfigText(source.Getenv(EnvDraftModel), maxConfigTextLen),
-		NativeMTP:            envBool(source.Getenv(EnvNativeMTP)),
+		NativeMTP:            nativeMTPEnabled,
+		NativeMTPAuto:        nativeMTPAuto,
 		DraftMaxTokens:       envInt(source.Getenv(EnvDraftMaxTokens), 0),
 		DraftMinTokens:       envInt(source.Getenv(EnvDraftMinTokens), 0),
 		DraftPMin:            envFloat(source.Getenv(EnvDraftPMin), 0),
@@ -158,6 +160,24 @@ func normalizeConfig(cfg LlamaCppSidecarConfig) LlamaCppSidecarConfig {
 		cfg.DraftMaxTokens = DefaultDraftMaxTokens
 	}
 	return cfg
+}
+
+func parseNativeMTPSetting(raw string) (enabled bool, auto bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "auto", "default":
+		return false, true
+	case "0":
+		// v1.2.233 installers wrote 0 before native-MTP auto mode existed.
+		// Keep those upgraded nodes eligible for MTP-head models without a
+		// manual environment repair.
+		return false, true
+	case "1", "true", "t", "yes", "y", "on", "enabled", "enable":
+		return true, true
+	case "false", "f", "no", "n", "off", "disabled", "disable":
+		return false, false
+	default:
+		return false, true
+	}
 }
 
 func deriveLaunchProfile(cfg LlamaCppSidecarConfig) string {

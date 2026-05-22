@@ -114,6 +114,25 @@ func TestBuildServerArgsEmitsNativeMTPFlagsWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestBuildServerArgsAutoEnablesNativeMTPForMTPModel(t *testing.T) {
+	t.Parallel()
+	cfg := LlamaCppSidecarConfig{
+		ServerPath:     "/usr/local/bin/llama-server",
+		ModelPath:      "/models/Qwen3.6-27B-MTP-Q5_K_M.gguf",
+		Host:           DefaultHost,
+		Port:           45910,
+		ContextSize:    8192,
+		NativeMTPAuto:  true,
+		DraftMaxTokens: 3,
+	}
+	args := buildServerArgs(cfg)
+	joined := strings.Join(args, " ")
+
+	if !strings.Contains(joined, "--spec-type draft-mtp") {
+		t.Fatalf("auto MTP args = %q, want native draft-mtp for MTP-head model", joined)
+	}
+}
+
 func TestBuildServerArgsSkipsNativeMTPForPlainModel(t *testing.T) {
 	t.Parallel()
 	cfg := LlamaCppSidecarConfig{
@@ -352,6 +371,52 @@ func TestConfigFromEnvLoadsNativeMTP(t *testing.T) {
 	}
 	if cfg.DraftMaxTokens != 2 {
 		t.Fatalf("DraftMaxTokens = %d, want 2", cfg.DraftMaxTokens)
+	}
+}
+
+func TestConfigFromEnvTreatsInstallerZeroNativeMTPAsAuto(t *testing.T) {
+	t.Parallel()
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			switch name {
+			case EnvNativeMTP:
+				return "0"
+			case EnvModel:
+				return "/models/Qwen3.6-27B-MTP-Q5_K_M.gguf"
+			default:
+				return ""
+			}
+		},
+	})
+	if !cfg.NativeMTPAuto {
+		t.Fatal("NativeMTPAuto = false, want old installer 0 to mean auto")
+	}
+	args := buildServerArgs(cfg)
+	if joined := strings.Join(args, " "); !strings.Contains(joined, "--spec-type draft-mtp") {
+		t.Fatalf("args = %q, want native MTP auto-enabled despite installer 0", joined)
+	}
+}
+
+func TestConfigFromEnvDisablesNativeMTPWithOff(t *testing.T) {
+	t.Parallel()
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			switch name {
+			case EnvNativeMTP:
+				return "off"
+			case EnvModel:
+				return "/models/Qwen3.6-27B-MTP-Q5_K_M.gguf"
+			default:
+				return ""
+			}
+		},
+	})
+	if cfg.NativeMTP || cfg.NativeMTPAuto {
+		t.Fatalf("NativeMTP flags = force:%v auto:%v, want disabled", cfg.NativeMTP, cfg.NativeMTPAuto)
+	}
+	args := buildServerArgs(cfg)
+	if joined := strings.Join(args, " "); strings.Contains(joined, "draft-mtp") {
+		t.Fatalf("args = %q, want native MTP disabled", joined)
 	}
 }
 

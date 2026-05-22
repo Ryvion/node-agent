@@ -657,7 +657,9 @@ func speculativeMethodFromConfig(cfg LlamaCppSidecarConfig, draftReady bool) str
 
 func nativeMTPConfigured(cfg LlamaCppSidecarConfig) bool {
 	cfg.ExtraArgs = sanitizeExtraArgs(strings.Join(cfg.ExtraArgs, " "))
-	return cfg.NativeMTP || specTypeExtraArgContains(cfg.ExtraArgs, "draft-mtp")
+	return cfg.NativeMTP ||
+		(cfg.NativeMTPAuto && modelSupportsNativeMTP(cfg.ModelPath)) ||
+		specTypeExtraArgContains(cfg.ExtraArgs, "draft-mtp")
 }
 
 func nativeMTPUsable(cfg LlamaCppSidecarConfig) bool {

@@ -72,6 +72,7 @@ type LlamaCppSidecarConfig struct {
 	// NativeMTP enables llama.cpp's native MTP-head speculative path via
 	// --spec-type draft-mtp. It does not require a separate draft model.
 	NativeMTP      bool
+	NativeMTPAuto  bool
 	DraftMaxTokens int     // --spec-draft-n-max (default 16 when DraftModelPath set)
 	DraftMinTokens int     // --spec-draft-n-min
 	DraftPMin      float64 // --draft-p-min (0 = llama.cpp default 0.75)
