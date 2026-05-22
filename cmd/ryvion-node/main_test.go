@@ -1627,6 +1627,32 @@ func TestOCILaneDisabledSkipsManagedRuntimeProbe(t *testing.T) {
 	}
 }
 
+func TestOCIEnableOverridesStaleDisableEnv(t *testing.T) {
+	t.Setenv("RYV_DISABLE_OCI", "1")
+	t.Setenv("RYV_ENABLE_OCI", "1")
+
+	called := false
+	prevProbe := probeManagedRuntimeStatus
+	probeManagedRuntimeStatus = func(_ context.Context, _ string, _ func(string) string, _ string) (runtimeexec.Status, bool) {
+		called = true
+		return runtimeexec.Status{CLIInstalled: true, Ready: true, GPUReady: true, Health: "ready"}, true
+	}
+	defer func() { probeManagedRuntimeStatus = prevProbe }()
+
+	runtimeMgr := newRuntimeManager("dev", runtimeContractMetadata{
+		Channel: "managed_oci_v1",
+		Version: "2026.04.16.10",
+		Binary:  "/tmp/ryvion-runtime-test",
+	})
+	snap := runtimeMgr.Snapshot(true)
+	if !called {
+		t.Fatal("managed runtime probe should run when RYV_ENABLE_OCI=1 overrides stale RYV_DISABLE_OCI=1")
+	}
+	if !snap.Ready || !snap.GPUReady || !snap.CLIInstalled {
+		t.Fatalf("expected ready managed runtime snapshot, got %+v", snap)
+	}
+}
+
 func TestRuntimeStatusTokensGateWorkCapsuleByEnv(t *testing.T) {
 	if !commandExists("git") {
 		t.Skip("git not available in test environment")

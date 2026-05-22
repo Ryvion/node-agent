@@ -207,6 +207,32 @@ func TestWindowsInstallRootFromExe(t *testing.T) {
 	}
 }
 
+func TestWindowsCanonicalExePath(t *testing.T) {
+	if got := windowsCanonicalExePath(`C:\Program Files\Ryvion`); got != `C:\Program Files\Ryvion\ryvion-node.exe` {
+		t.Fatalf("canonical exe path = %q", got)
+	}
+}
+
+func TestWindowsCanonicalRefreshCommandCopiesStagedUpdateToPathBinary(t *testing.T) {
+	args := windowsCanonicalRefreshCommand(
+		`C:\Program Files\Ryvion\updates\ryvion-node-abcd.exe`,
+		`C:\Program Files\Ryvion\ryvion-node.exe`,
+	)
+	got := strings.Join(args, "\x00")
+	if !strings.Contains(got, "cmd.exe\x00/C\x00start\x00\x00powershell.exe") {
+		t.Fatalf("unexpected command prefix: %#v", args)
+	}
+	if !strings.Contains(got, "Copy-Item -LiteralPath $src -Destination $dst -Force") {
+		t.Fatalf("refresh command does not copy staged binary to canonical path: %#v", args)
+	}
+	if !strings.Contains(got, `$src = 'C:\Program Files\Ryvion\updates\ryvion-node-abcd.exe'`) {
+		t.Fatalf("staged path was not safely quoted: %#v", args)
+	}
+	if !strings.Contains(got, `$dst = 'C:\Program Files\Ryvion\ryvion-node.exe'`) {
+		t.Fatalf("canonical path was not safely quoted: %#v", args)
+	}
+}
+
 func TestWindowsServiceStartCommandQuotesServiceName(t *testing.T) {
 	args := windowsServiceStartCommand(`Ryvion'Node`)
 	got := strings.Join(args, "\x00")

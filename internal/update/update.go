@@ -307,6 +307,7 @@ func rewriteLaunchAgentBinaryContent(content, previousExePath, target string) (s
 
 func replaceWindows(exePath string, data []byte) error {
 	installRoot := windowsInstallRootFromExe(exePath)
+	canonicalTarget := windowsCanonicalExePath(installRoot)
 	updateDir := filepath.Join(installRoot, "updates")
 	if err := os.MkdirAll(updateDir, 0755); err != nil {
 		return fmt.Errorf("create update dir: %w", err)
@@ -346,8 +347,19 @@ func replaceWindows(exePath string, data []byte) error {
 	if err := setWindowsServiceImagePath(serviceName, nextImagePath); err != nil {
 		return fmt.Errorf("set Windows service image path: %w", err)
 	}
+	if err := scheduleWindowsCanonicalBinaryRefresh(target, canonicalTarget); err != nil {
+		slog.Warn("could not schedule Windows canonical binary refresh", "target", canonicalTarget, "staged", target, "error", err)
+	}
 	slog.Info("staged Windows update and rewired service path", "service", serviceName, "target", target)
 	return nil
+}
+
+func windowsCanonicalExePath(installRoot string) string {
+	installRoot = strings.TrimRight(strings.TrimSpace(installRoot), `\/`)
+	if installRoot == "" {
+		return "ryvion-node.exe"
+	}
+	return installRoot + `\ryvion-node.exe`
 }
 
 func windowsInstallRootFromExe(exePath string) string {
@@ -499,8 +511,23 @@ func scheduleWindowsServiceStart(serviceName string) error {
 	return startWindowsServiceCommand(windowsServiceStartCommand(serviceName)...)
 }
 
+func scheduleWindowsCanonicalBinaryRefresh(stagedPath, canonicalPath string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	return startWindowsCanonicalRefreshCommand(windowsCanonicalRefreshCommand(stagedPath, canonicalPath)...)
+}
+
 func windowsServiceStartCommand(serviceName string) []string {
 	command := fmt.Sprintf("Start-Sleep -Seconds 3; Start-Service -Name %s", quotePowerShellSingle(serviceName))
+	return []string{"cmd.exe", "/C", "start", "", "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command}
+}
+
+func windowsCanonicalRefreshCommand(stagedPath, canonicalPath string) []string {
+	command := fmt.Sprintf("$src = %s; $dst = %s; Start-Sleep -Seconds 6; for ($i = 0; $i -lt 12; $i++) { try { Copy-Item -LiteralPath $src -Destination $dst -Force; exit 0 } catch { Start-Sleep -Seconds 2 } }; exit 1",
+		quotePowerShellSingle(stagedPath),
+		quotePowerShellSingle(canonicalPath),
+	)
 	return []string{"cmd.exe", "/C", "start", "", "powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command}
 }
 
@@ -529,6 +556,8 @@ var startWindowsServiceCommand = func(args ...string) error {
 	}
 	return nil
 }
+
+var startWindowsCanonicalRefreshCommand = startWindowsServiceCommand
 
 // isValidReleaseVersion rejects anything that is not a clean semver, which also
 // blocks path/URL injection via a hub-advertised version string.

@@ -54,7 +54,14 @@ var probeManagedRuntimeStatus = runtimeexec.ProbeStatus
 // runtime manager never probes Podman/Docker and reports the node as
 // native-only. Phase 1 of the Docker-free native path.
 func ociLaneDisabled() bool {
-	raw := strings.ToLower(strings.TrimSpace(os.Getenv("RYV_DISABLE_OCI")))
+	if envFlagEnabled("RYV_ENABLE_OCI") {
+		return false
+	}
+	return envFlagEnabled("RYV_DISABLE_OCI")
+}
+
+func envFlagEnabled(name string) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
 	switch raw {
 	case "1", "true", "yes", "on":
 		return true

@@ -85,6 +85,31 @@ func TestConfigFromEnvAllowsSlotSavePathExtraArg(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvDefaultsNativeSidecarEnabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(string) string {
+			return ""
+		},
+	})
+	if !cfg.Enabled {
+		t.Fatal("enabled = false, want native llama.cpp enabled by default")
+	}
+
+	cfg = ConfigFromEnvWith(ConfigSource{
+		Getenv: func(name string) string {
+			if name == EnvEnabled {
+				return "0"
+			}
+			return ""
+		},
+	})
+	if cfg.Enabled {
+		t.Fatal("enabled = true, want explicit RYV_LLAMA_CPP_ENABLED=0 to disable native llama.cpp")
+	}
+}
+
 func TestConfigFromEnvDefaultsToGPUOffloadAndAllowsExplicitOptOut(t *testing.T) {
 	t.Parallel()
 

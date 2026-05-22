@@ -232,11 +232,7 @@ func resolveInitialPublicAIOptIn() (bool, error) {
 // importing it here (operator_preferences.go is loaded before the runtime
 // manager is constructed).
 func ociLaneDisabledFromEnv() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_DISABLE_OCI"))) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
+	return ociLaneDisabled()
 }
 
 func resolveInitialDeclaredCountry(flagValue string) (string, error) {

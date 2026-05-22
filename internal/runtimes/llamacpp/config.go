@@ -76,7 +76,7 @@ func ConfigFromEnvWith(source ConfigSource) LlamaCppSidecarConfig {
 	gpuLayersRaw := source.Getenv(EnvGPULayers)
 	fastDefaultsRaw := source.Getenv(EnvFastDefaults)
 	cfg := LlamaCppSidecarConfig{
-		Enabled:              envBool(source.Getenv(EnvEnabled)),
+		Enabled:              envBoolDefault(source.Getenv(EnvEnabled), true),
 		ServerPath:           cleanConfigText(source.Getenv(EnvServer), maxConfigTextLen),
 		ServerPathExplicit:   explicitServerPath,
 		ModelPath:            cleanConfigText(source.Getenv(EnvModel), maxConfigTextLen),
