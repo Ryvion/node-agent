@@ -940,6 +940,8 @@ func sidecarAccelerationStatus(cfg LlamaCppSidecarConfig, props *LlamaCppServerP
 		switch {
 		case accelerationContains(acceleration, "cuda"):
 			return acceleration, "server_reported_cuda"
+		case accelerationContains(acceleration, "vulkan"):
+			return acceleration, "server_reported_vulkan"
 		case len(acceleration) == 1 && acceleration[0] == "cpu" && cfg.GPULayers > 0:
 			return acceleration, "server_reported_cpu_after_gpu_offload_requested"
 		case len(acceleration) == 1 && acceleration[0] == "cpu":
@@ -950,6 +952,9 @@ func sidecarAccelerationStatus(cfg LlamaCppSidecarConfig, props *LlamaCppServerP
 	}
 	if cfg.GPULayers > 0 && accelerationContains(cfg.AccelerationHints, "cuda") {
 		return []string{"cuda"}, "configured_cuda_unconfirmed"
+	}
+	if cfg.GPULayers > 0 && accelerationContains(cfg.AccelerationHints, "vulkan") {
+		return []string{"vulkan"}, "configured_vulkan_unconfirmed"
 	}
 	return []string{"cpu"}, "server_acceleration_unreported"
 }
@@ -995,12 +1000,16 @@ func sidecarAccelerationReasonSuffix(reason string) string {
 	switch strings.TrimSpace(reason) {
 	case "server_reported_cuda":
 		return "CUDA acceleration reported active"
+	case "server_reported_vulkan":
+		return "Vulkan acceleration reported active"
 	case "server_reported_cpu_after_gpu_offload_requested":
 		return "GPU offload requested but server reports CPU-only acceleration"
 	case "server_reported_cpu":
 		return "CPU acceleration reported active"
 	case "configured_cuda_unconfirmed":
 		return "CUDA acceleration requested; server report not available"
+	case "configured_vulkan_unconfirmed":
+		return "Vulkan acceleration requested; server report not available"
 	default:
 		return ""
 	}
@@ -1339,6 +1348,14 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	if cfg.FastDefaults && cfg.GPULayers > 0 {
 		args = appendGPUFastDefaults(args, extraArgs)
 	}
+	if reasoningFormat := reasoningFormatForModel(cfg.ModelPath); reasoningFormat != "" {
+		if !hasArgFlag(extraArgs, "--jinja") {
+			args = append(args, "--jinja")
+		}
+		if !hasArgFlag(extraArgs, "--reasoning-format") {
+			args = append(args, "--reasoning-format", reasoningFormat)
+		}
+	}
 	// V8 speculative decoding (Level 0).
 	// Native MTP uses the target model's own MTP heads. The older
 	// --model-draft path remains the default when only DraftModelPath is set.
@@ -1377,6 +1394,16 @@ func buildServerArgs(cfg LlamaCppSidecarConfig) []string {
 	}
 	args = append(args, extraArgs...)
 	return args
+}
+
+func reasoningFormatForModel(modelPath string) string {
+	meta := modelMetadata(modelPath)
+	switch meta.familyHint {
+	case "qwen", "deepseek":
+		return "deepseek"
+	default:
+		return ""
+	}
 }
 
 func appendGPUFastDefaults(args []string, extraArgs []string) []string {

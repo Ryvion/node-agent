@@ -265,6 +265,11 @@ func configAccelerationHints(source ConfigSource) []string {
 		if len(hardware.AccelerationHints) > 0 {
 			hints = append(hints, hardware.AccelerationHints...)
 		}
+		if strings.EqualFold(strings.TrimSpace(source.GOOS), "windows") &&
+			hardware.GPUDetected &&
+			hardware.GPUVendor == capshardware.GPUVendorAMD {
+			hints = append(hints, "vulkan")
+		}
 	}
 	if hardwareCUDAAvailable(source) || nvidiaSMIAvailable(source.Getenv, source.LookPath, source.Stat) {
 		hints = append(hints, "cuda")

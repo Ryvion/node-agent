@@ -303,6 +303,53 @@ func TestConfigFromEnvUsesHardwareInventoryForCUDAFastDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvUsesVulkanHintForWindowsAMD(t *testing.T) {
+	t.Parallel()
+
+	cfg := ConfigFromEnvWith(ConfigSource{
+		Getenv: func(string) string {
+			return ""
+		},
+		LookPath: func(string) (string, error) {
+			return "", os.ErrNotExist
+		},
+		Stat: func(string) (os.FileInfo, error) {
+			return nil, os.ErrNotExist
+		},
+		GOOS: "windows",
+		HardwareCapacity: &capshardware.CapacityInventory{
+			GPUDetected:       true,
+			GPUVendor:         capshardware.GPUVendorAMD,
+			GPUName:           "AMD Radeon RX 7900 XTX",
+			DirectMLAvailable: true,
+		},
+	})
+
+	if got := strings.Join(cfg.AccelerationHints, ","); !strings.Contains(got, "vulkan") {
+		t.Fatalf("acceleration hints = %q, want vulkan for Windows AMD native llama.cpp", got)
+	}
+	if got := strings.Join(cfg.AccelerationHints, ","); !strings.Contains(got, "directml") {
+		t.Fatalf("acceleration hints = %q, want existing DirectML hint preserved", got)
+	}
+}
+
+func TestBuildServerArgsAddsReasoningFormatForQwen(t *testing.T) {
+	t.Parallel()
+
+	args := buildServerArgs(LlamaCppSidecarConfig{
+		Host:        DefaultHost,
+		Port:        freePortForConfig(t),
+		ModelPath:   "/models/Qwen3-8B-Q4_K_M.gguf",
+		ContextSize: DefaultContextSize,
+	})
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--jinja", "--reasoning-format deepseek"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing Qwen reasoning arg %q", joined, want)
+		}
+	}
+}
+
 func TestConfigDiscoversKnownDirServerAndModel(t *testing.T) {
 	t.Parallel()
 
@@ -972,6 +1019,25 @@ func TestGPUOffloadRequestedButServerReportsCPUOnly(t *testing.T) {
 		ReportedAcceleration: []string{"cuda"},
 	}) {
 		t.Fatal("gpuOffloadRequestedButServerReportsCPUOnly() = true for CUDA server")
+	}
+}
+
+func TestSidecarAccelerationStatusReportsVulkan(t *testing.T) {
+	t.Parallel()
+
+	acceleration, reason := sidecarAccelerationStatus(LlamaCppSidecarConfig{GPULayers: 999}, &LlamaCppServerProperties{
+		ReportedAcceleration: []string{"vulkan"},
+	})
+	if len(acceleration) != 1 || acceleration[0] != "vulkan" || reason != "server_reported_vulkan" {
+		t.Fatalf("sidecarAccelerationStatus() = %+v/%q, want reported Vulkan", acceleration, reason)
+	}
+
+	acceleration, reason = sidecarAccelerationStatus(LlamaCppSidecarConfig{
+		GPULayers:         999,
+		AccelerationHints: []string{"vulkan"},
+	}, nil)
+	if len(acceleration) != 1 || acceleration[0] != "vulkan" || reason != "configured_vulkan_unconfirmed" {
+		t.Fatalf("sidecarAccelerationStatus(unconfirmed) = %+v/%q, want configured Vulkan", acceleration, reason)
 	}
 }
 
