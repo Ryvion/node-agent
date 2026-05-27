@@ -192,6 +192,68 @@ func SupportedNativeChatModels(vramBytes uint64) []string {
 	return out
 }
 
+// ActiveDownloads returns a snapshot of every in-flight model download. The
+// agent reports this set in its heartbeat status as `download:<id>:<pct>:<mb_done>:<mb_total>`
+// tokens; the hub parses those tokens and surfaces them to the buyer's
+// playground so the cold-start UI shows actual progress instead of a
+// generic spinner.
+func (m *Manager) ActiveDownloads() []ActiveDownload {
+	if m == nil {
+		return nil
+	}
+	m.downloadsMu.RLock()
+	defer m.downloadsMu.RUnlock()
+	out := make([]ActiveDownload, 0, len(m.activeDownloads))
+	for _, d := range m.activeDownloads {
+		out = append(out, *d)
+	}
+	return out
+}
+
+func (m *Manager) registerDownload(modelID string) *ActiveDownload {
+	d := &ActiveDownload{
+		ModelID:   modelID,
+		StartedAt: time.Now(),
+	}
+	m.downloadsMu.Lock()
+	m.activeDownloads[modelID] = d
+	m.downloadsMu.Unlock()
+	return d
+}
+
+func (m *Manager) updateDownloadProgress(modelID string, bytesDone, bytesTotal int64) {
+	m.downloadsMu.Lock()
+	defer m.downloadsMu.Unlock()
+	d, ok := m.activeDownloads[modelID]
+	if !ok {
+		return
+	}
+	d.BytesDone = bytesDone
+	d.BytesTotal = bytesTotal
+}
+
+func (m *Manager) completeDownload(modelID string) {
+	m.downloadsMu.Lock()
+	defer m.downloadsMu.Unlock()
+	delete(m.activeDownloads, modelID)
+}
+
+// modelIDForFilename reverse-maps a GGUF filename to the canonical model ID
+// in NativeModels. Used by the download path to register progress under the
+// public-facing model id (e.g. "qwen3-8b-reasoning") rather than the raw
+// GGUF basename (e.g. "Qwen3-8B-Q4_K_M.gguf"). Returns "" when nothing
+// matches — caller should fall back to using the basename so progress is
+// at least observable, just not tied to a catalog entry.
+func modelIDForFilename(filename string) string {
+	base := filepath.Base(filename)
+	for id, cfg := range NativeModels {
+		if cfg.FileName == base {
+			return id
+		}
+	}
+	return ""
+}
+
 // ModelFileDownloaded reports whether the GGUF for a given native model id is
 // already on disk. Used by the heartbeat advertiser to mark models with a
 // `native-model-ready:` token (in addition to the always-emitted `model:`
@@ -392,6 +454,25 @@ type Manager struct {
 	activeModelPath string
 	activeModelMode ModelMode
 	speculative     streamingSpeculativeLaunch
+
+	// activeDownloads tracks in-flight GGUF downloads keyed by model ID.
+	// Populated by downloadModelFile when it starts a transfer, cleared
+	// on success or failure. Surfaced to operators (and through them to
+	// buyers via heartbeat) so the cold-start UI can show real download
+	// progress instead of a generic spinner. Concurrency-safe via its
+	// own mutex — independent of `mu` to avoid lock-ordering issues.
+	downloadsMu     sync.RWMutex
+	activeDownloads map[string]*ActiveDownload
+}
+
+// ActiveDownload describes an in-flight GGUF transfer. Snapshot semantics:
+// callers receive a value copy via ActiveDownloads(), so reading is
+// allocation-free past the slice and safe to render in tight UI loops.
+type ActiveDownload struct {
+	ModelID    string
+	BytesDone  int64
+	BytesTotal int64
+	StartedAt  time.Time
 }
 
 func (m *Manager) SetHubAuth(hubURL string, nodeAuthToken func(int64) string) {
@@ -410,6 +491,7 @@ func New(dataDir string) *Manager {
 	port := envOr("RYV_INFERENCE_PORT", defaultPort)
 	serverURL, serverURLExplicit := envOrExplicit("RYV_SERVER_URL", platformServerURL())
 	mgr := &Manager{
+		activeDownloads:   map[string]*ActiveDownload{},
 		dataDir:           dataDir,
 		port:              port,
 		threads:           envOr("RYV_INFERENCE_THREADS", defaultThreads),
@@ -1140,7 +1222,20 @@ func (m *Manager) modelDownloadURL(cfg ModelConfig) string {
 }
 
 func (m *Manager) downloadModelFile(ctx context.Context, url, dst string) error {
-	return downloadFileWithAuth(ctx, url, dst, m.attachModelDownloadAuth)
+	// Track this download so the heartbeat can surface progress to operators
+	// and (through them) to buyers staring at the cold-start UI. modelID is
+	// resolved from the dst filename when possible — falls back to the
+	// basename when the file isn't in the native registry (e.g. a custom
+	// finetuned model from EnsureCustomModel).
+	modelID := modelIDForFilename(dst)
+	if modelID == "" {
+		modelID = filepath.Base(dst)
+	}
+	m.registerDownload(modelID)
+	defer m.completeDownload(modelID)
+	return downloadFileWithAuthAndProgress(ctx, url, dst, m.attachModelDownloadAuth, func(done, total int64) {
+		m.updateDownloadProgress(modelID, done, total)
+	})
 }
 
 func (m *Manager) attachModelDownloadAuth(req *http.Request, rawURL string) {
@@ -1152,6 +1247,19 @@ func (m *Manager) attachModelDownloadAuth(req *http.Request, rawURL string) {
 }
 
 func downloadFileWithAuth(ctx context.Context, url, dst string, attachAuth func(*http.Request, string)) error {
+	return downloadFileWithAuthAndProgress(ctx, url, dst, attachAuth, nil)
+}
+
+// downloadFileWithAuthAndProgress is the underlying download primitive. The
+// optional onProgress callback fires as bytes are written, at the same
+// 5-second cadence as the existing progressWriter logging (cheap to call;
+// just updates a small counter struct guarded by the Manager's mutex).
+func downloadFileWithAuthAndProgress(
+	ctx context.Context,
+	url, dst string,
+	attachAuth func(*http.Request, string),
+	onProgress func(bytesDone, bytesTotal int64),
+) error {
 	tmp := dst + ".tmp"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -1182,7 +1290,7 @@ func downloadFileWithAuth(ctx context.Context, url, dst string, attachAuth func(
 	}
 
 	total := resp.ContentLength
-	pw := &progressWriter{dst: f, total: total, label: filepath.Base(dst)}
+	pw := &progressWriter{dst: f, total: total, label: filepath.Base(dst), onProgress: onProgress}
 	if _, err := io.Copy(pw, resp.Body); err != nil {
 		f.Close()
 		os.Remove(tmp)
@@ -1231,18 +1339,21 @@ func redactDownloadURL(raw string) string {
 }
 
 type progressWriter struct {
-	dst     io.Writer
-	total   int64
-	written int64
-	label   string
-	lastLog time.Time
+	dst        io.Writer
+	total      int64
+	written    int64
+	label      string
+	lastLog    time.Time
+	lastReport time.Time
+	onProgress func(bytesDone, bytesTotal int64)
 }
 
 func (pw *progressWriter) Write(p []byte) (int, error) {
 	n, err := pw.dst.Write(p)
 	pw.written += int64(n)
+	now := time.Now()
 	if time.Since(pw.lastLog) > 5*time.Second {
-		pw.lastLog = time.Now()
+		pw.lastLog = now
 		if pw.total > 0 {
 			pct := float64(pw.written) / float64(pw.total) * 100
 			slog.Info("downloading", "file", pw.label, "progress", fmt.Sprintf("%.1f%%", pct),
@@ -1250,6 +1361,13 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 		} else {
 			slog.Info("downloading", "file", pw.label, "downloaded_mb", pw.written/(1024*1024))
 		}
+	}
+	// Surface progress to subscribers (Manager.activeDownloads) at ~1 Hz —
+	// fast enough to feel live in the buyer UI, slow enough to avoid lock
+	// contention on the activeDownloads mutex during the inner copy loop.
+	if pw.onProgress != nil && time.Since(pw.lastReport) > time.Second {
+		pw.lastReport = now
+		pw.onProgress(pw.written, pw.total)
 	}
 	return n, err
 }

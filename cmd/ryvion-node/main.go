@@ -3882,6 +3882,26 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	} else {
 		parts = append(parts, "public-inference-ready:0")
 	}
+	// Download progress tokens — emitted while a GGUF is in flight (either
+	// from the background prewarmer or an on-demand load triggered by a
+	// buyer's job). The hub parses these and surfaces them to the buyer's
+	// playground so the cold-start UI shows actual progress percentage
+	// instead of a generic spinner.
+	//
+	// Format: download:<modelID>:<percent>:<mb_done>:<mb_total>
+	//
+	// model IDs contain no colons so the format is unambiguous to split.
+	if infMgr != nil {
+		for _, dl := range infMgr.ActiveDownloads() {
+			pct := 0
+			if dl.BytesTotal > 0 {
+				pct = int(dl.BytesDone * 100 / dl.BytesTotal)
+			}
+			mbDone := dl.BytesDone >> 20
+			mbTotal := dl.BytesTotal >> 20
+			parts = append(parts, fmt.Sprintf("download:%s:%d:%d:%d", dl.ModelID, pct, mbDone, mbTotal))
+		}
+	}
 	parts = append(parts, speculativeRoleStatusTokens(caps, diskGB, publicInferenceReady)...)
 	parts = append(parts, smartShardingStatusTokens(caps, diskGB, publicInferenceReady)...)
 	parts = append(parts, worldGridRoleStatusTokens(caps, ffmpegOK, spatialReady)...)
