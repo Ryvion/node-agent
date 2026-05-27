@@ -271,14 +271,15 @@ func (r LlamaCppRunner) RunDashboardInferenceWithProgress(ctx context.Context, s
 	wallStart := time.Now()
 	preInferenceMs := wallStart.Sub(preInferenceStart).Milliseconds()
 	req := llamacpp.CompletionRequest{
-		BaseURL:      status.BaseURL,
-		ModelID:      spec.ModelID,
-		Prompt:       prompt,
-		SystemPrompt: spec.SystemPrompt,
-		Messages:     messages,
-		MaxTokens:    spec.MaxTokens,
-		Temperature:  0,
-		Stream:       streaming,
+		BaseURL:         status.BaseURL,
+		ModelID:         spec.ModelID,
+		Prompt:          prompt,
+		SystemPrompt:    spec.SystemPrompt,
+		Messages:        messages,
+		MaxTokens:       spec.MaxTokens,
+		Temperature:     0,
+		Stream:          streaming,
+		ReasoningEffort: spec.ReasoningEffort,
 	}
 	cacheMeta := initialCacheMetadata(spec)
 	cacheMeta = restoreSlotCacheIfRequested(runCtx, r.slotClient(), status.BaseURL, spec, cacheMeta)

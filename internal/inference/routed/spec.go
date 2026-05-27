@@ -58,11 +58,17 @@ type Spec struct {
 	ReturnText                bool                         `json:"return_text,omitempty"`
 	MaxReturnChars            int                          `json:"max_return_chars,omitempty"`
 	MaxTokens                 int                          `json:"max_tokens"`
-	Stream                    bool                         `json:"stream"`
-	CreatedAtUnixMs           int64                        `json:"created_at_unix_ms"`
-	PromptHash                string                       `json:"prompt_hash,omitempty"`
-	PromptProfileID           string                       `json:"prompt_profile_id,omitempty"`
-	CachePolicy               CachePolicy                  `json:"cache_policy,omitempty"`
+	// ReasoningEffort is the OpenAI-compatible reasoning_effort param
+	// (low | medium | high). Forwarded verbatim into the llama-server
+	// request body so reasoning models (GPT-OSS, Qwen3-reasoning) can
+	// trade off latency vs depth without restarting the sidecar. Empty
+	// string = runtime default.
+	ReasoningEffort string      `json:"reasoning_effort,omitempty"`
+	Stream          bool        `json:"stream"`
+	CreatedAtUnixMs int64       `json:"created_at_unix_ms"`
+	PromptHash      string      `json:"prompt_hash,omitempty"`
+	PromptProfileID string      `json:"prompt_profile_id,omitempty"`
+	CachePolicy     CachePolicy `json:"cache_policy,omitempty"`
 }
 
 type CachePolicy struct {

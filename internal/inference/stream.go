@@ -26,6 +26,12 @@ type chatRequest struct {
 	Stream      bool          `json:"stream"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`
+	// ReasoningEffort: "low" | "medium" | "high". Set for reasoning models
+	// (GPT-OSS, Qwen3-reasoning, DeepSeek R1). llama-server routes this
+	// into the chat template's reasoning_effort kwarg via --jinja, which
+	// changes how much the model "thinks" before answering. Empty string
+	// is omitted from the JSON and falls back to runtime default.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // chatMessage carries either a plain string OR an OpenAI multimodal
@@ -89,6 +95,25 @@ type specPayload struct {
 	ModelName   string        `json:"model_name,omitempty"`   // Human-readable name
 	Task        string        `json:"task,omitempty"`         // "custom_inference", "embedding"
 	Input       string        `json:"input,omitempty"`        // Text input for embedding tasks
+	// V8ReasoningEffort is the hub's scheduler-metadata key carrying the
+	// OpenAI-compatible reasoning_effort param ("low"|"medium"|"high").
+	// Underscore prefix marks it as out-of-band — it does not enter the
+	// model's transcript hash, so reruns at a different effort produce
+	// distinct receipts without polluting the message stream.
+	V8ReasoningEffort string `json:"_v8_reasoning_effort,omitempty"`
+}
+
+// normalizeStreamReasoningEffort lower-cases the inbound effort token and
+// drops anything that isn't a valid OpenAI-compatible reasoning_effort.
+// Returns "" on invalid input — llama-server then falls back to whatever
+// default the chat template / --chat-template-kwargs encoded.
+func normalizeStreamReasoningEffort(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "low", "medium", "high":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return ""
+	}
 }
 
 // IsEmbeddingJob returns true when the hub-provided spec_json asks the node
@@ -179,9 +204,10 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	}
 
 	reqBody := chatRequest{
-		Model:       modelName,
-		Messages:    spec.Messages,
-		Stream:      true,
+		Model:           modelName,
+		Messages:        spec.Messages,
+		ReasoningEffort: normalizeStreamReasoningEffort(spec.V8ReasoningEffort),
+		Stream:          true,
 		MaxTokens:   maxTokens,
 		Temperature: spec.Temperature,
 	}

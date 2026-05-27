@@ -44,7 +44,14 @@ type CompletionRequest struct {
 	CachePrompt      bool
 	CacheReuseTokens int
 	SlotID           *int
-	OnDelta          func(CompletionDelta) error
+	// ReasoningEffort — "low" | "medium" | "high". Passed to llama-server
+	// as the OpenAI-compatible `reasoning_effort` body field. llama-server
+	// >= b9180 with --jinja routes this into the chat template's
+	// reasoning_effort kwarg (GPT-OSS Harmony, Qwen3 deepseek, etc.).
+	// Empty string omits the field and falls back to whatever the runtime
+	// (or --chat-template-kwargs) sets as default.
+	ReasoningEffort string
+	OnDelta         func(CompletionDelta) error
 }
 
 type CompletionMessage struct {
@@ -144,14 +151,15 @@ func (c OpenAIClient) Complete(ctx context.Context, req CompletionRequest) (Comp
 func (c OpenAIClient) completeChat(ctx context.Context, req CompletionRequest) (CompletionResult, error) {
 	started := c.now()
 	body, err := json.Marshal(openAIChatRequest{
-		Model:       strings.TrimSpace(req.ModelID),
-		Messages:    openAIChatMessages(req.Messages),
-		Stream:      req.Stream,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
-		CachePrompt: optionalBool(req.CachePrompt),
-		NCacheReuse: req.CacheReuseTokens,
-		IDSlot:      cloneIntPtr(req.SlotID),
+		Model:           strings.TrimSpace(req.ModelID),
+		Messages:        openAIChatMessages(req.Messages),
+		Stream:          req.Stream,
+		MaxTokens:       req.MaxTokens,
+		Temperature:     req.Temperature,
+		CachePrompt:     optionalBool(req.CachePrompt),
+		NCacheReuse:     req.CacheReuseTokens,
+		IDSlot:          cloneIntPtr(req.SlotID),
+		ReasoningEffort: strings.ToLower(strings.TrimSpace(req.ReasoningEffort)),
 	})
 	if err != nil {
 		return CompletionResult{}, ClientError{Code: "llamacpp_request_marshal_failed"}
@@ -678,14 +686,15 @@ func cloneIntPtr(value *int) *int {
 }
 
 type openAIChatRequest struct {
-	Model       string              `json:"model,omitempty"`
-	Messages    []openAIChatMessage `json:"messages"`
-	Stream      bool                `json:"stream"`
-	MaxTokens   int                 `json:"max_tokens"`
-	Temperature float64             `json:"temperature"`
-	CachePrompt *bool               `json:"cache_prompt,omitempty"`
-	NCacheReuse int                 `json:"n_cache_reuse,omitempty"`
-	IDSlot      *int                `json:"id_slot,omitempty"`
+	Model           string              `json:"model,omitempty"`
+	Messages        []openAIChatMessage `json:"messages"`
+	Stream          bool                `json:"stream"`
+	MaxTokens       int                 `json:"max_tokens"`
+	Temperature     float64             `json:"temperature"`
+	CachePrompt     *bool               `json:"cache_prompt,omitempty"`
+	NCacheReuse     int                 `json:"n_cache_reuse,omitempty"`
+	IDSlot          *int                `json:"id_slot,omitempty"`
+	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
 }
 
 type rawCompletionRequest struct {
