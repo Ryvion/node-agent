@@ -463,6 +463,16 @@ type Manager struct {
 	// own mutex — independent of `mu` to avoid lock-ordering issues.
 	downloadsMu     sync.RWMutex
 	activeDownloads map[string]*ActiveDownload
+
+	// downloadLocks serializes downloads of the same GGUF so two
+	// concurrent callers — typically the background prewarmer and the
+	// on-demand inference loop — don't both `os.Create(dst+".tmp")` and
+	// truncate each other's bytes. Race symptom: the progress bar
+	// flip-flops between two competing writers' offsets, sometimes
+	// decreasing. Per-model lock means different models can still
+	// download in parallel; only same-model callers serialize. sync.Map
+	// gives us atomic LoadOrStore for the lock-creation race.
+	downloadLocks sync.Map
 }
 
 // ActiveDownload describes an in-flight GGUF transfer. Snapshot semantics:
@@ -1231,6 +1241,25 @@ func (m *Manager) downloadModelFile(ctx context.Context, url, dst string) error 
 	if modelID == "" {
 		modelID = filepath.Base(dst)
 	}
+
+	// Per-model lock — prevents the background prewarmer and the on-demand
+	// inference loop from concurrently creating the same `<dst>.tmp` file,
+	// which would truncate each other's bytes and cause the buyer-visible
+	// progress bar to flip-flop / reset.
+	lockI, _ := m.downloadLocks.LoadOrStore(modelID, &sync.Mutex{})
+	lock := lockI.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check after acquiring the lock — the OTHER goroutine may have
+	// finished the download while we were waiting. Skip the redundant
+	// re-download in that case; the caller (which checked Stat before
+	// calling us) cared about the file existing, not about doing the
+	// download itself.
+	if info, err := os.Stat(dst); err == nil && !info.IsDir() && info.Size() > 1<<20 {
+		return nil
+	}
+
 	m.registerDownload(modelID)
 	defer m.completeDownload(modelID)
 	return downloadFileWithAuthAndProgress(ctx, url, dst, m.attachModelDownloadAuth, func(done, total int64) {

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -381,4 +382,71 @@ func testServerPort(t *testing.T, rawURL string) string {
 		t.Fatalf("split server port: %v", err)
 	}
 	return port
+}
+
+func TestDownloadModelFileSerializesConcurrentCallers(t *testing.T) {
+	t.Parallel()
+
+	// Slow handler — sleeps mid-stream so concurrent callers overlap.
+	// If the per-model lock works, only ONE GET reaches the server even
+	// when many goroutines race. Without the lock, every goroutine would
+	// hit the server and the .tmp file would get truncated repeatedly.
+	var hits int32
+	body := strings.Repeat("x", 4<<20) // 4 MiB > the >1MiB "downloaded" floor
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		// Honest Content-Length so net/http actually reads the body. An
+		// earlier draft set this to "0" and discovered the bug below:
+		// dst ended up at size 0, the file-exists skip on subsequent
+		// callers failed, and all 5 goroutines re-downloaded — which
+		// looked like a lock failure but was a test-setup artifact.
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		// Stream in small chunks with a tiny sleep so concurrent callers
+		// definitely overlap during the lock window.
+		flusher, _ := w.(http.Flusher)
+		const chunk = 64 << 10
+		for i := 0; i < len(body); i += chunk {
+			end := i + chunk
+			if end > len(body) {
+				end = len(body)
+			}
+			_, _ = w.Write([]byte(body[i:end]))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	mgr := New(t.TempDir())
+	if err := os.MkdirAll(filepath.Join(mgr.dataDir, "models"), 0o755); err != nil {
+		t.Fatalf("mkdir models: %v", err)
+	}
+	dst := filepath.Join(mgr.dataDir, "models", "Qwen3-8B-Q4_K_M.gguf")
+
+	// Fire 5 concurrent download requests for the same model.
+	const callers = 5
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			errs <- mgr.downloadModelFile(context.Background(), srv.URL, dst)
+		}()
+	}
+	for i := 0; i < callers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("downloadModelFile call %d: %v", i, err)
+		}
+	}
+
+	// Only one caller actually hit the server — the other 4 skipped after
+	// acquiring the lock and seeing the file already on disk.
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected exactly 1 HTTP GET to the upstream, got %d", got)
+	}
+	if info, err := os.Stat(dst); err != nil {
+		t.Fatalf("stat dst after download: %v", err)
+	} else if info.Size() != int64(len(body)) {
+		t.Fatalf("dst size = %d, want %d (truncation bug?)", info.Size(), len(body))
+	}
 }
