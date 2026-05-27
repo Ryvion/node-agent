@@ -392,7 +392,10 @@ func TestDownloadModelFileSerializesConcurrentCallers(t *testing.T) {
 	// when many goroutines race. Without the lock, every goroutine would
 	// hit the server and the .tmp file would get truncated repeatedly.
 	var hits int32
-	body := strings.Repeat("x", 4<<20) // 4 MiB > the >1MiB "downloaded" floor
+	// Body must start with the GGUF magic header — downloadModelFile now
+	// validates after fetch and removes/errors on a missing magic. 4 MiB
+	// of payload is still well above the >1MiB sanity floor.
+	body := "GGUF" + strings.Repeat("x", 4<<20)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		// Honest Content-Length so net/http actually reads the body. An
@@ -448,5 +451,52 @@ func TestDownloadModelFileSerializesConcurrentCallers(t *testing.T) {
 		t.Fatalf("stat dst after download: %v", err)
 	} else if info.Size() != int64(len(body)) {
 		t.Fatalf("dst size = %d, want %d (truncation bug?)", info.Size(), len(body))
+	}
+}
+
+func TestDownloadModelFileRemovesCorruptOnDiskGGUF(t *testing.T) {
+	t.Parallel()
+
+	// HTTP server serves a valid (magic="GGUF") body so the redownload
+	// succeeds — the test asserts that downloadModelFile rejects the
+	// pre-existing corrupt file on disk + actually goes out to the
+	// network instead of silently returning early.
+	var hits int32
+	body := "GGUF" + strings.Repeat("y", 2<<20) // 2 MiB
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	mgr := New(t.TempDir())
+	if err := os.MkdirAll(filepath.Join(mgr.dataDir, "models"), 0o755); err != nil {
+		t.Fatalf("mkdir models: %v", err)
+	}
+	dst := filepath.Join(mgr.dataDir, "models", "Qwen3-8B-Q4_K_M.gguf")
+
+	// Seed a "corrupt" file > 1 MiB so the size check passes but the
+	// magic-byte check fails — simulates a previously-interrupted
+	// download that left garbage on disk.
+	corrupt := strings.Repeat("0", 2<<20)
+	if err := os.WriteFile(dst, []byte(corrupt), 0o644); err != nil {
+		t.Fatalf("seed corrupt file: %v", err)
+	}
+
+	if err := mgr.downloadModelFile(context.Background(), srv.URL, dst); err != nil {
+		t.Fatalf("downloadModelFile: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected 1 HTTP GET after corrupt-file recovery, got %d", got)
+	}
+	// The bad file must have been replaced with a valid GGUF.
+	if err := validateGGUF(dst); err != nil {
+		t.Fatalf("post-recovery file still invalid: %v", err)
+	}
+	if info, err := os.Stat(dst); err != nil {
+		t.Fatalf("stat dst: %v", err)
+	} else if info.Size() != int64(len(body)) {
+		t.Fatalf("dst size = %d, want %d", info.Size(), len(body))
 	}
 }

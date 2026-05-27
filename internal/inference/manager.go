@@ -255,9 +255,16 @@ func modelIDForFilename(filename string) string {
 }
 
 // ModelFileDownloaded reports whether the GGUF for a given native model id is
-// already on disk. Used by the heartbeat advertiser to mark models with a
-// `native-model-ready:` token (in addition to the always-emitted `model:`
-// capability token) so the hub can prefer warm nodes for scheduling.
+// already on disk AND has a valid GGUF magic header. Used by the heartbeat
+// advertiser to mark models with a `native-model-ready:` token (in addition
+// to the always-emitted `model:` capability token) so the hub can prefer
+// warm nodes for scheduling.
+//
+// Cheap: just stats the file and reads the first 4 bytes — no full-file
+// hash. False positives (advertising a file that llama-server later
+// fails to load for some non-magic reason) are still possible but
+// vastly less likely than with a bare size check, which would happily
+// approve an 11 GB partial download.
 func (m *Manager) ModelFileDownloaded(modelID string) bool {
 	cfg, ok := NativeModels[strings.TrimSpace(modelID)]
 	if !ok || cfg.FileName == "" {
@@ -268,11 +275,14 @@ func (m *Manager) ModelFileDownloaded(modelID string) bool {
 	if err != nil || info.IsDir() {
 		return false
 	}
-	// Guard against a zero-byte or truncated file from a previous failed
-	// download — we'd rather mark it not-ready than have the hub route a
-	// real job to an empty file. 1 MiB is well below the smallest real GGUF
-	// in the registry (TinyLlama Q4_K_M is ~700 MB).
-	return info.Size() > 1<<20
+	// 1 MiB is well below the smallest real GGUF in the registry
+	// (TinyLlama Q4_K_M is ~700 MB), so anything smaller is clearly junk.
+	if info.Size() <= 1<<20 {
+		return false
+	}
+	// Magic-byte check — catches truncated downloads, CDN error pages
+	// that returned 200 with HTML, etc. validateGGUF reads just 4 bytes.
+	return validateGGUF(modelPath) == nil
 }
 
 // ReadyNativeChatModels returns the subset of SupportedNativeChatModels whose
@@ -323,8 +333,22 @@ func (m *Manager) PrewarmEligibleModels(ctx context.Context, vramBytes uint64) {
 			continue
 		}
 		modelPath := filepath.Join(modelsDir, cfg.FileName)
+		// "Already on disk" = exists + valid GGUF magic. A partial /
+		// corrupt file from a previously interrupted download must be
+		// deleted here, otherwise the inference loop later tries to
+		// load it and llama-server keeps failing until the 5-min
+		// EnsureModel deadline fires (the "timeout waiting for X to
+		// start" error operators were hitting). downloadModelFile
+		// also validates after fetch, but doing it here avoids the
+		// extra round-trip when the file is already good.
 		if info, err := os.Stat(modelPath); err == nil && !info.IsDir() && info.Size() > 1<<20 {
-			continue // already on disk
+			if vErr := validateGGUF(modelPath); vErr == nil {
+				continue // already on disk + valid
+			} else {
+				slog.Warn("prewarm: discarding invalid GGUF, will re-download",
+					"model", id, "path", modelPath, "error", vErr)
+				_ = os.Remove(modelPath)
+			}
 		}
 		if err := checkDiskSpace(m.dataDir); err != nil {
 			slog.Warn("prewarm: disk space check failed, aborting prewarm",
@@ -604,7 +628,24 @@ func (m *Manager) Start(ctx context.Context) error {
 			}
 			activeMode = cfg.Mode
 			modelPath = filepath.Join(modelDir, cfg.FileName)
-			if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+			// Download trigger: file missing OR present but failing GGUF
+			// magic-byte validation. The second case catches truncated /
+			// corrupt files left behind by a previously interrupted
+			// download — without this check llama-server would start
+			// with a bad GGUF and crash, the loop would relaunch, and
+			// EnsureModel would eventually return "timeout waiting for
+			// X to start" to the buyer. downloadModelFile is idempotent
+			// + per-model locked, so re-entering it is safe.
+			fileMissing := false
+			if info, statErr := os.Stat(modelPath); statErr != nil || info.IsDir() || info.Size() <= 1<<20 {
+				fileMissing = true
+			} else if vErr := validateGGUF(modelPath); vErr != nil {
+				slog.Warn("on-disk GGUF failed magic-byte validation, removing + re-downloading",
+					"model", currentModel, "path", modelPath, "error", vErr)
+				_ = os.Remove(modelPath)
+				fileMissing = true
+			}
+			if fileMissing {
 				if err := checkDiskSpace(m.dataDir); err != nil {
 					slog.Error("disk space check failed before model download", "error", err)
 					m.setBlockerReason(BlockerDiskSpace)
@@ -1252,19 +1293,38 @@ func (m *Manager) downloadModelFile(ctx context.Context, url, dst string) error 
 	defer lock.Unlock()
 
 	// Re-check after acquiring the lock — the OTHER goroutine may have
-	// finished the download while we were waiting. Skip the redundant
-	// re-download in that case; the caller (which checked Stat before
-	// calling us) cared about the file existing, not about doing the
-	// download itself.
+	// finished the download while we were waiting. But ALSO validate the
+	// GGUF magic header so a corrupt/partial file from a previous
+	// interrupted run gets deleted and re-downloaded instead of being
+	// fed to llama-server (which would crash on every retry until the
+	// 5-min EnsureModel deadline fires — surfaces as the buyer-visible
+	// "timeout waiting for <model> to start" error).
 	if info, err := os.Stat(dst); err == nil && !info.IsDir() && info.Size() > 1<<20 {
-		return nil
+		if vErr := validateGGUF(dst); vErr == nil {
+			return nil
+		} else {
+			slog.Warn("on-disk GGUF failed validation, re-downloading",
+				"model", modelID, "path", dst, "error", vErr)
+			_ = os.Remove(dst)
+		}
 	}
 
 	m.registerDownload(modelID)
 	defer m.completeDownload(modelID)
-	return downloadFileWithAuthAndProgress(ctx, url, dst, m.attachModelDownloadAuth, func(done, total int64) {
+	if err := downloadFileWithAuthAndProgress(ctx, url, dst, m.attachModelDownloadAuth, func(done, total int64) {
 		m.updateDownloadProgress(modelID, done, total)
-	})
+	}); err != nil {
+		return err
+	}
+	// Validate the freshly-downloaded file. A non-GGUF response (e.g. an
+	// HTML error page from the CDN that returned 200 but with wrong body,
+	// or a truncated transfer with status 200 OK that ended early) would
+	// otherwise sit on disk forever and brick this model on every run.
+	if err := validateGGUF(dst); err != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("downloaded GGUF failed validation (%s): %w", filepath.Base(dst), err)
+	}
+	return nil
 }
 
 func (m *Manager) attachModelDownloadAuth(req *http.Request, rawURL string) {
