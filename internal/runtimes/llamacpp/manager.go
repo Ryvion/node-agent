@@ -1406,11 +1406,24 @@ func jinjaTemplateRequiredForModel(modelPath string) bool {
 	}
 }
 
+// reasoningFormatForModel returns the llama-server `--reasoning-format` flag
+// value that routes a model's thinking output into the `reasoning_content`
+// SSE delta field. Without this flag llama-server emits everything in
+// `content` (often with raw channel/think markers), which the frontend
+// renders as a confusing wall of internal monologue.
+//
+//   - "deepseek": parses `<think>...</think>` tags. Right for Qwen3 and
+//     DeepSeek R1 — their chat templates wrap thinking in think tags.
+//   - "auto": llama.cpp auto-detects. Required for GPT-OSS, which uses
+//     the Harmony channel format; per the llama.cpp official guide
+//     (discussions/15396) the right invocation is `--jinja --reasoning-format auto`.
 func reasoningFormatForModel(modelPath string) string {
 	meta := modelMetadata(modelPath)
 	switch meta.familyHint {
 	case "qwen", "deepseek":
 		return "deepseek"
+	case "gpt-oss":
+		return "auto"
 	default:
 		return ""
 	}

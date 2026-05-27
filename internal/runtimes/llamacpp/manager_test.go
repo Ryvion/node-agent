@@ -360,11 +360,16 @@ func TestBuildServerArgsAddsHarmonyJinjaForGPTOSS(t *testing.T) {
 		ContextSize: DefaultContextSize,
 	})
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--jinja") {
-		t.Fatalf("args = %q, missing GPT-OSS Jinja chat-template flag", joined)
-	}
-	if strings.Contains(joined, "--reasoning-format") {
-		t.Fatalf("args = %q, GPT-OSS should use Harmony/Jinja without DeepSeek reasoning format", joined)
+	// GPT-OSS uses the Harmony channel format. Per llama.cpp's official
+	// guide (ggml-org/llama.cpp discussions/15396), the right launch
+	// flags are `--jinja` PLUS `--reasoning-format auto`. Without the
+	// reasoning-format flag, llama-server emits the model's analysis
+	// channel inline in `content` and the frontend can't separate the
+	// thinking from the answer.
+	for _, want := range []string{"--jinja", "--reasoning-format auto"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args = %q, missing GPT-OSS Harmony flag %q", joined, want)
+		}
 	}
 }
 
