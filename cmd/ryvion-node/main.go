@@ -967,6 +967,21 @@ func runNode(ctx context.Context) {
 	}
 	startUserImageRuntimePrewarm(ctx, caps, detectAvailableDiskGB(), strings.TrimSpace(caps.GPUModel) != "")
 
+	// Prewarm native chat-model GGUFs in the background so the *first*
+	// buyer request to Qwen3 / GPT-OSS / Gemma doesn't trigger a 5-15 min
+	// on-demand download. Sequential, non-blocking — startup continues
+	// immediately and the heartbeat begins reporting normally. As each
+	// GGUF lands it gets surfaced via the `native-model-ready:` status
+	// token so the hub can prefer warm nodes for scheduling.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("native model prewarm panic", "error", r)
+			}
+		}()
+		infMgr.PrewarmEligibleModels(ctx, caps.VRAMBytes)
+	}()
+
 	// Health report loop keeps scheduler-facing capability flags up to date
 	// (for example native inference readiness).
 	go func() {
@@ -3847,8 +3862,22 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	}
 	if publicInferenceReady {
 		parts = append(parts, "public-inference-ready:1")
-		for _, modelID := range inference.SupportedNativeChatModels(caps.VRAMBytes) {
+		// `model:X` is the hardware-eligibility token — what this node *can*
+		// run given its VRAM. The hub uses it as a hard capability gate.
+		// `native-model-ready:X` is the warm-state token — what this node
+		// can serve *immediately* with no download stall. PrewarmEligibleModels
+		// runs in the background at startup so the ready set converges with
+		// the eligible set within a few minutes of a fresh node coming up.
+		supported := inference.SupportedNativeChatModels(caps.VRAMBytes)
+		for _, modelID := range supported {
 			parts = append(parts, "model:"+modelID)
+		}
+		if infMgr != nil {
+			for _, modelID := range supported {
+				if infMgr.ModelFileDownloaded(modelID) {
+					parts = append(parts, "native-model-ready:"+modelID)
+				}
+			}
 		}
 	} else {
 		parts = append(parts, "public-inference-ready:0")

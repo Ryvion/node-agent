@@ -168,6 +168,12 @@ var NativeModels = map[string]ModelConfig{
 // SupportedNativeChatModels returns chat models this node is willing to advertise
 // to the hub. Large gated models stay hidden unless local hardware is realistically
 // capable; the hub then uses these tokens as a hard capability gate.
+//
+// Note: this is the *hardware-eligible* list — it does NOT check whether the
+// GGUF is on disk. The hub may still route a job to a node whose model file
+// hasn't been downloaded yet; the node will then download on demand. To
+// eliminate first-request latency the agent calls PrewarmEligibleModels at
+// startup, which downloads every entry in this list in the background.
 func SupportedNativeChatModels(vramBytes uint64) []string {
 	out := make([]string, 0, len(NativeModels))
 	for id, cfg := range NativeModels {
@@ -184,6 +190,108 @@ func SupportedNativeChatModels(vramBytes uint64) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ModelFileDownloaded reports whether the GGUF for a given native model id is
+// already on disk. Used by the heartbeat advertiser to mark models with a
+// `native-model-ready:` token (in addition to the always-emitted `model:`
+// capability token) so the hub can prefer warm nodes for scheduling.
+func (m *Manager) ModelFileDownloaded(modelID string) bool {
+	cfg, ok := NativeModels[strings.TrimSpace(modelID)]
+	if !ok || cfg.FileName == "" {
+		return false
+	}
+	modelPath := filepath.Join(m.dataDir, "models", cfg.FileName)
+	info, err := os.Stat(modelPath)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	// Guard against a zero-byte or truncated file from a previous failed
+	// download — we'd rather mark it not-ready than have the hub route a
+	// real job to an empty file. 1 MiB is well below the smallest real GGUF
+	// in the registry (TinyLlama Q4_K_M is ~700 MB).
+	return info.Size() > 1<<20
+}
+
+// ReadyNativeChatModels returns the subset of SupportedNativeChatModels whose
+// GGUF is already on disk and ready to serve without a download stall. This
+// is what should be advertised to operators / surfaced in the dashboard's
+// "this node is ready for X" view; the broader SupportedNativeChatModels list
+// stays the source of truth for hardware eligibility.
+func (m *Manager) ReadyNativeChatModels(vramBytes uint64) []string {
+	supported := SupportedNativeChatModels(vramBytes)
+	ready := make([]string, 0, len(supported))
+	for _, id := range supported {
+		if m.ModelFileDownloaded(id) {
+			ready = append(ready, id)
+		}
+	}
+	return ready
+}
+
+// PrewarmEligibleModels downloads every GGUF this node's hardware can serve
+// in the background, so the *first* buyer request to any reasoning model
+// doesn't trigger a 5-15 minute on-demand download. Downloads are sequential
+// to avoid disk thrashing + bandwidth contention on the operator's link.
+//
+// Safe to call multiple times — already-downloaded files are skipped via the
+// os.Stat check in the existing download loop. Designed to run in a
+// goroutine fired at node-agent startup:
+//
+//	go infMgr.PrewarmEligibleModels(ctx, caps.VRAMBytes)
+//
+// Cancellation propagates through ctx; the download loop polls for it
+// between chunks.
+func (m *Manager) PrewarmEligibleModels(ctx context.Context, vramBytes uint64) {
+	supported := SupportedNativeChatModels(vramBytes)
+	if len(supported) == 0 {
+		return
+	}
+	modelsDir := filepath.Join(m.dataDir, "models")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		slog.Warn("prewarm: cannot create models dir", "error", err)
+		return
+	}
+	for _, id := range supported {
+		if ctx.Err() != nil {
+			return
+		}
+		cfg, ok := NativeModels[id]
+		if !ok || cfg.FileName == "" {
+			continue
+		}
+		modelPath := filepath.Join(modelsDir, cfg.FileName)
+		if info, err := os.Stat(modelPath); err == nil && !info.IsDir() && info.Size() > 1<<20 {
+			continue // already on disk
+		}
+		if err := checkDiskSpace(m.dataDir); err != nil {
+			slog.Warn("prewarm: disk space check failed, aborting prewarm",
+				"model", id, "error", err)
+			return
+		}
+		downloadURL := m.modelDownloadURL(cfg)
+		slog.Info("prewarming model", "model", id, "url", redactDownloadURL(downloadURL))
+		if err := m.downloadModelFile(ctx, downloadURL, modelPath); err != nil {
+			slog.Warn("prewarm: model download failed (will retry on first job)",
+				"model", id, "error", err)
+			// Don't return — try the next model. The failed one will be
+			// retried on demand from the existing job-execution path.
+			continue
+		}
+		slog.Info("prewarmed model", "model", id)
+		// Vision projector (mmproj), if any — same opportunistic prewarm.
+		if cfg.MmprojURL != "" && cfg.MmprojFileName != "" {
+			mmprojPath := filepath.Join(modelsDir, cfg.MmprojFileName)
+			if info, err := os.Stat(mmprojPath); err == nil && !info.IsDir() && info.Size() > 1<<20 {
+				continue
+			}
+			if err := m.downloadModelFile(ctx, cfg.MmprojURL, mmprojPath); err != nil {
+				slog.Warn("prewarm: mmproj download failed (model will run text-only until retry)",
+					"model", id, "error", err)
+				_ = os.Remove(mmprojPath)
+			}
+		}
+	}
 }
 
 func meetsModelVRAMRequirement(vramBytes, minVRAMBytes uint64) bool {
