@@ -746,11 +746,15 @@ type openAIChatStreamChunk struct {
 
 type openAIChatStreamChoice struct {
 	Delta struct {
-		Content string `json:"content"`
+		Content          string `json:"content"`
+		ReasoningContent string `json:"reasoning_content"`
+		Reasoning        string `json:"reasoning"`
 	} `json:"delta"`
-	Content      string `json:"content"`
-	Text         string `json:"text"`
-	FinishReason string `json:"finish_reason,omitempty"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content"`
+	Reasoning        string `json:"reasoning"`
+	Text             string `json:"text"`
+	FinishReason     string `json:"finish_reason,omitempty"`
 }
 
 type openAIChatResponse struct {
@@ -777,11 +781,15 @@ type openAIChatResponse struct {
 
 type openAIChatChoice struct {
 	Message struct {
-		Content string `json:"content"`
+		Content          string `json:"content"`
+		ReasoningContent string `json:"reasoning_content"`
+		Reasoning        string `json:"reasoning"`
 	} `json:"message"`
-	Content      string `json:"content"`
-	Text         string `json:"text"`
-	FinishReason string `json:"finish_reason,omitempty"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content"`
+	Reasoning        string `json:"reasoning"`
+	Text             string `json:"text"`
+	FinishReason     string `json:"finish_reason,omitempty"`
 }
 
 type llamaTimings struct {
@@ -838,14 +846,19 @@ func (t *llamaTimings) speculativeCounts() (int64, int64) {
 }
 
 func generatedTextFromStreamChoice(choice openAIChatStreamChoice) string {
-	switch {
-	case choice.Delta.Content != "":
-		return choice.Delta.Content
-	case choice.Content != "":
-		return choice.Content
-	default:
-		return choice.Text
+	if combined := combineReasoningAndContent(
+		firstNonEmptyString(choice.Delta.ReasoningContent, choice.Delta.Reasoning),
+		choice.Delta.Content,
+	); combined != "" {
+		return combined
 	}
+	if combined := combineReasoningAndContent(
+		firstNonEmptyString(choice.ReasoningContent, choice.Reasoning),
+		choice.Content,
+	); combined != "" {
+		return combined
+	}
+	return choice.Text
 }
 
 func generatedTextFromStreamChunk(chunk openAIChatStreamChunk) string {
@@ -885,14 +898,39 @@ func generatedTextFromChatResponse(payload openAIChatResponse) string {
 }
 
 func generatedTextFromChatChoice(choice openAIChatChoice) string {
-	switch {
-	case choice.Message.Content != "":
-		return choice.Message.Content
-	case choice.Content != "":
-		return choice.Content
-	default:
-		return choice.Text
+	if combined := combineReasoningAndContent(
+		firstNonEmptyString(choice.Message.ReasoningContent, choice.Message.Reasoning),
+		choice.Message.Content,
+	); combined != "" {
+		return combined
 	}
+	if combined := combineReasoningAndContent(
+		firstNonEmptyString(choice.ReasoningContent, choice.Reasoning),
+		choice.Content,
+	); combined != "" {
+		return combined
+	}
+	return choice.Text
+}
+
+func combineReasoningAndContent(reasoning, content string) string {
+	var out strings.Builder
+	if content != "" {
+		out.WriteString(content)
+	}
+	if reasoning != "" {
+		out.WriteString(reasoning)
+	}
+	return out.String()
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func rawCompletionPrompt(req CompletionRequest) (string, string) {

@@ -80,6 +80,55 @@ func TestOpenAIClientStreamingChunksComputeTimings(t *testing.T) {
 	}
 }
 
+func TestOpenAIClientStreamingAcceptsReasoningOnlyDeltas(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	clock := &sequenceClock{times: []time.Time{
+		base,
+		base.Add(200 * time.Millisecond),
+		base.Add(900 * time.Millisecond),
+	}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"reasoning_content":"thinking "}}]}`)
+		fmt.Fprintln(w, `data: {"choices":[{"delta":{"reasoning":"through"}}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}`)
+		fmt.Fprintln(w, `data: {"choices":[{"finish_reason":"length"}],"timings":{"predicted_n":2}}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer server.Close()
+
+	var deltas []string
+	result, err := (OpenAIClient{HTTPClient: server.Client(), Now: clock.Now}).Complete(context.Background(), CompletionRequest{
+		BaseURL:     server.URL,
+		ModelID:     "Qwen3-8B-Q4_K_M.gguf",
+		Prompt:      "Think briefly.",
+		MaxTokens:   8,
+		Temperature: 0,
+		Stream:      true,
+		OnDelta: func(delta CompletionDelta) error {
+			deltas = append(deltas, delta.Text)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if string(result.Output) != "thinking through" {
+		t.Fatalf("output = %q, want reasoning-only stream output", result.Output)
+	}
+	if strings.Join(deltas, "") != "thinking through" {
+		t.Fatalf("deltas = %+v, want reasoning deltas", deltas)
+	}
+	if result.TTFTMs != 200 || result.TotalTimeMs != 900 {
+		t.Fatalf("timings = ttft %d total %d, want 200/900", result.TTFTMs, result.TotalTimeMs)
+	}
+	if result.TokensGenerated != 2 || result.PromptTokens != 9 {
+		t.Fatalf("tokens = %+v, want usage token counts", result)
+	}
+}
+
 func TestOpenAIClientNonStreamingCompletion(t *testing.T) {
 	base := time.Unix(1_800_000_000, 0)
 	clock := &sequenceClock{times: []time.Time{
@@ -124,6 +173,38 @@ func TestOpenAIClientNonStreamingCompletion(t *testing.T) {
 	}
 	if result.TokensGenerated != 2 || result.RuntimeMeasurementStatus != RuntimeMeasurementStatusMeasured || result.MetadataParseStatus != MetadataParseStatusOK {
 		t.Fatalf("normalized token metadata = %+v, want OpenAI usage token count", result)
+	}
+}
+
+func TestOpenAIClientNonStreamingAcceptsReasoningOnlyMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"choices":[{"message":{"reasoning_content":"reasoned but hit the cap"},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}`)
+	}))
+	defer server.Close()
+
+	result, err := (OpenAIClient{HTTPClient: server.Client()}).Complete(context.Background(), CompletionRequest{
+		BaseURL:     server.URL,
+		ModelID:     "Qwen3-8B-Q4_K_M.gguf",
+		Prompt:      "Think briefly.",
+		MaxTokens:   6,
+		Temperature: 0,
+		Stream:      false,
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if string(result.Output) != "reasoned but hit the cap" {
+		t.Fatalf("output = %q, want reasoning-only message output", result.Output)
+	}
+	if result.TokensGenerated != 6 || result.PromptTokens != 5 {
+		t.Fatalf("tokens = %+v, want usage token counts", result)
+	}
+	if result.FinishReason != FinishReasonLength || !result.MaxTokensReached {
+		t.Fatalf("finish metadata = %+v, want length cap", result)
 	}
 }
 
