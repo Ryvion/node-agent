@@ -132,8 +132,13 @@ func normalizeStreamReasoningEffort(raw string) string {
 // "analysis" loop that never emits its final channel. Each family is pinned to
 // its vendor-recommended profile instead:
 //
-//   - GPT-OSS: temp 1.0, top_p 1.0, top_k 0 (OpenAI / llama.cpp guide
-//     discussions/15396 — "Do not use repetition penalties").
+//   - GPT-OSS: temp 1.0, top_p 1.0, no repetition penalty (OpenAI / llama.cpp
+//     guide discussions/15396 — "Do not use repetition penalties"). We keep a
+//     modest top_k 40 rather than OpenAI's top_k 0: with no tail truncation the
+//     model occasionally samples a sub-1% token mid-word (the guide warns about
+//     exactly this), producing stray typos. At temp 1.0, 40 candidates is far
+//     more diversity than the ~handful that drove the original low-temp
+//     repetition loop, so it clips the garbage tail without regressing.
 //   - Qwen3 / DeepSeek-R1 thinking: temp 0.6, top_p 0.95, top_k 20 (Qwen team's
 //     published thinking-mode recommendation).
 //
@@ -142,7 +147,7 @@ func normalizeStreamReasoningEffort(raw string) string {
 func reasoningSamplingForModel(modelName string) (temp, topP, minP float64, topK int, ok bool) {
 	switch streamingFamilyHintForModel(modelName) {
 	case "gpt-oss":
-		return 1.0, 1.0, 0.0, 0, true
+		return 1.0, 1.0, 0.0, 40, true
 	case "qwen", "deepseek":
 		return 0.6, 0.95, 0.0, 20, true
 	default:

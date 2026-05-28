@@ -26,9 +26,11 @@ func TestReasoningSamplingForModel(t *testing.T) {
 		topK             int
 	}{
 		// GPT-OSS: OpenAI / llama.cpp guide discussions/15396 — temp 1.0,
-		// top_p 1.0, top_k 0, no repetition penalty. min_p pinned to 0 to
-		// override llama-server's 0.1 default.
-		{"gpt-oss-20b", true, 1.0, 1.0, 0.0, 0},
+		// top_p 1.0, no repetition penalty. min_p pinned to 0 to override
+		// llama-server's 0.1 default. top_k 40 (not OpenAI's 0) clips the
+		// low-probability tail that caused stray mid-word typos; at temp 1.0
+		// it stays well clear of the repetition low-temp sampling triggered.
+		{"gpt-oss-20b", true, 1.0, 1.0, 0.0, 40},
 		// Qwen3 thinking-mode recommendation.
 		{"qwen3-8b-reasoning", true, 0.6, 0.95, 0.0, 20},
 		// Non-reasoning models keep the buyer temperature + server defaults.
@@ -83,7 +85,7 @@ func TestChatRequestCarriesReasoningSampling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"temperature":1`, `"top_p":1`, `"min_p":0`, `"top_k":0`} {
+	for _, want := range []string{`"temperature":1`, `"top_p":1`, `"min_p":0`, `"top_k":40`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("gpt-oss request missing %q, got %s", want, body)
 		}
