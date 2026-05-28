@@ -3178,6 +3178,7 @@ func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work
 		Getenv:          os.Getenv,
 		Policy:          modelpolicy.FromEnv(),
 		LlamaCppManager: manager,
+		AttachAuth:      nodeModelArtifactAuth(client),
 		BenchmarkRunner: llamacpp.BenchmarkRunner{
 			Sidecar: manager,
 			Client:  llamacpp.OpenAIClient{},
@@ -3270,6 +3271,22 @@ func processOptionalV7ModelPrepare(ctx context.Context, client *hub.Client, work
 		requestV7CapabilityHeartbeat("v7_model_prepare_changed")
 	}
 	return true, snapshot, err
+}
+
+func nodeModelArtifactAuth(client *hub.Client) func(*http.Request, string) {
+	return func(req *http.Request, rawURL string) {
+		if req == nil || client == nil || !isNodeModelArtifactDownloadURL(rawURL) {
+			return
+		}
+		req.Header.Set("X-Node-Token", client.NodeAuthToken(0))
+	}
+}
+
+func isNodeModelArtifactDownloadURL(rawURL string) bool {
+	lower := strings.ToLower(strings.TrimSpace(rawURL))
+	return (strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://")) &&
+		strings.Contains(lower, "/api/v1/node/models/") &&
+		strings.Contains(lower, "/download")
 }
 
 // relayStreamingFailure sends a terminal SSE error chunk to hub-orch so the

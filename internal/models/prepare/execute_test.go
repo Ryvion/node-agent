@@ -65,7 +65,7 @@ func TestExecutePrepareAssignmentPolicyBlocksDownload(t *testing.T) {
 func TestExecutePrepareAssignmentDownloadsVerifiesAndInstallsFromHTTP(t *testing.T) {
 	t.Parallel()
 
-	body := []byte("gguf-model-body")
+	body := []byte("GGUF-model-body")
 	cacheDir := t.TempDir()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -104,7 +104,7 @@ func TestExecutePrepareAssignmentDownloadsVerifiesAndInstallsFromHTTP(t *testing
 func TestExecutePrepareAssignmentSHAMismatchFailsSafely(t *testing.T) {
 	t.Parallel()
 
-	body := []byte("correct-body")
+	body := []byte("GGUF-correct-body")
 	cacheDir := t.TempDir()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)
@@ -112,7 +112,7 @@ func TestExecutePrepareAssignmentSHAMismatchFailsSafely(t *testing.T) {
 	defer ts.Close()
 
 	spec := testPrepareSpec(ts.URL+"/TinyLlama.Q4_K_M.gguf", body, cacheDir)
-	spec.ArtifactSHA256 = hashBytes([]byte("different-body"))
+	spec.ArtifactSHA256 = hashBytes([]byte("GGUF-different-body"))
 	receipt, handled, err := ExecutePrepareAssignment(context.Background(), testPrepareSpecJSON(t, spec), testPrepareOptions(cacheDir))
 	if !handled {
 		t.Fatal("handled = false, want true")
@@ -133,10 +133,42 @@ func TestExecutePrepareAssignmentSHAMismatchFailsSafely(t *testing.T) {
 	}
 }
 
+func TestExecutePrepareAssignmentRejectsUnverifiedNonGGUF(t *testing.T) {
+	t.Parallel()
+
+	body := []byte("not-a-gguf")
+	cacheDir := t.TempDir()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer ts.Close()
+
+	spec := testPrepareSpec(ts.URL+"/TinyLlama.Q4_K_M.gguf", body, cacheDir)
+	spec.ArtifactSHA256 = ""
+	receipt, handled, err := ExecutePrepareAssignment(context.Background(), testPrepareSpecJSON(t, spec), testPrepareOptions(cacheDir))
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if err == nil {
+		t.Fatal("error = nil, want artifact format rejection")
+	}
+	metadata := prepareMetadata(t, receipt)
+	if metadata["error_code"] != "artifact_format_invalid" || metadata["installed"] != false {
+		t.Fatalf("receipt metadata = %+v", metadata)
+	}
+	destination, err := modelcache.ModelPath(cacheDir, spec.ModelID, spec.ArtifactURI)
+	if err != nil {
+		t.Fatalf("ModelPath() error = %v", err)
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("destination stat err = %v, want not exist", err)
+	}
+}
+
 func TestExecutePrepareAssignmentExistingModelSkipsDownloadWhenHashMatches(t *testing.T) {
 	t.Parallel()
 
-	body := []byte("cached-body")
+	body := []byte("GGUF-cached-body")
 	cacheDir := t.TempDir()
 	spec := testPrepareSpec("https://models.example/TinyLlama.Q4_K_M.gguf", body, cacheDir)
 	destination, err := modelcache.ModelPath(cacheDir, spec.ModelID, spec.ArtifactURI)
@@ -153,7 +185,7 @@ func TestExecutePrepareAssignmentExistingModelSkipsDownloadWhenHashMatches(t *te
 	var calls atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		_, _ = w.Write([]byte("new-body"))
+		_, _ = w.Write([]byte("GGUF-new-body"))
 	}))
 	defer ts.Close()
 	spec.ArtifactURI = ts.URL + "/TinyLlama.Q4_K_M.gguf"
@@ -177,7 +209,7 @@ func TestExecutePrepareAssignmentExistingModelSkipsDownloadWhenHashMatches(t *te
 func TestExecutePrepareAssignmentKeepWarmStartsLlamaCppManager(t *testing.T) {
 	t.Parallel()
 
-	body := []byte("warm-body")
+	body := []byte("GGUF-warm-body")
 	cacheDir := t.TempDir()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(body)

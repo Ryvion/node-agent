@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,7 @@ const (
 	// report slightly below 16 GiB. Keep model eligibility aligned with the
 	// hub's displayed/capability GB values instead of hiding valid cards.
 	modelVRAMReserveTolerance = 256 * 1024 * 1024
+	nodeTokenHeader           = "X-Node-Token"
 )
 
 // resolvedStartupTimeout returns the cold-start budget for llama-server's
@@ -1478,7 +1480,7 @@ func (m *Manager) attachModelDownloadAuth(req *http.Request, rawURL string) {
 	if req == nil || m == nil || m.nodeToken == nil || !isRyvionModelArtifactURL(rawURL) {
 		return
 	}
-	req.Header.Set("X-Node-Token", m.nodeToken(0))
+	req.Header.Set(nodeTokenHeader, m.nodeToken(0))
 }
 
 func downloadFileWithAuth(ctx context.Context, url, dst string, attachAuth func(*http.Request, string)) error {
@@ -1503,7 +1505,7 @@ func downloadFileWithAuthAndProgress(
 	if attachAuth != nil {
 		attachAuth(req, url)
 	}
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := redirectSafeDownloadClient(&http.Client{Timeout: 30 * time.Minute})
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -1543,6 +1545,31 @@ func attachModelDownloadAuth(req *http.Request, url string) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+}
+
+func redirectSafeDownloadClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = &http.Client{Timeout: 30 * time.Minute}
+	}
+	clone := *base
+	prior := clone.CheckRedirect
+	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !sameDownloadHost(req.URL, via[len(via)-1].URL) {
+			req.Header.Del(nodeTokenHeader)
+		}
+		if prior != nil {
+			return prior(req, via)
+		}
+		return nil
+	}
+	return &clone
+}
+
+func sameDownloadHost(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
 }
 
 func huggingFaceToken() string {

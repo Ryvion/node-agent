@@ -501,6 +501,43 @@ func TestDownloadModelFileRemovesCorruptOnDiskGGUF(t *testing.T) {
 	}
 }
 
+func TestDownloadModelFileStripsNodeTokenOnRedirect(t *testing.T) {
+	t.Parallel()
+
+	body := "GGUF" + strings.Repeat("z", 2<<20)
+	var cdnToken string
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cdnToken = r.Header.Get(nodeTokenHeader)
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write([]byte(body))
+	}))
+	defer cdn.Close()
+
+	var hubToken string
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubToken = r.Header.Get(nodeTokenHeader)
+		http.Redirect(w, r, cdn.URL+"/Qwen3-8B-Q4_K_M.gguf", http.StatusTemporaryRedirect)
+	}))
+	defer hub.Close()
+
+	mgr := New(t.TempDir())
+	mgr.nodeToken = func(int64) string { return "node-secret" }
+	if err := os.MkdirAll(filepath.Join(mgr.dataDir, "models"), 0o755); err != nil {
+		t.Fatalf("mkdir models: %v", err)
+	}
+	dst := filepath.Join(mgr.dataDir, "models", "Qwen3-8B-Q4_K_M.gguf")
+
+	if err := mgr.downloadModelFile(context.Background(), hub.URL+"/api/v1/node/models/qwen3-8b-reasoning/download", dst); err != nil {
+		t.Fatalf("downloadModelFile: %v", err)
+	}
+	if hubToken != "node-secret" {
+		t.Fatalf("hub token = %q, want node auth token", hubToken)
+	}
+	if cdnToken != "" {
+		t.Fatalf("cdn received node token %q; node auth must not follow CDN redirects", cdnToken)
+	}
+}
+
 func TestStreamingFamilyHintForModel(t *testing.T) {
 	cases := []struct{ path, want string }{
 		{"/models/Qwen3-8B-Q4_K_M.gguf", "qwen"},

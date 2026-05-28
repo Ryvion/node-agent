@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -74,6 +76,52 @@ func TestDownloadArtifactDoesNotAttachTokenToNonHuggingFaceURL(t *testing.T) {
 	}
 	if gotAuth != "" {
 		t.Fatalf("Authorization = %q, want empty for non-Hugging Face artifact", gotAuth)
+	}
+}
+
+func TestDownloadArtifactUsesNodeAuthButStripsItOnCDNRedirect(t *testing.T) {
+	body := []byte("gguf-cdn-body")
+	var hubToken string
+	var cdnToken string
+
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cdnToken = r.Header.Get("X-Node-Token")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write(body)
+	}))
+	defer cdn.Close()
+
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubToken = r.Header.Get("X-Node-Token")
+		http.Redirect(w, r, cdn.URL+"/model.gguf", http.StatusTemporaryRedirect)
+	}))
+	defer hub.Close()
+
+	destination := filepath.Join(t.TempDir(), "model.gguf")
+	result, err := DownloadArtifact(
+		context.Background(),
+		hub.URL+"/api/v1/node/models/qwen3-8b-reasoning/download",
+		destination,
+		DownloadOptions{
+			MaxBytes:          uint64(len(body)),
+			ExpectedSizeBytes: int64(len(body)),
+			AllowInsecureHTTP: true,
+			AttachAuth: func(req *http.Request, _ string) {
+				req.Header.Set("X-Node-Token", "node-secret")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("DownloadArtifact() error = %v, want nil", err)
+	}
+	if result.Bytes != int64(len(body)) {
+		t.Fatalf("bytes = %d, want %d", result.Bytes, len(body))
+	}
+	if hubToken != "node-secret" {
+		t.Fatalf("hub token = %q, want node auth token", hubToken)
+	}
+	if cdnToken != "" {
+		t.Fatalf("cdn received node token %q; node auth must not follow CDN redirects", cdnToken)
 	}
 }
 

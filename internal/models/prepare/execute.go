@@ -3,6 +3,8 @@ package modelprepare
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,6 +23,7 @@ var (
 	ErrHashMismatch    = errors.New("modelprepare: artifact sha256 mismatch")
 	ErrExistingModel   = errors.New("modelprepare: existing model is not safely reusable")
 	ErrWarmFailed      = errors.New("modelprepare: keep_warm failed")
+	ErrInvalidArtifact = errors.New("modelprepare: downloaded artifact is not valid for its format")
 )
 
 type LlamaCppManager interface {
@@ -37,6 +40,7 @@ type ExecuteOptions struct {
 	Getenv            func(string) string
 	Policy            modelpolicy.Policy
 	HTTPClient        *http.Client
+	AttachAuth        func(*http.Request, string)
 	LlamaCppManager   LlamaCppManager
 	BenchmarkRunner   BenchmarkRunner
 	Now               func() time.Time
@@ -188,9 +192,13 @@ func ExecutePrepareSpec(ctx context.Context, spec PrepareSpec, opts ExecuteOptio
 		ExpectedSizeBytes: spec.ArtifactSizeBytes,
 		AllowFileURI:      opts.AllowFileURI || FileURIAllowedFromEnv(opts.getenv()),
 		AllowInsecureHTTP: opts.AllowInsecureHTTP,
+		AttachAuth:        opts.AttachAuth,
 	})
 	if err != nil {
 		return BuildPrepareRejectionReceipt(spec, codedError{code: "download_failed", err: err}), codedError{code: "download_failed", err: err}
+	}
+	if err := validateDownloadedArtifact(download.Path, spec.ArtifactFormat); err != nil {
+		return BuildPrepareRejectionReceipt(spec, codedError{code: "artifact_format_invalid", err: err}), codedError{code: "artifact_format_invalid", err: err}
 	}
 	hashVerified := false
 	if spec.ArtifactSHA256 != "" {
@@ -279,6 +287,25 @@ func reusableExistingModel(path string, expectedSHA string) (bool, error) {
 		return false, codedError{code: "existing_model_hash_mismatch", err: ErrExistingModel}
 	}
 	return true, nil
+}
+
+func validateDownloadedArtifact(pathValue, format string) error {
+	if !strings.EqualFold(strings.TrimSpace(format), modelcache.DefaultFormat) {
+		return nil
+	}
+	f, err := os.Open(pathValue)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil {
+		return fmt.Errorf("%w: gguf header unreadable", ErrInvalidArtifact)
+	}
+	if string(magic[:]) != "GGUF" {
+		return fmt.Errorf("%w: gguf magic missing", ErrInvalidArtifact)
+	}
+	return nil
 }
 
 func (opts ExecuteOptions) getenv() func(string) string {

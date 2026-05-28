@@ -27,6 +27,7 @@ type DownloadOptions struct {
 	ExpectedSizeBytes int64
 	AllowFileURI      bool
 	AllowInsecureHTTP bool
+	AttachAuth        func(*http.Request, string)
 }
 
 type DownloadResult struct {
@@ -91,16 +92,16 @@ func DownloadArtifact(ctx context.Context, artifactURI, destinationPath string, 
 }
 
 func openHTTPArtifact(ctx context.Context, artifactURI string, options DownloadOptions) (io.ReadCloser, error) {
-	client := options.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Minute}
-	}
+	client := redirectSafeArtifactClient(options.HTTPClient)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, artifactURI, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/octet-stream")
 	attachHTTPArtifactAuth(req, artifactURI)
+	if options.AttachAuth != nil {
+		options.AttachAuth(req, artifactURI)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -117,6 +118,31 @@ func openHTTPArtifact(ctx context.Context, artifactURI string, options DownloadO
 		return nil, ErrDownloadTooLarge
 	}
 	return resp.Body, nil
+}
+
+func redirectSafeArtifactClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = &http.Client{Timeout: 30 * time.Minute}
+	}
+	clone := *base
+	prior := clone.CheckRedirect
+	clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !sameArtifactHost(req.URL, via[len(via)-1].URL) {
+			req.Header.Del("X-Node-Token")
+		}
+		if prior != nil {
+			return prior(req, via)
+		}
+		return nil
+	}
+	return &clone
+}
+
+func sameArtifactHost(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
 }
 
 func attachHTTPArtifactAuth(req *http.Request, artifactURI string) {
