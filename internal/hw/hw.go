@@ -662,7 +662,55 @@ func detectGPU() (model string, vramBytes uint64, sensors string) {
 		}
 	}
 
+	// 5) macOS: Apple Silicon (M-series) has a Metal GPU with unified
+	//    memory shared with the CPU. llama.cpp ships a Metal backend
+	//    by default, so any arm64 Mac running our llama-server bundle
+	//    can serve 8B-class reasoning models at 20-40 t/s real-world.
+	//    Without this branch, every Mac was classified as CPU-only,
+	//    and the hub's `node.DeviceType != GPU` hard filter shut them
+	//    out of every job that set Accelerator="gpu" or non-zero
+	//    MinVRAMMB — including Qwen3-8B-reasoning and Phi-4.
+	if runtime.GOOS == "darwin" {
+		if m, vram, sensor := detectGPUDarwin(); m != "" {
+			return m, vram, sensor
+		}
+	}
+
 	return "", 0, ""
+}
+
+// detectGPUDarwin reports an Apple Silicon Mac's chip name (e.g. "Apple M2 Pro")
+// and the slice of unified memory available to Metal as "VRAM". Intel Macs
+// return ("", 0, "") — their integrated GPUs aren't useful for LLM inference
+// and we'd rather have them classified as CPU-only.
+//
+// The unified-memory model means the GPU and CPU share the same physical
+// DRAM. macOS's Metal heap can address up to ~75% of physical RAM by
+// default; we report the full system RAM so the hub's MinVRAMMB gate
+// compares against the right ceiling. (The model still has to fit; Apple
+// Silicon Macs with 8 GB ship rarely and would just fail the same way
+// any 8 GB GPU would.)
+func detectGPUDarwin() (string, uint64, string) {
+	if runtime.GOARCH != "arm64" {
+		return "", 0, ""
+	}
+	// sysctl is universally available on macOS — no special privileges
+	// needed, and the call returns the chip brand string directly
+	// (e.g. "Apple M2 Pro", "Apple M3 Max"). Falling back to "Apple Silicon"
+	// for forward-compat with unfamiliar variants.
+	chip := "Apple Silicon"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if out, err := exec.CommandContext(ctx, "sysctl", "-n", "machdep.cpu.brand_string").Output(); err == nil {
+		if s := strings.TrimSpace(string(out)); s != "" {
+			chip = s
+		}
+	}
+	cancel()
+	// Unified memory size = system RAM. detectRAMBytes already uses
+	// sysctl hw.memsize on darwin, so there's no separate path needed.
+	ram := detectRAMBytes()
+	sensor := "metal model:" + chip
+	return chip, ram, sensor
 }
 
 // detectGPULspci uses lspci to find discrete GPUs on Linux when

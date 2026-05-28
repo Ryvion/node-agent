@@ -2,6 +2,7 @@ package hw
 
 import (
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -126,5 +127,51 @@ func TestParseWindowsGPUWMICSV(t *testing.T) {
 	}
 	if gpu.VRAMBytes != 3221225472 {
 		t.Fatalf("expected raw WMI bytes, got %d", gpu.VRAMBytes)
+	}
+}
+
+func TestDetectGPUDarwinReportsAppleSilicon(t *testing.T) {
+	// Skip on non-darwin or non-arm64 hosts — the function is only meant
+	// to fire on Apple Silicon Macs. Intel Macs / non-darwin OSes return
+	// empty by design (their integrated GPUs aren't useful for LLM
+	// inference and we'd rather they classify as CPU-only).
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only path")
+	}
+	if runtime.GOARCH != "arm64" {
+		t.Skip("Apple Silicon path requires arm64")
+	}
+	model, vram, sensor := detectGPUDarwin()
+	if model == "" {
+		t.Fatal("expected a non-empty chip name from sysctl machdep.cpu.brand_string on Apple Silicon")
+	}
+	// Expect either "Apple Silicon" (fallback) or an Apple-branded chip
+	// like "Apple M1", "Apple M2 Pro", "Apple M3 Max" — anything not
+	// matching is suspicious.
+	if !strings.Contains(strings.ToLower(model), "apple") {
+		t.Fatalf("expected chip name to contain 'Apple', got %q", model)
+	}
+	// Unified memory ≈ system RAM. Any modern Mac has > 4 GiB.
+	if vram < 4*1024*1024*1024 {
+		t.Fatalf("expected unified memory >= 4 GiB on a modern Mac, got %d bytes", vram)
+	}
+	if !strings.HasPrefix(sensor, "metal model:") {
+		t.Fatalf("expected sensor to start with 'metal model:', got %q", sensor)
+	}
+}
+
+func TestDetectGPUDarwinSkipsIntelMac(t *testing.T) {
+	// Synthetic: prove the architecture guard works by simulating
+	// non-arm64. Since runtime.GOARCH is compile-time, we can only
+	// regression-test the intent — that the function bails when
+	// GOARCH != arm64. The detectGPUDarwin source has a single
+	// branch on runtime.GOARCH, so this is more of a documentation
+	// guard against anyone removing it.
+	if runtime.GOARCH == "arm64" {
+		t.Skip("can't simulate non-arm64 at runtime")
+	}
+	model, vram, sensor := detectGPUDarwin()
+	if model != "" || vram != 0 || sensor != "" {
+		t.Fatalf("expected empty Intel-Mac result, got (%q, %d, %q)", model, vram, sensor)
 	}
 }
