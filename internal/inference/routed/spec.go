@@ -63,7 +63,15 @@ type Spec struct {
 	// request body so reasoning models (GPT-OSS, Qwen3-reasoning) can
 	// trade off latency vs depth without restarting the sidecar. Empty
 	// string = runtime default.
-	ReasoningEffort string      `json:"reasoning_effort,omitempty"`
+	//
+	// JSON tag MUST match what the hub's BuildChatJob writes —
+	// `_v8_reasoning_effort`. Previously this field was tagged
+	// `reasoning_effort` (no underscore), which silently dropped the
+	// effort value on the non-streaming dashboard inference path —
+	// non-stream Qwen3 always ran at the chat template's default
+	// regardless of what the buyer picked. Tag bridge bug; see
+	// hub/internal/gateway/openai/service.go BuildChatJob.
+	ReasoningEffort string      `json:"_v8_reasoning_effort,omitempty"`
 	Stream          bool        `json:"stream"`
 	CreatedAtUnixMs int64       `json:"created_at_unix_ms"`
 	PromptHash      string      `json:"prompt_hash,omitempty"`

@@ -276,10 +276,26 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		// Extract content for hash/receipt + capture llama-server's terminal
 		// `usage` object when emitted (some llama.cpp builds attach it to the
 		// final non-[DONE] chunk; others emit a standalone usage frame).
+		//
+		// Also extract `reasoning_content` (and the alternate `reasoning`
+		// spelling). Reasoning-capable models like Qwen3 and GPT-OSS emit
+		// their thinking text in this field when llama-server is launched
+		// with `--jinja --reasoning-format deepseek|auto`. We count it
+		// toward fullContent / hasFirstToken so:
+		//   1. The empty-output guard below doesn't fire for reasoning-only
+		//      responses (Qwen3 at high effort can spend its entire
+		//      max_tokens budget on thinking with no final answer).
+		//   2. TTFT measures time-to-first-thinking-token, not
+		//      time-to-first-content-token — the buyer-facing cold-start
+		//      indicator stops as soon as ANY token arrives.
+		//   3. The receipt's content hash covers reasoning too, so reruns
+		//      at the same effort are content-addressable end-to-end.
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
 				} `json:"delta"`
 			} `json:"choices"`
 			Usage *struct {
@@ -301,15 +317,27 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 				}
 			}
 			if len(chunk.Choices) > 0 {
-				content := chunk.Choices[0].Delta.Content
-				if content != "" {
+				delta := chunk.Choices[0].Delta
+				content := delta.Content
+				reasoning := delta.ReasoningContent
+				if reasoning == "" {
+					reasoning = delta.Reasoning
+				}
+				if content != "" || reasoning != "" {
 					if !hasFirstToken {
 						firstTokenAt = time.Now()
 						hasFirstToken = true
 					}
+				}
+				if content != "" {
 					chunkTokens++
 					fullContent.WriteString(content)
 					hash.Write([]byte(content))
+				}
+				if reasoning != "" {
+					chunkTokens++
+					fullContent.WriteString(reasoning)
+					hash.Write([]byte(reasoning))
 				}
 			}
 		}

@@ -319,6 +319,18 @@ func (m *Manager) PrewarmEligibleModels(ctx context.Context, vramBytes uint64) {
 	if len(supported) == 0 {
 		return
 	}
+	// Reorder by prewarm priority: smallest + most-used first so the
+	// most-requested models become available within minutes of node
+	// startup, even if the larger reasoning models are still downloading.
+	//
+	// SupportedNativeChatModels returns sort.Strings() (alphabetical),
+	// which on a 24GB Mac is: gemma → gpt-oss → nemotron → phi → qwen3
+	// → ryvion-llama → tinyllama. That puts the 14GB Gemma at the head
+	// and the 700MB TinyLlama at the tail — exactly backwards. With a
+	// home-internet uplink, a buyer asking for Qwen3 right after node
+	// boot would wait through ~50GB of larger downloads before their
+	// 5GB Qwen3 GGUF lands.
+	supported = sortPrewarmByPriority(supported)
 	modelsDir := filepath.Join(m.dataDir, "models")
 	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
 		slog.Warn("prewarm: cannot create models dir", "error", err)
@@ -1077,6 +1089,118 @@ func (m *Manager) runServerContainerized(ctx context.Context, modelPath, port st
 	return waitErr
 }
 
+// prewarmPriority maps a model id to a small integer "download me first"
+// rank. Lower = earlier. The intent: the smallest + most-frequently-used
+// chat models come up within ~1 min of node boot; the giant reasoning /
+// multimodal models can take their time.
+//
+// Ordering rationale (in increasing rank):
+//
+//	0 tinyllama          — 700 MB, fastest possible smoke-test path
+//	1 ryvion-llama-3.2-3b — 2 GB, the default chat model
+//	2 phi-4              — 9 GB, popular for code/reasoning, fits 8 GB GPUs
+//	3 qwen3-8b-reasoning — 5 GB, primary reasoning model
+//	4 gpt-oss-20b        — 11 GB, secondary reasoning model
+//	5 gemma-4-26b-a4b-it — 17 GB, vision + bigger, slower
+//	6 nemotron-3-...     — 17 GB, vision + MoE, slower
+var prewarmPriority = map[string]int{
+	"tinyllama":                    0,
+	"ryvion-llama-3.2-3b":          1,
+	"phi-4":                        2,
+	"qwen3-8b-reasoning":           3,
+	"gpt-oss-20b":                  4,
+	"gemma-4-26b-a4b-it":           5,
+	"nemotron-3-nano-omni-30b-a3b": 6,
+	"nomic-embed-text-v1.5":        7, // embedding model, only matters for RAG
+}
+
+// sortPrewarmByPriority returns a copy of `ids` sorted by prewarmPriority
+// (lower first). Unknown ids land after all known ones, in their original
+// alphabetical order, so future additions to NativeModels still get
+// prewarmed — just at the tail of the queue.
+func sortPrewarmByPriority(ids []string) []string {
+	out := make([]string, len(ids))
+	copy(out, ids)
+	const unknown = 1000
+	sort.SliceStable(out, func(i, j int) bool {
+		pi, ok := prewarmPriority[out[i]]
+		if !ok {
+			pi = unknown
+		}
+		pj, ok := prewarmPriority[out[j]]
+		if !ok {
+			pj = unknown
+		}
+		if pi != pj {
+			return pi < pj
+		}
+		return out[i] < out[j]
+	})
+	return out
+}
+
+// streamingFamilyHintForModel returns "qwen", "gpt-oss", "deepseek", "llama",
+// "phi" etc. based on the GGUF filename. Used only to gate
+// reasoning-related llama-server flags in the streaming path. Kept in
+// this package (rather than imported from internal/runtimes/llamacpp) to
+// avoid an import cycle and to make the streaming launcher self-contained.
+func streamingFamilyHintForModel(modelPath string) string {
+	lower := strings.ToLower(filepath.Base(strings.TrimSpace(modelPath)))
+	switch {
+	case strings.Contains(lower, "qwen"):
+		return "qwen"
+	case strings.Contains(lower, "gpt-oss"), strings.Contains(lower, "gptoss"):
+		return "gpt-oss"
+	case strings.Contains(lower, "deepseek"):
+		return "deepseek"
+	case strings.Contains(lower, "phi"):
+		return "phi"
+	case strings.Contains(lower, "gemma"):
+		return "gemma"
+	case strings.Contains(lower, "nemotron"):
+		return "nemotron"
+	case strings.Contains(lower, "llama"):
+		return "llama"
+	default:
+		return ""
+	}
+}
+
+// streamingJinjaRequiredForModel reports whether llama-server needs the
+// `--jinja` flag to correctly apply this model's chat template — in
+// particular to honor the `reasoning_effort` body field and to emit
+// `<think>` segments / Harmony channels through the proper output paths.
+// Qwen, DeepSeek-R1 and GPT-OSS all need it.
+func streamingJinjaRequiredForModel(modelPath string) bool {
+	switch streamingFamilyHintForModel(modelPath) {
+	case "qwen", "deepseek", "gpt-oss":
+		return true
+	default:
+		return false
+	}
+}
+
+// streamingReasoningFormatForModel returns the llama-server
+// `--reasoning-format` value that routes a model's thinking output into
+// the `reasoning_content` SSE delta field. Without this flag the model's
+// reasoning lands in `delta.content` with raw `<think>` / Harmony
+// markers — the frontend's defensive regex tries to scrape them out, but
+// cleanly separating reasoning_content upstream is much more reliable.
+//
+//   - "deepseek": parses `<think>...</think>` (Qwen3, DeepSeek R1).
+//   - "auto":     auto-detect (required for GPT-OSS Harmony per
+//     llama.cpp discussions/15396).
+func streamingReasoningFormatForModel(modelPath string) string {
+	switch streamingFamilyHintForModel(modelPath) {
+	case "qwen", "deepseek":
+		return "deepseek"
+	case "gpt-oss":
+		return "auto"
+	default:
+		return ""
+	}
+}
+
 // runServerNative runs llama-server directly on the host.
 func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) error {
 	serverCtx, cancel := context.WithCancel(ctx)
@@ -1092,6 +1216,28 @@ func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) e
 		"--threads", m.threads,
 		"--ctx-size", m.ctxSize,
 		"--log-disable",
+	}
+
+	// Reasoning-model flags. CRITICAL: without these, Qwen3-reasoning
+	// emits its `<think>...</think>` blocks inline in `content` instead
+	// of the OpenAI-style `delta.reasoning_content` SSE field — and
+	// GPT-OSS's Harmony channel format goes raw. The frontend's
+	// cold-start indicator only stops when content OR reasoning_content
+	// arrives; without these flags the model spends 30-120s reasoning
+	// silently before the first content token, and the buyer sees a
+	// frozen UI with no thinking block.
+	//
+	// The companion sidecar manager (internal/runtimes/llamacpp/manager.go)
+	// already gates these flags by family hint. Duplicating the tiny
+	// switch here keeps RunStreamingJob — which uses runServerNative
+	// directly, NOT the sidecar — in sync. Without this duplication,
+	// every streaming Qwen3/GPT-OSS request hangs until cold-start
+	// auto-aborts at 5 min.
+	if streamingJinjaRequiredForModel(modelPath) {
+		args = append(args, "--jinja")
+	}
+	if rf := streamingReasoningFormatForModel(modelPath); rf != "" {
+		args = append(args, "--reasoning-format", rf)
 	}
 
 	// Vision projector auto-detection. If a .mmproj file lives alongside

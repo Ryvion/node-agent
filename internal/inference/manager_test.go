@@ -500,3 +500,109 @@ func TestDownloadModelFileRemovesCorruptOnDiskGGUF(t *testing.T) {
 		t.Fatalf("dst size = %d, want %d", info.Size(), len(body))
 	}
 }
+
+func TestStreamingFamilyHintForModel(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"/models/Qwen3-8B-Q4_K_M.gguf", "qwen"},
+		{"/models/gpt-oss-20b-mxfp4.gguf", "gpt-oss"},
+		{"/models/gptoss-20b.gguf", "gpt-oss"},
+		{"/models/DeepSeek-R1-Q4_K_M.gguf", "deepseek"},
+		{"/models/phi-4-Q4_K_M.gguf", "phi"},
+		{"/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf", "llama"},
+		{"/models/gemma-4-26B-A4B-it-Q4_K_M.gguf", "gemma"},
+		{"/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", "llama"},
+		{"/models/unknown-model.gguf", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		got := streamingFamilyHintForModel(tc.path)
+		if got != tc.want {
+			t.Errorf("streamingFamilyHintForModel(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestStreamingJinjaRequiredForModel(t *testing.T) {
+	// Models that NEED --jinja for chat template / reasoning_effort.
+	for _, path := range []string{
+		"/models/Qwen3-8B-Q4_K_M.gguf",
+		"/models/gpt-oss-20b-mxfp4.gguf",
+		"/models/DeepSeek-R1.gguf",
+	} {
+		if !streamingJinjaRequiredForModel(path) {
+			t.Errorf("expected --jinja for %q (reasoning-capable model)", path)
+		}
+	}
+	// Models that do NOT need --jinja.
+	for _, path := range []string{
+		"/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		"/models/phi-4-Q4_K_M.gguf",
+		"/models/tinyllama.gguf",
+	} {
+		if streamingJinjaRequiredForModel(path) {
+			t.Errorf("did not expect --jinja for %q", path)
+		}
+	}
+}
+
+func TestStreamingReasoningFormatForModel(t *testing.T) {
+	cases := []struct{ path, want string }{
+		{"/models/Qwen3-8B-Q4_K_M.gguf", "deepseek"},
+		{"/models/DeepSeek-R1-Q4_K_M.gguf", "deepseek"},
+		{"/models/gpt-oss-20b-mxfp4.gguf", "auto"},
+		{"/models/Llama-3.2-3B.gguf", ""},
+		{"/models/phi-4.gguf", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		got := streamingReasoningFormatForModel(tc.path)
+		if got != tc.want {
+			t.Errorf("streamingReasoningFormatForModel(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestSortPrewarmByPriority(t *testing.T) {
+	// Input is sort.Strings() output for a 24GB Mac — the alphabetical
+	// order that we're reordering AWAY from.
+	in := []string{
+		"gemma-4-26b-a4b-it",
+		"gpt-oss-20b",
+		"nemotron-3-nano-omni-30b-a3b",
+		"phi-4",
+		"qwen3-8b-reasoning",
+		"ryvion-llama-3.2-3b",
+		"tinyllama",
+	}
+	got := sortPrewarmByPriority(in)
+	want := []string{
+		"tinyllama",
+		"ryvion-llama-3.2-3b",
+		"phi-4",
+		"qwen3-8b-reasoning",
+		"gpt-oss-20b",
+		"gemma-4-26b-a4b-it",
+		"nemotron-3-nano-omni-30b-a3b",
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("position %d: got %q, want %q (full got=%v)", i, got[i], w, got)
+		}
+	}
+}
+
+func TestSortPrewarmByPriorityHandlesUnknownModels(t *testing.T) {
+	// Future model not yet in prewarmPriority should land AFTER all
+	// known ones but still be present (not dropped).
+	in := []string{"tinyllama", "some-future-13b", "qwen3-8b-reasoning"}
+	got := sortPrewarmByPriority(in)
+	if len(got) != 3 {
+		t.Fatalf("dropped a model: got %v", got)
+	}
+	if got[0] != "tinyllama" || got[1] != "qwen3-8b-reasoning" {
+		t.Fatalf("known-prewarm ordering wrong: %v", got)
+	}
+	if got[2] != "some-future-13b" {
+		t.Fatalf("unknown model should land last, got %v", got)
+	}
+}
