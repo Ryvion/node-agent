@@ -18,6 +18,78 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/hub"
 )
 
+func TestReasoningSamplingForModel(t *testing.T) {
+	cases := []struct {
+		model            string
+		wantOK           bool
+		temp, topP, minP float64
+		topK             int
+	}{
+		// GPT-OSS: OpenAI / llama.cpp guide discussions/15396 — temp 1.0,
+		// top_p 1.0, top_k 0, no repetition penalty. min_p pinned to 0 to
+		// override llama-server's 0.1 default.
+		{"gpt-oss-20b", true, 1.0, 1.0, 0.0, 0},
+		// Qwen3 thinking-mode recommendation.
+		{"qwen3-8b-reasoning", true, 0.6, 0.95, 0.0, 20},
+		// Non-reasoning models keep the buyer temperature + server defaults.
+		{"phi-4", false, 0, 0, 0, 0},
+		{"ryvion-llama-3.2-3b", false, 0, 0, 0, 0},
+		{"tinyllama", false, 0, 0, 0, 0},
+	}
+	for _, tc := range cases {
+		temp, topP, minP, topK, ok := reasoningSamplingForModel(tc.model)
+		if ok != tc.wantOK {
+			t.Errorf("%s: ok=%v, want %v", tc.model, ok, tc.wantOK)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if temp != tc.temp || topP != tc.topP || minP != tc.minP || topK != tc.topK {
+			t.Errorf("%s: got temp=%v top_p=%v min_p=%v top_k=%v; want %v/%v/%v/%v",
+				tc.model, temp, topP, minP, topK, tc.temp, tc.topP, tc.minP, tc.topK)
+		}
+	}
+}
+
+func TestChatRequestOmitsSamplingForNonReasoning(t *testing.T) {
+	// A non-reasoning request must NOT carry top_p/top_k/min_p so llama-server
+	// keeps the buyer's temperature and its own defaults.
+	body, err := json.Marshal(chatRequest{Model: "phi-4", Stream: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"top_p", "top_k", "min_p"} {
+		if strings.Contains(string(body), k) {
+			t.Errorf("non-reasoning request must omit %q, got %s", k, body)
+		}
+	}
+}
+
+func TestChatRequestCarriesReasoningSampling(t *testing.T) {
+	// A GPT-OSS request must pin the documented anti-repetition profile.
+	temp, topP, minP, topK, ok := reasoningSamplingForModel("gpt-oss-20b")
+	if !ok {
+		t.Fatal("expected gpt-oss to have a reasoning sampling profile")
+	}
+	body, err := json.Marshal(chatRequest{
+		Model:       "gpt-oss-20b",
+		Stream:      true,
+		Temperature: &temp,
+		TopP:        &topP,
+		MinP:        &minP,
+		TopK:        &topK,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"temperature":1`, `"top_p":1`, `"min_p":0`, `"top_k":0`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("gpt-oss request missing %q, got %s", want, body)
+		}
+	}
+}
+
 func TestWriteHubStreamErrorUsesOpenAIErrorShape(t *testing.T) {
 	var out strings.Builder
 	writeHubStreamError(&out, `insufficient VRAM: "1202" MB free`)

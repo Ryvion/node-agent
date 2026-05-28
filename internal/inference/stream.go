@@ -26,6 +26,12 @@ type chatRequest struct {
 	Stream      bool          `json:"stream"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`
+	// TopP/TopK/MinP override llama-server's defaults for reasoning models.
+	// They are pointers + omitempty so non-reasoning requests send nothing and
+	// the server keeps its own defaults. See reasoningSamplingForModel.
+	TopP *float64 `json:"top_p,omitempty"`
+	TopK *int     `json:"top_k,omitempty"`
+	MinP *float64 `json:"min_p,omitempty"`
 	// ReasoningEffort: "low" | "medium" | "high". Set for reasoning models
 	// (GPT-OSS, Qwen3-reasoning, DeepSeek R1). llama-server routes this
 	// into the chat template's reasoning_effort kwarg via --jinja, which
@@ -113,6 +119,34 @@ func normalizeStreamReasoningEffort(raw string) string {
 		return strings.ToLower(strings.TrimSpace(raw))
 	default:
 		return ""
+	}
+}
+
+// reasoningSamplingForModel returns llama.cpp sampling parameters tuned to a
+// reasoning model family. ok=false for non-reasoning models, which keep the
+// buyer-supplied temperature and llama-server's own defaults.
+//
+// Reasoning models degrade badly under llama-server's default sampling
+// (top_p 0.9, top_k 40, min_p 0.1) combined with the low temperature the
+// playground sends (0.4): GPT-OSS in particular falls into a repetitive
+// "analysis" loop that never emits its final channel. Each family is pinned to
+// its vendor-recommended profile instead:
+//
+//   - GPT-OSS: temp 1.0, top_p 1.0, top_k 0 (OpenAI / llama.cpp guide
+//     discussions/15396 — "Do not use repetition penalties").
+//   - Qwen3 / DeepSeek-R1 thinking: temp 0.6, top_p 0.95, top_k 20 (Qwen team's
+//     published thinking-mode recommendation).
+//
+// min_p is pinned to 0 in both cases to override llama-server's 0.1 default,
+// which otherwise prunes the low-probability tokens these models rely on.
+func reasoningSamplingForModel(modelName string) (temp, topP, minP float64, topK int, ok bool) {
+	switch streamingFamilyHintForModel(modelName) {
+	case "gpt-oss":
+		return 1.0, 1.0, 0.0, 0, true
+	case "qwen", "deepseek":
+		return 0.6, 0.95, 0.0, 20, true
+	default:
+		return 0, 0, 0, 0, false
 	}
 }
 
@@ -210,6 +244,18 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		Stream:          true,
 		MaxTokens:   maxTokens,
 		Temperature: spec.Temperature,
+	}
+	// Reasoning models need their vendor-recommended sampling profile. The
+	// buyer-supplied temperature (the playground sends 0.4) plus llama-server's
+	// default min_p 0.1 / top_k 40 / top_p 0.9 sends GPT-OSS into a repetitive
+	// "analysis" loop that burns the whole token budget without ever emitting
+	// its final answer. Pin the full profile for reasoning families, overriding
+	// the request temperature; non-reasoning models are left untouched.
+	if temp, topP, minP, topK, ok := reasoningSamplingForModel(modelName); ok {
+		reqBody.Temperature = &temp
+		reqBody.TopP = &topP
+		reqBody.MinP = &minP
+		reqBody.TopK = &topK
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
