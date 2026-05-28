@@ -1414,7 +1414,24 @@ func downloadFile(ctx context.Context, url, dst string) error {
 }
 
 func (m *Manager) modelDownloadURL(cfg ModelConfig) string {
-	if platformManagedGatedModelsEnabled() && strings.TrimSpace(cfg.PlatformPath) != "" && strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
+	// Route through the hub's model-artifact proxy ONLY for models this node
+	// cannot pull from upstream by itself — i.e. a GATED HuggingFace repo when
+	// the operator has set no local HF token. The hub then attaches its own
+	// token on the node's behalf.
+	//
+	// Every other model — including every current native model, which are all
+	// public (RequiresHuggingFaceAuth=false) — downloads FAR faster straight
+	// from HuggingFace's CDN than through the hub's single-machine proxy, which
+	// streams multi-GB GGUFs inline and was pushing first-request cold starts
+	// past the 300s EnsureModel deadline ("timeout waiting for <model> to
+	// start"). phi-4/llama/tinyllama already work this way (they have no
+	// PlatformPath); this brings qwen3-8b-reasoning / gpt-oss-20b in line so
+	// reasoning models load as fast as the rest. The PlatformPath stays as a
+	// fallback for genuinely gated future models.
+	gatedWithoutLocalToken := cfg.RequiresHuggingFaceAuth && huggingFaceToken() == ""
+	if gatedWithoutLocalToken && platformManagedGatedModelsEnabled() &&
+		strings.TrimSpace(cfg.PlatformPath) != "" &&
+		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
 		return strings.TrimRight(m.hubURL, "/") + cfg.PlatformPath
 	}
 	return cfg.URL

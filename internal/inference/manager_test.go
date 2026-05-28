@@ -126,6 +126,79 @@ func TestSupportedNativeChatModelsAdvertisesGemmaEvenWithPlatformDownloadsDisabl
 	t.Fatal("expected Gemma model to advertise without HF_TOKEN even when platform-managed downloads are disabled")
 }
 
+func TestModelDownloadURLPublicModelsBypassHubProxy(t *testing.T) {
+	// Regression guard for the "reasoning models stuck loading / timeout" bug.
+	//
+	// qwen3-8b-reasoning and gpt-oss-20b are PUBLIC (RequiresHuggingFaceAuth
+	// =false) but carry a PlatformPath fallback. The node must download them
+	// directly from HuggingFace's CDN — exactly like phi-4/tinyllama, which
+	// have no PlatformPath and work fine. Routing them through the hub's
+	// single-machine artifact proxy streamed the 5GB/12GB GGUF inline and
+	// pushed first-request cold starts past the 300s EnsureModel deadline,
+	// surfacing to buyers as "timeout waiting for <model> to start".
+	//
+	// This asserts the production configuration: hubURL + nodeToken set and
+	// platform-managed downloads at their default (enabled). Even so, public
+	// models must resolve to their direct upstream URL.
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("HUGGINGFACE_TOKEN", "")
+
+	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
+
+	for _, id := range []string{"qwen3-8b-reasoning", "gpt-oss-20b", "gemma-4-26b-a4b-it", "nemotron-3-nano-omni-30b-a3b"} {
+		cfg, ok := NativeModels[id]
+		if !ok {
+			t.Fatalf("model %s missing from native registry", id)
+		}
+		got := m.modelDownloadURL(cfg)
+		if got != cfg.URL {
+			t.Errorf("model %s: expected direct upstream URL %q, got %q", id, cfg.URL, got)
+		}
+		if strings.Contains(got, "/api/v1/node/models/") {
+			t.Errorf("model %s: routed through hub proxy %q — public models must download from HuggingFace directly", id, got)
+		}
+	}
+}
+
+func TestModelDownloadURLGatedModelWithoutTokenUsesHubProxy(t *testing.T) {
+	// A genuinely gated repo with no local HF token CANNOT be fetched by the
+	// node itself, so it must fall back to the hub proxy (the hub attaches
+	// its own upstream token). This is the only case the proxy exists for.
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("HUGGINGFACE_TOKEN", "")
+
+	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
+	cfg := ModelConfig{
+		FileName:                "gated.gguf",
+		URL:                     "https://huggingface.co/gated/repo/resolve/main/gated.gguf",
+		PlatformPath:            "/api/v1/node/models/gated/download",
+		RequiresHuggingFaceAuth: true,
+	}
+	got := m.modelDownloadURL(cfg)
+	want := "https://api.ryvion.ai/api/v1/node/models/gated/download"
+	if got != want {
+		t.Errorf("gated model without token: expected hub proxy %q, got %q", want, got)
+	}
+}
+
+func TestModelDownloadURLGatedModelWithTokenUsesDirectURL(t *testing.T) {
+	// With a local HF token the node can pull the gated repo directly, so it
+	// should NOT detour through the hub proxy.
+	t.Setenv("HF_TOKEN", "hf-secret")
+	t.Setenv("HUGGINGFACE_TOKEN", "")
+
+	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
+	cfg := ModelConfig{
+		FileName:                "gated.gguf",
+		URL:                     "https://huggingface.co/gated/repo/resolve/main/gated.gguf",
+		PlatformPath:            "/api/v1/node/models/gated/download",
+		RequiresHuggingFaceAuth: true,
+	}
+	if got := m.modelDownloadURL(cfg); got != cfg.URL {
+		t.Errorf("gated model with token: expected direct URL %q, got %q", cfg.URL, got)
+	}
+}
+
 func TestEnsureModelRestartsWhenServedModelMismatchesActiveName(t *testing.T) {
 	var restartCount atomic.Int32
 	llamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
