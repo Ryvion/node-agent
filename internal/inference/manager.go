@@ -240,6 +240,20 @@ func (m *Manager) completeDownload(modelID string) {
 	delete(m.activeDownloads, modelID)
 }
 
+// modelDownloadBytes reports the bytes fetched so far for a model's GGUF when a
+// download is currently in flight. EnsureModel uses it to tell an actively-
+// progressing first-time load apart from a genuinely stalled one, so a slow
+// multi-GB download isn't killed mid-transfer by the startup stall clock.
+func (m *Manager) modelDownloadBytes(modelID string) (bytesDone int64, downloading bool) {
+	m.downloadsMu.RLock()
+	defer m.downloadsMu.RUnlock()
+	d, ok := m.activeDownloads[modelID]
+	if !ok {
+		return 0, false
+	}
+	return d.BytesDone, true
+}
+
 // modelIDForFilename reverse-maps a GGUF filename to the canonical model ID
 // in NativeModels. Used by the download path to register progress under the
 // public-facing model id (e.g. "qwen3-8b-reasoning") rather than the raw
@@ -482,6 +496,12 @@ type Manager struct {
 	serverPath        string
 	hubURL            string
 	nodeToken         func(int64) string
+	// startupStallTimeout bounds how long EnsureModel waits with NO forward
+	// progress (model not yet loaded AND no download bytes arriving) before it
+	// declares "timeout waiting to start". 0 means use the 300s default. It is
+	// a stall clock, not a total-time cap: an actively-downloading GGUF keeps
+	// resetting it (see EnsureModel). Overridable so tests don't wait minutes.
+	startupStallTimeout time.Duration
 
 	mu              sync.RWMutex
 	healthy         bool
@@ -793,11 +813,25 @@ func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
 	}
 
 	restartRequested := current != modelName
-	deadline := time.NewTimer(300 * time.Second)
-	defer deadline.Stop()
+	stallTimeout := m.startupStallTimeout
+	if stallTimeout <= 0 {
+		stallTimeout = 300 * time.Second
+	}
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	var lastMismatchIDs []string
+
+	// Stall clock, not a total-time cap. A first-time load of a large reasoning
+	// GGUF (qwen3 ~5GB, gpt-oss ~12GB) on a slow / home uplink can take well
+	// over the bare startup window — on a MacBook this is exactly the
+	// "first-time model load … timeout waiting to start" failure. Treat active
+	// download progress as liveness: while bytes keep arriving we push
+	// lastProgressAt forward, so the model is never declared stuck mid-transfer.
+	// The surrounding job context (30 min for streaming inference) remains the
+	// real upper bound; this only catches a genuine stall (no model loaded AND
+	// no download progress for stallTimeout).
+	lastProgressAt := time.Now()
+	var lastDownloadBytes int64 = -1
 
 	for {
 		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -821,18 +855,25 @@ func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
 			lastMismatchIDs = append(lastMismatchIDs[:0], ids...)
 		}
 
+		// Reset the stall clock whenever the GGUF download advances.
+		if done, downloading := m.modelDownloadBytes(modelName); downloading && done != lastDownloadBytes {
+			lastDownloadBytes = done
+			lastProgressAt = time.Now()
+		}
+		if time.Since(lastProgressAt) >= stallTimeout {
+			m.setBlockerReason(BlockerStartupTimeout)
+			if len(lastMismatchIDs) > 0 {
+				return fmt.Errorf("timeout waiting for %s to start; last loaded model mismatch: requested %s (%s), llama-server reports %s", modelName, modelName, cfg.FileName, strings.Join(lastMismatchIDs, ","))
+			}
+			return fmt.Errorf("timeout waiting for %s to start", modelName)
+		}
+
 		select {
 		case <-ctx.Done():
 			if len(lastMismatchIDs) > 0 {
 				return fmt.Errorf("model %s not ready before context deadline; last loaded model mismatch: requested %s (%s), llama-server reports %s: %w", modelName, modelName, cfg.FileName, strings.Join(lastMismatchIDs, ","), ctx.Err())
 			}
 			return ctx.Err()
-		case <-deadline.C:
-			m.setBlockerReason(BlockerStartupTimeout)
-			if len(lastMismatchIDs) > 0 {
-				return fmt.Errorf("timeout waiting for %s to start; last loaded model mismatch: requested %s (%s), llama-server reports %s", modelName, modelName, cfg.FileName, strings.Join(lastMismatchIDs, ","))
-			}
-			return fmt.Errorf("timeout waiting for %s to start", modelName)
 		case <-ticker.C:
 		}
 	}

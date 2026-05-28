@@ -271,6 +271,92 @@ func TestEnsureModelClearsCustomModelPathWhenSwitchingToRegistryModel(t *testing
 	}
 }
 
+func TestEnsureModelWaitsWhileDownloadProgresses(t *testing.T) {
+	// Regression guard for "reasoning model stuck at first-time load then
+	// times out". llama-server reports a different model (the GGUF is still
+	// downloading), so EnsureModel never sees a match. A *continuously
+	// progressing* download must keep resetting the stall clock so a large
+	// first-time load on a slow link isn't killed mid-transfer — EnsureModel
+	// should ultimately exit via the job context, NOT via the
+	// "timeout waiting ... to start" stall path.
+	llamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf","object":"model"}]}`))
+	}))
+	defer llamaSrv.Close()
+
+	mgr := &Manager{
+		dataDir:             t.TempDir(),
+		port:                testServerPort(t, llamaSrv.URL),
+		activeModelName:     "qwen3-8b-reasoning",
+		healthy:             true,
+		startupStallTimeout: 2 * time.Second,
+		activeDownloads:     map[string]*ActiveDownload{},
+	}
+	mgr.cancel = func() {}
+
+	mgr.registerDownload("qwen3-8b-reasoning")
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		var done int64
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			done += 50 * 1024 * 1024 // ~50 MB per tick
+			mgr.updateDownloadProgress("qwen3-8b-reasoning", done, 5*1024*1024*1024)
+			time.Sleep(300 * time.Millisecond)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := mgr.EnsureModel(ctx, "qwen3-8b-reasoning")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected EnsureModel to return an error (model never loads in this test)")
+	}
+	if strings.Contains(err.Error(), "timeout waiting for") {
+		t.Fatalf("EnsureModel hit the stall timeout after %v despite a continuously-progressing download: %v", elapsed, err)
+	}
+	if elapsed < 3*time.Second {
+		t.Fatalf("EnsureModel returned after %v — expected it to wait past the %v stall window while the download progressed", elapsed, mgr.startupStallTimeout)
+	}
+}
+
+func TestEnsureModelTimesOutWhenDownloadStalls(t *testing.T) {
+	// With no download progress (never started or stalled) and no model loaded,
+	// EnsureModel must still surface its "timeout waiting ... to start" error so
+	// a genuinely stuck node fails fast instead of hanging forever.
+	llamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf","object":"model"}]}`))
+	}))
+	defer llamaSrv.Close()
+
+	mgr := &Manager{
+		dataDir:             t.TempDir(),
+		port:                testServerPort(t, llamaSrv.URL),
+		activeModelName:     "qwen3-8b-reasoning",
+		healthy:             true,
+		startupStallTimeout: 1 * time.Second,
+		activeDownloads:     map[string]*ActiveDownload{},
+	}
+	mgr.cancel = func() {}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := mgr.EnsureModel(ctx, "qwen3-8b-reasoning")
+	if err == nil || !strings.Contains(err.Error(), "timeout waiting for") {
+		t.Fatalf("expected stall timeout error, got %v", err)
+	}
+}
+
 func TestShouldInstallServerRefreshesUnmarkedWindowsCUDABundle(t *testing.T) {
 	serverPath := filepath.Join(t.TempDir(), "llama-server.exe")
 	if err := os.WriteFile(serverPath, []byte("old cpu server"), 0o755); err != nil {
