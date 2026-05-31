@@ -93,8 +93,16 @@ const autoUpdateRetryInterval = 5 * time.Minute
 
 // bootHealthyGrace is how long a freshly-started binary must stay alive before it
 // is considered healthy even without a successful hub registration (a
-// hub-independent commit that prevents false crash-loop rollbacks).
-const bootHealthyGrace = 3 * time.Minute
+// hub-independent commit that prevents false crash-loop rollbacks). Overridable
+// via RYV_BOOT_HEALTHY_GRACE_SECONDS (used by the rollback drill; default 180s).
+func bootHealthyGrace() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("RYV_BOOT_HEALTHY_GRACE_SECONDS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 3 * time.Minute
+}
 
 var (
 	autoUpdateInProgress    atomic.Int32
@@ -822,13 +830,16 @@ func runNode(ctx context.Context) {
 	// before it ever proves healthy, revert to the last-known-good binary. Runs
 	// before any risky init so a recurring early crash still reaches this gate.
 	update.RecordBootAndMaybeRollback(version)
+	// Fault-injection hook for the auto-update rollback drill. Compiled to a
+	// no-op in production; the crashing variant exists only with `-tags faultinject`.
+	maybeFaultInject(version)
 	// Hub-independent safety commit: if the binary stays alive for the grace
 	// period (even when the hub is unreachable), mark it healthy so a later
 	// unrelated restart cannot trigger a false rollback.
 	go func() {
 		select {
 		case <-ctx.Done():
-		case <-time.After(bootHealthyGrace):
+		case <-time.After(bootHealthyGrace()):
 			update.MarkBootHealthy(version)
 		}
 	}()
