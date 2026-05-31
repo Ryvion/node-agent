@@ -3714,10 +3714,13 @@ func isRyvionRuntimeTask(specJSON string) bool {
 		strings.TrimSpace(spec.RuntimeTask) != ""
 }
 
-// fdtdNativeReady reports whether this node can run native EM (FDTD) sims. It
-// requires a detected GPU (NVIDIA/AMD) and excludes Apple-Silicon/CPU-only
-// nodes, matching the hub scheduler's Accelerator-in-{gpu,cuda} EM filter.
-// Operators can force-disable EM via RYV_DISABLE_NATIVE_EM=1.
+// fdtdNativeReady reports whether this node should advertise the native EM
+// (FDTD) capability. gprMax (the v1 native engine) GPU-accelerates ONLY on
+// NVIDIA CUDA, so by default EM is advertised only on a CUDA GPU with VRAM
+// headroom — protecting operator earnings + buyer ETAs from CPU-speed runs that
+// blow GPU-sized timeouts. Apple-Silicon/CPU-only nodes are excluded. Operators
+// with small sims can opt into the slow CPU lane via RYV_EM_ALLOW_CPU=1; EM can
+// be force-disabled via RYV_DISABLE_NATIVE_EM=1.
 func fdtdNativeReady(caps hw.CapSet, gpuReady bool) bool {
 	if envFlagEnabled("RYV_DISABLE_NATIVE_EM") {
 		return false
@@ -3729,8 +3732,39 @@ func fdtdNativeReady(caps hw.CapSet, gpuReady bool) bool {
 	if runtime.GOOS == "darwin" {
 		return false
 	}
-	// Require some VRAM headroom so budgeted sims can actually run.
-	return caps.VRAMBytes/1024/1024 >= fdtdMinVRAMMB
+	if emGPUAccelerated(caps) {
+		// Real GPU lane: require VRAM headroom so budgeted sims fit on-device.
+		return caps.VRAMBytes/1024/1024 >= fdtdMinVRAMMB
+	}
+	if envFlagEnabled("RYV_EM_ALLOW_CPU") {
+		// Opt-in CPU lane (e.g. AMD GPUs): the solver runs in host RAM, so gate
+		// on RAM headroom rather than VRAM. Real physics, just ~10-20x slower.
+		return caps.RAMBytes/1024/1024 >= fdtdMinVRAMMB
+	}
+	return false
+}
+
+// emGPUAccelerated reports whether this node's GPU can run the FDTD engine ON the
+// GPU. gprMax accelerates only on NVIDIA CUDA; AMD ROCm has no gprMax backend yet
+// (planned for gprMax v4 / a HIP port), so an AMD GPU runs the solver on CPU.
+func emGPUAccelerated(caps hw.CapSet) bool {
+	// AMD GPUs report a gfx architecture via rocm-smi -> not CUDA-capable.
+	if strings.TrimSpace(caps.GfxVersion) != "" {
+		return false
+	}
+	model := strings.ToLower(caps.GPUModel)
+	if model == "" {
+		return false
+	}
+	for _, m := range []string{
+		"nvidia", "geforce", "rtx", "gtx", "tesla", "quadro", "titan",
+		"a100", "h100", "h200", "a40", "a30", "a16", "a10", "l4", "l40", "v100",
+	} {
+		if strings.Contains(model, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // fdtdMinVRAMMB is a conservative floor; the hub sets per-task MinVRAMMB from
@@ -3879,17 +3913,24 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	}
 	parts = append(parts, boolStatusToken("cap:image_gen", publicAIReady && (runtimeSnap.GPUReady || localFluxReady)))
 	parts = append(parts, boolStatusToken("cap:ryvion_runtime", publicAIReady && (localFluxReady || localFluxPreparing || localFluxPrepareEligible)))
-	// EM (FDTD) native runtime capability. A GPU-capable node (NVIDIA/AMD)
-	// advertises runtime:fdtd so the hub can schedule electromagnetic
-	// simulations to it; Apple-Silicon/CPU-only nodes are excluded (Apple out
-	// for v1 per EM-WORKLOAD-ARCHITECTURE §4.4). This sits alongside (does not
-	// replace) the inference model-readiness tokens — one node serves both.
+	// EM (FDTD) native runtime capability. An NVIDIA CUDA node advertises
+	// runtime:fdtd so the hub can schedule electromagnetic simulations to it;
+	// AMD/CPU/Apple nodes are excluded by default (gprMax GPU-accelerates only on
+	// CUDA — see fdtdNativeReady). This sits alongside (does not replace) the
+	// inference model-readiness tokens — one node serves both.
 	emFDTDReady := fdtdNativeReady(caps, gpuReady)
 	parts = append(parts, boolStatusToken("cap:native_em", emFDTDReady))
 	if emFDTDReady {
 		parts = append(parts, "runtime:fdtd")
 		parts = append(parts, "runtime:fdtd:engine:"+fdtdNativeEngine())
 		parts = append(parts, "runtime:fdtd:mode:native")
+		// Advertise whether EM is GPU-accelerated (NVIDIA CUDA) or on the opt-in
+		// CPU lane so the hub prefers real-GPU nodes for sweeps.
+		if emGPUAccelerated(caps) {
+			parts = append(parts, "runtime:fdtd:accel:cuda")
+		} else {
+			parts = append(parts, "runtime:fdtd:accel:cpu")
+		}
 	} else {
 		parts = append(parts, "runtime:fdtd:ready:0")
 	}
