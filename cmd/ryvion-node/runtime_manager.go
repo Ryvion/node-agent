@@ -17,6 +17,11 @@ const (
 	executorKindRyvionRuntime   = "ryvion_runtime"
 	executorKindAgentHosting    = "agent_hosting"
 	executorKindWorkCapsule     = "work_capsule"
+	// executorKindNativeEM runs an electromagnetic (FDTD) simulation through a
+	// signed, self-contained native runtime bundle (gprMax/openEMS) instead of
+	// an OCI container, so consumer operators do not need Docker. OCI remains a
+	// fallback for Linux/power nodes (see EM-WORKLOAD-ARCHITECTURE §10).
+	executorKindNativeEM = "native_em"
 
 	assuranceClassVerifiedGateway    = "verified_gateway"
 	assuranceClassSovereignExecution = "sovereign_execution"

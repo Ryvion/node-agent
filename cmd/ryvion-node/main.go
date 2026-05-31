@@ -3714,6 +3714,44 @@ func isRyvionRuntimeTask(specJSON string) bool {
 		strings.TrimSpace(spec.RuntimeTask) != ""
 }
 
+// fdtdNativeReady reports whether this node can run native EM (FDTD) sims. It
+// requires a detected GPU (NVIDIA/AMD) and excludes Apple-Silicon/CPU-only
+// nodes, matching the hub scheduler's Accelerator-in-{gpu,cuda} EM filter.
+// Operators can force-disable EM via RYV_DISABLE_NATIVE_EM=1.
+func fdtdNativeReady(caps hw.CapSet, gpuReady bool) bool {
+	if envFlagEnabled("RYV_DISABLE_NATIVE_EM") {
+		return false
+	}
+	if !gpuReady {
+		return false
+	}
+	// Apple Metal nodes are excluded for v1 (no CUDA/ROCm FDTD bundle).
+	if runtime.GOOS == "darwin" {
+		return false
+	}
+	// Require some VRAM headroom so budgeted sims can actually run.
+	return caps.VRAMBytes/1024/1024 >= fdtdMinVRAMMB
+}
+
+// fdtdMinVRAMMB is a conservative floor; the hub sets per-task MinVRAMMB from
+// budget.py and the scheduler enforces it. This only gates capability
+// advertisement.
+const fdtdMinVRAMMB = 6000
+
+// fdtdNativeEngine reports which native FDTD engine this OS leads with. gprMax
+// (pure-Python + CUDA) and openEMS (prebuilt Windows binaries) package cleanly
+// for the native path per EM-WORKLOAD-ARCHITECTURE §10; Meep stays on the OCI
+// lane. Operators can pin via RYV_EM_ENGINE.
+func fdtdNativeEngine() string {
+	if eng := strings.TrimSpace(strings.ToLower(os.Getenv("RYV_EM_ENGINE"))); eng != "" {
+		return eng
+	}
+	if runtime.GOOS == "windows" {
+		return "openems"
+	}
+	return "gprmax"
+}
+
 func extractDeploymentID(specJSON string) string {
 	var spec struct {
 		DeploymentID string `json:"deployment_id"`
@@ -3841,6 +3879,20 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	}
 	parts = append(parts, boolStatusToken("cap:image_gen", publicAIReady && (runtimeSnap.GPUReady || localFluxReady)))
 	parts = append(parts, boolStatusToken("cap:ryvion_runtime", publicAIReady && (localFluxReady || localFluxPreparing || localFluxPrepareEligible)))
+	// EM (FDTD) native runtime capability. A GPU-capable node (NVIDIA/AMD)
+	// advertises runtime:fdtd so the hub can schedule electromagnetic
+	// simulations to it; Apple-Silicon/CPU-only nodes are excluded (Apple out
+	// for v1 per EM-WORKLOAD-ARCHITECTURE §4.4). This sits alongside (does not
+	// replace) the inference model-readiness tokens — one node serves both.
+	emFDTDReady := fdtdNativeReady(caps, gpuReady)
+	parts = append(parts, boolStatusToken("cap:native_em", emFDTDReady))
+	if emFDTDReady {
+		parts = append(parts, "runtime:fdtd")
+		parts = append(parts, "runtime:fdtd:engine:"+fdtdNativeEngine())
+		parts = append(parts, "runtime:fdtd:mode:native")
+	} else {
+		parts = append(parts, "runtime:fdtd:ready:0")
+	}
 	if localFluxPreparing {
 		parts = append(parts, "runtime:image:"+flux2Klein4BLocalModel+":preparing:1")
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -35,10 +36,12 @@ type managedOCIEngine struct{}
 type ryvionRuntimeEngine struct{}
 type agentHostingEngine struct{}
 type workCapsuleEngine struct{}
+type nativeEMEngine struct{}
 
 func (streamingEngine) Kind() string    { return executorKindNativeStreaming }
 func (nativeReportEngine) Kind() string { return executorKindNativeReport }
 func (managedOCIEngine) Kind() string   { return executorKindManagedOCI }
+func (nativeEMEngine) Kind() string     { return executorKindNativeEM }
 func (ryvionRuntimeEngine) Kind() string {
 	return executorKindRyvionRuntime
 }
@@ -59,6 +62,8 @@ func selectExecutionEngine(work *hub.WorkAssignment) executionEngine {
 		return agentHostingEngine{}
 	case executorKindWorkCapsule:
 		return workCapsuleEngine{}
+	case executorKindNativeEM:
+		return nativeEMEngine{}
 	default:
 		return managedOCIEngine{}
 	}
@@ -79,6 +84,15 @@ func executorKindForAssignment(work *hub.WorkAssignment) string {
 	}
 	if isRyvionRuntimeTask(work.SpecJSON) {
 		return executorKindRyvionRuntime
+	}
+	// EM (FDTD) jobs route to the native runtime when the hub omits a real
+	// OCI ContainerImage (native-first) or explicitly tags the spec. A real
+	// container image falls through to ManagedOCI (the EM OCI fallback lane).
+	if strings.TrimSpace(work.Image) == "" && isNativeEMTask(work.SpecJSON) {
+		return executorKindNativeEM
+	}
+	if strings.EqualFold(strings.TrimSpace(work.Image), executorKindNativeEM) {
+		return executorKindNativeEM
 	}
 	if strings.EqualFold(strings.TrimSpace(work.Image), "streaming") {
 		return executorKindNativeStreaming
@@ -636,6 +650,134 @@ func (workCapsuleEngine) Execute(ctx context.Context, work *hub.WorkAssignment, 
 		ObjectKey:     stringValue(metadata["object_key"]),
 		Metadata:      metadata,
 	}, runErr
+}
+
+// isNativeEMTask reports whether a job spec describes an electromagnetic (FDTD)
+// simulation that should run through the native runtime bundle. It mirrors the
+// task-detection pattern of isWorkCapsuleTask / isRyvionRuntimeTask.
+func isNativeEMTask(specJSON string) bool {
+	if strings.TrimSpace(specJSON) == "" {
+		return false
+	}
+	var spec struct {
+		Task          string `json:"task"`
+		SchemaVersion string `json:"schema_version"`
+		ExecutorKind  string `json:"executor_kind"`
+	}
+	if json.Unmarshal([]byte(specJSON), &spec) != nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(spec.ExecutorKind), executorKindNativeEM) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(spec.Task), "em_simulation") {
+		return true
+	}
+	return strings.HasPrefix(strings.TrimSpace(spec.SchemaVersion), "em.job.")
+}
+
+// Execute runs an EM (FDTD) simulation natively: it ensures the signed runtime
+// bundle is present, stages the job into a sandboxed working dir, runs the
+// engine offline, then reads the SAME result.npz/receipt.json/metrics.json
+// contract used by the OCI lane and uploads the (small) artifact via blob.
+func (nativeEMEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {
+	if strings.TrimSpace(work.SpecJSON) == "" {
+		return submitNativeEMFailure(ctx, work, execCtx, "missing_em_spec", fmt.Errorf("missing EM job spec"))
+	}
+
+	result, runErr := runner.RunNativeEM(ctx, work.SpecJSON, execCtx.gpus, execCtx.client.NodeAuthToken(0))
+	if result == nil {
+		return submitNativeEMFailure(ctx, work, execCtx, "native_em_failed", runErr)
+	}
+
+	resultHash := result.Hash
+	metadata := receiptMetadataBase(
+		work,
+		execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+		result.Metadata,
+		map[string]any{
+			"executor":    executorKindNativeEM,
+			"task":        "em_simulation",
+			"duration_ms": result.Duration.Milliseconds(),
+			"exit_code":   result.ExitCode,
+			"stderr_tail": result.Logs,
+			"metrics":     result.Metrics,
+		},
+	)
+	if strings.TrimSpace(result.OutputPath) != "" {
+		uploadRes, uploadErr := blob.Upload(ctx, execCtx.client, work.JobID, result.OutputPath)
+		if uploadErr == nil {
+			metadata["blob_url"] = uploadRes.URL
+			metadata["object_key"] = uploadRes.Key
+			if strings.TrimSpace(uploadRes.Key) != "" {
+				metadata["manifest_key"] = uploadRes.Key + ".manifest.json"
+			}
+			if strings.TrimSpace(uploadRes.Hash) != "" {
+				metadata["artifact_sha256"] = uploadRes.Hash
+				resultHash = uploadRes.Hash
+			}
+		}
+		_ = os.Remove(result.OutputPath)
+	}
+	units := uint64(work.Units)
+	if units == 0 {
+		units = 1
+	}
+	receipt := hub.Receipt{
+		JobID:         work.JobID,
+		ResultHashHex: resultHash,
+		MeteringUnits: units,
+		Metadata:      metadata,
+	}
+	if err := submitReceiptWithRetry(ctx, execCtx.client, receipt); err != nil {
+		return &runnerResultSnapshot{
+			DurationMs:    result.Duration.Milliseconds(),
+			ResultHashHex: resultHash,
+			ExitCode:      result.ExitCode,
+			MeteringUnits: units,
+			BlobURL:       stringValue(metadata["blob_url"]),
+			ObjectKey:     stringValue(metadata["object_key"]),
+			Metadata:      metadata,
+		}, err
+	}
+	return &runnerResultSnapshot{
+		DurationMs:    result.Duration.Milliseconds(),
+		ResultHashHex: resultHash,
+		ExitCode:      result.ExitCode,
+		MeteringUnits: units,
+		BlobURL:       stringValue(metadata["blob_url"]),
+		ObjectKey:     stringValue(metadata["object_key"]),
+		Metadata:      metadata,
+	}, runErr
+}
+
+// submitNativeEMFailure writes a deterministic fail receipt so the hub gets a
+// clean fail+refund instead of a hang (mirrors the EM runner fail() contract).
+func submitNativeEMFailure(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext, code string, runErr error) (*runnerResultSnapshot, error) {
+	msg := code
+	if runErr != nil && strings.TrimSpace(runErr.Error()) != "" {
+		msg = runErr.Error()
+	}
+	sum := sha256.Sum256([]byte(work.JobID + ":" + code + ":" + msg))
+	hash := hex.EncodeToString(sum[:])
+	metadata := receiptMetadataBase(
+		work,
+		execCtx.runtimeManager.ReceiptMetadata(execCtx.gpuDetected),
+		map[string]any{
+			"executor":   executorKindNativeEM,
+			"task":       "em_simulation",
+			"exit_code":  1,
+			"error_code": code,
+			"error":      msg,
+		},
+	)
+	_ = submitReceiptWithRetry(ctx, execCtx.client, hub.Receipt{
+		JobID:         work.JobID,
+		ResultHashHex: hash,
+		MeteringUnits: 0,
+		Metadata:      metadata,
+	})
+	return &runnerResultSnapshot{ResultHashHex: hash, Metadata: metadata, ExitCode: 1}, runErr
 }
 
 func receiptMetadataBase(work *hub.WorkAssignment, extras ...map[string]any) map[string]any {
