@@ -114,9 +114,10 @@ func RunNativeEM(ctx context.Context, specJSON, gpus, nodeToken string) (*Result
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	bundleRoot := emBundleRoot(entrypoint)
 	cmd := buildNativeEMCommand(runCtx, entrypoint, workDir)
 	cmd.Dir = workDir // jail the process CWD to the working dir
-	cmd.Env = nativeEMProcessEnv(workDir, gpus, spec.Budget)
+	cmd.Env = nativeEMProcessEnv(workDir, bundleRoot, gpus, spec.Budget)
 	// OS-level hard caps (cgroup v2 on Linux / Job Object on Windows). Falls back
 	// to the process-group containment + kill-on-timeout path when the host is
 	// unprivileged or the OS feature is unavailable. ctrl is never nil.
@@ -224,7 +225,15 @@ func buildNativeEMCommand(ctx context.Context, entrypoint, workDir string) *exec
 	jobArg := filepath.Join(workDir, "job.json")
 	switch {
 	case strings.HasSuffix(lower, ".py"):
-		python := nativeEMPython()
+		// Prefer the bundle's OWN embedded interpreter (which has the FDTD engine
+		// + GPU bindings installed); fall back to the host python (e.g. a
+		// runner-only bundle where the operator's python carries gprMax via
+		// RYV_EM_PYTHON). Without this the host python lacks gprMax and the runner
+		// silently degrades to the analytic solver.
+		python := emEmbeddedPython(emBundleRoot(entrypoint))
+		if python == "" {
+			python = nativeEMPython()
+		}
 		return exec.CommandContext(ctx, python, entrypoint, "--job", jobArg, "--work", workDir)
 	case strings.HasSuffix(lower, ".ps1"):
 		args := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", entrypoint, "--job", jobArg, "--work", workDir}
@@ -244,11 +253,54 @@ func nativeEMPython() string {
 	return "python3"
 }
 
+// emBundleRoot returns the bundle root dir for a resolved entrypoint. The bundle
+// stages the runner under <root>/runner/run.py, so the root is the parent of the
+// runner/ dir; a flat layout (entrypoint directly in the bundle dir) falls back
+// to the entrypoint's own dir.
+func emBundleRoot(entrypoint string) string {
+	dir := filepath.Dir(entrypoint)
+	if strings.EqualFold(filepath.Base(dir), "runner") {
+		return filepath.Dir(dir)
+	}
+	return dir
+}
+
+// emEmbeddedPython returns the bundle's self-contained interpreter if present,
+// else "" so the caller falls back to the host python. The bundle ships its own
+// CPython (with the FDTD engine + GPU bindings) precisely so the real solve can
+// run without anything installed on the operator host.
+func emEmbeddedPython(bundleRoot string) string {
+	if strings.TrimSpace(bundleRoot) == "" {
+		return ""
+	}
+	var candidates []string
+	if runtime.GOOS == "windows" {
+		candidates = []string{
+			filepath.Join(bundleRoot, "python", "python.exe"),
+			filepath.Join(bundleRoot, "python", "Scripts", "python.exe"),
+		}
+	} else {
+		candidates = []string{
+			filepath.Join(bundleRoot, "python", "bin", "python3"),
+			filepath.Join(bundleRoot, "python", "bin", "python"),
+		}
+	}
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
 // nativeEMProcessEnv builds a minimal environment for the EM process: the result
 // contract paths (mirroring the OCI RYV_* env), a GPU selector hint, and the
 // work dir. The native process is expected to honor these and stay offline.
-func nativeEMProcessEnv(workDir, gpus string, budget emBudget) []string {
+func nativeEMProcessEnv(workDir, bundleRoot, gpus string, budget emBudget) []string {
 	env := []string{
+		// RYVION_WORK_DIR is the name the runner (run.py / engine_gprmax) actually
+		// reads; RYV_WORK_DIR is kept as a back-compat alias.
+		"RYVION_WORK_DIR=" + workDir,
 		"RYV_WORK_DIR=" + workDir,
 		"RYV_RECEIPT_PATH=" + filepath.Join(workDir, "receipt.json"),
 		"RYV_PARTIAL_RECEIPT_PATH=" + filepath.Join(workDir, "receipt.partial.json"),
@@ -257,9 +309,48 @@ func nativeEMProcessEnv(workDir, gpus string, budget emBudget) []string {
 		"RYV_EM_GPUS=" + strings.TrimSpace(gpus),
 		"RYV_EM_MAX_CELLS=" + strconv.Itoa(budget.MaxCells),
 		"RYV_EM_VRAM_MB=" + strconv.Itoa(budget.EstVRAMMB),
-		// Keep PATH/HOME so the bundle's interpreter resolves shared libs.
+		// Keep PATH/HOME so the bundle's interpreter resolves shared libs (and so
+		// pycuda finds nvcc on the host toolkit for v1).
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
+	}
+	// Pin the assigned GPU so the EM job uses the scheduler-chosen device and does
+	// not collide with a concurrent inference job. With CUDA_VISIBLE_DEVICES set,
+	// the engine's "-gpu 0" addresses the (now sole-visible) assigned device.
+	if cvd := emCudaVisibleDevices(gpus); cvd != "" {
+		env = append(env, "CUDA_VISIBLE_DEVICES="+cvd, "HIP_VISIBLE_DEVICES="+cvd)
+	}
+	// LD_LIBRARY_PATH: prepend the bundle's own runtime libs (when a fully
+	// self-contained bundle ships them), then the host's, so a bundled CUDA/ROCm
+	// runtime wins but the operator's toolkit is still found.
+	var ldParts []string
+	if strings.TrimSpace(bundleRoot) != "" {
+		for _, sub := range []string{
+			filepath.Join("engine", "cuda"), filepath.Join("engine", "rocm"),
+			"engine", filepath.Join("python", "lib"),
+		} {
+			p := filepath.Join(bundleRoot, sub)
+			if st, err := os.Stat(p); err == nil && st.IsDir() {
+				ldParts = append(ldParts, p)
+			}
+		}
+	}
+	if host := os.Getenv("LD_LIBRARY_PATH"); host != "" {
+		ldParts = append(ldParts, host)
+	}
+	if len(ldParts) > 0 {
+		env = append(env, "LD_LIBRARY_PATH="+strings.Join(ldParts, string(os.PathListSeparator)))
+	}
+	// Pass through the operator's CUDA/ROCm toolchain + any explicit engine GPU
+	// preference so the native solver reaches the GPU at runtime (v1 relies on the
+	// host toolkit; a fully self-contained bundle is a later optimization).
+	for _, key := range []string{
+		"CUDA_HOME", "CUDA_PATH", "NVIDIA_VISIBLE_DEVICES",
+		"ROCR_VISIBLE_DEVICES", "ROCM_PATH", "RYVION_EM_GPU",
+	} {
+		if v := os.Getenv(key); v != "" {
+			env = append(env, key+"="+v)
+		}
 	}
 	if tmp := os.Getenv("TMPDIR"); tmp != "" {
 		env = append(env, "TMPDIR="+tmp)
@@ -268,6 +359,21 @@ func nativeEMProcessEnv(workDir, gpus string, budget emBudget) []string {
 		env = append(env, "SystemRoot="+sysroot)
 	}
 	return env
+}
+
+// emCudaVisibleDevices maps the node's --gpus selection (auto|all|none|device
+// list) to a CUDA_VISIBLE_DEVICES value: "auto"/"all"/"" -> "" (inherit / engine
+// picks); "none" -> "-1" (force CPU); a device list ("0", "0,1", "device=0") ->
+// bare indices.
+func emCudaVisibleDevices(gpus string) string {
+	g := strings.TrimSpace(strings.ToLower(gpus))
+	switch g {
+	case "", "auto", "all":
+		return ""
+	case "none":
+		return "-1"
+	}
+	return strings.ReplaceAll(g, "device=", "")
 }
 
 func readEMReceiptMetadata(path string) map[string]any {
@@ -306,8 +412,8 @@ func deriveEMBundleURL(m emBundleManifest) string {
 }
 
 func defaultEMEntrypoint() string {
-	if runtime.GOOS == "windows" {
-		return "run.py"
-	}
-	return "run.py"
+	// The signed bundle stages the runner under runner/ (see build_bundle.py), so
+	// the entrypoint is runner/run.py on every OS. ensureEMBundle converts the
+	// slash to the OS separator; buildNativeEMCommand resolves the interpreter.
+	return "runner/run.py"
 }

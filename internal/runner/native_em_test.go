@@ -104,8 +104,8 @@ func TestSafeJoinRejectsTraversal(t *testing.T) {
 }
 
 func TestNativeEMProcessEnvIsolated(t *testing.T) {
-	env := nativeEMProcessEnv("/work/x", "all", emBudget{EstVRAMMB: 8000, MaxCells: 1000})
-	var hasOffline, hasReceipt, hasGpus bool
+	env := nativeEMProcessEnv("/work/x", "", "all", emBudget{EstVRAMMB: 8000, MaxCells: 1000})
+	var hasOffline, hasReceipt, hasGpus, hasWorkDir bool
 	for _, e := range env {
 		switch {
 		case e == "RYV_EM_OFFLINE=1":
@@ -114,10 +114,54 @@ func TestNativeEMProcessEnvIsolated(t *testing.T) {
 			hasReceipt = true
 		case e == "RYV_EM_GPUS=all":
 			hasGpus = true
+		case e == "RYVION_WORK_DIR=/work/x":
+			hasWorkDir = true
 		}
 	}
-	if !hasOffline || !hasReceipt || !hasGpus {
-		t.Fatalf("env missing required keys: offline=%v receipt=%v gpus=%v", hasOffline, hasReceipt, hasGpus)
+	if !hasOffline || !hasReceipt || !hasGpus || !hasWorkDir {
+		t.Fatalf("env missing required keys: offline=%v receipt=%v gpus=%v workdir=%v",
+			hasOffline, hasReceipt, hasGpus, hasWorkDir)
+	}
+}
+
+func TestEMCudaVisibleDevices(t *testing.T) {
+	cases := map[string]string{
+		"": "", "auto": "", "all": "", "none": "-1",
+		"0": "0", "0,1": "0,1", "device=0": "0",
+	}
+	for in, want := range cases {
+		if got := emCudaVisibleDevices(in); got != want {
+			t.Fatalf("emCudaVisibleDevices(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+func TestEMBundleRootAndEmbeddedPython(t *testing.T) {
+	root := t.TempDir()
+	entry := filepath.Join(root, "runner", "run.py")
+	if got := emBundleRoot(entry); got != root {
+		t.Fatalf("emBundleRoot(%q)=%q want %q", entry, got, root)
+	}
+	if got := emEmbeddedPython(root); got != "" {
+		t.Fatalf("expected no embedded python, got %q", got)
+	}
+	if runtime.GOOS != "windows" {
+		py := filepath.Join(root, "python", "bin", "python3")
+		if err := os.MkdirAll(filepath.Dir(py), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(py, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := emEmbeddedPython(root); got != py {
+			t.Fatalf("embedded python: got %q want %q", got, py)
+		}
+	}
+}
+
+func TestDefaultEMEntrypointIsRunnerRunPy(t *testing.T) {
+	if got := defaultEMEntrypoint(); got != "runner/run.py" {
+		t.Fatalf("default entrypoint should be runner/run.py, got %q", got)
 	}
 }
 
