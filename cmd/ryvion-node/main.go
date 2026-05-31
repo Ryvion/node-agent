@@ -91,6 +91,11 @@ type heartbeatSendResult struct {
 
 const autoUpdateRetryInterval = 5 * time.Minute
 
+// bootHealthyGrace is how long a freshly-started binary must stay alive before it
+// is considered healthy even without a successful hub registration (a
+// hub-independent commit that prevents false crash-loop rollbacks).
+const bootHealthyGrace = 3 * time.Minute
+
 var (
 	autoUpdateInProgress    atomic.Int32
 	lastAutoUpdateAttemptMs atomic.Int64
@@ -813,6 +818,20 @@ func runModelBenchSelfTestViaOperatorAPI(ctx context.Context, config modelbench.
 // or from the Windows service handler with a cancellable context.
 func runNode(ctx context.Context) {
 	ensureServiceRecovery()
+	// Crash-loop rollback (Layer 2): if this auto-updated binary keeps restarting
+	// before it ever proves healthy, revert to the last-known-good binary. Runs
+	// before any risky init so a recurring early crash still reaches this gate.
+	update.RecordBootAndMaybeRollback(version)
+	// Hub-independent safety commit: if the binary stays alive for the grace
+	// period (even when the hub is unreachable), mark it healthy so a later
+	// unrelated restart cannot trigger a false rollback.
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(bootHealthyGrace):
+			update.MarkBootHealthy(version)
+		}
+	}()
 	cleanupOrphanedContainers()
 
 	hubURL := strings.TrimSpace(flagHub)
@@ -925,6 +944,9 @@ func runNode(ctx context.Context) {
 	bindToken := strings.TrimSpace(os.Getenv("RYV_BIND_TOKEN"))
 	slog.Info("register succeeded", "hub", hubURL, "device_type", deviceType, "pubkey", client.PublicKeyHex(),
 		"bind_token", redact(bindToken))
+	// Registration with the hub succeeded => this binary works. Commit it as the
+	// known-good rollback target (Layer 2). Idempotent with the grace-timer.
+	update.MarkBootHealthy(version)
 	if flagMaxGPUUtil > 0 && flagMaxGPUUtil < 100 {
 		slog.Info("GPU utilization cap enabled", "max_gpu_util", flagMaxGPUUtil)
 	}
