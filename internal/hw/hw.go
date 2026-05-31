@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,10 +174,21 @@ type Metrics struct {
 
 // DetectCaps returns machine capability info.
 // Failed probes return zero values instead of synthetic data.
-func DetectCaps(_ string) CapSet {
+//
+// A probe that PANICS on unexpected vendor-tool output must never crash the node
+// at boot: that would feed the service-manager restart loop and, on a freshly
+// auto-updated binary, contribute to a brick. The recover degrades to a minimal
+// CPU profile so the node still comes up and stays remotely updatable.
+func DetectCaps(_ string) (caps CapSet) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("hardware detection panicked; using minimal capabilities", "panic", r)
+			caps = CapSet{CPUCores: uint32(runtime.NumCPU())}
+		}
+	}()
 	gpuModel, vramBytes, sensors := detectGPU()
 	teeSupported, teeType := DetectTEE()
-	return CapSet{
+	caps = CapSet{
 		GPUModel:      gpuModel,
 		CPUModel:      detectCPUModel(),
 		CPUCores:      uint32(runtime.NumCPU()),
@@ -190,6 +202,7 @@ func DetectCaps(_ string) CapSet {
 		TEEType:       teeType,
 		GfxVersion:    GetAMDGfxVersion(),
 	}
+	return caps
 }
 
 func detectCPUModel() string {

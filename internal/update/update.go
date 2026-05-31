@@ -181,6 +181,38 @@ func Apply(ctx context.Context, version string) error {
 	return replaceUnix(exePath, binaryData)
 }
 
+// updateSelfCheckTimeout bounds the staged-binary self-check.
+const updateSelfCheckTimeout = 30 * time.Second
+
+// selfCheckBinary runs a freshly-staged binary with `--version` to confirm it can
+// actually START before we commit it as the node's executable. A release can be
+// correctly signed yet still be a broken build (panics on startup, wrong arch,
+// missing shared library). Without this gate we would swap such a binary in, and
+// the service-manager restart loop would never again reach the auto-update code —
+// permanently bricking the node with no remote recovery. On failure we keep the
+// current working binary and recover via a later release.
+//
+// Opt out (not recommended) with RYV_DISABLE_UPDATE_SELFCHECK=1.
+func selfCheckBinary(path string) error {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_DISABLE_UPDATE_SELFCHECK"))) {
+	case "1", "true", "yes", "on":
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateSelfCheckTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("staged binary self-check timed out after %s (hung on --version)", updateSelfCheckTimeout)
+	}
+	if err != nil {
+		return fmt.Errorf("staged binary self-check failed (will not adopt): %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if !strings.Contains(string(out), "ryvion-node") {
+		return fmt.Errorf("staged binary self-check returned unexpected output (will not adopt): %q", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func replaceUnix(exePath string, data []byte) error {
 	dir := filepath.Dir(exePath)
 	tmp, err := os.CreateTemp(dir, ".ryvion-node-update-*")
@@ -206,6 +238,10 @@ func replaceUnix(exePath string, data []byte) error {
 			return replaceDarwinUserManaged(exePath, data)
 		}
 		return fmt.Errorf("chmod: %w", err)
+	}
+	if err := selfCheckBinary(tmpPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("staged binary rejected, keeping current binary: %w", err)
 	}
 	if err := os.Rename(tmpPath, exePath); err != nil {
 		os.Remove(tmpPath)
@@ -244,6 +280,10 @@ func replaceDarwinUserManaged(previousExePath string, data []byte) error {
 	if err := os.Chmod(tmpPath, 0o755); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("chmod user-managed binary: %w", err)
+	}
+	if err := selfCheckBinary(tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("staged user-managed binary rejected, keeping current binary: %w", err)
 	}
 	if err := os.Rename(tmpPath, target); err != nil {
 		_ = os.Remove(tmpPath)
@@ -332,6 +372,13 @@ func replaceWindows(exePath string, data []byte) error {
 	if err := os.Rename(tmpPath, target); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("install staged binary: %w", err)
+	}
+
+	// Self-check the staged exe BEFORE rewiring the service to it. If it can't
+	// start, the service keeps pointing at the current working binary — no brick.
+	if err := selfCheckBinary(target); err != nil {
+		_ = os.Remove(target)
+		return fmt.Errorf("staged Windows binary rejected, keeping current service binary: %w", err)
 	}
 
 	serviceName := strings.TrimSpace(os.Getenv("RYVION_WINDOWS_SERVICE"))
