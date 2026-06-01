@@ -1006,14 +1006,21 @@ func runNode(ctx context.Context) {
 	// immediately and the heartbeat begins reporting normally. As each
 	// GGUF lands it gets surfaced via the `native-model-ready:` status
 	// token so the hub can prefer warm nodes for scheduling.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("native model prewarm panic", "error", r)
-			}
+	// Opt-out: an EM-only / bandwidth-limited operator should not pull tens of GB
+	// of chat-model GGUFs it will never serve. RYV_DISABLE_MODEL_PREWARM=1 skips
+	// it entirely (models still load on-demand if an inference job ever arrives).
+	if envFlagEnabled("RYV_DISABLE_MODEL_PREWARM") {
+		slog.Info("native model prewarm disabled (RYV_DISABLE_MODEL_PREWARM=1)")
+	} else {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("native model prewarm panic", "error", r)
+				}
+			}()
+			infMgr.PrewarmEligibleModels(ctx, caps.VRAMBytes)
 		}()
-		infMgr.PrewarmEligibleModels(ctx, caps.VRAMBytes)
-	}()
+	}
 
 	// Health report loop keeps scheduler-facing capability flags up to date
 	// (for example native inference readiness).
