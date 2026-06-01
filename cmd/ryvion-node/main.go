@@ -3765,27 +3765,39 @@ func fdtdNativeReady(caps hw.CapSet, gpuReady bool) bool {
 	if envFlagEnabled("RYV_DISABLE_NATIVE_EM") {
 		return false
 	}
-	if !gpuReady {
+	switch runtime.GOOS {
+	case "linux":
+		// gprMax lead (CUDA-only GPU accel + published linux-amd64 bundle).
+		if !gpuReady {
+			return false
+		}
+		if emGPUAccelerated(caps) {
+			// Real GPU lane: require VRAM headroom so budgeted sims fit on-device.
+			return caps.VRAMBytes/1024/1024 >= fdtdMinVRAMMB
+		}
+		if envFlagEnabled("RYV_EM_ALLOW_CPU") {
+			// Opt-in CPU lane (e.g. AMD GPUs): the solver runs in host RAM, so gate
+			// on RAM headroom rather than VRAM. Real physics, just ~10-20x slower.
+			return caps.RAMBytes/1024/1024 >= fdtdMinVRAMMB
+		}
 		return false
-	}
-	// v1 ships ONLY the Linux gprMax engine + a published linux-amd64 bundle.
-	// openEMS (Windows) and Meep (macOS) are not shipped yet, so don't advertise
-	// FDTD on those platforms — a node that claims EM it can't fulfill would just
-	// fail buyer jobs (e.g. an operator's main Windows inference node). Lift this
-	// per-OS once a real bundle exists for that platform.
-	if runtime.GOOS != "linux" {
-		return false
-	}
-	if emGPUAccelerated(caps) {
-		// Real GPU lane: require VRAM headroom so budgeted sims fit on-device.
-		return caps.VRAMBytes/1024/1024 >= fdtdMinVRAMMB
-	}
-	if envFlagEnabled("RYV_EM_ALLOW_CPU") {
-		// Opt-in CPU lane (e.g. AMD GPUs): the solver runs in host RAM, so gate
-		// on RAM headroom rather than VRAM. Real physics, just ~10-20x slower.
+	case "darwin":
+		// Meep photonics lane: a real 2D FDTD solver shipped as a self-contained
+		// native bundle (meep-v1, conda-pack'd python + Meep). Apple Silicon has no
+		// CUDA, so Meep runs on the CPU — opt-in via RYV_EM_ALLOW_CPU so an
+		// operator's Mac inference node never silently takes EM work. Gate on host
+		// RAM (the solve runs in RAM). The bundle carries Meep itself, so the
+		// opt-in is an HONEST claim — nothing to preinstall.
+		if !envFlagEnabled("RYV_EM_ALLOW_CPU") {
+			return false
+		}
 		return caps.RAMBytes/1024/1024 >= fdtdMinVRAMMB
+	default:
+		// openEMS (Windows) bundle not published yet — a node that claims EM it
+		// can't fulfill would just fail buyer jobs (e.g. a main Windows inference
+		// node). Lift this once a real Windows bundle exists.
+		return false
 	}
-	return false
 }
 
 // emGPUAccelerated reports whether this node's GPU can run the FDTD engine ON the
@@ -3824,10 +3836,16 @@ func fdtdNativeEngine() string {
 	if eng := strings.TrimSpace(strings.ToLower(os.Getenv("RYV_EM_ENGINE"))); eng != "" {
 		return eng
 	}
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		return "openems"
+	case "darwin":
+		// macOS leads with Meep (conda-pack'd self-contained bundle); gprMax has no
+		// macOS GPU path and openEMS targets Windows.
+		return "meep"
+	default:
+		return "gprmax"
 	}
-	return "gprmax"
 }
 
 func extractDeploymentID(specJSON string) string {

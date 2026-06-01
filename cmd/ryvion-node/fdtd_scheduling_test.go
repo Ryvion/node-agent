@@ -56,11 +56,12 @@ func TestFDTDNativeReadyExclusions(t *testing.T) {
 	})
 }
 
-// fdtdNativeReady is OS-aware (darwin excluded), so the positive GPU/CPU-lane
-// paths are only asserted off darwin where they actually apply.
+// fdtdNativeReady is OS-aware: linux leads with gprMax (CUDA GPU + opt-in CPU
+// lanes), darwin with Meep (opt-in CPU lane, asserted separately below). These
+// NVIDIA/AMD GPU-lane paths only apply off darwin.
 func TestFDTDNativeReadyPositive(t *testing.T) {
 	if runtime.GOOS == "darwin" {
-		t.Skip("EM is excluded on Apple/darwin for v1")
+		t.Skip("gprMax GPU/AMD lanes do not apply on darwin; see TestFDTDNativeReadyDarwinMeep")
 	}
 	nvidiaBig := hw.CapSet{GPUModel: "NVIDIA GeForce RTX 4070 Ti", VRAMBytes: 16 * gb, RAMBytes: 32 * gb}
 	nvidiaSmall := hw.CapSet{GPUModel: "NVIDIA GeForce RTX 3050", VRAMBytes: 4 * gb, RAMBytes: 16 * gb}
@@ -86,6 +87,37 @@ func TestFDTDNativeReadyPositive(t *testing.T) {
 			t.Fatal("CPU lane below RAM floor should not advertise EM")
 		}
 	})
+}
+
+// TestFDTDNativeReadyDarwinMeep asserts the darwin Meep lane: opt-in only, RAM
+// gated, gpuReady-independent (Apple Silicon has no CUDA; Meep solves on CPU).
+func TestFDTDNativeReadyDarwinMeep(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin Meep lane only applies on macOS")
+	}
+	t.Setenv("RYV_DISABLE_NATIVE_EM", "")
+	t.Setenv("RYV_EM_ENGINE", "")
+	mac := hw.CapSet{GPUModel: "Apple M4", RAMBytes: 16 * gb}
+
+	t.Run("requires opt-in", func(t *testing.T) {
+		t.Setenv("RYV_EM_ALLOW_CPU", "")
+		if fdtdNativeReady(mac, false) || fdtdNativeReady(mac, true) {
+			t.Fatal("darwin must not advertise EM without RYV_EM_ALLOW_CPU")
+		}
+	})
+	t.Run("opt-in meep lane (gpuReady irrelevant)", func(t *testing.T) {
+		t.Setenv("RYV_EM_ALLOW_CPU", "1")
+		if !fdtdNativeReady(mac, false) {
+			t.Fatal("darwin + RYV_EM_ALLOW_CPU + RAM headroom should advertise Meep EM regardless of gpuReady")
+		}
+		low := hw.CapSet{GPUModel: "Apple M4", RAMBytes: 4 * gb}
+		if fdtdNativeReady(low, true) {
+			t.Fatal("below RAM floor should not advertise EM")
+		}
+	})
+	if eng := fdtdNativeEngine(); eng != "meep" {
+		t.Fatalf("darwin fdtdNativeEngine=%q want meep", eng)
+	}
 }
 
 // envFlagsClear guards the exclusion tests against an EM flag leaking in from the
