@@ -265,6 +265,32 @@ func emBundleRoot(entrypoint string) string {
 	return dir
 }
 
+// emBundlePATH prepends the bundle's interpreter bin dir (python/bin, or
+// python/ on Windows) to PATH so a self-contained bundle's nvcc + python tools
+// resolve without anything installed on the host. Falls back to the host PATH.
+func emBundlePATH(bundleRoot string) string {
+	host := os.Getenv("PATH")
+	if strings.TrimSpace(bundleRoot) == "" {
+		return host
+	}
+	candidates := []string{filepath.Join(bundleRoot, "python", "bin")}
+	if runtime.GOOS == "windows" {
+		candidates = []string{
+			filepath.Join(bundleRoot, "python", "Scripts"),
+			filepath.Join(bundleRoot, "python"),
+		}
+	}
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && st.IsDir() {
+			if host == "" {
+				return c
+			}
+			return c + string(os.PathListSeparator) + host
+		}
+	}
+	return host
+}
+
 // emEmbeddedPython returns the bundle's self-contained interpreter if present,
 // else "" so the caller falls back to the host python. The bundle ships its own
 // CPython (with the FDTD engine + GPU bindings) precisely so the real solve can
@@ -309,9 +335,10 @@ func nativeEMProcessEnv(workDir, bundleRoot, gpus string, budget emBudget) []str
 		"RYV_EM_GPUS=" + strings.TrimSpace(gpus),
 		"RYV_EM_MAX_CELLS=" + strconv.Itoa(budget.MaxCells),
 		"RYV_EM_VRAM_MB=" + strconv.Itoa(budget.EstVRAMMB),
-		// Keep PATH/HOME so the bundle's interpreter resolves shared libs (and so
-		// pycuda finds nvcc on the host toolkit for v1).
-		"PATH=" + os.Getenv("PATH"),
+		// Prepend the bundle's own bin (its python + nvcc for pycuda's runtime
+		// kernel compile) to PATH so a self-contained bundle needs nothing on the
+		// host; falls back to the host PATH when no bundle bin exists.
+		"PATH=" + emBundlePATH(bundleRoot),
 		"HOME=" + os.Getenv("HOME"),
 	}
 	// Pin the assigned GPU so the EM job uses the scheduler-chosen device and does
