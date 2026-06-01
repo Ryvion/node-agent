@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -716,6 +717,11 @@ func (nativeEMEngine) Execute(ctx context.Context, work *hub.WorkAssignment, exe
 				metadata["artifact_sha256"] = uploadRes.Hash
 				resultHash = uploadRes.Hash
 			}
+		} else {
+			// Don't swallow: without object_key the hub has no result data and the
+			// study can't build a dataset. Surface it so it's diagnosable.
+			slog.Warn("EM result artifact upload failed; receipt will carry no object_key",
+				"job_id", work.JobID, "error", uploadErr)
 		}
 		_ = os.Remove(result.OutputPath)
 	}

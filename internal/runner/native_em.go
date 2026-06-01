@@ -167,7 +167,11 @@ func RunNativeEM(ctx context.Context, specJSON, gpus, nodeToken string) (*Result
 	)
 	receiptComplete := receiptFileHasHash(filepath.Join(workDir, "receipt.json"))
 	metrics := readMetrics(filepath.Join(workDir, "metrics.json"), duration)
-	artifactPath, _ := copyArtifact(workDir, workBase)
+	artifactPath, artErr := copyArtifact(workDir, workBase)
+	if artifactPath == "" {
+		slog.Warn("EM result artifact not found in work dir — dataset will be empty",
+			"job_dir", workDir, "error", artErr)
+	}
 
 	hash := receiptHash
 	if hash == "" {

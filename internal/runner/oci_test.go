@@ -168,6 +168,54 @@ func TestCopyArtifactFindsNamedOutputFromMetrics(t *testing.T) {
 	}
 }
 
+// TestCopyArtifactFindsArtifactInOutputSubdir covers the EM/OCI runner contract:
+// the runner writes its artifact into WORK_DIR/output/<name> and reports
+// output_name as just the basename. copyArtifact must still find it (regression
+// for the EM dataset-delivery bug where artifacts in output/ were never found).
+func TestCopyArtifactFindsArtifactInOutputSubdir(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work")
+	outputDir := filepath.Join(workDir, "output")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+
+	artifact := []byte("npz-bytes")
+	if err := os.WriteFile(filepath.Join(outputDir, "result.npz"), artifact, 0o644); err != nil {
+		t.Fatalf("write result.npz: %v", err)
+	}
+	// metrics.json reports the basename only (as the runner does).
+	if err := os.WriteFile(filepath.Join(workDir, "metrics.json"), []byte(`{"output_name":"result.npz"}`), 0o644); err != nil {
+		t.Fatalf("write metrics.json: %v", err)
+	}
+	// A control file in the work dir must not be picked as the artifact.
+	if err := os.WriteFile(filepath.Join(workDir, "receipt.json"), []byte(`{"output_hash":"x"}`), 0o644); err != nil {
+		t.Fatalf("write receipt.json: %v", err)
+	}
+
+	outBase := filepath.Join(tmp, "out")
+	if err := os.MkdirAll(outBase, 0o755); err != nil {
+		t.Fatalf("mkdir out base: %v", err)
+	}
+
+	path, err := copyArtifact(workDir, outBase)
+	if err != nil {
+		t.Fatalf("copyArtifact returned error: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected artifact path from output/ subdir, got empty")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read copied artifact: %v", err)
+	}
+	if string(got) != string(artifact) {
+		t.Fatalf("artifact mismatch: got=%q want=%q", string(got), string(artifact))
+	}
+}
+
 func TestReadProbeSummaryKeepsScaledEvidenceAndDropsRawInternals(t *testing.T) {
 	t.Parallel()
 

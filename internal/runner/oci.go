@@ -1011,22 +1011,36 @@ func artifactCandidates(workDir string) []string {
 	add(filepath.Join(workDir, "result.bin"))
 
 	if outputName := metricsOutputName(filepath.Join(workDir, "metrics.json")); outputName != "" {
-		add(filepath.Join(workDir, filepath.Base(outputName)))
+		base := filepath.Base(outputName)
+		add(filepath.Join(workDir, base))
+		// Runners (OCI image + native EM bundle) write the artifact into the
+		// WORK_DIR/output/ subdir and report output_name as just the basename,
+		// so also look there. Honor a relative output_name (e.g. output/x.npz).
+		add(filepath.Join(workDir, "output", base))
+		if !filepath.IsAbs(outputName) {
+			add(filepath.Join(workDir, filepath.Clean(outputName)))
+		}
 	}
 
-	entries, err := os.ReadDir(workDir)
-	if err != nil {
-		return candidates
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	// Scan workDir top level AND the conventional output/ subdir for any
+	// non-control file the runner may have left as the artifact.
+	scanDir := func(dir, prefix string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
 		}
-		if controlFiles[strings.ToLower(entry.Name())] {
-			continue
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			if controlFiles[strings.ToLower(entry.Name())] {
+				continue
+			}
+			add(filepath.Join(prefix, entry.Name()))
 		}
-		add(filepath.Join(workDir, entry.Name()))
 	}
+	scanDir(workDir, workDir)
+	scanDir(filepath.Join(workDir, "output"), filepath.Join(workDir, "output"))
 	return candidates
 }
 
