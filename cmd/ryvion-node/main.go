@@ -3768,8 +3768,12 @@ func fdtdNativeReady(caps hw.CapSet, gpuReady bool) bool {
 	if !gpuReady {
 		return false
 	}
-	// Apple Metal nodes are excluded for v1 (no CUDA/ROCm FDTD bundle).
-	if runtime.GOOS == "darwin" {
+	// v1 ships ONLY the Linux gprMax engine + a published linux-amd64 bundle.
+	// openEMS (Windows) and Meep (macOS) are not shipped yet, so don't advertise
+	// FDTD on those platforms — a node that claims EM it can't fulfill would just
+	// fail buyer jobs (e.g. an operator's main Windows inference node). Lift this
+	// per-OS once a real bundle exists for that platform.
+	if runtime.GOOS != "linux" {
 		return false
 	}
 	if emGPUAccelerated(caps) {
