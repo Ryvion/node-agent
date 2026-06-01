@@ -933,8 +933,14 @@ func forbiddenProbeSummaryKey(key string) bool {
 }
 
 func copyArtifact(workDir, workBase string) (string, error) {
+	return copyArtifactFrom(workDir, workBase, artifactCandidates(workDir))
+}
+
+// copyArtifactFrom copies the first readable, in-jail candidate to workBase.
+// Callers can prepend preferred paths (e.g. the EM lane prefers result.json,
+// the JSON mirror the hub parses, over the binary result.npz).
+func copyArtifactFrom(workDir, workBase string, candidates []string) (string, error) {
 	workRoot := canonicalPath(workDir)
-	candidates := artifactCandidates(workDir)
 	for _, src := range candidates {
 		fi, err := os.Stat(src)
 		if err != nil || fi.IsDir() {

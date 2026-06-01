@@ -167,7 +167,15 @@ func RunNativeEM(ctx context.Context, specJSON, gpus, nodeToken string) (*Result
 	)
 	receiptComplete := receiptFileHasHash(filepath.Join(workDir, "receipt.json"))
 	metrics := readMetrics(filepath.Join(workDir, "metrics.json"), duration)
-	artifactPath, artErr := copyArtifact(workDir, workBase)
+	// The hub's em.result.v1 reader parses result.json (the JSON mirror of
+	// result.npz). Upload that, not the binary .npz, so the study aggregator can
+	// read the FOM/vectors and build the dataset. Fall back to the generic
+	// artifact candidates if the mirror is absent.
+	emCandidates := append([]string{
+		filepath.Join(workDir, "output", "result.json"),
+		filepath.Join(workDir, "result.json"),
+	}, artifactCandidates(workDir)...)
+	artifactPath, artErr := copyArtifactFrom(workDir, workBase, emCandidates)
 	if artifactPath == "" {
 		slog.Warn("EM result artifact not found in work dir — dataset will be empty",
 			"job_dir", workDir, "error", artErr)

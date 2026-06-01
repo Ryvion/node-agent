@@ -216,6 +216,49 @@ func TestCopyArtifactFindsArtifactInOutputSubdir(t *testing.T) {
 	}
 }
 
+// TestCopyArtifactFromPrefersJSONMirror verifies the EM lane uploads the JSON
+// mirror (which the hub's em.result.v1 reader parses) over the binary .npz when
+// both are present — the fix for the EM dataset format mismatch.
+func TestCopyArtifactFromPrefersJSONMirror(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	workDir := filepath.Join(tmp, "work")
+	outputDir := filepath.Join(workDir, "output")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	jsonBytes := []byte(`{"point_index":0,"fom":{"transmission_mag":0.5}}`)
+	if err := os.WriteFile(filepath.Join(outputDir, "result.json"), jsonBytes, 0o644); err != nil {
+		t.Fatalf("write result.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "result.npz"), []byte("PK\x03\x04binary-npz"), 0o644); err != nil {
+		t.Fatalf("write result.npz: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "metrics.json"), []byte(`{"output_name":"result.npz"}`), 0o644); err != nil {
+		t.Fatalf("write metrics.json: %v", err)
+	}
+
+	outBase := filepath.Join(tmp, "out")
+	if err := os.MkdirAll(outBase, 0o755); err != nil {
+		t.Fatalf("mkdir out base: %v", err)
+	}
+
+	prefer := []string{filepath.Join(workDir, "output", "result.json"), filepath.Join(workDir, "result.json")}
+	candidates := append(prefer, artifactCandidates(workDir)...)
+	path, err := copyArtifactFrom(workDir, outBase, candidates)
+	if err != nil {
+		t.Fatalf("copyArtifactFrom returned error: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read copied artifact: %v", err)
+	}
+	if string(got) != string(jsonBytes) {
+		t.Fatalf("expected JSON mirror, got %q", string(got))
+	}
+}
+
 func TestReadProbeSummaryKeepsScaledEvidenceAndDropsRawInternals(t *testing.T) {
 	t.Parallel()
 
