@@ -304,6 +304,8 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 
 	// Read SSE lines from llama-server, relay as-is to hub
 	var fullContent strings.Builder
+	tcAcc := newToolCallAccumulator()
+	finishReason := ""
 	hash := sha256.New()
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024)
@@ -354,8 +356,10 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 				Delta struct {
 					Content          string `json:"content"`
 					ReasoningContent string `json:"reasoning_content"`
-					Reasoning        string `json:"reasoning"`
+					Reasoning        string          `json:"reasoning"`
+					ToolCalls        json.RawMessage `json:"tool_calls"`
 				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *struct {
 				PromptTokens     int64 `json:"prompt_tokens"`
@@ -377,6 +381,16 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 			}
 			if len(chunk.Choices) > 0 {
 				delta := chunk.Choices[0].Delta
+				if len(delta.ToolCalls) > 0 {
+					tcAcc.add(delta.ToolCalls)
+					if !hasFirstToken {
+						firstTokenAt = time.Now()
+						hasFirstToken = true
+					}
+				}
+				if fr := chunk.Choices[0].FinishReason; fr != "" {
+					finishReason = fr
+				}
 				content := delta.Content
 				reasoning := delta.ReasoningContent
 				if reasoning == "" {
@@ -419,7 +433,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		return fmt.Errorf("job context cancelled: %w", err)
 	}
 
-	if fullContent.Len() == 0 {
+	if fullContent.Len() == 0 && !tcAcc.hasAny() {
 		writeHubStreamError(pw, "llama-server returned empty output (context window or memory exceeded)")
 		pw.Close()
 		<-streamErr
@@ -482,6 +496,15 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	meta["exit_code"] = 0
 	meta["response_length"] = fullContent.Len()
 	meta["stderr_tail"] = tail
+	// Record assembled tool calls so the hub can surface structured tool_calls in
+	// the (non-streaming) /v1/chat response and the receipt proves what was called.
+	if tcAcc.hasAny() {
+		meta["tool_calls"] = tcAcc.assembled()
+		if finishReason == "" {
+			finishReason = "tool_calls"
+		}
+		meta["finish_reason"] = finishReason
+	}
 	applyStreamingMetricsToMetadata(meta, metrics)
 	applyStreamingSpeculativeMetadata(meta, m.streamingSpeculativeLaunch(), metrics)
 	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
