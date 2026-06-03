@@ -117,6 +117,47 @@ func validateAgentImageRef(image string) error {
 	return fmt.Errorf("agent image must use a pinned digest or an approved managed prefix")
 }
 
+// validateManagedRunnerImage gates the main OCI lane (Run / RunVerifierSession)
+// so a malicious or compromised hub cannot make a node pull and run an arbitrary
+// attacker image (cryptominer, container-escape payload). Unlike
+// validateAgentImageRef (agent-hosting lane) this ALLOWS the :latest tag, because
+// the platform's runner images are published and consumed as :latest by design
+// (the node re-pulls before every run). Pinned digests are always allowed. All
+// hub-referenced runner images use the ghcr.io/ryvion/ prefix, so this is
+// fail-closed without affecting legitimate jobs. Override the allowed prefixes
+// with RYV_ALLOWED_RUNNER_IMAGE_PREFIXES (comma-separated) if needed.
+func validateManagedRunnerImage(image string) error {
+	image = strings.TrimSpace(strings.ToLower(image))
+	if image == "" {
+		return fmt.Errorf("image required")
+	}
+	if strings.Contains(image, "@sha256:") {
+		return nil
+	}
+	for _, prefix := range allowedRunnerImagePrefixes() {
+		if strings.HasPrefix(image, prefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("runner image %q is not from an approved registry prefix", image)
+}
+
+func allowedRunnerImagePrefixes() []string {
+	if raw := strings.TrimSpace(os.Getenv("RYV_ALLOWED_RUNNER_IMAGE_PREFIXES")); raw != "" {
+		var prefixes []string
+		for _, entry := range strings.Split(raw, ",") {
+			entry = strings.TrimSpace(strings.ToLower(entry))
+			if entry != "" {
+				prefixes = append(prefixes, entry)
+			}
+		}
+		if len(prefixes) > 0 {
+			return prefixes
+		}
+	}
+	return []string{"ghcr.io/ryvion/"}
+}
+
 func verifyAgentImageSignature(ctx context.Context, image string) error {
 	if !shouldRequireAgentSignature(image) {
 		return nil

@@ -38,6 +38,9 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	if strings.TrimSpace(image) == "" {
 		return nil, fmt.Errorf("image required")
 	}
+	if err := validateManagedRunnerImage(image); err != nil {
+		return nil, fmt.Errorf("refusing to run unapproved image: %w", err)
+	}
 
 	if strings.TrimSpace(specJSON) == "" {
 		specJSON = `{}`
@@ -171,6 +174,9 @@ func Run(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 func RunVerifierSession(ctx context.Context, image, specJSON, gpus string) (*Result, error) {
 	if strings.TrimSpace(image) == "" {
 		return nil, fmt.Errorf("image required")
+	}
+	if err := validateManagedRunnerImage(image); err != nil {
+		return nil, fmt.Errorf("refusing to run unapproved image: %w", err)
 	}
 	if strings.TrimSpace(specJSON) == "" {
 		specJSON = `{}`
