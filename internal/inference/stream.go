@@ -22,10 +22,12 @@ import (
 // chatRequest is the OpenAI-compatible request to local llama-server.
 type chatRequest struct {
 	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Stream      bool          `json:"stream"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
+	Messages    []chatMessage   `json:"messages"`
+	Stream      bool            `json:"stream"`
+	Tools       json.RawMessage `json:"tools,omitempty"`
+	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
 	// TopP/TopK/MinP override llama-server's defaults for reasoning models.
 	// They are pointers + omitempty so non-reasoning requests send nothing and
 	// the server keeps its own defaults. See reasoningSamplingForModel.
@@ -92,8 +94,10 @@ func (m chatMessage) MessageText() string {
 
 // specPayload is what the hub sends as spec_json for inference jobs.
 type specPayload struct {
-	Messages    []chatMessage `json:"messages"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Messages    []chatMessage   `json:"messages"`
+	Tools       json.RawMessage `json:"tools,omitempty"`
+	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`
 	Model       string        `json:"model,omitempty"`
 	ModelURL    string        `json:"model_url,omitempty"`    // Presigned download URL for custom models
@@ -247,8 +251,12 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		Messages:        spec.Messages,
 		ReasoningEffort: normalizeStreamReasoningEffort(spec.V8ReasoningEffort),
 		Stream:          true,
-		MaxTokens:   maxTokens,
-		Temperature: spec.Temperature,
+		MaxTokens:       maxTokens,
+		Temperature:     spec.Temperature,
+		// Forward tool-calling definitions to llama-server (capable models emit
+		// tool_call deltas, which the SSE relay passes straight back to the client).
+		Tools:      spec.Tools,
+		ToolChoice: spec.ToolChoice,
 	}
 	// Reasoning models need their vendor-recommended sampling profile. The
 	// buyer-supplied temperature (the playground sends 0.4) plus llama-server's
