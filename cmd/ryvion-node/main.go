@@ -62,6 +62,7 @@ var (
 	flagGPUs       string
 	flagUIPort     string
 	flagMaxGPUUtil float64
+	flagFleetToken string
 )
 
 // cachedGPUUtil stores the latest GPU utilization from heartbeat sampling.
@@ -388,6 +389,7 @@ func main() {
 	flag.StringVar(&flagDevice, "type", "", "Node device type (gpu|cpu|mobile|iot)")
 	flag.StringVar(&flagCountry, "country", "", "Declared ISO 3166-1 alpha-2 country code for sovereign routing")
 	flag.StringVar(&flagReferral, "referral", "", "Optional referral code")
+	flag.StringVar(&flagFleetToken, "fleet-token", "", "Organization fleet enrollment token (ryv_fleet_…) — auto-joins this node to the org's fleet")
 	flag.StringVar(&flagGPUs, "gpus", "auto", "Managed OCI GPU selection value (auto|all|none|device list)")
 	flag.StringVar(&flagUIPort, "ui-port", defaultOperatorAPIPort, "Local operator API port (set 0 to disable)")
 	flag.Float64Var(&flagMaxGPUUtil, "max-gpu-util", 90, "Skip jobs when GPU utilization exceeds this % (0=disabled)")
@@ -868,6 +870,7 @@ func runNode(ctx context.Context) {
 		pub,
 		priv,
 		hub.WithBindToken(os.Getenv("RYV_BIND_TOKEN")),
+		hub.WithFleetToken(firstNonEmptyString(flagFleetToken, strings.TrimSpace(os.Getenv("RYVION_FLEET_TOKEN")))),
 		hub.WithWallet(os.Getenv("RYV_WALLET")),
 		hub.WithAdminKey(os.Getenv("RYV_ADMIN_KEY")),
 		hub.WithUserAgent("ryvion-node/"+version),
