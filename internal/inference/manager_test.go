@@ -126,47 +126,37 @@ func TestSupportedNativeChatModelsAdvertisesGemmaEvenWithPlatformDownloadsDisabl
 	t.Fatal("expected Gemma model to advertise without HF_TOKEN even when platform-managed downloads are disabled")
 }
 
-func TestModelDownloadURLPublicModelsBypassHubProxy(t *testing.T) {
+func TestModelDownloadURLPublicModelsUsePlatformRedirectorByDefault(t *testing.T) {
 	// Regression guard for the "reasoning models stuck loading / timeout" bug.
 	//
-	// qwen3-8b-reasoning and gpt-oss-20b are PUBLIC (RequiresHuggingFaceAuth
-	// =false) but carry a PlatformPath fallback. The node must download them
-	// directly from HuggingFace's CDN — exactly like phi-4/tinyllama, which
-	// have no PlatformPath and work fine. Routing them through the hub's
-	// single-machine artifact proxy streamed the 5GB/12GB GGUF inline and
-	// pushed first-request cold starts past the 300s EnsureModel deadline,
-	// surfacing to buyers as "timeout waiting for <model> to start".
-	//
-	// This asserts the production configuration: hubURL + nodeToken set and
-	// platform-managed downloads at their default (enabled). Even so, public
-	// models must resolve to their direct upstream URL.
+	// Public models can safely use the hub artifact endpoint now because the
+	// hub redirects cache hits to private R2 presigned URLs and cache misses to
+	// public Hugging Face upstream. It does not stream public multi-GB GGUFs
+	// through the hub process.
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
 	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
+	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 
-	// nemotron-3-nano-omni-30b-a3b is public (ggml-org/NVIDIA-Nemotron-3-Nano-Omni),
-	// so it downloads directly from HF like the other public models.
 	for _, id := range []string{"qwen3-8b-reasoning", "gpt-oss-20b", "gemma-4-26b-a4b-it", "nemotron-3-nano-omni-30b-a3b"} {
 		cfg, ok := NativeModels[id]
 		if !ok {
 			t.Fatalf("model %s missing from native registry", id)
 		}
 		got := m.modelDownloadURL(cfg)
-		if got != cfg.URL {
-			t.Errorf("model %s: expected direct upstream URL %q, got %q", id, cfg.URL, got)
-		}
-		if strings.Contains(got, "/api/v1/node/models/") {
-			t.Errorf("model %s: routed through hub proxy %q — public models must download from HuggingFace directly", id, got)
+		want := "https://api.ryvion.ai" + cfg.PlatformPath
+		if got != want {
+			t.Errorf("model %s: expected platform artifact URL %q, got %q", id, want, got)
 		}
 	}
 }
 
-func TestModelDownloadURLPublicModelUsesPlatformCacheWhenExplicitlyEnabled(t *testing.T) {
+func TestModelDownloadURLPublicModelCanForceDirectUpstream(t *testing.T) {
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
-	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "1")
+	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "1")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 	cfg, ok := NativeModels["nemotron-3-nano-omni-30b-a3b"]
@@ -174,10 +164,26 @@ func TestModelDownloadURLPublicModelUsesPlatformCacheWhenExplicitlyEnabled(t *te
 		t.Fatal("Nemotron missing from native registry")
 	}
 
-	got := m.modelDownloadURL(cfg)
-	want := "https://api.ryvion.ai/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download"
+	if got := m.modelDownloadURL(cfg); got != cfg.URL {
+		t.Fatalf("expected direct upstream URL %q, got %q", cfg.URL, got)
+	}
+}
+
+func TestMmprojDownloadURLUsesPlatformRedirectorByDefault(t *testing.T) {
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("HUGGINGFACE_TOKEN", "")
+	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "")
+
+	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
+	cfg, ok := NativeModels["nemotron-3-nano-omni-30b-a3b"]
+	if !ok {
+		t.Fatal("Nemotron missing from native registry")
+	}
+
+	got := m.mmprojDownloadURL(cfg)
+	want := "https://api.ryvion.ai/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/artifacts/mmproj/download"
 	if got != want {
-		t.Fatalf("expected platform cache URL %q, got %q", want, got)
+		t.Fatalf("expected platform mmproj URL %q, got %q", want, got)
 	}
 }
 
@@ -188,6 +194,7 @@ func TestModelDownloadURLGatedModelWithoutTokenUsesHubProxy(t *testing.T) {
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
 	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
+	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 	cfg := ModelConfig{
@@ -209,6 +216,7 @@ func TestModelDownloadURLGatedModelWithTokenUsesDirectURL(t *testing.T) {
 	t.Setenv("HF_TOKEN", "hf-secret")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
 	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
+	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 	cfg := ModelConfig{

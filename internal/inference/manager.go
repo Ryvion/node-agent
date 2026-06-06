@@ -88,8 +88,9 @@ type ModelConfig struct {
 	// GGUF and llama-server is launched with --mmproj pointing at it,
 	// which is what makes the model actually consume image_url parts
 	// from OpenAI multimodal messages. Empty for text-only models.
-	MmprojFileName string
-	MmprojURL      string
+	MmprojFileName     string
+	MmprojURL          string
+	MmprojPlatformPath string
 }
 
 // NativeModels maps UI model names to GGUF downloads
@@ -131,8 +132,9 @@ var NativeModels = map[string]ModelConfig{
 		// Vision projector — auto-downloaded alongside the model so
 		// llama-server launches with --mmproj and the model can answer
 		// about images natively (no OCR fallback needed). ~2 GB on disk.
-		MmprojFileName: "mmproj-gemma-4-26B-A4B-it-F16.gguf",
-		MmprojURL:      "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-gemma-4-26B-A4B-it-F16.gguf",
+		MmprojFileName:     "mmproj-gemma-4-26B-A4B-it-F16.gguf",
+		MmprojURL:          "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-gemma-4-26B-A4B-it-F16.gguf",
+		MmprojPlatformPath: "/api/v1/node/models/gemma-4-26b-a4b-it/artifacts/mmproj/download",
 	},
 	"tinyllama": {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
 	"nemotron-3-nano-omni-30b-a3b": {
@@ -156,8 +158,9 @@ var NativeModels = map[string]ModelConfig{
 		RequiresHuggingFaceAuth: false,
 		// Vision projector for the Omni multimodal mode. Same auto-
 		// download + --mmproj launch flow as Gemma 4.
-		MmprojFileName: "mmproj-nemotron-3-nano-omni-30b-a3b-F16.gguf",
-		MmprojURL:      "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/mmproj-nemotron-3-nano-omni-ga_v1.0.gguf",
+		MmprojFileName:     "mmproj-nemotron-3-nano-omni-30b-a3b-F16.gguf",
+		MmprojURL:          "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/mmproj-nemotron-3-nano-omni-ga_v1.0.gguf",
+		MmprojPlatformPath: "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/artifacts/mmproj/download",
 	},
 	// Phase 1c: native embeddings. nomic-embed-text-v1.5 is 137M params,
 	// 768-dim, matches OpenAI text-embedding-3-small quality on MTEB, and
@@ -399,7 +402,7 @@ func (m *Manager) PrewarmEligibleModels(ctx context.Context, vramBytes uint64) {
 			if info, err := os.Stat(mmprojPath); err == nil && !info.IsDir() && info.Size() > 1<<20 {
 				continue
 			}
-			if err := m.downloadModelFile(ctx, cfg.MmprojURL, mmprojPath); err != nil {
+			if err := m.downloadModelFile(ctx, m.mmprojDownloadURL(cfg), mmprojPath); err != nil {
 				slog.Warn("prewarm: mmproj download failed (model will run text-only until retry)",
 					"model", id, "error", err)
 				_ = os.Remove(mmprojPath)
@@ -707,9 +710,9 @@ func (m *Manager) Start(ctx context.Context) error {
 					slog.Info("downloading vision projector",
 						"model", currentModel,
 						"mmproj", cfg.MmprojFileName,
-						"url", redactDownloadURL(cfg.MmprojURL),
+						"url", redactDownloadURL(m.mmprojDownloadURL(cfg)),
 					)
-					if err := m.downloadModelFile(ctx, cfg.MmprojURL, mmprojPath); err != nil {
+					if err := m.downloadModelFile(ctx, m.mmprojDownloadURL(cfg), mmprojPath); err != nil {
 						slog.Warn("vision projector download failed; model will run text-only",
 							"model", currentModel,
 							"error", err,
@@ -1529,35 +1532,40 @@ func downloadFile(ctx context.Context, url, dst string) error {
 }
 
 func (m *Manager) modelDownloadURL(cfg ModelConfig) string {
-	if platformModelCacheDownloadsEnabled() &&
-		strings.TrimSpace(cfg.PlatformPath) != "" &&
-		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
-		return strings.TrimRight(m.hubURL, "/") + cfg.PlatformPath
-	}
+	return m.artifactDownloadURL(cfg.URL, cfg.PlatformPath, cfg.RequiresHuggingFaceAuth)
+}
 
+func (m *Manager) mmprojDownloadURL(cfg ModelConfig) string {
+	return m.artifactDownloadURL(cfg.MmprojURL, cfg.MmprojPlatformPath, cfg.RequiresHuggingFaceAuth)
+}
+
+func (m *Manager) artifactDownloadURL(upstreamURL string, platformPath string, requiresHuggingFaceAuth bool) string {
 	// Route through the hub's model-artifact proxy ONLY for models this node
 	// cannot pull from upstream by itself — i.e. a GATED HuggingFace repo when
 	// the operator has set no local HF token. The hub then attaches its own
 	// token on the node's behalf.
 	//
-	// Every other model — including every current native model, which are all
-	// public (RequiresHuggingFaceAuth=false) — downloads FAR faster straight
-	// from HuggingFace's CDN than through the hub's single-machine proxy, which
-	// streams multi-GB GGUFs inline and was pushing first-request cold starts
-	// past the 300s EnsureModel deadline ("timeout waiting for <model> to
-	// start"). phi-4/llama/tinyllama already work this way (they have no
-	// PlatformPath); this brings qwen3-8b-reasoning / gpt-oss-20b in line so
-	// reasoning models load as fast as the rest. The PlatformPath stays as a
-	// fallback for genuinely gated future models, and can be used for CDN-backed
-	// public downloads by setting RYV_USE_PLATFORM_MODEL_CACHE=1 after the hub
-	// has MODEL_ARTIFACT_BASE_URL configured.
-	gatedWithoutLocalToken := cfg.RequiresHuggingFaceAuth && huggingFaceToken() == ""
-	if gatedWithoutLocalToken && platformManagedGatedModelsEnabled() &&
-		strings.TrimSpace(cfg.PlatformPath) != "" &&
-		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
-		return strings.TrimRight(m.hubURL, "/") + cfg.PlatformPath
+	// For current public platform models the hub endpoint is now a redirector:
+	// R2 private cache when present, otherwise Hugging Face upstream. That keeps
+	// one central cache control point without streaming multi-GB files through
+	// the hub process. Operators can force direct upstream with
+	// RYV_DISABLE_PLATFORM_MODEL_CACHE=1.
+	localHFToken := huggingFaceToken()
+	if requiresHuggingFaceAuth && localHFToken != "" {
+		return upstreamURL
 	}
-	return cfg.URL
+	gatedWithoutLocalToken := requiresHuggingFaceAuth && localHFToken == ""
+	if !gatedWithoutLocalToken && platformModelCacheDownloadsEnabled() &&
+		strings.TrimSpace(platformPath) != "" &&
+		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
+		return strings.TrimRight(m.hubURL, "/") + platformPath
+	}
+	if gatedWithoutLocalToken && platformManagedGatedModelsEnabled() &&
+		strings.TrimSpace(platformPath) != "" &&
+		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
+		return strings.TrimRight(m.hubURL, "/") + platformPath
+	}
+	return upstreamURL
 }
 
 func (m *Manager) downloadModelFile(ctx context.Context, url, dst string) error {
@@ -1725,11 +1733,15 @@ func platformManagedGatedModelsEnabled() bool {
 }
 
 func platformModelCacheDownloadsEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_USE_PLATFORM_MODEL_CACHE"))) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_DISABLE_PLATFORM_MODEL_CACHE"))) {
 	case "1", "true", "yes", "on":
-		return true
-	default:
 		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_USE_PLATFORM_MODEL_CACHE"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
 	}
 }
 
