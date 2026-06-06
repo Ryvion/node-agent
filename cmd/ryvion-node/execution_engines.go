@@ -211,8 +211,10 @@ func nativeInferenceJobLaunchEnabled(getenv func(string) string) bool {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	switch strings.ToLower(strings.TrimSpace(getenv(legacyNativeInferenceFlagEnv))) {
+	switch strings.ToLower(strings.TrimSpace(getenv(nativeInferenceJobLaunchOffEnv))) {
 	case "0", "false", "no", "off", "disabled":
+		return true
+	case "1", "true", "yes", "on", "enabled":
 		return false
 	default:
 		return true

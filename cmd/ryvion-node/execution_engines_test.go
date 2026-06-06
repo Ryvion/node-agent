@@ -66,6 +66,31 @@ func TestWorkCapsuleOptInIsAdvertisedWhenGitExists(t *testing.T) {
 	}
 }
 
+func TestNativeInferenceJobLaunchIgnoresLegacyBootResidencyOptOut(t *testing.T) {
+	getenv := map[string]string{
+		legacyNativeInferenceFlagEnv: "0",
+	}
+
+	if !nativeInferenceJobLaunchEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("legacy boot-time native inference opt-out must not disable assigned inference jobs")
+	}
+}
+
+func TestNativeInferenceJobLaunchCanBeExplicitlyDisabled(t *testing.T) {
+	getenv := map[string]string{
+		nativeInferenceJobLaunchOffEnv: "1",
+	}
+
+	if nativeInferenceJobLaunchEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("explicit native inference job launch opt-out should disable assigned inference jobs")
+	}
+
+	getenv[nativeInferenceJobLaunchOffEnv] = "0"
+	if !nativeInferenceJobLaunchEnabled(func(key string) string { return getenv[key] }) {
+		t.Fatal("false explicit native inference job launch opt-out should keep assigned inference jobs enabled")
+	}
+}
+
 func TestUsesVerifierSessionRunnerImageRecognizesVerifierRuntimeNames(t *testing.T) {
 	accepted := []string{
 		"ghcr.io/ryvion/ryvion-verifier-sglang:0.1.0",

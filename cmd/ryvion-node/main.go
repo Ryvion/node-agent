@@ -268,6 +268,7 @@ const (
 	v7ProofOutputBytesMetadataKey   = "_v7_proof_output_bytes"
 	v7ProofArtifactBytesMetadataKey = "_v7_proof_artifact_bytes"
 	legacyNativeInferenceFlagEnv    = "RYV_NODE_LEGACY_NATIVE_INFERENCE"
+	nativeInferenceJobLaunchOffEnv  = "RYV_DISABLE_NATIVE_INFERENCE_JOB_LAUNCH"
 )
 
 var (
