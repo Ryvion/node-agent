@@ -54,6 +54,53 @@ func TestReasoningSamplingForModel(t *testing.T) {
 	}
 }
 
+func TestRequestedNativeModelForSpec(t *testing.T) {
+	cases := []struct {
+		name      string
+		specJSON  string
+		wantModel string
+		wantOK    bool
+	}{
+		{
+			name:      "explicit platform model",
+			specJSON:  `{"model":"nemotron-3-nano-omni-30b-a3b","messages":[{"role":"user","content":"\"hi\""}]}`,
+			wantModel: "nemotron-3-nano-omni-30b-a3b",
+			wantOK:    true,
+		},
+		{
+			name:      "default chat model",
+			specJSON:  `{"messages":[{"role":"user","content":"\"hi\""}]}`,
+			wantModel: "ryvion-llama-3.2-3b",
+			wantOK:    true,
+		},
+		{
+			name:      "default embedding model",
+			specJSON:  `{"task":"embedding","input":"hello"}`,
+			wantModel: "nomic-embed-text-v1.5",
+			wantOK:    true,
+		},
+		{
+			name:     "custom model resolved later",
+			specJSON: `{"task":"custom_inference","model_url":"https://example.invalid/model.gguf","messages":[{"role":"user","content":"\"hi\""}]}`,
+			wantOK:   false,
+		},
+		{
+			name:     "unknown model",
+			specJSON: `{"model":"not-a-native-model","messages":[{"role":"user","content":"\"hi\""}]}`,
+			wantOK:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := RequestedNativeModelForSpec(tc.specJSON)
+			if ok != tc.wantOK || got != tc.wantModel {
+				t.Fatalf("RequestedNativeModelForSpec() = %q/%v, want %q/%v", got, ok, tc.wantModel, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestChatRequestOmitsSamplingForNonReasoning(t *testing.T) {
 	// A non-reasoning request must NOT carry top_p/top_k/min_p so llama-server
 	// keeps the buyer's temperature and its own defaults.

@@ -21,7 +21,7 @@ import (
 
 // chatRequest is the OpenAI-compatible request to local llama-server.
 type chatRequest struct {
-	Model       string        `json:"model"`
+	Model       string          `json:"model"`
 	Messages    []chatMessage   `json:"messages"`
 	Stream      bool            `json:"stream"`
 	Tools       json.RawMessage `json:"tools,omitempty"`
@@ -98,13 +98,13 @@ type specPayload struct {
 	Tools       json.RawMessage `json:"tools,omitempty"`
 	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	Model       string        `json:"model,omitempty"`
-	ModelURL    string        `json:"model_url,omitempty"`    // Presigned download URL for custom models
-	ModelFormat string        `json:"model_format,omitempty"` // "gguf", "onnx", etc.
-	ModelName   string        `json:"model_name,omitempty"`   // Human-readable name
-	Task        string        `json:"task,omitempty"`         // "custom_inference", "embedding"
-	Input       string        `json:"input,omitempty"`        // Text input for embedding tasks
+	Temperature *float64        `json:"temperature,omitempty"`
+	Model       string          `json:"model,omitempty"`
+	ModelURL    string          `json:"model_url,omitempty"`    // Presigned download URL for custom models
+	ModelFormat string          `json:"model_format,omitempty"` // "gguf", "onnx", etc.
+	ModelName   string          `json:"model_name,omitempty"`   // Human-readable name
+	Task        string          `json:"task,omitempty"`         // "custom_inference", "embedding"
+	Input       string          `json:"input,omitempty"`        // Text input for embedding tasks
 	// V8ReasoningEffort is the hub's scheduler-metadata key carrying the
 	// OpenAI-compatible reasoning_effort param ("low"|"medium"|"high").
 	// Underscore prefix marks it as out-of-band — it does not enter the
@@ -167,6 +167,31 @@ func IsEmbeddingJob(specJSON string) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(s.Task), "embedding")
+}
+
+// RequestedNativeModelForSpec returns the built-in native model a spec will
+// ask llama-server to load. Custom model specs intentionally return false
+// because their model path is resolved by EnsureCustomModel at execution time.
+func RequestedNativeModelForSpec(specJSON string) (string, bool) {
+	var s specPayload
+	if err := json.Unmarshal([]byte(specJSON), &s); err != nil {
+		return "", false
+	}
+	if strings.EqualFold(strings.TrimSpace(s.Task), "custom_inference") && strings.TrimSpace(s.ModelURL) != "" {
+		return "", false
+	}
+	modelName := strings.TrimSpace(s.Model)
+	if modelName == "" {
+		if strings.EqualFold(strings.TrimSpace(s.Task), "embedding") {
+			modelName = "nomic-embed-text-v1.5"
+		} else {
+			modelName = "ryvion-llama-3.2-3b"
+		}
+	}
+	if _, ok := NativeModels[modelName]; !ok {
+		return "", false
+	}
+	return modelName, true
 }
 
 // StreamingMetrics summarises the latency / throughput numbers a single
@@ -354,8 +379,8 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content          string `json:"content"`
-					ReasoningContent string `json:"reasoning_content"`
+					Content          string          `json:"content"`
+					ReasoningContent string          `json:"reasoning_content"`
 					Reasoning        string          `json:"reasoning"`
 					ToolCalls        json.RawMessage `json:"tool_calls"`
 				} `json:"delta"`

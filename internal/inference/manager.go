@@ -788,6 +788,42 @@ func (m *Manager) ModelName() string {
 	return m.activeModelName
 }
 
+// SelectModelForNextStart updates the native model that Start should launch
+// when the manager is currently idle. If a different model is already running,
+// it stops that process so the normal Start/EnsureModel path can launch the
+// requested model directly instead of booting the old/default model first.
+func (m *Manager) SelectModelForNextStart(modelName string) error {
+	if m == nil {
+		return fmt.Errorf("inference manager is not available")
+	}
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		modelName = "ryvion-llama-3.2-3b"
+	}
+	cfg, ok := NativeModels[modelName]
+	if !ok {
+		return fmt.Errorf("model %s not supported in native registry", modelName)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.activeModelName == modelName {
+		if !m.healthy && m.cancel == nil {
+			m.activeModelPath = ""
+			m.activeModelMode = cfg.Mode
+			m.blockerReason = BlockerStarting
+		}
+		return nil
+	}
+	m.activeModelName = modelName
+	m.activeModelPath = ""
+	m.activeModelMode = cfg.Mode
+	m.healthy = false
+	m.blockerReason = BlockerStarting
+	m.stopServerLocked()
+	return nil
+}
+
 func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
 	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {

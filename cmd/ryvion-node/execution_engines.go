@@ -118,6 +118,14 @@ func assuranceClassForAssignment(work *hub.WorkAssignment) string {
 }
 
 func (streamingEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {
+	if execCtx.infMgr != nil {
+		if modelName, ok := inference.RequestedNativeModelForSpec(work.SpecJSON); ok {
+			if err := execCtx.infMgr.SelectModelForNextStart(modelName); err != nil {
+				relayStreamingFailure(ctx, execCtx.client, work.JobID, err)
+				return nil, err
+			}
+		}
+	}
 	cleanupNative, readyErr := ensureNativeInferenceReadyForJob(ctx, execCtx.infMgr, os.Getenv)
 	if cleanupNative != nil {
 		defer cleanupNative()

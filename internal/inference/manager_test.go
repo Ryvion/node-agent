@@ -508,6 +508,38 @@ func TestNewReportsBlockerReasonBeforeStart(t *testing.T) {
 	}
 }
 
+func TestSelectModelForNextStartAvoidsDefaultColdBoot(t *testing.T) {
+	mgr := New(t.TempDir())
+
+	if err := mgr.SelectModelForNextStart("nemotron-3-nano-omni-30b-a3b"); err != nil {
+		t.Fatalf("SelectModelForNextStart() error = %v", err)
+	}
+
+	if got := mgr.ModelName(); got != "nemotron-3-nano-omni-30b-a3b" {
+		t.Fatalf("ModelName() = %q, want nemotron", got)
+	}
+	if mgr.activeModelPath != "" {
+		t.Fatalf("activeModelPath = %q, want empty registry path before Start", mgr.activeModelPath)
+	}
+	if mgr.activeModelMode != NativeModels["nemotron-3-nano-omni-30b-a3b"].Mode {
+		t.Fatalf("activeModelMode = %q, want registry mode", mgr.activeModelMode)
+	}
+	if mgr.Healthy() {
+		t.Fatal("manager should remain unhealthy before Start")
+	}
+}
+
+func TestSelectModelForNextStartRejectsUnknownModel(t *testing.T) {
+	mgr := New(t.TempDir())
+
+	if err := mgr.SelectModelForNextStart("not-a-native-model"); err == nil {
+		t.Fatal("SelectModelForNextStart() accepted unknown model")
+	}
+	if got := mgr.ModelName(); got != "ryvion-llama-3.2-3b" {
+		t.Fatalf("ModelName() changed after rejected model: %q", got)
+	}
+}
+
 func TestSetHealthyClearsBlocker(t *testing.T) {
 	mgr := New(t.TempDir())
 	mgr.setBlockerReason(BlockerStartupTimeout)
