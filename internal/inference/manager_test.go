@@ -789,6 +789,64 @@ func TestSortPrewarmByPriority(t *testing.T) {
 	}
 }
 
+func TestSelectPrewarmModelsDefaultLeanSkipsHugeModels(t *testing.T) {
+	supported := []string{
+		"gemma-4-26b-a4b-it",
+		"gpt-oss-20b",
+		"nemotron-3-nano-omni-30b-a3b",
+		"phi-4",
+		"qwen3-8b-reasoning",
+		"ryvion-llama-3.2-3b",
+		"tinyllama",
+	}
+	got := selectPrewarmModels(supported, prewarmTestEnv(nil))
+	want := []string{"tinyllama", "ryvion-llama-3.2-3b", "qwen3-8b-reasoning"}
+	requireStringSlice(t, got, want)
+}
+
+func TestSelectPrewarmModelsAllKeepsHugeModels(t *testing.T) {
+	supported := []string{
+		"gemma-4-26b-a4b-it",
+		"gpt-oss-20b",
+		"nemotron-3-nano-omni-30b-a3b",
+		"phi-4",
+		"qwen3-8b-reasoning",
+		"ryvion-llama-3.2-3b",
+		"tinyllama",
+	}
+	got := selectPrewarmModels(supported, prewarmTestEnv(map[string]string{
+		"RYV_MODEL_PREWARM_MODE": "all",
+	}))
+	want := []string{
+		"tinyllama",
+		"ryvion-llama-3.2-3b",
+		"phi-4",
+		"qwen3-8b-reasoning",
+		"gpt-oss-20b",
+		"gemma-4-26b-a4b-it",
+		"nemotron-3-nano-omni-30b-a3b",
+	}
+	requireStringSlice(t, got, want)
+}
+
+func TestSelectPrewarmModelsExplicitListPreservesOperatorOrder(t *testing.T) {
+	supported := []string{"qwen3-8b-reasoning", "ryvion-llama-3.2-3b", "nemotron-3-nano-omni-30b-a3b"}
+	got := selectPrewarmModels(supported, prewarmTestEnv(map[string]string{
+		"RYV_PREWARM_MODELS": "nemotron-3-nano-omni-30b-a3b,missing-model,qwen3-8b-reasoning,nemotron-3-nano-omni-30b-a3b",
+	}))
+	want := []string{"nemotron-3-nano-omni-30b-a3b", "qwen3-8b-reasoning"}
+	requireStringSlice(t, got, want)
+}
+
+func TestSelectPrewarmModelsOff(t *testing.T) {
+	got := selectPrewarmModels([]string{"tinyllama", "ryvion-llama-3.2-3b"}, prewarmTestEnv(map[string]string{
+		"RYV_MODEL_PREWARM_MODE": "off",
+	}))
+	if len(got) != 0 {
+		t.Fatalf("expected no prewarm models, got %v", got)
+	}
+}
+
 func TestSortPrewarmByPriorityHandlesUnknownModels(t *testing.T) {
 	// Future model not yet in prewarmPriority should land AFTER all
 	// known ones but still be present (not dropped).
@@ -802,5 +860,23 @@ func TestSortPrewarmByPriorityHandlesUnknownModels(t *testing.T) {
 	}
 	if got[2] != "some-future-13b" {
 		t.Fatalf("unknown model should land last, got %v", got)
+	}
+}
+
+func prewarmTestEnv(values map[string]string) func(string) string {
+	return func(key string) string {
+		return values[key]
+	}
+}
+
+func requireStringSlice(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
 	}
 }

@@ -176,9 +176,9 @@ var NativeModels = map[string]ModelConfig{
 //
 // Note: this is the *hardware-eligible* list — it does NOT check whether the
 // GGUF is on disk. The hub may still route a job to a node whose model file
-// hasn't been downloaded yet; the node will then download on demand. To
-// eliminate first-request latency the agent calls PrewarmEligibleModels at
-// startup, which downloads every entry in this list in the background.
+// hasn't been downloaded yet; the node will then download on demand. Startup
+// prewarm intentionally selects a smaller subset so operators do not fill disks
+// by advertising one large model family.
 func SupportedNativeChatModels(vramBytes uint64) []string {
 	out := make([]string, 0, len(NativeModels))
 	for id, cfg := range NativeModels {
@@ -320,10 +320,17 @@ func (m *Manager) ReadyNativeChatModels(vramBytes uint64) []string {
 	return ready
 }
 
-// PrewarmEligibleModels downloads every GGUF this node's hardware can serve
-// in the background, so the *first* buyer request to any reasoning model
-// doesn't trigger a 5-15 minute on-demand download. Downloads are sequential
-// to avoid disk thrashing + bandwidth contention on the operator's link.
+// PrewarmEligibleModels downloads a small selected set of GGUFs in the
+// background so the common smoke-test/default paths are warm without filling
+// an operator's disk with every large hardware-eligible model. Downloads are
+// sequential to avoid disk thrashing + bandwidth contention on the operator's
+// link.
+//
+// Selection:
+//   - default/lean: tinyllama, ryvion-llama-3.2-3b, qwen3-8b-reasoning
+//   - RYV_MODEL_PREWARM_MODE=all: every hardware-eligible chat model
+//   - RYV_MODEL_PREWARM_MODE=off: no startup prewarm
+//   - RYV_PREWARM_MODELS=a,b,c: exactly those supported model IDs
 //
 // Safe to call multiple times — already-downloaded files are skipped via the
 // os.Stat check in the existing download loop. Designed to run in a
@@ -335,21 +342,11 @@ func (m *Manager) ReadyNativeChatModels(vramBytes uint64) []string {
 // between chunks.
 func (m *Manager) PrewarmEligibleModels(ctx context.Context, vramBytes uint64) {
 	supported := SupportedNativeChatModels(vramBytes)
+	supported = selectPrewarmModels(supported, os.Getenv)
 	if len(supported) == 0 {
+		slog.Info("prewarm: no models selected")
 		return
 	}
-	// Reorder by prewarm priority: smallest + most-used first so the
-	// most-requested models become available within minutes of node
-	// startup, even if the larger reasoning models are still downloading.
-	//
-	// SupportedNativeChatModels returns sort.Strings() (alphabetical),
-	// which on a 24GB Mac is: gemma → gpt-oss → nemotron → phi → qwen3
-	// → ryvion-llama → tinyllama. That puts the 14GB Gemma at the head
-	// and the 700MB TinyLlama at the tail — exactly backwards. With a
-	// home-internet uplink, a buyer asking for Qwen3 right after node
-	// boot would wait through ~50GB of larger downloads before their
-	// 5GB Qwen3 GGUF lands.
-	supported = sortPrewarmByPriority(supported)
 	modelsDir := filepath.Join(m.dataDir, "models")
 	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
 		slog.Warn("prewarm: cannot create models dir", "error", err)
@@ -1158,6 +1155,80 @@ var prewarmPriority = map[string]int{
 	"gemma-4-26b-a4b-it":           5,
 	"nemotron-3-nano-omni-30b-a3b": 6,
 	"nomic-embed-text-v1.5":        7, // embedding model, only matters for RAG
+}
+
+var defaultPrewarmModels = map[string]struct{}{
+	"tinyllama":           {},
+	"ryvion-llama-3.2-3b": {},
+	"qwen3-8b-reasoning":  {},
+}
+
+func selectPrewarmModels(supported []string, getenv func(string) string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	explicit := strings.TrimSpace(getenv("RYV_PREWARM_MODELS"))
+	if explicit != "" {
+		return selectExplicitPrewarmModels(supported, explicit)
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(getenv("RYV_MODEL_PREWARM_MODE")))
+	switch mode {
+	case "all":
+		return sortPrewarmByPriority(supported)
+	case "off", "none", "disabled", "0", "false":
+		return nil
+	case "", "default", "lean", "small":
+		return selectDefaultPrewarmModels(supported)
+	default:
+		slog.Warn("prewarm: unknown mode, using lean default", "mode", mode)
+		return selectDefaultPrewarmModels(supported)
+	}
+}
+
+func selectDefaultPrewarmModels(supported []string) []string {
+	sorted := sortPrewarmByPriority(supported)
+	out := make([]string, 0, len(defaultPrewarmModels))
+	for _, id := range sorted {
+		if _, ok := defaultPrewarmModels[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func selectExplicitPrewarmModels(supported []string, raw string) []string {
+	supportedSet := make(map[string]struct{}, len(supported))
+	for _, id := range supported {
+		supportedSet[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, id := range splitPrewarmModelList(raw) {
+		if _, ok := supportedSet[id]; !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func splitPrewarmModelList(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\n' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		id := strings.ToLower(strings.TrimSpace(part))
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // sortPrewarmByPriority returns a copy of `ids` sorted by prewarmPriority
