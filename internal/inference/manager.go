@@ -145,12 +145,14 @@ var NativeModels = map[string]ModelConfig{
 		// was why every download failed. The repo is PUBLIC, so the node pulls
 		// it straight from the HF CDN: no token, no hub proxy.
 		//
-		// Q4_K_M is ~22.8 GB resident, so it needs a 24GB-class GPU
-		// (RTX 3090 / 4090, RX 7900 XTX) — not a 16GB card.
+		// Q4_K_M is ~22.8 GB. A 16GB card still runs it via llama.cpp's -ngl
+		// partial offload (the same mechanism Gemma 26B uses above), so the gate
+		// is 14GB like the other large models — NOT 22GB, which wrongly locked
+		// out the RTX 4070 Ti SUPER (16GB) that has run this model fine.
 		FileName:                "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
 		URL:                     "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/nemotron-3-nano-omni-ga_v1.0-Q4_K_M.gguf",
 		PlatformPath:            "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download",
-		MinVRAMBytes:            22 * 1024 * 1024 * 1024,
+		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
 		RequiresHuggingFaceAuth: false,
 		// Vision projector for the Omni multimodal mode. Same auto-
 		// download + --mmproj launch flow as Gemma 4.
