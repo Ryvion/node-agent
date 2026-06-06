@@ -174,7 +174,7 @@ func TestStreamingSpeculativeLaunchEnablesNativeMTPForMTPModel(t *testing.T) {
 		t.Fatalf("method = %q, want native MTP", launch.Method)
 	}
 	joined := strings.Join(launch.Args, " ")
-	for _, want := range []string{"--spec-type draft-mtp", "--spec-draft-n-max 3"} {
+	for _, want := range []string{"--spec-type draft-mtp", "--draft-max 3"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args = %q, missing %q", joined, want)
 		}
@@ -199,7 +199,7 @@ func TestStreamingSpeculativeLaunchFallsBackToNGramForPlainModel(t *testing.T) {
 	if strings.Contains(joined, "draft-mtp") {
 		t.Fatalf("plain model args = %q, should not force native MTP", joined)
 	}
-	for _, want := range []string{"--spec-type ngram-simple", "--spec-draft-n-max 16"} {
+	for _, want := range []string{"--spec-type ngram-simple", "--draft-max 16"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args = %q, missing %q", joined, want)
 		}
@@ -283,7 +283,7 @@ func TestStreamingSpeculativeLaunchUsesExplicitNGramMode(t *testing.T) {
 	if launch.Method != speculativeMethodNGramMod {
 		t.Fatalf("method = %q, want explicit ngram-mod", launch.Method)
 	}
-	if joined := strings.Join(launch.Args, " "); !strings.Contains(joined, "--spec-type ngram-mod") || !strings.Contains(joined, "--spec-draft-n-max 24") {
+	if joined := strings.Join(launch.Args, " "); !strings.Contains(joined, "--spec-type ngram-mod") || !strings.Contains(joined, "--draft-max 24") {
 		t.Fatalf("args = %q, want explicit ngram mode", joined)
 	}
 }

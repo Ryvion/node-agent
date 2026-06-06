@@ -101,9 +101,9 @@ func streamingSpeculativeLaunchForModel(modelPath string, modelDir string, geten
 		if draftMax == 0 {
 			draftMax = defaultStreamingNativeMTPMaxTokens
 		}
-		args := []string{"--spec-type", "draft-mtp", "--spec-draft-n-max", strconv.Itoa(draftMax)}
+		args := []string{"--spec-type", "draft-mtp", "--draft-max", strconv.Itoa(draftMax)}
 		if draftMin > 0 {
-			args = append(args, "--spec-draft-n-min", strconv.Itoa(draftMin))
+			args = append(args, "--draft-min", strconv.Itoa(draftMin))
 		}
 		return streamingSpeculativeLaunch{
 			Method:         speculativeMethodNativeMTP,
@@ -123,9 +123,9 @@ func streamingSpeculativeLaunchForModel(modelPath string, modelDir string, geten
 	if draftMax == 0 {
 		draftMax = defaultStreamingDraftMaxTokens
 	}
-	args := []string{"--model-draft", draftPath, "--spec-draft-n-max", strconv.Itoa(draftMax)}
+	args := []string{"--model-draft", draftPath, "--draft-max", strconv.Itoa(draftMax)}
 	if draftMin > 0 {
-		args = append(args, "--spec-draft-n-min", strconv.Itoa(draftMin))
+		args = append(args, "--draft-min", strconv.Itoa(draftMin))
 	}
 	if pMin := strings.TrimSpace(getenv(envStreamingDraftPMin)); pMin != "" {
 		args = append(args, "--draft-p-min", pMin)
@@ -159,9 +159,9 @@ func streamingNGramSpeculativeLaunch(getenv func(string) string, draftMax int, d
 	} else if draftMax == 0 || draftMax == defaultStreamingNativeMTPMaxTokens {
 		draftMax = defaultStreamingNGramMaxTokens
 	}
-	args := []string{"--spec-type", specType, "--spec-draft-n-max", strconv.Itoa(draftMax)}
+	args := []string{"--spec-type", specType, "--draft-max", strconv.Itoa(draftMax)}
 	if draftMin > 0 {
-		args = append(args, "--spec-draft-n-min", strconv.Itoa(draftMin))
+		args = append(args, "--draft-min", strconv.Itoa(draftMin))
 	}
 	return streamingSpeculativeLaunch{
 		Method:         specType,
