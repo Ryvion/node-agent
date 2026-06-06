@@ -836,6 +836,42 @@ func TestStreamingJinjaRequiredForModel(t *testing.T) {
 	}
 }
 
+func TestStreamingMoECPUOffloadArgsForModel(t *testing.T) {
+	hasCPUMoE := func(args []string) bool {
+		for _, a := range args {
+			if a == "--cpu-moe" {
+				return true
+			}
+		}
+		return false
+	}
+	// The large Nemotron MoE must offload experts to CPU — full GPU offload of
+	// its 24.5 GB Q4_K_M OOMs every card in the fleet and the manager then
+	// reports "inference manager is not healthy".
+	for _, path := range []string{
+		"/models/nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
+		"/models/NVIDIA-Nemotron-3-Nano-Omni.gguf",
+	} {
+		if args := streamingMoECPUOffloadArgsForModel(path); !hasCPUMoE(args) {
+			t.Errorf("expected --cpu-moe for %q, got %v", path, args)
+		}
+	}
+	// Models that fit on the GPU must NOT get --cpu-moe (it would needlessly
+	// push them onto the CPU and tank throughput). gpt-oss-20b is also a MoE but
+	// fits at 16 GB, so it stays fully on the GPU.
+	for _, path := range []string{
+		"/models/gpt-oss-20b-mxfp4.gguf",
+		"/models/gemma-4-26B-A4B-it-Q4_K_M.gguf",
+		"/models/phi-4-Q4_K_M.gguf",
+		"/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+		"",
+	} {
+		if args := streamingMoECPUOffloadArgsForModel(path); len(args) != 0 {
+			t.Errorf("did not expect MoE CPU offload for %q, got %v", path, args)
+		}
+	}
+}
+
 func TestStreamingReasoningFormatForModel(t *testing.T) {
 	cases := []struct{ path, want string }{
 		{"/models/Qwen3-8B-Q4_K_M.gguf", "deepseek"},

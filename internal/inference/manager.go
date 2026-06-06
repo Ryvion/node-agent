@@ -147,10 +147,13 @@ var NativeModels = map[string]ModelConfig{
 		// was why every download failed. The repo is PUBLIC, so the node pulls
 		// it straight from the HF CDN: no token, no hub proxy.
 		//
-		// Q4_K_M is ~22.8 GB. A 16GB card still runs it via llama.cpp's -ngl
-		// partial offload (the same mechanism Gemma 26B uses above), so the gate
-		// is 14GB like the other large models — NOT 22GB, which wrongly locked
-		// out the RTX 4070 Ti SUPER (16GB) that has run this model fine.
+		// Q4_K_M is ~24.5 GB — larger than any fleet GPU. It does NOT fit via
+		// `--n-gpu-layers` offload (that places whole layers on the GPU and OOMs
+		// on a 24 GB card, never mind 16 GB). The streaming launcher instead passes
+		// `--cpu-moe`, keeping the MoE expert weights in system RAM so only
+		// attention + KV + mmproj (~6-8 GB) sit on the GPU. That is why the gate is
+		// 14GB: the GPU side genuinely fits a 14-16GB card — the operator just needs
+		// ~24 GB of system RAM for the experts. See streamingMoECPUOffloadArgsForModel.
 		FileName:                "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
 		URL:                     "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/nemotron-3-nano-omni-ga_v1.0-Q4_K_M.gguf",
 		PlatformPath:            "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download",
@@ -1366,6 +1369,35 @@ func streamingReasoningFormatForModel(modelPath string) string {
 	}
 }
 
+// streamingMoECPUOffloadArgsForModel returns extra llama-server flags that keep
+// a Mixture-of-Experts model's expert tensors in system RAM instead of VRAM.
+// Returns nil for models that fit on the GPU normally.
+//
+// Nemotron 3 Nano Omni 30B-A3B is a 30B-total / 3B-active MoE whose Q4_K_M GGUF
+// is ~24.5 GB on disk — larger than the VRAM of every card in the fleet (24 GB on
+// the RTX 3090 / RX 7900 XTX, 16 GB on the 4070 Ti). Passing only
+// `--n-gpu-layers 99` asks llama-server to place all ~24.5 GB on the GPU; it
+// cannot, so it aborts with a CUDA/ROCm out-of-memory at load. The manager then
+// never reaches Healthy() and every chat request fails with the buyer-facing
+// "inference manager is not healthy".
+//
+// `--cpu-moe` keeps the expert weights (the bulk of the model) on the CPU and
+// leaves only attention/router/embeddings + KV cache + the vision projector on
+// the GPU (~6-8 GB). Only 3B params are active per token, so throughput stays
+// usable. This is the standard way to serve a large MoE on limited VRAM and is
+// what actually makes the model run on a 16-24 GB card. The flag was added to
+// llama.cpp around b6000; the node ships b9180. The operator needs ~24 GB of free
+// system RAM for the offloaded experts.
+func streamingMoECPUOffloadArgsForModel(modelPath string) []string {
+	// Every Nemotron model in the registry is the 30B-A3B Omni MoE. Other MoE
+	// models we ship (gpt-oss-20b) fit fully on a 16 GB GPU, so they are left on
+	// the GPU for full throughput.
+	if streamingFamilyHintForModel(modelPath) == "nemotron" {
+		return []string{"--cpu-moe"}
+	}
+	return nil
+}
+
 // runServerNative runs llama-server directly on the host.
 func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) error {
 	serverCtx, cancel := context.WithCancel(ctx)
@@ -1445,6 +1477,21 @@ func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) e
 	case "linux", "windows":
 		// CUDA acceleration if available; llama.cpp ignores flag if no GPU
 		args = append(args, "--n-gpu-layers", m.gpuLayers)
+	}
+
+	// Large Mixture-of-Experts models (Nemotron 3 Nano Omni 30B-A3B) exceed the
+	// VRAM of every fleet GPU when fully offloaded — the 24.5 GB Q4_K_M does not
+	// fit even a 24 GB card. Keep the expert tensors in system RAM with --cpu-moe
+	// so the GPU holds only attention + KV cache + the vision projector. Combined
+	// with --n-gpu-layers above, every non-expert layer still runs on the GPU.
+	// Without this the launch OOMs at load and the manager reports
+	// "inference manager is not healthy".
+	if moeArgs := streamingMoECPUOffloadArgsForModel(modelPath); len(moeArgs) > 0 {
+		args = append(args, moeArgs...)
+		slog.Info("large MoE model — offloading expert tensors to CPU",
+			"model", modelPath,
+			"flags", moeArgs,
+		)
 	}
 
 	cmd := exec.CommandContext(serverCtx, m.serverPath, args...)
