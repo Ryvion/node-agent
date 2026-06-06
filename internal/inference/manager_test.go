@@ -142,6 +142,7 @@ func TestModelDownloadURLPublicModelsBypassHubProxy(t *testing.T) {
 	// models must resolve to their direct upstream URL.
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
+	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 
@@ -162,12 +163,31 @@ func TestModelDownloadURLPublicModelsBypassHubProxy(t *testing.T) {
 	}
 }
 
+func TestModelDownloadURLPublicModelUsesPlatformCacheWhenExplicitlyEnabled(t *testing.T) {
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("HUGGINGFACE_TOKEN", "")
+	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "1")
+
+	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
+	cfg, ok := NativeModels["nemotron-3-nano-omni-30b-a3b"]
+	if !ok {
+		t.Fatal("Nemotron missing from native registry")
+	}
+
+	got := m.modelDownloadURL(cfg)
+	want := "https://api.ryvion.ai/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download"
+	if got != want {
+		t.Fatalf("expected platform cache URL %q, got %q", want, got)
+	}
+}
+
 func TestModelDownloadURLGatedModelWithoutTokenUsesHubProxy(t *testing.T) {
 	// A genuinely gated repo with no local HF token CANNOT be fetched by the
 	// node itself, so it must fall back to the hub proxy (the hub attaches
 	// its own upstream token). This is the only case the proxy exists for.
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
+	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 	cfg := ModelConfig{
@@ -188,6 +208,7 @@ func TestModelDownloadURLGatedModelWithTokenUsesDirectURL(t *testing.T) {
 	// should NOT detour through the hub proxy.
 	t.Setenv("HF_TOKEN", "hf-secret")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
+	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 	cfg := ModelConfig{

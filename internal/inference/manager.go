@@ -1529,6 +1529,12 @@ func downloadFile(ctx context.Context, url, dst string) error {
 }
 
 func (m *Manager) modelDownloadURL(cfg ModelConfig) string {
+	if platformModelCacheDownloadsEnabled() &&
+		strings.TrimSpace(cfg.PlatformPath) != "" &&
+		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
+		return strings.TrimRight(m.hubURL, "/") + cfg.PlatformPath
+	}
+
 	// Route through the hub's model-artifact proxy ONLY for models this node
 	// cannot pull from upstream by itself — i.e. a GATED HuggingFace repo when
 	// the operator has set no local HF token. The hub then attaches its own
@@ -1542,7 +1548,9 @@ func (m *Manager) modelDownloadURL(cfg ModelConfig) string {
 	// start"). phi-4/llama/tinyllama already work this way (they have no
 	// PlatformPath); this brings qwen3-8b-reasoning / gpt-oss-20b in line so
 	// reasoning models load as fast as the rest. The PlatformPath stays as a
-	// fallback for genuinely gated future models.
+	// fallback for genuinely gated future models, and can be used for CDN-backed
+	// public downloads by setting RYV_USE_PLATFORM_MODEL_CACHE=1 after the hub
+	// has MODEL_ARTIFACT_BASE_URL configured.
 	gatedWithoutLocalToken := cfg.RequiresHuggingFaceAuth && huggingFaceToken() == ""
 	if gatedWithoutLocalToken && platformManagedGatedModelsEnabled() &&
 		strings.TrimSpace(cfg.PlatformPath) != "" &&
@@ -1714,6 +1722,15 @@ func huggingFaceToken() string {
 
 func platformManagedGatedModelsEnabled() bool {
 	return strings.TrimSpace(os.Getenv("RYV_DISABLE_PLATFORM_MODEL_DOWNLOADS")) != "1"
+}
+
+func platformModelCacheDownloadsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_USE_PLATFORM_MODEL_CACHE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func isHuggingFaceURL(url string) bool {
