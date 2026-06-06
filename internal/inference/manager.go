@@ -137,28 +137,25 @@ var NativeModels = map[string]ModelConfig{
 	"tinyllama": {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
 	"nemotron-3-nano-omni-30b-a3b": {
 		// NVIDIA Nemotron 3 Nano Omni 30B-A3B — MoE model (30B total /
-		// 3B active per token). On Q4_K_M the resident footprint is
-		// ~14-15 GB, which fits on any 16GB consumer NVIDIA card after
-		// driver overhead. The MoE activation pattern means decode TPS
-		// scales like a 3B model — this is the "fast Gemma alternative"
-		// for RTX 4070 Ti SUPER / RTX 4080 nodes that want speed.
+		// 3B active per token), multimodal (vision via mmproj).
 		//
-		// The ggml-org Nemotron repo is gated — HF returns 401 to anonymous
-		// downloads. Mark it as requiring HF auth so a node WITHOUT a local
-		// HF_TOKEN pulls it through the hub's model-artifact mirror
-		// (PlatformPath), which authenticates with the hub's single
-		// HUGGINGFACE_TOKEN. Operators never need a per-node token; the hub
-		// holds it once. (A node that sets its own HF_TOKEN still downloads
-		// direct from the URL.)
+		// ggml-org published the GGUF at ggml-org/NVIDIA-Nemotron-3-Nano-Omni.
+		// The previously-configured ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF
+		// path now 404s (upstream renamed the repo) — that dead URL, not gating,
+		// was why every download failed. The repo is PUBLIC, so the node pulls
+		// it straight from the HF CDN: no token, no hub proxy.
+		//
+		// Q4_K_M is ~22.8 GB resident, so it needs a 24GB-class GPU
+		// (RTX 3090 / 4090, RX 7900 XTX) — not a 16GB card.
 		FileName:                "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
-		URL:                     "https://huggingface.co/ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-Omni-30B-A3B-Q4_K_M.gguf",
+		URL:                     "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/nemotron-3-nano-omni-ga_v1.0-Q4_K_M.gguf",
 		PlatformPath:            "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download",
-		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
-		RequiresHuggingFaceAuth: true,
+		MinVRAMBytes:            22 * 1024 * 1024 * 1024,
+		RequiresHuggingFaceAuth: false,
 		// Vision projector for the Omni multimodal mode. Same auto-
 		// download + --mmproj launch flow as Gemma 4.
-		MmprojFileName: "mmproj-Nemotron-3-Nano-Omni-30B-A3B-F16.gguf",
-		MmprojURL:      "https://huggingface.co/ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF/resolve/main/mmproj-Nemotron-3-Nano-Omni-30B-A3B-F16.gguf",
+		MmprojFileName: "mmproj-nemotron-3-nano-omni-30b-a3b-F16.gguf",
+		MmprojURL:      "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/mmproj-nemotron-3-nano-omni-ga_v1.0.gguf",
 	},
 	// Phase 1c: native embeddings. nomic-embed-text-v1.5 is 137M params,
 	// 768-dim, matches OpenAI text-embedding-3-small quality on MTEB, and
