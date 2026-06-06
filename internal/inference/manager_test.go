@@ -145,7 +145,10 @@ func TestModelDownloadURLPublicModelsBypassHubProxy(t *testing.T) {
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 
-	for _, id := range []string{"qwen3-8b-reasoning", "gpt-oss-20b", "gemma-4-26b-a4b-it", "nemotron-3-nano-omni-30b-a3b"} {
+	// nemotron-3-nano-omni-30b-a3b is intentionally NOT in this list: its
+	// ggml-org repo is gated (HF 401s anonymous downloads), so it must route
+	// through the hub proxy — see TestNemotronRoutesThroughHubProxy.
+	for _, id := range []string{"qwen3-8b-reasoning", "gpt-oss-20b", "gemma-4-26b-a4b-it"} {
 		cfg, ok := NativeModels[id]
 		if !ok {
 			t.Fatalf("model %s missing from native registry", id)
@@ -157,6 +160,26 @@ func TestModelDownloadURLPublicModelsBypassHubProxy(t *testing.T) {
 		if strings.Contains(got, "/api/v1/node/models/") {
 			t.Errorf("model %s: routed through hub proxy %q — public models must download from HuggingFace directly", id, got)
 		}
+	}
+}
+
+func TestNemotronRoutesThroughHubProxy(t *testing.T) {
+	// nemotron's ggml-org GGUF repo is gated (HF returns 401 to anonymous
+	// downloads). A node with no local HF token must fetch it through the hub's
+	// artifact mirror, which holds the single HUGGINGFACE_TOKEN — so operators
+	// never configure a per-node token.
+	t.Setenv("HF_TOKEN", "")
+	t.Setenv("HUGGINGFACE_TOKEN", "")
+
+	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
+	cfg, ok := NativeModels["nemotron-3-nano-omni-30b-a3b"]
+	if !ok {
+		t.Fatal("nemotron missing from native registry")
+	}
+	got := m.modelDownloadURL(cfg)
+	want := "https://api.ryvion.ai/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download"
+	if got != want {
+		t.Errorf("nemotron without local token: expected hub proxy %q, got %q", want, got)
 	}
 }
 

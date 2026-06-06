@@ -143,14 +143,18 @@ var NativeModels = map[string]ModelConfig{
 		// scales like a 3B model — this is the "fast Gemma alternative"
 		// for RTX 4070 Ti SUPER / RTX 4080 nodes that want speed.
 		//
-		// URL: ggml-org community GGUF mirror (no HF token required;
-		// public CDN). PlatformPath kept as a fallback in case operators
-		// want the Ryvion-managed proxy without code changes.
+		// The ggml-org Nemotron repo is gated — HF returns 401 to anonymous
+		// downloads. Mark it as requiring HF auth so a node WITHOUT a local
+		// HF_TOKEN pulls it through the hub's model-artifact mirror
+		// (PlatformPath), which authenticates with the hub's single
+		// HUGGINGFACE_TOKEN. Operators never need a per-node token; the hub
+		// holds it once. (A node that sets its own HF_TOKEN still downloads
+		// direct from the URL.)
 		FileName:                "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
 		URL:                     "https://huggingface.co/ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-Omni-30B-A3B-Q4_K_M.gguf",
 		PlatformPath:            "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download",
 		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
-		RequiresHuggingFaceAuth: false,
+		RequiresHuggingFaceAuth: true,
 		// Vision projector for the Omni multimodal mode. Same auto-
 		// download + --mmproj launch flow as Gemma 4.
 		MmprojFileName: "mmproj-Nemotron-3-Nano-Omni-30B-A3B-F16.gguf",
