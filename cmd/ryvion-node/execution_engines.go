@@ -131,10 +131,7 @@ func (streamingEngine) Execute(ctx context.Context, work *hub.WorkAssignment, ex
 		defer cleanupNative()
 	}
 	if readyErr != nil {
-		err := fmt.Errorf("inference manager is not healthy")
-		if readyErr != nil {
-			err = readyErr
-		}
+		err := nativeInferenceReadinessError(execCtx.infMgr, readyErr)
 		relayStreamingFailure(ctx, execCtx.client, work.JobID, err)
 		return nil, err
 	}
@@ -213,6 +210,20 @@ func ensureNativeInferenceReadyForJob(ctx context.Context, infMgr *inference.Man
 		case <-ticker.C:
 		}
 	}
+}
+
+func nativeInferenceReadinessError(infMgr *inference.Manager, cause error) error {
+	if cause == nil {
+		cause = fmt.Errorf("inference manager is not healthy")
+	}
+	reason := inference.BlockerNone
+	if infMgr != nil {
+		reason = infMgr.BlockerReason()
+	}
+	if reason == inference.BlockerNone {
+		return fmt.Errorf("native inference manager not ready: %w", cause)
+	}
+	return fmt.Errorf("native inference manager not ready: %w; blocker=%s", cause, reason)
 }
 
 func nativeInferenceJobLaunchEnabled(getenv func(string) string) bool {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -537,6 +538,37 @@ func TestSelectModelForNextStartRejectsUnknownModel(t *testing.T) {
 	}
 	if got := mgr.ModelName(); got != "ryvion-llama-3.2-3b" {
 		t.Fatalf("ModelName() changed after rejected model: %q", got)
+	}
+}
+
+func TestStopClearsIdleProcessState(t *testing.T) {
+	mgr := New(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	mgr.cancel = cancel
+	mgr.cmd = &exec.Cmd{}
+
+	mgr.Stop()
+
+	if mgr.cancel != nil {
+		t.Fatal("Stop() left cancel set")
+	}
+	if mgr.cmd != nil {
+		t.Fatal("Stop() left cmd set")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("Stop() did not cancel the running context")
+	}
+}
+
+func TestContainerizedInferenceIsOptIn(t *testing.T) {
+	t.Setenv("RYV_NATIVE_INFERENCE_ONLY", "")
+	t.Setenv("RYV_CONTAINERIZED_NATIVE_INFERENCE", "")
+
+	mgr := New(t.TempDir())
+	if mgr.useContainerizedInference() {
+		t.Fatal("containerized native inference should be opt-in")
 	}
 }
 

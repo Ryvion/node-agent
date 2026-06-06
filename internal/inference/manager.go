@@ -751,6 +751,8 @@ func (m *Manager) Stop() {
 	defer m.mu.Unlock()
 	m.stopServerLocked()
 	m.healthy = false
+	m.cancel = nil
+	m.cmd = nil
 }
 
 func (m *Manager) Healthy() bool {
@@ -988,6 +990,8 @@ func (m *Manager) stopServerLocked() {
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
 	}
+	m.cancel = nil
+	m.cmd = nil
 }
 
 func (m *Manager) setHealthy(v bool) {
@@ -1024,7 +1028,9 @@ func (m *Manager) runServer(ctx context.Context) error {
 	port := m.port
 	m.mu.RUnlock()
 
-	// Try containerized mode first (more secure — isolates GGUF parsing)
+	// Use the host-native llama-server by default. Containerized inference is
+	// opt-in because the generic OCI path has fixed memory/device constraints
+	// that are a poor fit for large local GGUFs such as Nemotron 30B.
 	if m.useContainerizedInference() {
 		return m.runServerContainerized(ctx, modelPath, port)
 	}
@@ -1037,7 +1043,10 @@ func (m *Manager) runServer(ctx context.Context) error {
 // On Windows, always prefer native mode — native inference is more reliable than GPU passthrough through the container backend
 // containers is unreliable (OOM kills, exit 137). The native llama-server.exe with CUDA works better.
 func (m *Manager) useContainerizedInference() bool {
-	if os.Getenv("RYV_NATIVE_INFERENCE_ONLY") == "1" {
+	if envBool("RYV_NATIVE_INFERENCE_ONLY") {
+		return false
+	}
+	if !envBool("RYV_CONTAINERIZED_NATIVE_INFERENCE") {
 		return false
 	}
 	if runtime.GOOS == "windows" {
@@ -2141,6 +2150,15 @@ func envOrExplicit(key, fallback string) (string, bool) {
 		return value, true
 	}
 	return fallback, false
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
 }
 
 // runAMDSmokeTest downloads a tiny model and runs a quick inference to verify ROCm works.
