@@ -81,6 +81,7 @@ type ModelConfig struct {
 	// and embedding serving (--embedding flag, /v1/embeddings endpoint).
 	Mode                    ModelMode
 	MinVRAMBytes            uint64
+	MinRAMBytes             uint64
 	RequiresHuggingFaceAuth bool
 	// MmprojFileName + MmprojURL are the multimodal vision projector
 	// artifact for vision-capable models like Gemma 4 26B and Nemotron
@@ -158,6 +159,7 @@ var NativeModels = map[string]ModelConfig{
 		URL:                     "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/nemotron-3-nano-omni-ga_v1.0-Q4_K_M.gguf",
 		PlatformPath:            "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download",
 		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
+		MinRAMBytes:             24 * 1024 * 1024 * 1024,
 		RequiresHuggingFaceAuth: false,
 		// Vision projector for the Omni multimodal mode. Same auto-
 		// download + --mmproj launch flow as Gemma 4.
@@ -186,12 +188,22 @@ var NativeModels = map[string]ModelConfig{
 // prewarm intentionally selects a smaller subset so operators do not fill disks
 // by advertising one large model family.
 func SupportedNativeChatModels(vramBytes uint64) []string {
+	return SupportedNativeChatModelsForHardware(vramBytes, 0)
+}
+
+// SupportedNativeChatModelsForHardware is the RAM-aware form used by live
+// heartbeats and prewarm. A zero ramBytes preserves legacy/test behavior for
+// callers that only know VRAM.
+func SupportedNativeChatModelsForHardware(vramBytes, ramBytes uint64) []string {
 	out := make([]string, 0, len(NativeModels))
 	for id, cfg := range NativeModels {
 		if cfg.Mode == ModeEmbedding {
 			continue
 		}
 		if !meetsModelVRAMRequirement(vramBytes, cfg.MinVRAMBytes) {
+			continue
+		}
+		if ramBytes > 0 && !meetsModelRAMRequirement(ramBytes, cfg.MinRAMBytes) {
 			continue
 		}
 		if cfg.RequiresHuggingFaceAuth && huggingFaceToken() == "" && !platformManagedGatedModelsEnabled() {
@@ -342,12 +354,16 @@ func (m *Manager) ReadyNativeChatModels(vramBytes uint64) []string {
 // os.Stat check in the existing download loop. Designed to run in a
 // goroutine fired at node-agent startup:
 //
-//	go infMgr.PrewarmEligibleModels(ctx, caps.VRAMBytes)
+//	go infMgr.PrewarmEligibleModelsForHardware(ctx, caps.VRAMBytes, caps.RAMBytes)
 //
 // Cancellation propagates through ctx; the download loop polls for it
 // between chunks.
 func (m *Manager) PrewarmEligibleModels(ctx context.Context, vramBytes uint64) {
-	supported := SupportedNativeChatModels(vramBytes)
+	m.PrewarmEligibleModelsForHardware(ctx, vramBytes, 0)
+}
+
+func (m *Manager) PrewarmEligibleModelsForHardware(ctx context.Context, vramBytes, ramBytes uint64) {
+	supported := SupportedNativeChatModelsForHardware(vramBytes, ramBytes)
 	supported = selectPrewarmModels(supported, os.Getenv)
 	if len(supported) == 0 {
 		slog.Info("prewarm: no models selected")
@@ -425,6 +441,13 @@ func meetsModelVRAMRequirement(vramBytes, minVRAMBytes uint64) bool {
 		return false
 	}
 	return vramBytes+modelVRAMReserveTolerance >= minVRAMBytes
+}
+
+func meetsModelRAMRequirement(ramBytes, minRAMBytes uint64) bool {
+	if minRAMBytes == 0 {
+		return true
+	}
+	return ramBytes >= minRAMBytes
 }
 
 // platformServerURL returns the correct llama.cpp release URL for the current OS/arch.

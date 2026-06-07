@@ -66,6 +66,23 @@ func TestSupportedNativeChatModelsGatesGPTOSSByVRAM(t *testing.T) {
 	t.Fatal("expected GPT-OSS 20B to advertise on 16GB VRAM nodes")
 }
 
+func TestSupportedNativeChatModelsGatesNemotronBySystemRAM(t *testing.T) {
+	lowRAM := SupportedNativeChatModelsForHardware(24*1024*1024*1024, 8*1024*1024*1024)
+	for _, model := range lowRAM {
+		if model == "nemotron-3-nano-omni-30b-a3b" {
+			t.Fatal("expected Nemotron to be hidden on 24GB VRAM nodes with only 8GB system RAM")
+		}
+	}
+
+	enoughRAM := SupportedNativeChatModelsForHardware(24*1024*1024*1024, 32*1024*1024*1024)
+	for _, model := range enoughRAM {
+		if model == "nemotron-3-nano-omni-30b-a3b" {
+			return
+		}
+	}
+	t.Fatal("expected Nemotron to advertise on 24GB VRAM nodes with 32GB system RAM")
+}
+
 func TestSupportedNativeChatModelsAllowsDriverReservedVRAMOn16GBCards(t *testing.T) {
 	t.Setenv("HF_TOKEN", "test-token")
 

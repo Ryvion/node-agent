@@ -1022,7 +1022,7 @@ func runNode(ctx context.Context) {
 					slog.Error("native model prewarm panic", "error", r)
 				}
 			}()
-			infMgr.PrewarmEligibleModels(ctx, caps.VRAMBytes)
+			infMgr.PrewarmEligibleModelsForHardware(ctx, caps.VRAMBytes, caps.RAMBytes)
 		}()
 	}
 
@@ -4044,7 +4044,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		// can serve *immediately* with no download stall. PrewarmEligibleModels
 		// runs in the background at startup so the ready set converges with
 		// the eligible set within a few minutes of a fresh node coming up.
-		supported := inference.SupportedNativeChatModels(caps.VRAMBytes)
+		supported := inference.SupportedNativeChatModelsForHardware(caps.VRAMBytes, caps.RAMBytes)
 		for _, modelID := range supported {
 			parts = append(parts, "model:"+modelID)
 		}
