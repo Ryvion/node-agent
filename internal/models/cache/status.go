@@ -153,6 +153,8 @@ func normalizeFamily(value string) string {
 		return "gpt-oss"
 	case "gemma":
 		return "gemma"
+	case "nemotron":
+		return "nemotron"
 	default:
 		return "unknown"
 	}

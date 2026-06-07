@@ -60,6 +60,25 @@ func TestScanDetectsGGUFModels(t *testing.T) {
 	}
 }
 
+func TestScanInfersNemotronFamily(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	modelPath := filepath.Join(cacheDir, "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf")
+	if err := os.WriteFile(modelPath, []byte("nemotron"), 0o644); err != nil {
+		t.Fatalf("write nemotron model: %v", err)
+	}
+
+	status := Scan(cacheDir)
+	if len(status.Models) != 1 {
+		t.Fatalf("models = %+v, want one Nemotron model", status.Models)
+	}
+	model := status.Models[0]
+	if model.FamilyHint != "nemotron" || model.QuantizationHint != "Q4_K_M" || model.ParameterCountBillions != 30 {
+		t.Fatalf("nemotron hints = %+v", model)
+	}
+}
+
 func TestScanCanonicalizesTinyLlamaDrafterAlias(t *testing.T) {
 	t.Parallel()
 
@@ -355,6 +374,55 @@ func TestAnnotateRuntimeStatusAllowsGemma4QATArtifactWhenPolicyAllowsGemma(t *te
 	model := annotated.Models[0]
 	if !model.Runnable || len(model.BlockedReasons) != 0 || model.FamilyHint != "gemma" || model.ParameterCountBillions != 27 {
 		t.Fatalf("gemma 4 annotation = %+v, want runnable Gemma 4 artifact without policy block", model)
+	}
+}
+
+func TestAnnotateRuntimeStatusAllowsNemotronWhenPolicyAllowsNemotron(t *testing.T) {
+	t.Parallel()
+
+	status := NormalizeStatus(Status{
+		CacheDir: "/cache",
+		Models: []Model{{
+			ModelID:                "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
+			Filename:               "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
+			Path:                   "/cache/nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
+			SizeBytes:              24_515_130_176,
+			FamilyHint:             "nemotron",
+			QuantizationHint:       "Q4_K_M",
+			ParameterCountBillions: 30,
+			Format:                 "gguf",
+			Installed:              true,
+		}},
+	})
+	policy := modelpolicy.NormalizePolicy(modelpolicy.Policy{
+		CacheDir:            "/cache",
+		MaxSingleModelBytes: 32 << 30,
+		MaxCacheBytes:       64 << 30,
+		AllowedFamilies:     []string{"llama", "phi", "qwen", "gemma", "gpt-oss", "nemotron"},
+		AllowedFormats:      []string{"gguf"},
+		RuntimePolicy: modelpolicy.RuntimePolicy{
+			AllowRuntimeExecution:            true,
+			MaxRuntimeModelBytes:             32 << 30,
+			MaxRuntimeParameterCountBillions: 32,
+			AllowCPUOffload:                  true,
+			AllowLargeModels:                 true,
+			AllowFamilies:                    []string{"llama", "phi", "qwen", "gemma", "gpt-oss", "nemotron"},
+		},
+	})
+
+	annotated := AnnotateRuntimeStatus(RuntimeAnnotationInput{
+		Status:                         status,
+		Policy:                         policy,
+		HardwareCapacityAvailable:      true,
+		BackendTextGenerationAvailable: true,
+		V7InferenceEnabled:             true,
+	})
+	if len(annotated.Models) != 1 {
+		t.Fatalf("models = %+v, want one Nemotron model", annotated.Models)
+	}
+	model := annotated.Models[0]
+	if !model.Runnable || len(model.BlockedReasons) != 0 || model.FamilyHint != "nemotron" {
+		t.Fatalf("nemotron annotation = %+v, want runnable Nemotron artifact without policy block", model)
 	}
 }
 

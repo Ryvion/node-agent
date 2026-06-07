@@ -195,6 +195,8 @@ func inferFamily(filename string) string {
 		return "qwen"
 	case strings.Contains(lower, "gemma"):
 		return "gemma"
+	case strings.Contains(lower, "nemotron"):
+		return "nemotron"
 	default:
 		return "unknown"
 	}
