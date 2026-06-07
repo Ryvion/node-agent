@@ -6,8 +6,8 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -52,50 +52,19 @@ func emRuntimeRoot() string {
 	return filepath.Join(os.TempDir(), "ryvion-em-runtime")
 }
 
-// emBundlePinnedSigningKeyB64 is the platform EM-bundle signing PUBLIC key
-// (base64 of the 32 raw Ed25519 bytes). Generate the keypair OFFLINE so the
-// private key never enters source control, then paste the PUBLIC key here:
-//
-//	python tools/build_bundle.py --genkey   # prints PUBLIC (paste here) + PRIVATE (store as a secret)
-//
-// While this is empty AND RYV_EM_BUNDLE_PUBKEY is unset, signature enforcement
-// falls back to the RYV_EM_ALLOW_UNSIGNED_BUNDLE migration switch (so the live
-// fleet keeps working). Once a signed bundle is published, pin the key here (or
-// set RYV_EM_BUNDLE_PUBKEY) and set RYV_EM_REQUIRE_SIGNED_BUNDLE=1, then drop the
-// unsigned switch. See docs/2026-06-02-SECURITY-AUDIT.md §6.
-const emBundlePinnedSigningKeyB64 = ""
-
-// emBundleSigningKey returns the Ed25519 public key used to verify EM bundle
-// manifests. RYV_EM_BUNDLE_PUBKEY (hex or base64) overrides the pinned key.
+// emBundleSigningKey returns the Ed25519 public key (hex) used to verify EM
+// bundle manifests. Configured by the installer/operator; when unset, signature
+// verification is skipped only if RYV_EM_ALLOW_UNSIGNED_BUNDLE=1 (dev/test).
 func emBundleSigningKey() ed25519.PublicKey {
-	if raw := strings.TrimSpace(os.Getenv("RYV_EM_BUNDLE_PUBKEY")); raw != "" {
-		return decodeEd25519PublicKey(raw)
+	raw := strings.TrimSpace(os.Getenv("RYV_EM_BUNDLE_PUBKEY"))
+	if raw == "" {
+		return nil
 	}
-	if pinned := strings.TrimSpace(emBundlePinnedSigningKeyB64); pinned != "" {
-		return decodeEd25519PublicKey(pinned)
+	b, err := hex.DecodeString(raw)
+	if err != nil || len(b) != ed25519.PublicKeySize {
+		return nil
 	}
-	return nil
-}
-
-func decodeEd25519PublicKey(raw string) ed25519.PublicKey {
-	raw = strings.TrimSpace(raw)
-	if b, err := hex.DecodeString(raw); err == nil && len(b) == ed25519.PublicKeySize {
-		return ed25519.PublicKey(b)
-	}
-	if b, err := base64.StdEncoding.DecodeString(raw); err == nil && len(b) == ed25519.PublicKeySize {
-		return ed25519.PublicKey(b)
-	}
-	return nil
-}
-
-// emRequireSignedBundle enforces fail-closed EM bundle verification.
-func emRequireSignedBundle() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_EM_REQUIRE_SIGNED_BUNDLE"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return ed25519.PublicKey(b)
 }
 
 func emAllowUnsignedBundle() bool {
@@ -116,58 +85,27 @@ const emBundleReadyMarker = ".em-bundle-ready"
 // signed fields. The signed payload excludes the signature field itself.
 func verifyManifestSignature(m emBundleManifest) error {
 	pub := emBundleSigningKey()
-	require := emRequireSignedBundle()
-
-	if require && pub == nil {
-		return fmt.Errorf("EM bundle signature required but no verifying key configured (pin emBundlePinnedSigningKeyB64 or set RYV_EM_BUNDLE_PUBKEY)")
-	}
-
-	if strings.TrimSpace(m.Signature) == "" {
-		// Unsigned manifest.
-		if require {
-			return fmt.Errorf("EM bundle signature required but manifest is unsigned")
-		}
-		if emAllowUnsignedBundle() {
-			slog.Warn("EM bundle UNSIGNED and accepted via RYV_EM_ALLOW_UNSIGNED_BUNDLE=1 — set RYV_EM_REQUIRE_SIGNED_BUNDLE=1 after publishing a signed bundle", "engine", m.Engine)
-			return nil
-		}
-		return fmt.Errorf("EM bundle is unsigned and unsigned bundles are not allowed")
-	}
-
-	// A signature is present. Verify it whenever we hold a key; never accept a
-	// signature we cannot check unless explicitly in unsigned-migration mode.
 	if pub == nil {
 		if emAllowUnsignedBundle() {
-			slog.Warn("EM bundle is signed but no verifying key is configured; accepting under RYV_EM_ALLOW_UNSIGNED_BUNDLE=1", "engine", m.Engine)
+			slog.Warn("EM bundle signature verification skipped (RYV_EM_ALLOW_UNSIGNED_BUNDLE=1)", "engine", m.Engine)
 			return nil
 		}
-		return fmt.Errorf("EM bundle is signed but no verifying key is configured")
+		return fmt.Errorf("EM bundle signing key not configured (set RYV_EM_BUNDLE_PUBKEY)")
 	}
 	sig, err := hex.DecodeString(strings.TrimSpace(m.Signature))
 	if err != nil || len(sig) == 0 {
-		return fmt.Errorf("EM bundle signature malformed")
+		return fmt.Errorf("EM bundle signature missing or malformed")
 	}
-	if !ed25519.Verify(pub, emManifestSigningBytes(m), sig) {
+	signed := m
+	signed.Signature = ""
+	payload, err := json.Marshal(signed)
+	if err != nil {
+		return fmt.Errorf("canonicalize manifest: %w", err)
+	}
+	if !ed25519.Verify(pub, payload, sig) {
 		return fmt.Errorf("EM bundle signature verification failed")
 	}
 	return nil
-}
-
-// emManifestSigningBytes is the canonical, language-neutral message signed over an
-// EM bundle manifest. It binds the bundle IDENTITY — engine, version, URL, digest,
-// entrypoint — and deliberately EXCLUDES the node-derived os/arch so one published
-// signature is portable across nodes, while bundle_sha256 still pins the exact
-// artifact. The signer (tools/sign_descriptor.py) reproduces it byte-for-byte: a
-// domain tag then the fields, newline-joined.
-func emManifestSigningBytes(m emBundleManifest) []byte {
-	return []byte(strings.Join([]string{
-		"ryvion-em-bundle-v1",
-		m.Engine,
-		m.EngineVersion,
-		m.BundleURL,
-		m.BundleSHA256,
-		m.Entrypoint,
-	}, "\n"))
 }
 
 // ensureEMBundle downloads, verifies, and caches the signed FDTD runtime bundle,
@@ -189,13 +127,7 @@ func ensureEMBundle(ctx context.Context, m emBundleManifest, nodeToken string) (
 
 	root := emRuntimeRoot()
 	bundleDir := filepath.Join(root, m.Engine+"-"+m.EngineVersion)
-	// Jail the hub-supplied entrypoint inside the bundle dir: a manifest with
-	// entrypoint "../../bin/sh" or an absolute path must not resolve to a host
-	// binary outside the extracted bundle. safeJoin rejects any traversal.
-	entry, err := safeJoin(bundleDir, strings.TrimPrefix(m.Entrypoint, "/"))
-	if err != nil {
-		return "", fmt.Errorf("EM bundle entrypoint %q: %w", m.Entrypoint, err)
-	}
+	entry := filepath.Join(bundleDir, filepath.FromSlash(strings.TrimPrefix(m.Entrypoint, "/")))
 	marker := filepath.Join(bundleDir, emBundleReadyMarker)
 
 	// Cache hit: ready marker present AND entrypoint exists -> reuse.

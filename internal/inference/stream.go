@@ -21,13 +21,11 @@ import (
 
 // chatRequest is the OpenAI-compatible request to local llama-server.
 type chatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []chatMessage   `json:"messages"`
-	Stream      bool            `json:"stream"`
-	Tools       json.RawMessage `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []chatMessage `json:"messages"`
+	Stream      bool          `json:"stream"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
 	// TopP/TopK/MinP override llama-server's defaults for reasoning models.
 	// They are pointers + omitempty so non-reasoning requests send nothing and
 	// the server keeps its own defaults. See reasoningSamplingForModel.
@@ -94,17 +92,15 @@ func (m chatMessage) MessageText() string {
 
 // specPayload is what the hub sends as spec_json for inference jobs.
 type specPayload struct {
-	Messages    []chatMessage   `json:"messages"`
-	Tools       json.RawMessage `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	Model       string          `json:"model,omitempty"`
-	ModelURL    string          `json:"model_url,omitempty"`    // Presigned download URL for custom models
-	ModelFormat string          `json:"model_format,omitempty"` // "gguf", "onnx", etc.
-	ModelName   string          `json:"model_name,omitempty"`   // Human-readable name
-	Task        string          `json:"task,omitempty"`         // "custom_inference", "embedding"
-	Input       string          `json:"input,omitempty"`        // Text input for embedding tasks
+	Messages    []chatMessage `json:"messages"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	Model       string        `json:"model,omitempty"`
+	ModelURL    string        `json:"model_url,omitempty"`    // Presigned download URL for custom models
+	ModelFormat string        `json:"model_format,omitempty"` // "gguf", "onnx", etc.
+	ModelName   string        `json:"model_name,omitempty"`   // Human-readable name
+	Task        string        `json:"task,omitempty"`         // "custom_inference", "embedding"
+	Input       string        `json:"input,omitempty"`        // Text input for embedding tasks
 	// V8ReasoningEffort is the hub's scheduler-metadata key carrying the
 	// OpenAI-compatible reasoning_effort param ("low"|"medium"|"high").
 	// Underscore prefix marks it as out-of-band — it does not enter the
@@ -167,31 +163,6 @@ func IsEmbeddingJob(specJSON string) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(s.Task), "embedding")
-}
-
-// RequestedNativeModelForSpec returns the built-in native model a spec will
-// ask llama-server to load. Custom model specs intentionally return false
-// because their model path is resolved by EnsureCustomModel at execution time.
-func RequestedNativeModelForSpec(specJSON string) (string, bool) {
-	var s specPayload
-	if err := json.Unmarshal([]byte(specJSON), &s); err != nil {
-		return "", false
-	}
-	if strings.EqualFold(strings.TrimSpace(s.Task), "custom_inference") && strings.TrimSpace(s.ModelURL) != "" {
-		return "", false
-	}
-	modelName := strings.TrimSpace(s.Model)
-	if modelName == "" {
-		if strings.EqualFold(strings.TrimSpace(s.Task), "embedding") {
-			modelName = "nomic-embed-text-v1.5"
-		} else {
-			modelName = "ryvion-llama-3.2-3b"
-		}
-	}
-	if _, ok := NativeModels[modelName]; !ok {
-		return "", false
-	}
-	return modelName, true
 }
 
 // StreamingMetrics summarises the latency / throughput numbers a single
@@ -276,12 +247,8 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		Messages:        spec.Messages,
 		ReasoningEffort: normalizeStreamReasoningEffort(spec.V8ReasoningEffort),
 		Stream:          true,
-		MaxTokens:       maxTokens,
-		Temperature:     spec.Temperature,
-		// Forward tool-calling definitions to llama-server (capable models emit
-		// tool_call deltas, which the SSE relay passes straight back to the client).
-		Tools:      spec.Tools,
-		ToolChoice: spec.ToolChoice,
+		MaxTokens:   maxTokens,
+		Temperature: spec.Temperature,
 	}
 	// Reasoning models need their vendor-recommended sampling profile. The
 	// buyer-supplied temperature (the playground sends 0.4) plus llama-server's
@@ -329,8 +296,6 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 
 	// Read SSE lines from llama-server, relay as-is to hub
 	var fullContent strings.Builder
-	tcAcc := newToolCallAccumulator()
-	finishReason := ""
 	hash := sha256.New()
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024)
@@ -379,12 +344,10 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content          string          `json:"content"`
-					ReasoningContent string          `json:"reasoning_content"`
-					Reasoning        string          `json:"reasoning"`
-					ToolCalls        json.RawMessage `json:"tool_calls"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
 				} `json:"delta"`
-				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *struct {
 				PromptTokens     int64 `json:"prompt_tokens"`
@@ -406,16 +369,6 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 			}
 			if len(chunk.Choices) > 0 {
 				delta := chunk.Choices[0].Delta
-				if len(delta.ToolCalls) > 0 {
-					tcAcc.add(delta.ToolCalls)
-					if !hasFirstToken {
-						firstTokenAt = time.Now()
-						hasFirstToken = true
-					}
-				}
-				if fr := chunk.Choices[0].FinishReason; fr != "" {
-					finishReason = fr
-				}
 				content := delta.Content
 				reasoning := delta.ReasoningContent
 				if reasoning == "" {
@@ -458,7 +411,7 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		return fmt.Errorf("job context cancelled: %w", err)
 	}
 
-	if fullContent.Len() == 0 && !tcAcc.hasAny() {
+	if fullContent.Len() == 0 {
 		writeHubStreamError(pw, "llama-server returned empty output (context window or memory exceeded)")
 		pw.Close()
 		<-streamErr
@@ -521,15 +474,6 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	meta["exit_code"] = 0
 	meta["response_length"] = fullContent.Len()
 	meta["stderr_tail"] = tail
-	// Record assembled tool calls so the hub can surface structured tool_calls in
-	// the (non-streaming) /v1/chat response and the receipt proves what was called.
-	if tcAcc.hasAny() {
-		meta["tool_calls"] = tcAcc.assembled()
-		if finishReason == "" {
-			finishReason = "tool_calls"
-		}
-		meta["finish_reason"] = finishReason
-	}
 	applyStreamingMetricsToMetadata(meta, metrics)
 	applyStreamingSpeculativeMetadata(meta, m.streamingSpeculativeLaunch(), metrics)
 	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{

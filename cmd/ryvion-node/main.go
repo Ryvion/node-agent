@@ -62,7 +62,6 @@ var (
 	flagGPUs       string
 	flagUIPort     string
 	flagMaxGPUUtil float64
-	flagFleetToken string
 )
 
 // cachedGPUUtil stores the latest GPU utilization from heartbeat sampling.
@@ -268,7 +267,6 @@ const (
 	v7ProofOutputBytesMetadataKey   = "_v7_proof_output_bytes"
 	v7ProofArtifactBytesMetadataKey = "_v7_proof_artifact_bytes"
 	legacyNativeInferenceFlagEnv    = "RYV_NODE_LEGACY_NATIVE_INFERENCE"
-	nativeInferenceJobLaunchOffEnv  = "RYV_DISABLE_NATIVE_INFERENCE_JOB_LAUNCH"
 )
 
 var (
@@ -390,7 +388,6 @@ func main() {
 	flag.StringVar(&flagDevice, "type", "", "Node device type (gpu|cpu|mobile|iot)")
 	flag.StringVar(&flagCountry, "country", "", "Declared ISO 3166-1 alpha-2 country code for sovereign routing")
 	flag.StringVar(&flagReferral, "referral", "", "Optional referral code")
-	flag.StringVar(&flagFleetToken, "fleet-token", "", "Organization fleet enrollment token (ryv_fleet_…) — auto-joins this node to the org's fleet")
 	flag.StringVar(&flagGPUs, "gpus", "auto", "Managed OCI GPU selection value (auto|all|none|device list)")
 	flag.StringVar(&flagUIPort, "ui-port", defaultOperatorAPIPort, "Local operator API port (set 0 to disable)")
 	flag.Float64Var(&flagMaxGPUUtil, "max-gpu-util", 90, "Skip jobs when GPU utilization exceeds this % (0=disabled)")
@@ -871,7 +868,6 @@ func runNode(ctx context.Context) {
 		pub,
 		priv,
 		hub.WithBindToken(os.Getenv("RYV_BIND_TOKEN")),
-		hub.WithFleetToken(firstNonEmptyString(flagFleetToken, strings.TrimSpace(os.Getenv("RYVION_FLEET_TOKEN")))),
 		hub.WithWallet(os.Getenv("RYV_WALLET")),
 		hub.WithAdminKey(os.Getenv("RYV_ADMIN_KEY")),
 		hub.WithUserAgent("ryvion-node/"+version),
@@ -1022,7 +1018,7 @@ func runNode(ctx context.Context) {
 					slog.Error("native model prewarm panic", "error", r)
 				}
 			}()
-			infMgr.PrewarmEligibleModelsForHardware(ctx, caps.VRAMBytes, caps.RAMBytes)
+			infMgr.PrewarmEligibleModels(ctx, caps.VRAMBytes)
 		}()
 	}
 
@@ -4044,7 +4040,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 		// can serve *immediately* with no download stall. PrewarmEligibleModels
 		// runs in the background at startup so the ready set converges with
 		// the eligible set within a few minutes of a fresh node coming up.
-		supported := inference.SupportedNativeChatModelsForHardware(caps.VRAMBytes, caps.RAMBytes)
+		supported := inference.SupportedNativeChatModels(caps.VRAMBytes)
 		for _, modelID := range supported {
 			parts = append(parts, "model:"+modelID)
 		}

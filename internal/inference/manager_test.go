@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -64,23 +63,6 @@ func TestSupportedNativeChatModelsGatesGPTOSSByVRAM(t *testing.T) {
 		}
 	}
 	t.Fatal("expected GPT-OSS 20B to advertise on 16GB VRAM nodes")
-}
-
-func TestSupportedNativeChatModelsGatesNemotronBySystemRAM(t *testing.T) {
-	lowRAM := SupportedNativeChatModelsForHardware(24*1024*1024*1024, 8*1024*1024*1024)
-	for _, model := range lowRAM {
-		if model == "nemotron-3-nano-omni-30b-a3b" {
-			t.Fatal("expected Nemotron to be hidden on 24GB VRAM nodes with only 8GB system RAM")
-		}
-	}
-
-	enoughRAM := SupportedNativeChatModelsForHardware(24*1024*1024*1024, 32*1024*1024*1024)
-	for _, model := range enoughRAM {
-		if model == "nemotron-3-nano-omni-30b-a3b" {
-			return
-		}
-	}
-	t.Fatal("expected Nemotron to advertise on 24GB VRAM nodes with 32GB system RAM")
 }
 
 func TestSupportedNativeChatModelsAllowsDriverReservedVRAMOn16GBCards(t *testing.T) {
@@ -144,17 +126,22 @@ func TestSupportedNativeChatModelsAdvertisesGemmaEvenWithPlatformDownloadsDisabl
 	t.Fatal("expected Gemma model to advertise without HF_TOKEN even when platform-managed downloads are disabled")
 }
 
-func TestModelDownloadURLPublicModelsUsePlatformRedirectorByDefault(t *testing.T) {
+func TestModelDownloadURLPublicModelsBypassHubProxy(t *testing.T) {
 	// Regression guard for the "reasoning models stuck loading / timeout" bug.
 	//
-	// Public models can safely use the hub artifact endpoint now because the
-	// hub redirects cache hits to private R2 presigned URLs and cache misses to
-	// public Hugging Face upstream. It does not stream public multi-GB GGUFs
-	// through the hub process.
+	// qwen3-8b-reasoning and gpt-oss-20b are PUBLIC (RequiresHuggingFaceAuth
+	// =false) but carry a PlatformPath fallback. The node must download them
+	// directly from HuggingFace's CDN — exactly like phi-4/tinyllama, which
+	// have no PlatformPath and work fine. Routing them through the hub's
+	// single-machine artifact proxy streamed the 5GB/12GB GGUF inline and
+	// pushed first-request cold starts past the 300s EnsureModel deadline,
+	// surfacing to buyers as "timeout waiting for <model> to start".
+	//
+	// This asserts the production configuration: hubURL + nodeToken set and
+	// platform-managed downloads at their default (enabled). Even so, public
+	// models must resolve to their direct upstream URL.
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
-	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
-	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 
@@ -164,44 +151,12 @@ func TestModelDownloadURLPublicModelsUsePlatformRedirectorByDefault(t *testing.T
 			t.Fatalf("model %s missing from native registry", id)
 		}
 		got := m.modelDownloadURL(cfg)
-		want := "https://api.ryvion.ai" + cfg.PlatformPath
-		if got != want {
-			t.Errorf("model %s: expected platform artifact URL %q, got %q", id, want, got)
+		if got != cfg.URL {
+			t.Errorf("model %s: expected direct upstream URL %q, got %q", id, cfg.URL, got)
 		}
-	}
-}
-
-func TestModelDownloadURLPublicModelCanForceDirectUpstream(t *testing.T) {
-	t.Setenv("HF_TOKEN", "")
-	t.Setenv("HUGGINGFACE_TOKEN", "")
-	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "1")
-
-	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
-	cfg, ok := NativeModels["nemotron-3-nano-omni-30b-a3b"]
-	if !ok {
-		t.Fatal("Nemotron missing from native registry")
-	}
-
-	if got := m.modelDownloadURL(cfg); got != cfg.URL {
-		t.Fatalf("expected direct upstream URL %q, got %q", cfg.URL, got)
-	}
-}
-
-func TestMmprojDownloadURLUsesPlatformRedirectorByDefault(t *testing.T) {
-	t.Setenv("HF_TOKEN", "")
-	t.Setenv("HUGGINGFACE_TOKEN", "")
-	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "")
-
-	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
-	cfg, ok := NativeModels["nemotron-3-nano-omni-30b-a3b"]
-	if !ok {
-		t.Fatal("Nemotron missing from native registry")
-	}
-
-	got := m.mmprojDownloadURL(cfg)
-	want := "https://api.ryvion.ai/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/artifacts/mmproj/download"
-	if got != want {
-		t.Fatalf("expected platform mmproj URL %q, got %q", want, got)
+		if strings.Contains(got, "/api/v1/node/models/") {
+			t.Errorf("model %s: routed through hub proxy %q — public models must download from HuggingFace directly", id, got)
+		}
 	}
 }
 
@@ -211,8 +166,6 @@ func TestModelDownloadURLGatedModelWithoutTokenUsesHubProxy(t *testing.T) {
 	// its own upstream token). This is the only case the proxy exists for.
 	t.Setenv("HF_TOKEN", "")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
-	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
-	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 	cfg := ModelConfig{
@@ -233,8 +186,6 @@ func TestModelDownloadURLGatedModelWithTokenUsesDirectURL(t *testing.T) {
 	// should NOT detour through the hub proxy.
 	t.Setenv("HF_TOKEN", "hf-secret")
 	t.Setenv("HUGGINGFACE_TOKEN", "")
-	t.Setenv("RYV_USE_PLATFORM_MODEL_CACHE", "")
-	t.Setenv("RYV_DISABLE_PLATFORM_MODEL_CACHE", "")
 
 	m := &Manager{hubURL: "https://api.ryvion.ai", nodeToken: func(int64) string { return "node-token" }}
 	cfg := ModelConfig{
@@ -526,108 +477,6 @@ func TestNewReportsBlockerReasonBeforeStart(t *testing.T) {
 	}
 }
 
-func TestSelectModelForNextStartAvoidsDefaultColdBoot(t *testing.T) {
-	mgr := New(t.TempDir())
-
-	if err := mgr.SelectModelForNextStart("nemotron-3-nano-omni-30b-a3b"); err != nil {
-		t.Fatalf("SelectModelForNextStart() error = %v", err)
-	}
-
-	if got := mgr.ModelName(); got != "nemotron-3-nano-omni-30b-a3b" {
-		t.Fatalf("ModelName() = %q, want nemotron", got)
-	}
-	if mgr.activeModelPath != "" {
-		t.Fatalf("activeModelPath = %q, want empty registry path before Start", mgr.activeModelPath)
-	}
-	if mgr.activeModelMode != NativeModels["nemotron-3-nano-omni-30b-a3b"].Mode {
-		t.Fatalf("activeModelMode = %q, want registry mode", mgr.activeModelMode)
-	}
-	if mgr.Healthy() {
-		t.Fatal("manager should remain unhealthy before Start")
-	}
-}
-
-func TestSelectModelForNextStartRejectsUnknownModel(t *testing.T) {
-	mgr := New(t.TempDir())
-
-	if err := mgr.SelectModelForNextStart("not-a-native-model"); err == nil {
-		t.Fatal("SelectModelForNextStart() accepted unknown model")
-	}
-	if got := mgr.ModelName(); got != "ryvion-llama-3.2-3b" {
-		t.Fatalf("ModelName() changed after rejected model: %q", got)
-	}
-}
-
-func TestStopClearsIdleProcessState(t *testing.T) {
-	mgr := New(t.TempDir())
-	ctx, cancel := context.WithCancel(context.Background())
-	mgr.cancel = cancel
-	mgr.cmd = &exec.Cmd{}
-
-	mgr.Stop()
-
-	if mgr.cancel != nil {
-		t.Fatal("Stop() left cancel set")
-	}
-	if mgr.cmd != nil {
-		t.Fatal("Stop() left cmd set")
-	}
-	select {
-	case <-ctx.Done():
-	default:
-		t.Fatal("Stop() did not cancel the running context")
-	}
-}
-
-func TestHandleServerExitContextCancelIsNotProcessFailed(t *testing.T) {
-	mgr := New(t.TempDir())
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	mgr.handleServerExit(ctx, context.Canceled)
-
-	if got := mgr.BlockerReason(); got != BlockerNotStarted {
-		t.Fatalf("expected cancelled on-demand shutdown to report %q, got %q", BlockerNotStarted, got)
-	}
-}
-
-func TestHandleServerExitRequestedRestartIsNotProcessFailed(t *testing.T) {
-	mgr := New(t.TempDir())
-	mgr.setBlockerReason(BlockerStarting)
-	mgr.mu.Lock()
-	mgr.serverStopIntent = true
-	mgr.mu.Unlock()
-
-	mgr.handleServerExit(context.Background(), context.Canceled)
-
-	if got := mgr.BlockerReason(); got == BlockerProcessFailed {
-		t.Fatalf("requested llama-server restart must not report %q", BlockerProcessFailed)
-	}
-	if got := mgr.BlockerReason(); got != BlockerStarting {
-		t.Fatalf("expected requested restart to keep %q, got %q", BlockerStarting, got)
-	}
-}
-
-func TestHandleServerExitCrashReportsProcessFailed(t *testing.T) {
-	mgr := New(t.TempDir())
-
-	mgr.handleServerExit(context.Background(), os.ErrProcessDone)
-
-	if got := mgr.BlockerReason(); got != BlockerProcessFailed {
-		t.Fatalf("unexpected blocker after crashed llama-server: got %q want %q", got, BlockerProcessFailed)
-	}
-}
-
-func TestContainerizedInferenceIsOptIn(t *testing.T) {
-	t.Setenv("RYV_NATIVE_INFERENCE_ONLY", "")
-	t.Setenv("RYV_CONTAINERIZED_NATIVE_INFERENCE", "")
-
-	mgr := New(t.TempDir())
-	if mgr.useContainerizedInference() {
-		t.Fatal("containerized native inference should be opt-in")
-	}
-}
-
 func TestSetHealthyClearsBlocker(t *testing.T) {
 	mgr := New(t.TempDir())
 	mgr.setBlockerReason(BlockerStartupTimeout)
@@ -892,42 +741,6 @@ func TestStreamingJinjaRequiredForModel(t *testing.T) {
 	}
 }
 
-func TestStreamingMoECPUOffloadArgsForModel(t *testing.T) {
-	hasCPUMoE := func(args []string) bool {
-		for _, a := range args {
-			if a == "--cpu-moe" {
-				return true
-			}
-		}
-		return false
-	}
-	// The large Nemotron MoE must offload experts to CPU — full GPU offload of
-	// its 24.5 GB Q4_K_M OOMs every card in the fleet and the manager then
-	// reports "inference manager is not healthy".
-	for _, path := range []string{
-		"/models/nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
-		"/models/NVIDIA-Nemotron-3-Nano-Omni.gguf",
-	} {
-		if args := streamingMoECPUOffloadArgsForModel(path); !hasCPUMoE(args) {
-			t.Errorf("expected --cpu-moe for %q, got %v", path, args)
-		}
-	}
-	// Models that fit on the GPU must NOT get --cpu-moe (it would needlessly
-	// push them onto the CPU and tank throughput). gpt-oss-20b is also a MoE but
-	// fits at 16 GB, so it stays fully on the GPU.
-	for _, path := range []string{
-		"/models/gpt-oss-20b-mxfp4.gguf",
-		"/models/gemma-4-26B-A4B-it-Q4_K_M.gguf",
-		"/models/phi-4-Q4_K_M.gguf",
-		"/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-		"",
-	} {
-		if args := streamingMoECPUOffloadArgsForModel(path); len(args) != 0 {
-			t.Errorf("did not expect MoE CPU offload for %q, got %v", path, args)
-		}
-	}
-}
-
 func TestStreamingReasoningFormatForModel(t *testing.T) {
 	cases := []struct{ path, want string }{
 		{"/models/Qwen3-8B-Q4_K_M.gguf", "deepseek"},
@@ -974,64 +787,6 @@ func TestSortPrewarmByPriority(t *testing.T) {
 	}
 }
 
-func TestSelectPrewarmModelsDefaultLeanSkipsHugeModels(t *testing.T) {
-	supported := []string{
-		"gemma-4-26b-a4b-it",
-		"gpt-oss-20b",
-		"nemotron-3-nano-omni-30b-a3b",
-		"phi-4",
-		"qwen3-8b-reasoning",
-		"ryvion-llama-3.2-3b",
-		"tinyllama",
-	}
-	got := selectPrewarmModels(supported, prewarmTestEnv(nil))
-	want := []string{"tinyllama", "ryvion-llama-3.2-3b", "qwen3-8b-reasoning"}
-	requireStringSlice(t, got, want)
-}
-
-func TestSelectPrewarmModelsAllKeepsHugeModels(t *testing.T) {
-	supported := []string{
-		"gemma-4-26b-a4b-it",
-		"gpt-oss-20b",
-		"nemotron-3-nano-omni-30b-a3b",
-		"phi-4",
-		"qwen3-8b-reasoning",
-		"ryvion-llama-3.2-3b",
-		"tinyllama",
-	}
-	got := selectPrewarmModels(supported, prewarmTestEnv(map[string]string{
-		"RYV_MODEL_PREWARM_MODE": "all",
-	}))
-	want := []string{
-		"tinyllama",
-		"ryvion-llama-3.2-3b",
-		"phi-4",
-		"qwen3-8b-reasoning",
-		"gpt-oss-20b",
-		"gemma-4-26b-a4b-it",
-		"nemotron-3-nano-omni-30b-a3b",
-	}
-	requireStringSlice(t, got, want)
-}
-
-func TestSelectPrewarmModelsExplicitListPreservesOperatorOrder(t *testing.T) {
-	supported := []string{"qwen3-8b-reasoning", "ryvion-llama-3.2-3b", "nemotron-3-nano-omni-30b-a3b"}
-	got := selectPrewarmModels(supported, prewarmTestEnv(map[string]string{
-		"RYV_PREWARM_MODELS": "nemotron-3-nano-omni-30b-a3b,missing-model,qwen3-8b-reasoning,nemotron-3-nano-omni-30b-a3b",
-	}))
-	want := []string{"nemotron-3-nano-omni-30b-a3b", "qwen3-8b-reasoning"}
-	requireStringSlice(t, got, want)
-}
-
-func TestSelectPrewarmModelsOff(t *testing.T) {
-	got := selectPrewarmModels([]string{"tinyllama", "ryvion-llama-3.2-3b"}, prewarmTestEnv(map[string]string{
-		"RYV_MODEL_PREWARM_MODE": "off",
-	}))
-	if len(got) != 0 {
-		t.Fatalf("expected no prewarm models, got %v", got)
-	}
-}
-
 func TestSortPrewarmByPriorityHandlesUnknownModels(t *testing.T) {
 	// Future model not yet in prewarmPriority should land AFTER all
 	// known ones but still be present (not dropped).
@@ -1045,23 +800,5 @@ func TestSortPrewarmByPriorityHandlesUnknownModels(t *testing.T) {
 	}
 	if got[2] != "some-future-13b" {
 		t.Fatalf("unknown model should land last, got %v", got)
-	}
-}
-
-func prewarmTestEnv(values map[string]string) func(string) string {
-	return func(key string) string {
-		return values[key]
-	}
-}
-
-func requireStringSlice(t *testing.T, got, want []string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("got %v, want %v", got, want)
-		}
 	}
 }

@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
-	"github.com/Ryvion/ryvion-node/internal/inference"
 	"github.com/Ryvion/ryvion-node/internal/runner"
 )
 
@@ -65,47 +63,6 @@ func TestWorkCapsuleOptInIsAdvertisedWhenGitExists(t *testing.T) {
 	kinds := v7SupportedRunnerKinds(false, true, false)
 	if !containsString(kinds, executorKindWorkCapsule) {
 		t.Fatalf("work_capsule not advertised after explicit opt-in: %v", kinds)
-	}
-}
-
-func TestNativeInferenceJobLaunchIgnoresLegacyBootResidencyOptOut(t *testing.T) {
-	getenv := map[string]string{
-		legacyNativeInferenceFlagEnv: "0",
-	}
-
-	if !nativeInferenceJobLaunchEnabled(func(key string) string { return getenv[key] }) {
-		t.Fatal("legacy boot-time native inference opt-out must not disable assigned inference jobs")
-	}
-}
-
-func TestNativeInferenceJobLaunchCanBeExplicitlyDisabled(t *testing.T) {
-	getenv := map[string]string{
-		nativeInferenceJobLaunchOffEnv: "1",
-	}
-
-	if nativeInferenceJobLaunchEnabled(func(key string) string { return getenv[key] }) {
-		t.Fatal("explicit native inference job launch opt-out should disable assigned inference jobs")
-	}
-
-	getenv[nativeInferenceJobLaunchOffEnv] = "0"
-	if !nativeInferenceJobLaunchEnabled(func(key string) string { return getenv[key] }) {
-		t.Fatal("false explicit native inference job launch opt-out should keep assigned inference jobs enabled")
-	}
-}
-
-func TestNativeInferenceReadinessErrorIncludesBlocker(t *testing.T) {
-	mgr := inference.New(t.TempDir())
-	if err := mgr.SelectModelForNextStart("nemotron-3-nano-omni-30b-a3b"); err != nil {
-		t.Fatalf("SelectModelForNextStart() error = %v", err)
-	}
-
-	err := nativeInferenceReadinessError(mgr, errors.New("native inference manager stopped before becoming healthy"))
-	msg := err.Error()
-	if !strings.Contains(msg, "native inference manager not ready") {
-		t.Fatalf("missing readiness context: %q", msg)
-	}
-	if !strings.Contains(msg, "blocker=starting") {
-		t.Fatalf("missing blocker reason: %q", msg)
 	}
 }
 

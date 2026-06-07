@@ -244,10 +244,6 @@ func (m *Manager) Start(ctx context.Context) LlamaCppSidecarStatus {
 	}
 	processCtx, cancel := context.WithCancel(context.Background())
 	args := buildServerArgs(m.cfg)
-	// Stock llama.cpp builds reject the Ryvion fork's --spec-* flags and exit
-	// immediately; fall back to standard decoding when the bundled binary
-	// cannot parse them, so the runtime starts instead of crash-looping.
-	args = specCompatibleArgs(m.cfg.ServerPath, args)
 	process, err := m.starter(processCtx, m.cfg.ServerPath, args, m.logs)
 	if err != nil {
 		cancel()

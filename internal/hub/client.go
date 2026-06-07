@@ -23,16 +23,15 @@ import (
 )
 
 type Client struct {
-	baseURL    string
-	pub        ed25519.PublicKey
-	priv       ed25519.PrivateKey
-	http       *http.Client
-	bindToken  string
-	fleetToken string
-	wallet     string
-	adminKey   string
-	userAgent  string
-	grpc       *grpcTransport
+	baseURL   string
+	pub       ed25519.PublicKey
+	priv      ed25519.PrivateKey
+	http      *http.Client
+	bindToken string
+	wallet    string
+	adminKey  string
+	userAgent string
+	grpc      *grpcTransport
 }
 
 type Option func(*Client)
@@ -47,12 +46,6 @@ func WithHTTPClient(h *http.Client) Option {
 
 func WithBindToken(token string) Option {
 	return func(c *Client) { c.bindToken = strings.TrimSpace(token) }
-}
-
-// WithFleetToken sets the organization fleet enrollment token sent as
-// X-Ryvion-Fleet-Token on registration, auto-joining this node to the org's fleet.
-func WithFleetToken(token string) Option {
-	return func(c *Client) { c.fleetToken = strings.TrimSpace(token) }
 }
 
 func WithWallet(wallet string) Option {
@@ -920,9 +913,6 @@ func (c *Client) getWithHeaders(ctx context.Context, path string, out any, heade
 	if c.bindToken != "" {
 		req.Header.Set("X-Bind-Token", c.bindToken)
 	}
-	if c.fleetToken != "" {
-		req.Header.Set("X-Ryvion-Fleet-Token", c.fleetToken)
-	}
 	if c.wallet != "" {
 		req.Header.Set("X-Wallet", c.wallet)
 	}
@@ -969,9 +959,6 @@ func (c *Client) postWithHeaders(ctx context.Context, path string, body any, out
 	req.Header.Set("User-Agent", c.userAgent)
 	if c.bindToken != "" {
 		req.Header.Set("X-Bind-Token", c.bindToken)
-	}
-	if c.fleetToken != "" {
-		req.Header.Set("X-Ryvion-Fleet-Token", c.fleetToken)
 	}
 	if c.wallet != "" {
 		req.Header.Set("X-Wallet", c.wallet)
