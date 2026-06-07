@@ -277,6 +277,44 @@ func TestBackendCandidateInventoryWindowsPaths(t *testing.T) {
 	}
 }
 
+func TestDetectGGUFModelsInfersNemotronFamily(t *testing.T) {
+	t.Parallel()
+
+	modelDir := `C:\Ryvion\models`
+	modelPath := modelDir + `\nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf`
+
+	inventory := BuildInventory(RuntimeStatus{}, CandidateBackendDetector{
+		GOOS: "windows",
+		LookPath: func(name string) (string, error) {
+			return "", errors.New("not found")
+		},
+		Stat: func(path string) (os.FileInfo, error) {
+			if path == modelPath {
+				return fakeFileInfo{name: "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf", size: 24_515_130_176}, nil
+			}
+			return nil, errors.New("not found")
+		},
+		ReadDirNames: func(dir string, limit int) ([]string, error) {
+			if dir != modelDir {
+				t.Fatalf("unexpected model dir read: %q", dir)
+			}
+			return []string{"nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf"}, nil
+		},
+		UserHomeDir: func() (string, error) {
+			return "", errors.New("not configured")
+		},
+		ConfiguredModelDirs: []string{modelDir},
+	})
+
+	if len(inventory.GGUFModels) != 1 {
+		t.Fatalf("gguf_models = %+v, want one model", inventory.GGUFModels)
+	}
+	model := inventory.GGUFModels[0]
+	if model.Path != modelPath || model.ModelFamilyHint != ggufModelFamilyNemotron || model.QuantizationHint != "Q4_K_M" {
+		t.Fatalf("nemotron gguf model = %+v, want nemotron Q4_K_M path", model)
+	}
+}
+
 func TestBackendCandidateInventoryJSONHasNoRawPromptOutputOrTensorFields(t *testing.T) {
 	t.Parallel()
 

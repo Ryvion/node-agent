@@ -21,12 +21,13 @@ const (
 	BackendCandidateSGLang             = "sglang"
 	BackendCandidatePythonTransformers = "python_transformers"
 
-	ggufModelFamilyLlama   = "llama"
-	ggufModelFamilyPhi     = "phi"
-	ggufModelFamilyGemma   = "gemma"
-	ggufModelFamilyQwen    = "qwen"
-	ggufModelFamilyGPTOSS  = "gpt-oss"
-	ggufModelFamilyUnknown = "unknown"
+	ggufModelFamilyLlama    = "llama"
+	ggufModelFamilyPhi      = "phi"
+	ggufModelFamilyGemma    = "gemma"
+	ggufModelFamilyQwen     = "qwen"
+	ggufModelFamilyGPTOSS   = "gpt-oss"
+	ggufModelFamilyNemotron = "nemotron"
+	ggufModelFamilyUnknown  = "unknown"
 
 	maxBackendCandidates       = 8
 	maxGGUFModels              = 20
@@ -587,6 +588,8 @@ func inferGGUFModelFamily(filename string) string {
 		return ggufModelFamilyQwen
 	case strings.Contains(lower, "gpt-oss"), strings.Contains(lower, "gptoss"):
 		return ggufModelFamilyGPTOSS
+	case strings.Contains(lower, "nemotron"):
+		return ggufModelFamilyNemotron
 	default:
 		return ggufModelFamilyUnknown
 	}
@@ -604,6 +607,8 @@ func normalizeGGUFModelFamily(value string) string {
 		return ggufModelFamilyQwen
 	case ggufModelFamilyGPTOSS, "gptoss":
 		return ggufModelFamilyGPTOSS
+	case ggufModelFamilyNemotron:
+		return ggufModelFamilyNemotron
 	default:
 		return ggufModelFamilyUnknown
 	}

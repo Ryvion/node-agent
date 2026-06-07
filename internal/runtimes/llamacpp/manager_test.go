@@ -1024,6 +1024,14 @@ func TestBuildBackendRuntimesMarksHealthySidecarLoadedWarm(t *testing.T) {
 	}
 }
 
+func TestInferModelFamilyRecognizesNemotron(t *testing.T) {
+	t.Parallel()
+
+	if got := inferModelFamily("nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf"); got != "nemotron" {
+		t.Fatalf("inferModelFamily() = %q, want nemotron", got)
+	}
+}
+
 func TestGPUOffloadRequestedButServerReportsCPUOnly(t *testing.T) {
 	t.Parallel()
 
