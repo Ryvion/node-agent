@@ -1494,6 +1494,15 @@ func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) e
 		)
 	}
 
+	// Stock upstream llama-server rejects the Ryvion fork's --spec-* flags and
+	// exits immediately, crash-looping native streaming for EVERY model (the
+	// speculative flags are added on every launch). Probe the binary and strip
+	// them when unsupported, falling back to standard decoding. Mirrors the V7
+	// sidecar's spec_support.go — this legacy streaming path (used by
+	// RunStreamingJob) had not been wired through that guard, which left
+	// stock-binary nodes reporting native-inference-blocker:process-failed.
+	args = specCompatibleArgs(m.serverPath, args)
+
 	cmd := exec.CommandContext(serverCtx, m.serverPath, args...)
 	// Send llama-server output to a log file to avoid mixing with JSON slog.
 	logPath := filepath.Join(m.dataDir, "llama-server.log")
