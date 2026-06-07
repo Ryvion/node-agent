@@ -81,6 +81,7 @@ type ModelConfig struct {
 	// and embedding serving (--embedding flag, /v1/embeddings endpoint).
 	Mode                    ModelMode
 	MinVRAMBytes            uint64
+	MinRAMBytes             uint64
 	RequiresHuggingFaceAuth bool
 	// MmprojFileName + MmprojURL are the multimodal vision projector
 	// artifact for vision-capable models like Gemma 4 26B and Nemotron
@@ -88,8 +89,9 @@ type ModelConfig struct {
 	// GGUF and llama-server is launched with --mmproj pointing at it,
 	// which is what makes the model actually consume image_url parts
 	// from OpenAI multimodal messages. Empty for text-only models.
-	MmprojFileName string
-	MmprojURL      string
+	MmprojFileName     string
+	MmprojURL          string
+	MmprojPlatformPath string
 }
 
 // NativeModels maps UI model names to GGUF downloads
@@ -131,30 +133,39 @@ var NativeModels = map[string]ModelConfig{
 		// Vision projector — auto-downloaded alongside the model so
 		// llama-server launches with --mmproj and the model can answer
 		// about images natively (no OCR fallback needed). ~2 GB on disk.
-		MmprojFileName: "mmproj-gemma-4-26B-A4B-it-F16.gguf",
-		MmprojURL:      "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-gemma-4-26B-A4B-it-F16.gguf",
+		MmprojFileName:     "mmproj-gemma-4-26B-A4B-it-F16.gguf",
+		MmprojURL:          "https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-gemma-4-26B-A4B-it-F16.gguf",
+		MmprojPlatformPath: "/api/v1/node/models/gemma-4-26b-a4b-it/artifacts/mmproj/download",
 	},
 	"tinyllama": {FileName: "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf", URL: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"},
 	"nemotron-3-nano-omni-30b-a3b": {
 		// NVIDIA Nemotron 3 Nano Omni 30B-A3B — MoE model (30B total /
-		// 3B active per token). On Q4_K_M the resident footprint is
-		// ~14-15 GB, which fits on any 16GB consumer NVIDIA card after
-		// driver overhead. The MoE activation pattern means decode TPS
-		// scales like a 3B model — this is the "fast Gemma alternative"
-		// for RTX 4070 Ti SUPER / RTX 4080 nodes that want speed.
+		// 3B active per token), multimodal (vision via mmproj).
 		//
-		// URL: ggml-org community GGUF mirror (no HF token required;
-		// public CDN). PlatformPath kept as a fallback in case operators
-		// want the Ryvion-managed proxy without code changes.
+		// ggml-org published the GGUF at ggml-org/NVIDIA-Nemotron-3-Nano-Omni.
+		// The previously-configured ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF
+		// path now 404s (upstream renamed the repo) — that dead URL, not gating,
+		// was why every download failed. The repo is PUBLIC, so the node pulls
+		// it straight from the HF CDN: no token, no hub proxy.
+		//
+		// Q4_K_M is ~24.5 GB — larger than any fleet GPU. It does NOT fit via
+		// `--n-gpu-layers` offload (that places whole layers on the GPU and OOMs
+		// on a 24 GB card, never mind 16 GB). The streaming launcher instead passes
+		// `--cpu-moe`, keeping the MoE expert weights in system RAM so only
+		// attention + KV + mmproj (~6-8 GB) sit on the GPU. That is why the gate is
+		// 14GB: the GPU side genuinely fits a 14-16GB card — the operator just needs
+		// ~24 GB of system RAM for the experts. See streamingMoECPUOffloadArgsForModel.
 		FileName:                "nemotron-3-nano-omni-30b-a3b-Q4_K_M.gguf",
-		URL:                     "https://huggingface.co/ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-Omni-30B-A3B-Q4_K_M.gguf",
+		URL:                     "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/nemotron-3-nano-omni-ga_v1.0-Q4_K_M.gguf",
 		PlatformPath:            "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/download",
 		MinVRAMBytes:            14 * 1024 * 1024 * 1024,
+		MinRAMBytes:             24 * 1024 * 1024 * 1024,
 		RequiresHuggingFaceAuth: false,
 		// Vision projector for the Omni multimodal mode. Same auto-
 		// download + --mmproj launch flow as Gemma 4.
-		MmprojFileName: "mmproj-Nemotron-3-Nano-Omni-30B-A3B-F16.gguf",
-		MmprojURL:      "https://huggingface.co/ggml-org/Nemotron-3-Nano-Omni-30B-A3B-GGUF/resolve/main/mmproj-Nemotron-3-Nano-Omni-30B-A3B-F16.gguf",
+		MmprojFileName:     "mmproj-nemotron-3-nano-omni-30b-a3b-F16.gguf",
+		MmprojURL:          "https://huggingface.co/ggml-org/NVIDIA-Nemotron-3-Nano-Omni/resolve/main/mmproj-nemotron-3-nano-omni-ga_v1.0.gguf",
+		MmprojPlatformPath: "/api/v1/node/models/nemotron-3-nano-omni-30b-a3b/artifacts/mmproj/download",
 	},
 	// Phase 1c: native embeddings. nomic-embed-text-v1.5 is 137M params,
 	// 768-dim, matches OpenAI text-embedding-3-small quality on MTEB, and
@@ -173,16 +184,26 @@ var NativeModels = map[string]ModelConfig{
 //
 // Note: this is the *hardware-eligible* list — it does NOT check whether the
 // GGUF is on disk. The hub may still route a job to a node whose model file
-// hasn't been downloaded yet; the node will then download on demand. To
-// eliminate first-request latency the agent calls PrewarmEligibleModels at
-// startup, which downloads every entry in this list in the background.
+// hasn't been downloaded yet; the node will then download on demand. Startup
+// prewarm intentionally selects a smaller subset so operators do not fill disks
+// by advertising one large model family.
 func SupportedNativeChatModels(vramBytes uint64) []string {
+	return SupportedNativeChatModelsForHardware(vramBytes, 0)
+}
+
+// SupportedNativeChatModelsForHardware is the RAM-aware form used by live
+// heartbeats and prewarm. A zero ramBytes preserves legacy/test behavior for
+// callers that only know VRAM.
+func SupportedNativeChatModelsForHardware(vramBytes, ramBytes uint64) []string {
 	out := make([]string, 0, len(NativeModels))
 	for id, cfg := range NativeModels {
 		if cfg.Mode == ModeEmbedding {
 			continue
 		}
 		if !meetsModelVRAMRequirement(vramBytes, cfg.MinVRAMBytes) {
+			continue
+		}
+		if ramBytes > 0 && !meetsModelRAMRequirement(ramBytes, cfg.MinRAMBytes) {
 			continue
 		}
 		if cfg.RequiresHuggingFaceAuth && huggingFaceToken() == "" && !platformManagedGatedModelsEnabled() {
@@ -317,36 +338,37 @@ func (m *Manager) ReadyNativeChatModels(vramBytes uint64) []string {
 	return ready
 }
 
-// PrewarmEligibleModels downloads every GGUF this node's hardware can serve
-// in the background, so the *first* buyer request to any reasoning model
-// doesn't trigger a 5-15 minute on-demand download. Downloads are sequential
-// to avoid disk thrashing + bandwidth contention on the operator's link.
+// PrewarmEligibleModels downloads a small selected set of GGUFs in the
+// background so the common smoke-test/default paths are warm without filling
+// an operator's disk with every large hardware-eligible model. Downloads are
+// sequential to avoid disk thrashing + bandwidth contention on the operator's
+// link.
+//
+// Selection:
+//   - default/lean: tinyllama, ryvion-llama-3.2-3b, qwen3-8b-reasoning
+//   - RYV_MODEL_PREWARM_MODE=all: every hardware-eligible chat model
+//   - RYV_MODEL_PREWARM_MODE=off: no startup prewarm
+//   - RYV_PREWARM_MODELS=a,b,c: exactly those supported model IDs
 //
 // Safe to call multiple times — already-downloaded files are skipped via the
 // os.Stat check in the existing download loop. Designed to run in a
 // goroutine fired at node-agent startup:
 //
-//	go infMgr.PrewarmEligibleModels(ctx, caps.VRAMBytes)
+//	go infMgr.PrewarmEligibleModelsForHardware(ctx, caps.VRAMBytes, caps.RAMBytes)
 //
 // Cancellation propagates through ctx; the download loop polls for it
 // between chunks.
 func (m *Manager) PrewarmEligibleModels(ctx context.Context, vramBytes uint64) {
-	supported := SupportedNativeChatModels(vramBytes)
+	m.PrewarmEligibleModelsForHardware(ctx, vramBytes, 0)
+}
+
+func (m *Manager) PrewarmEligibleModelsForHardware(ctx context.Context, vramBytes, ramBytes uint64) {
+	supported := SupportedNativeChatModelsForHardware(vramBytes, ramBytes)
+	supported = selectPrewarmModels(supported, os.Getenv)
 	if len(supported) == 0 {
+		slog.Info("prewarm: no models selected")
 		return
 	}
-	// Reorder by prewarm priority: smallest + most-used first so the
-	// most-requested models become available within minutes of node
-	// startup, even if the larger reasoning models are still downloading.
-	//
-	// SupportedNativeChatModels returns sort.Strings() (alphabetical),
-	// which on a 24GB Mac is: gemma → gpt-oss → nemotron → phi → qwen3
-	// → ryvion-llama → tinyllama. That puts the 14GB Gemma at the head
-	// and the 700MB TinyLlama at the tail — exactly backwards. With a
-	// home-internet uplink, a buyer asking for Qwen3 right after node
-	// boot would wait through ~50GB of larger downloads before their
-	// 5GB Qwen3 GGUF lands.
-	supported = sortPrewarmByPriority(supported)
 	modelsDir := filepath.Join(m.dataDir, "models")
 	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
 		slog.Warn("prewarm: cannot create models dir", "error", err)
@@ -399,7 +421,7 @@ func (m *Manager) PrewarmEligibleModels(ctx context.Context, vramBytes uint64) {
 			if info, err := os.Stat(mmprojPath); err == nil && !info.IsDir() && info.Size() > 1<<20 {
 				continue
 			}
-			if err := m.downloadModelFile(ctx, cfg.MmprojURL, mmprojPath); err != nil {
+			if err := m.downloadModelFile(ctx, m.mmprojDownloadURL(cfg), mmprojPath); err != nil {
 				slog.Warn("prewarm: mmproj download failed (model will run text-only until retry)",
 					"model", id, "error", err)
 				_ = os.Remove(mmprojPath)
@@ -419,6 +441,13 @@ func meetsModelVRAMRequirement(vramBytes, minVRAMBytes uint64) bool {
 		return false
 	}
 	return vramBytes+modelVRAMReserveTolerance >= minVRAMBytes
+}
+
+func meetsModelRAMRequirement(ramBytes, minRAMBytes uint64) bool {
+	if minRAMBytes == 0 {
+		return true
+	}
+	return ramBytes >= minRAMBytes
 }
 
 // platformServerURL returns the correct llama.cpp release URL for the current OS/arch.
@@ -503,15 +532,16 @@ type Manager struct {
 	// resetting it (see EnsureModel). Overridable so tests don't wait minutes.
 	startupStallTimeout time.Duration
 
-	mu              sync.RWMutex
-	healthy         bool
-	blockerReason   BlockerReason
-	cmd             *exec.Cmd
-	cancel          context.CancelFunc
-	activeModelName string
-	activeModelPath string
-	activeModelMode ModelMode
-	speculative     streamingSpeculativeLaunch
+	mu               sync.RWMutex
+	healthy          bool
+	blockerReason    BlockerReason
+	cmd              *exec.Cmd
+	cancel           context.CancelFunc
+	serverStopIntent bool
+	activeModelName  string
+	activeModelPath  string
+	activeModelMode  ModelMode
+	speculative      streamingSpeculativeLaunch
 
 	// activeDownloads tracks in-flight GGUF downloads keyed by model ID.
 	// Populated by downloadModelFile when it starts a transfer, cleared
@@ -707,9 +737,9 @@ func (m *Manager) Start(ctx context.Context) error {
 					slog.Info("downloading vision projector",
 						"model", currentModel,
 						"mmproj", cfg.MmprojFileName,
-						"url", redactDownloadURL(cfg.MmprojURL),
+						"url", redactDownloadURL(m.mmprojDownloadURL(cfg)),
 					)
-					if err := m.downloadModelFile(ctx, cfg.MmprojURL, mmprojPath); err != nil {
+					if err := m.downloadModelFile(ctx, m.mmprojDownloadURL(cfg), mmprojPath); err != nil {
 						slog.Warn("vision projector download failed; model will run text-only",
 							"model", currentModel,
 							"error", err,
@@ -730,8 +760,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 		slog.Info("starting llama-server", "port", m.port, "model", modelPath, "mode", string(activeMode))
 		if err := m.runServer(ctx); err != nil {
-			slog.Warn("llama-server exited", "error", err)
-			m.setBlockerReason(BlockerProcessFailed)
+			m.handleServerExit(ctx, err)
 		}
 		m.setHealthy(false)
 		select {
@@ -748,6 +777,8 @@ func (m *Manager) Stop() {
 	defer m.mu.Unlock()
 	m.stopServerLocked()
 	m.healthy = false
+	m.cancel = nil
+	m.cmd = nil
 }
 
 func (m *Manager) Healthy() bool {
@@ -783,6 +814,42 @@ func (m *Manager) ModelName() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.activeModelName
+}
+
+// SelectModelForNextStart updates the native model that Start should launch
+// when the manager is currently idle. If a different model is already running,
+// it stops that process so the normal Start/EnsureModel path can launch the
+// requested model directly instead of booting the old/default model first.
+func (m *Manager) SelectModelForNextStart(modelName string) error {
+	if m == nil {
+		return fmt.Errorf("inference manager is not available")
+	}
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		modelName = "ryvion-llama-3.2-3b"
+	}
+	cfg, ok := NativeModels[modelName]
+	if !ok {
+		return fmt.Errorf("model %s not supported in native registry", modelName)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.activeModelName == modelName {
+		if !m.healthy && m.cancel == nil {
+			m.activeModelPath = ""
+			m.activeModelMode = cfg.Mode
+			m.blockerReason = BlockerStarting
+		}
+		return nil
+	}
+	m.activeModelName = modelName
+	m.activeModelPath = ""
+	m.activeModelMode = cfg.Mode
+	m.healthy = false
+	m.blockerReason = BlockerStarting
+	m.stopServerLocked()
+	return nil
 }
 
 func (m *Manager) EnsureModel(ctx context.Context, modelName string) error {
@@ -943,17 +1010,54 @@ func (m *Manager) EnsureCustomModel(ctx context.Context, modelName, modelURL str
 }
 
 func (m *Manager) stopServerLocked() {
+	if m.cancel != nil || (m.cmd != nil && m.cmd.Process != nil) {
+		m.serverStopIntent = true
+	}
 	if m.cancel != nil {
 		m.cancel()
 	}
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
 	}
+	m.cancel = nil
+	m.cmd = nil
+}
+
+func (m *Manager) consumeServerStopIntent() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v := m.serverStopIntent
+	m.serverStopIntent = false
+	return v
+}
+
+func (m *Manager) handleServerExit(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	if ctx != nil && ctx.Err() != nil {
+		slog.Info("llama-server stopped after inference manager context cancelled", "error", err)
+		m.setBlockerReason(BlockerNotStarted)
+		_ = m.consumeServerStopIntent()
+		return
+	}
+	if m.consumeServerStopIntent() {
+		slog.Info("llama-server stopped after requested restart", "error", err)
+		return
+	}
+	slog.Warn("llama-server exited", "error", err)
+	m.setBlockerReason(BlockerProcessFailed)
 }
 
 func (m *Manager) setHealthy(v bool) {
 	m.mu.Lock()
 	m.healthy = v
+	if !v && m.blockerReason == BlockerNone {
+		m.blockerReason = BlockerNotStarted
+	}
 	if v {
 		m.blockerReason = BlockerNone
 	}
@@ -985,7 +1089,9 @@ func (m *Manager) runServer(ctx context.Context) error {
 	port := m.port
 	m.mu.RUnlock()
 
-	// Try containerized mode first (more secure — isolates GGUF parsing)
+	// Use the host-native llama-server by default. Containerized inference is
+	// opt-in because the generic OCI path has fixed memory/device constraints
+	// that are a poor fit for large local GGUFs such as Nemotron 30B.
 	if m.useContainerizedInference() {
 		return m.runServerContainerized(ctx, modelPath, port)
 	}
@@ -998,7 +1104,10 @@ func (m *Manager) runServer(ctx context.Context) error {
 // On Windows, always prefer native mode — native inference is more reliable than GPU passthrough through the container backend
 // containers is unreliable (OOM kills, exit 137). The native llama-server.exe with CUDA works better.
 func (m *Manager) useContainerizedInference() bool {
-	if os.Getenv("RYV_NATIVE_INFERENCE_ONLY") == "1" {
+	if envBool("RYV_NATIVE_INFERENCE_ONLY") {
+		return false
+	}
+	if !envBool("RYV_CONTAINERIZED_NATIVE_INFERENCE") {
 		return false
 	}
 	if runtime.GOOS == "windows" {
@@ -1157,6 +1266,80 @@ var prewarmPriority = map[string]int{
 	"nomic-embed-text-v1.5":        7, // embedding model, only matters for RAG
 }
 
+var defaultPrewarmModels = map[string]struct{}{
+	"tinyllama":           {},
+	"ryvion-llama-3.2-3b": {},
+	"qwen3-8b-reasoning":  {},
+}
+
+func selectPrewarmModels(supported []string, getenv func(string) string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	explicit := strings.TrimSpace(getenv("RYV_PREWARM_MODELS"))
+	if explicit != "" {
+		return selectExplicitPrewarmModels(supported, explicit)
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(getenv("RYV_MODEL_PREWARM_MODE")))
+	switch mode {
+	case "all":
+		return sortPrewarmByPriority(supported)
+	case "off", "none", "disabled", "0", "false":
+		return nil
+	case "", "default", "lean", "small":
+		return selectDefaultPrewarmModels(supported)
+	default:
+		slog.Warn("prewarm: unknown mode, using lean default", "mode", mode)
+		return selectDefaultPrewarmModels(supported)
+	}
+}
+
+func selectDefaultPrewarmModels(supported []string) []string {
+	sorted := sortPrewarmByPriority(supported)
+	out := make([]string, 0, len(defaultPrewarmModels))
+	for _, id := range sorted {
+		if _, ok := defaultPrewarmModels[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func selectExplicitPrewarmModels(supported []string, raw string) []string {
+	supportedSet := make(map[string]struct{}, len(supported))
+	for _, id := range supported {
+		supportedSet[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, id := range splitPrewarmModelList(raw) {
+		if _, ok := supportedSet[id]; !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func splitPrewarmModelList(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\n' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		id := strings.ToLower(strings.TrimSpace(part))
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // sortPrewarmByPriority returns a copy of `ids` sorted by prewarmPriority
 // (lower first). Unknown ids land after all known ones, in their original
 // alphabetical order, so future additions to NativeModels still get
@@ -1244,6 +1427,35 @@ func streamingReasoningFormatForModel(modelPath string) string {
 	}
 }
 
+// streamingMoECPUOffloadArgsForModel returns extra llama-server flags that keep
+// a Mixture-of-Experts model's expert tensors in system RAM instead of VRAM.
+// Returns nil for models that fit on the GPU normally.
+//
+// Nemotron 3 Nano Omni 30B-A3B is a 30B-total / 3B-active MoE whose Q4_K_M GGUF
+// is ~24.5 GB on disk — larger than the VRAM of every card in the fleet (24 GB on
+// the RTX 3090 / RX 7900 XTX, 16 GB on the 4070 Ti). Passing only
+// `--n-gpu-layers 99` asks llama-server to place all ~24.5 GB on the GPU; it
+// cannot, so it aborts with a CUDA/ROCm out-of-memory at load. The manager then
+// never reaches Healthy() and every chat request fails with the buyer-facing
+// "inference manager is not healthy".
+//
+// `--cpu-moe` keeps the expert weights (the bulk of the model) on the CPU and
+// leaves only attention/router/embeddings + KV cache + the vision projector on
+// the GPU (~6-8 GB). Only 3B params are active per token, so throughput stays
+// usable. This is the standard way to serve a large MoE on limited VRAM and is
+// what actually makes the model run on a 16-24 GB card. The flag was added to
+// llama.cpp around b6000; the node ships b9180. The operator needs ~24 GB of free
+// system RAM for the offloaded experts.
+func streamingMoECPUOffloadArgsForModel(modelPath string) []string {
+	// Every Nemotron model in the registry is the 30B-A3B Omni MoE. Other MoE
+	// models we ship (gpt-oss-20b) fit fully on a 16 GB GPU, so they are left on
+	// the GPU for full throughput.
+	if streamingFamilyHintForModel(modelPath) == "nemotron" {
+		return []string{"--cpu-moe"}
+	}
+	return nil
+}
+
 // runServerNative runs llama-server directly on the host.
 func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) error {
 	serverCtx, cancel := context.WithCancel(ctx)
@@ -1324,6 +1536,30 @@ func (m *Manager) runServerNative(ctx context.Context, modelPath, port string) e
 		// CUDA acceleration if available; llama.cpp ignores flag if no GPU
 		args = append(args, "--n-gpu-layers", m.gpuLayers)
 	}
+
+	// Large Mixture-of-Experts models (Nemotron 3 Nano Omni 30B-A3B) exceed the
+	// VRAM of every fleet GPU when fully offloaded — the 24.5 GB Q4_K_M does not
+	// fit even a 24 GB card. Keep the expert tensors in system RAM with --cpu-moe
+	// so the GPU holds only attention + KV cache + the vision projector. Combined
+	// with --n-gpu-layers above, every non-expert layer still runs on the GPU.
+	// Without this the launch OOMs at load and the manager reports
+	// "inference manager is not healthy".
+	if moeArgs := streamingMoECPUOffloadArgsForModel(modelPath); len(moeArgs) > 0 {
+		args = append(args, moeArgs...)
+		slog.Info("large MoE model — offloading expert tensors to CPU",
+			"model", modelPath,
+			"flags", moeArgs,
+		)
+	}
+
+	// Stock upstream llama-server rejects the Ryvion fork's --spec-* flags and
+	// exits immediately, crash-looping native streaming for EVERY model (the
+	// speculative flags are added on every launch). Probe the binary and strip
+	// them when unsupported, falling back to standard decoding. Mirrors the V7
+	// sidecar's spec_support.go — this legacy streaming path (used by
+	// RunStreamingJob) had not been wired through that guard, which left
+	// stock-binary nodes reporting native-inference-blocker:process-failed.
+	args = specCompatibleArgs(m.serverPath, args)
 
 	cmd := exec.CommandContext(serverCtx, m.serverPath, args...)
 	// Send llama-server output to a log file to avoid mixing with JSON slog.
@@ -1455,27 +1691,40 @@ func downloadFile(ctx context.Context, url, dst string) error {
 }
 
 func (m *Manager) modelDownloadURL(cfg ModelConfig) string {
+	return m.artifactDownloadURL(cfg.URL, cfg.PlatformPath, cfg.RequiresHuggingFaceAuth)
+}
+
+func (m *Manager) mmprojDownloadURL(cfg ModelConfig) string {
+	return m.artifactDownloadURL(cfg.MmprojURL, cfg.MmprojPlatformPath, cfg.RequiresHuggingFaceAuth)
+}
+
+func (m *Manager) artifactDownloadURL(upstreamURL string, platformPath string, requiresHuggingFaceAuth bool) string {
 	// Route through the hub's model-artifact proxy ONLY for models this node
 	// cannot pull from upstream by itself — i.e. a GATED HuggingFace repo when
 	// the operator has set no local HF token. The hub then attaches its own
 	// token on the node's behalf.
 	//
-	// Every other model — including every current native model, which are all
-	// public (RequiresHuggingFaceAuth=false) — downloads FAR faster straight
-	// from HuggingFace's CDN than through the hub's single-machine proxy, which
-	// streams multi-GB GGUFs inline and was pushing first-request cold starts
-	// past the 300s EnsureModel deadline ("timeout waiting for <model> to
-	// start"). phi-4/llama/tinyllama already work this way (they have no
-	// PlatformPath); this brings qwen3-8b-reasoning / gpt-oss-20b in line so
-	// reasoning models load as fast as the rest. The PlatformPath stays as a
-	// fallback for genuinely gated future models.
-	gatedWithoutLocalToken := cfg.RequiresHuggingFaceAuth && huggingFaceToken() == ""
-	if gatedWithoutLocalToken && platformManagedGatedModelsEnabled() &&
-		strings.TrimSpace(cfg.PlatformPath) != "" &&
-		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
-		return strings.TrimRight(m.hubURL, "/") + cfg.PlatformPath
+	// For current public platform models the hub endpoint is now a redirector:
+	// R2 private cache when present, otherwise Hugging Face upstream. That keeps
+	// one central cache control point without streaming multi-GB files through
+	// the hub process. Operators can force direct upstream with
+	// RYV_DISABLE_PLATFORM_MODEL_CACHE=1.
+	localHFToken := huggingFaceToken()
+	if requiresHuggingFaceAuth && localHFToken != "" {
+		return upstreamURL
 	}
-	return cfg.URL
+	gatedWithoutLocalToken := requiresHuggingFaceAuth && localHFToken == ""
+	if !gatedWithoutLocalToken && platformModelCacheDownloadsEnabled() &&
+		strings.TrimSpace(platformPath) != "" &&
+		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
+		return strings.TrimRight(m.hubURL, "/") + platformPath
+	}
+	if gatedWithoutLocalToken && platformManagedGatedModelsEnabled() &&
+		strings.TrimSpace(platformPath) != "" &&
+		strings.TrimSpace(m.hubURL) != "" && m.nodeToken != nil {
+		return strings.TrimRight(m.hubURL, "/") + platformPath
+	}
+	return upstreamURL
 }
 
 func (m *Manager) downloadModelFile(ctx context.Context, url, dst string) error {
@@ -1640,6 +1889,19 @@ func huggingFaceToken() string {
 
 func platformManagedGatedModelsEnabled() bool {
 	return strings.TrimSpace(os.Getenv("RYV_DISABLE_PLATFORM_MODEL_DOWNLOADS")) != "1"
+}
+
+func platformModelCacheDownloadsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_DISABLE_PLATFORM_MODEL_CACHE"))) {
+	case "1", "true", "yes", "on":
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_USE_PLATFORM_MODEL_CACHE"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func isHuggingFaceURL(url string) bool {
@@ -2002,6 +2264,15 @@ func envOrExplicit(key, fallback string) (string, bool) {
 		return value, true
 	}
 	return fallback, false
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
 }
 
 // runAMDSmokeTest downloads a tiny model and runs a quick inference to verify ROCm works.

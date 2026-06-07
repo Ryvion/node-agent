@@ -118,15 +118,20 @@ func assuranceClassForAssignment(work *hub.WorkAssignment) string {
 }
 
 func (streamingEngine) Execute(ctx context.Context, work *hub.WorkAssignment, execCtx executionContext) (*runnerResultSnapshot, error) {
+	if execCtx.infMgr != nil {
+		if modelName, ok := inference.RequestedNativeModelForSpec(work.SpecJSON); ok {
+			if err := execCtx.infMgr.SelectModelForNextStart(modelName); err != nil {
+				relayStreamingFailure(ctx, execCtx.client, work.JobID, err)
+				return nil, err
+			}
+		}
+	}
 	cleanupNative, readyErr := ensureNativeInferenceReadyForJob(ctx, execCtx.infMgr, os.Getenv)
 	if cleanupNative != nil {
 		defer cleanupNative()
 	}
 	if readyErr != nil {
-		err := fmt.Errorf("inference manager is not healthy")
-		if readyErr != nil {
-			err = readyErr
-		}
+		err := nativeInferenceReadinessError(execCtx.infMgr, readyErr)
 		relayStreamingFailure(ctx, execCtx.client, work.JobID, err)
 		return nil, err
 	}
@@ -207,12 +212,28 @@ func ensureNativeInferenceReadyForJob(ctx context.Context, infMgr *inference.Man
 	}
 }
 
+func nativeInferenceReadinessError(infMgr *inference.Manager, cause error) error {
+	if cause == nil {
+		cause = fmt.Errorf("inference manager is not healthy")
+	}
+	reason := inference.BlockerNone
+	if infMgr != nil {
+		reason = infMgr.BlockerReason()
+	}
+	if reason == inference.BlockerNone {
+		return fmt.Errorf("native inference manager not ready: %w", cause)
+	}
+	return fmt.Errorf("native inference manager not ready: %w; blocker=%s", cause, reason)
+}
+
 func nativeInferenceJobLaunchEnabled(getenv func(string) string) bool {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	switch strings.ToLower(strings.TrimSpace(getenv(legacyNativeInferenceFlagEnv))) {
+	switch strings.ToLower(strings.TrimSpace(getenv(nativeInferenceJobLaunchOffEnv))) {
 	case "0", "false", "no", "off", "disabled":
+		return true
+	case "1", "true", "yes", "on", "enabled":
 		return false
 	default:
 		return true

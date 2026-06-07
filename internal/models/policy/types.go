@@ -29,7 +29,7 @@ const (
 )
 
 var (
-	DefaultAllowedFamilies        = []string{"llama", "phi", "qwen", "gemma", "gpt-oss"}
+	DefaultAllowedFamilies        = []string{"llama", "phi", "qwen", "gemma", "gpt-oss", "nemotron"}
 	DefaultAllowedFormats         = []string{"gguf"}
 	DefaultRuntimeAllowedFamilies = []string{"llama"}
 )

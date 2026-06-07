@@ -113,7 +113,7 @@ func TestDefaultPolicyValues(t *testing.T) {
 	if policy.CacheDir != "/home/operator/.ryvion/models" {
 		t.Fatalf("cache_dir = %q", policy.CacheDir)
 	}
-	if got, want := strings.Join(policy.AllowedFamilies, ","), "llama,phi,qwen,gemma,gpt-oss"; got != want {
+	if got, want := strings.Join(policy.AllowedFamilies, ","), "llama,phi,qwen,gemma,gpt-oss,nemotron"; got != want {
 		t.Fatalf("allowed_families = %q, want %q", got, want)
 	}
 	if got, want := strings.Join(policy.AllowedFormats, ","), "gguf"; got != want {

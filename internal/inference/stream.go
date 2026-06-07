@@ -165,6 +165,31 @@ func IsEmbeddingJob(specJSON string) bool {
 	return strings.EqualFold(strings.TrimSpace(s.Task), "embedding")
 }
 
+// RequestedNativeModelForSpec returns the built-in native model a spec will
+// ask llama-server to load. Custom model specs intentionally return false
+// because their model path is resolved by EnsureCustomModel at execution time.
+func RequestedNativeModelForSpec(specJSON string) (string, bool) {
+	var s specPayload
+	if err := json.Unmarshal([]byte(specJSON), &s); err != nil {
+		return "", false
+	}
+	if strings.EqualFold(strings.TrimSpace(s.Task), "custom_inference") && strings.TrimSpace(s.ModelURL) != "" {
+		return "", false
+	}
+	modelName := strings.TrimSpace(s.Model)
+	if modelName == "" {
+		if strings.EqualFold(strings.TrimSpace(s.Task), "embedding") {
+			modelName = "nomic-embed-text-v1.5"
+		} else {
+			modelName = "ryvion-llama-3.2-3b"
+		}
+	}
+	if _, ok := NativeModels[modelName]; !ok {
+		return "", false
+	}
+	return modelName, true
+}
+
 // StreamingMetrics summarises the latency / throughput numbers a single
 // streaming inference job observed locally. The /v8 verifier (and hub
 // dashboards) read these from the receipt's MetadataJSON via the keys
@@ -247,8 +272,8 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 		Messages:        spec.Messages,
 		ReasoningEffort: normalizeStreamReasoningEffort(spec.V8ReasoningEffort),
 		Stream:          true,
-		MaxTokens:   maxTokens,
-		Temperature: spec.Temperature,
+		MaxTokens:       maxTokens,
+		Temperature:     spec.Temperature,
 	}
 	// Reasoning models need their vendor-recommended sampling profile. The
 	// buyer-supplied temperature (the playground sends 0.4) plus llama-server's
