@@ -579,6 +579,45 @@ func TestStopClearsIdleProcessState(t *testing.T) {
 	}
 }
 
+func TestHandleServerExitContextCancelIsNotProcessFailed(t *testing.T) {
+	mgr := New(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mgr.handleServerExit(ctx, context.Canceled)
+
+	if got := mgr.BlockerReason(); got != BlockerNotStarted {
+		t.Fatalf("expected cancelled on-demand shutdown to report %q, got %q", BlockerNotStarted, got)
+	}
+}
+
+func TestHandleServerExitRequestedRestartIsNotProcessFailed(t *testing.T) {
+	mgr := New(t.TempDir())
+	mgr.setBlockerReason(BlockerStarting)
+	mgr.mu.Lock()
+	mgr.serverStopIntent = true
+	mgr.mu.Unlock()
+
+	mgr.handleServerExit(context.Background(), context.Canceled)
+
+	if got := mgr.BlockerReason(); got == BlockerProcessFailed {
+		t.Fatalf("requested llama-server restart must not report %q", BlockerProcessFailed)
+	}
+	if got := mgr.BlockerReason(); got != BlockerStarting {
+		t.Fatalf("expected requested restart to keep %q, got %q", BlockerStarting, got)
+	}
+}
+
+func TestHandleServerExitCrashReportsProcessFailed(t *testing.T) {
+	mgr := New(t.TempDir())
+
+	mgr.handleServerExit(context.Background(), os.ErrProcessDone)
+
+	if got := mgr.BlockerReason(); got != BlockerProcessFailed {
+		t.Fatalf("unexpected blocker after crashed llama-server: got %q want %q", got, BlockerProcessFailed)
+	}
+}
+
 func TestContainerizedInferenceIsOptIn(t *testing.T) {
 	t.Setenv("RYV_NATIVE_INFERENCE_ONLY", "")
 	t.Setenv("RYV_CONTAINERIZED_NATIVE_INFERENCE", "")

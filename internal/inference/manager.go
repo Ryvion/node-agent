@@ -532,15 +532,16 @@ type Manager struct {
 	// resetting it (see EnsureModel). Overridable so tests don't wait minutes.
 	startupStallTimeout time.Duration
 
-	mu              sync.RWMutex
-	healthy         bool
-	blockerReason   BlockerReason
-	cmd             *exec.Cmd
-	cancel          context.CancelFunc
-	activeModelName string
-	activeModelPath string
-	activeModelMode ModelMode
-	speculative     streamingSpeculativeLaunch
+	mu               sync.RWMutex
+	healthy          bool
+	blockerReason    BlockerReason
+	cmd              *exec.Cmd
+	cancel           context.CancelFunc
+	serverStopIntent bool
+	activeModelName  string
+	activeModelPath  string
+	activeModelMode  ModelMode
+	speculative      streamingSpeculativeLaunch
 
 	// activeDownloads tracks in-flight GGUF downloads keyed by model ID.
 	// Populated by downloadModelFile when it starts a transfer, cleared
@@ -759,8 +760,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 		slog.Info("starting llama-server", "port", m.port, "model", modelPath, "mode", string(activeMode))
 		if err := m.runServer(ctx); err != nil {
-			slog.Warn("llama-server exited", "error", err)
-			m.setBlockerReason(BlockerProcessFailed)
+			m.handleServerExit(ctx, err)
 		}
 		m.setHealthy(false)
 		select {
@@ -1010,6 +1010,9 @@ func (m *Manager) EnsureCustomModel(ctx context.Context, modelName, modelURL str
 }
 
 func (m *Manager) stopServerLocked() {
+	if m.cancel != nil || (m.cmd != nil && m.cmd.Process != nil) {
+		m.serverStopIntent = true
+	}
 	if m.cancel != nil {
 		m.cancel()
 	}
@@ -1020,9 +1023,41 @@ func (m *Manager) stopServerLocked() {
 	m.cmd = nil
 }
 
+func (m *Manager) consumeServerStopIntent() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v := m.serverStopIntent
+	m.serverStopIntent = false
+	return v
+}
+
+func (m *Manager) handleServerExit(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	if ctx != nil && ctx.Err() != nil {
+		slog.Info("llama-server stopped after inference manager context cancelled", "error", err)
+		m.setBlockerReason(BlockerNotStarted)
+		_ = m.consumeServerStopIntent()
+		return
+	}
+	if m.consumeServerStopIntent() {
+		slog.Info("llama-server stopped after requested restart", "error", err)
+		return
+	}
+	slog.Warn("llama-server exited", "error", err)
+	m.setBlockerReason(BlockerProcessFailed)
+}
+
 func (m *Manager) setHealthy(v bool) {
 	m.mu.Lock()
 	m.healthy = v
+	if !v && m.blockerReason == BlockerNone {
+		m.blockerReason = BlockerNotStarted
+	}
 	if v {
 		m.blockerReason = BlockerNone
 	}
