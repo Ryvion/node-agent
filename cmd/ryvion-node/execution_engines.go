@@ -199,16 +199,34 @@ func ensureNativeInferenceReadyForJob(ctx context.Context, infMgr *inference.Man
 		infMgr.Stop()
 	}
 
+	// Bound the readiness wait. infMgr.Start() loops forever on failure (it
+	// retries model downloads every 5s and restarts crashed servers every 3s,
+	// so Start never returns), and processWork runs jobs sequentially — so a
+	// single doomed inference job would otherwise pin the whole node until the
+	// job timeout (~30 min). Cap the wait and fail fast on a terminal blocker
+	// so the caller can emit a fail receipt and move on.
+	budget := nativeInferenceReadinessBudget(getenv)
+	deadline := time.NewTimer(budget)
+	defer deadline.Stop()
+
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		if infMgr.Healthy() {
 			return cleanup, nil
 		}
+		if reason := infMgr.BlockerReason(); isTerminalInferenceBlocker(reason) {
+			cleanup()
+			return nil, fmt.Errorf("native inference manager not ready: blocker=%s", reason)
+		}
 		select {
 		case <-ctx.Done():
 			cleanup()
 			return nil, ctx.Err()
+		case <-deadline.C:
+			cleanup()
+			reason := infMgr.BlockerReason()
+			return nil, fmt.Errorf("native inference manager not ready within %s: blocker=%s", budget, reason)
 		case err := <-errCh:
 			cleanup()
 			if err == nil || errors.Is(err, context.Canceled) {
@@ -218,6 +236,45 @@ func ensureNativeInferenceReadyForJob(ctx context.Context, infMgr *inference.Man
 		case <-ticker.C:
 		}
 	}
+}
+
+// isTerminalInferenceBlocker reports whether a blocker reason represents a
+// failure the readiness wait should give up on immediately rather than keep
+// polling (the inference manager would otherwise retry these forever).
+//
+// NOTE: BlockerStartupTimeout is deliberately NOT terminal. The health loop now
+// keeps probing past its startup budget (a slow cold Nemotron load can become
+// healthy late) and sets this blocker as a "still slow" signal, not a permanent
+// failure — so we keep waiting up to our own readiness budget instead of
+// bailing the instant the health loop's budget elapses.
+func isTerminalInferenceBlocker(reason inference.BlockerReason) bool {
+	switch reason {
+	case inference.BlockerProcessFailed,
+		inference.BlockerModelDownloadFail,
+		inference.BlockerDiskSpace,
+		inference.BlockerBinaryMissing,
+		inference.BlockerNotInstalled,
+		inference.BlockerPlatformUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+// nativeInferenceReadinessBudget is the max time ensureNativeInferenceReadyForJob
+// waits for the inference manager to become healthy before failing fast. A cold
+// Nemotron load can take a few minutes, so the default is generous; override
+// with RYV_NATIVE_INFERENCE_READY_BUDGET (any time.ParseDuration value).
+func nativeInferenceReadinessBudget(getenv func(string) string) time.Duration {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if v := strings.TrimSpace(getenv(nativeInferenceReadyBudgetEnv)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 4 * time.Minute
 }
 
 func nativeInferenceReadinessError(infMgr *inference.Manager, cause error) error {
