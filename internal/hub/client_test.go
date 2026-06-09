@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -634,6 +635,52 @@ func TestSubmitReceiptSignsExpectedMessage(t *testing.T) {
 	}
 	if handlerErr != nil {
 		t.Fatalf("handler failed: %v", handlerErr)
+	}
+}
+
+func TestSubmitReceiptWithRetrySucceedsAfterTransientFailure(t *testing.T) {
+	pub, priv := testKeyPair()
+	var attempts atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node/receipt" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// Fail the first attempt with a 5xx, succeed on the second.
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := New(ts.URL, pub, priv)
+	err := c.SubmitReceiptWithRetry(context.Background(), Receipt{JobID: "job_retry", ResultHashHex: "abcd", MeteringUnits: 1})
+	if err != nil {
+		t.Fatalf("SubmitReceiptWithRetry() error = %v, want success after retry", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2 (one transient failure then success)", got)
+	}
+}
+
+func TestSubmitReceiptWithRetryStopsOnCanceledContext(t *testing.T) {
+	pub, priv := testKeyPair()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := New(ts.URL, pub, priv)
+	err := c.SubmitReceiptWithRetry(ctx, Receipt{JobID: "job_cancel", ResultHashHex: "abcd", MeteringUnits: 1})
+	if err == nil {
+		t.Fatal("SubmitReceiptWithRetry() = nil, want error when context canceled")
+	}
+	if !strings.Contains(err.Error(), "context cancelled") {
+		t.Fatalf("error = %v, want context cancellation surfaced", err)
 	}
 }
 

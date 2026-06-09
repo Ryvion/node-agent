@@ -310,6 +310,33 @@ func (c *Client) SubmitReceipt(ctx context.Context, receipt Receipt) error {
 	return c.post(ctx, "/api/v1/node/receipt", body, nil)
 }
 
+// SubmitReceiptWithRetry submits a receipt with exponential backoff (5 attempts,
+// 2s→30s). Receipts represent completed work — a single transient network
+// failure should not lose the operator's payment. Returns the last error if all
+// attempts fail, or early if ctx is canceled.
+func (c *Client) SubmitReceiptWithRetry(ctx context.Context, receipt Receipt) error {
+	const maxAttempts = 5
+	delay := 2 * time.Second
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		if err := c.SubmitReceipt(ctx, receipt); err != nil {
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during receipt retry: %w", lastErr)
+			case <-time.After(delay):
+			}
+			delay *= 2
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
 func (c *Client) SubmitSpeculativeDraftPacket(ctx context.Context, windowID string, packet map[string]any) (DraftPacketDecision, error) {
 	windowID = strings.TrimSpace(windowID)
 	if windowID == "" {

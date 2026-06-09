@@ -501,7 +501,10 @@ func (m *Manager) RunStreamingJob(ctx context.Context, hubClient *hub.Client, jo
 	meta["stderr_tail"] = tail
 	applyStreamingMetricsToMetadata(meta, metrics)
 	applyStreamingSpeculativeMetadata(meta, m.streamingSpeculativeLaunch(), metrics)
-	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
+	// Retry on transient failure: this receipt proves completed streaming work,
+	// and a single dropped submit means the job never reaches "completed" and
+	// the operator isn't paid.
+	if err := hubClient.SubmitReceiptWithRetry(ctx, hub.Receipt{
 		JobID:         jobID,
 		ResultHashHex: resultHash,
 		MeteringUnits: 1,
@@ -793,7 +796,7 @@ func (m *Manager) RunEmbeddingJob(ctx context.Context, hubClient *hub.Client, jo
 	meta["prompt_tokens"] = embResp.Usage.PromptTokens
 	meta["embedding"] = vector
 
-	if err := hubClient.SubmitReceipt(ctx, hub.Receipt{
+	if err := hubClient.SubmitReceiptWithRetry(ctx, hub.Receipt{
 		JobID:         jobID,
 		ResultHashHex: resultHash,
 		MeteringUnits: 1,
