@@ -4032,3 +4032,197 @@ func submitReceiptWithRetryTestable(ctx context.Context, client receiptSubmitter
 	}
 	return fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
 }
+
+// captureReceiptServer spins up an httptest server that records the last
+// receipt POSTed to /api/v1/node/receipt and returns the client + a getter.
+func captureReceiptServer(t *testing.T) (*hub.Client, func() map[string]any, func() int) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var mu sync.Mutex
+	var last map[string]any
+	count := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ping" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path != "/api/v1/node/receipt" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		last = body
+		count++
+		mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+	t.Cleanup(ts.Close)
+	get := func() map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		return last
+	}
+	calls := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return count
+	}
+	return hub.New(ts.URL, pub, priv), get, calls
+}
+
+func TestSubmitExecutionFailureReceiptEmitsFailReceipt(t *testing.T) {
+	client, getReceipt, calls := captureReceiptServer(t)
+	work := &hub.WorkAssignment{JobID: "job-exec-fail"}
+
+	submitExecutionFailureReceipt(client, work, nil, false, executorKindNativeStreaming, fmt.Errorf("model load exploded"))
+
+	if calls() != 1 {
+		t.Fatalf("receipt submissions = %d, want 1", calls())
+	}
+	body := getReceipt()
+	if body == nil {
+		t.Fatal("no receipt captured")
+	}
+	if body["job_id"] != "job-exec-fail" {
+		t.Fatalf("job_id = %v, want job-exec-fail", body["job_id"])
+	}
+	// The failure signal the hub keys off is exit_code=1 + the error metadata,
+	// not the metering units (the client coerces 0→1 on the wire, same as the
+	// existing submitNativeEMFailure path).
+	meta, _ := body["metadata"].(map[string]any)
+	if meta == nil {
+		t.Fatalf("metadata missing: %#v", body)
+	}
+	if ec, _ := meta["exit_code"].(float64); ec != 1 {
+		t.Fatalf("exit_code = %v, want 1", meta["exit_code"])
+	}
+	if !strings.Contains(fmt.Sprint(meta["error"]), "model load exploded") {
+		t.Fatalf("error metadata = %v, want it to carry the cause", meta["error"])
+	}
+	if meta["error_code"] != "execution_failed" {
+		t.Fatalf("error_code = %v, want execution_failed", meta["error_code"])
+	}
+}
+
+func TestSubmitExecutionFailureReceiptNoopOnNilOrEmpty(t *testing.T) {
+	client, _, calls := captureReceiptServer(t)
+	submitExecutionFailureReceipt(client, nil, nil, false, "x", fmt.Errorf("boom"))
+	submitExecutionFailureReceipt(client, &hub.WorkAssignment{JobID: "   "}, nil, false, "x", fmt.Errorf("boom"))
+	submitExecutionFailureReceipt(nil, &hub.WorkAssignment{JobID: "ok"}, nil, false, "x", fmt.Errorf("boom"))
+	if calls() != 0 {
+		t.Fatalf("receipt submissions = %d, want 0 for nil/empty inputs", calls())
+	}
+}
+
+func TestMaybeApplyAutoUpdateDefersRestartWhenJobClaimedDuringDownload(t *testing.T) {
+	resetAutoUpdateTestState(t)
+	var applyCalls, restartCalls int
+	// Simulate a job being claimed WHILE the (multi-minute) download runs:
+	// jobActive was 0 at entry, applyAutoUpdate flips it to 1 mid-flight.
+	applyAutoUpdate = func(context.Context, string) error {
+		applyCalls++
+		jobActive.Store(1)
+		return nil
+	}
+	restartAfterAutoUpdate = func() error {
+		restartCalls++
+		return nil
+	}
+
+	if maybeApplyAutoUpdate(context.Background(), "https://hub.example", "v1.2.161", "v1.2.162", "heartbeat_periodic") {
+		t.Fatal("maybeApplyAutoUpdate() = true, want false (restart deferred while job claimed mid-download)")
+	}
+	if applyCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1 (binary must still be swapped)", applyCalls)
+	}
+	if restartCalls != 0 {
+		t.Fatalf("restart calls = %d, want 0 (must not kill the in-flight job)", restartCalls)
+	}
+}
+
+func TestRelayStreamingFailureSurvivesCanceledJobContext(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	var got atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "stream") || r.Method == http.MethodPost {
+			got.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	client := hub.New(ts.URL, pub, priv)
+
+	// Pass an ALREADY-canceled context: the old code derived the relay timeout
+	// from this dead ctx and the SSE error never reached the hub. The fix uses
+	// a fresh background context, so the relay must still go out.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	relayStreamingFailure(ctx, client, "job-relay", fmt.Errorf("inference died"))
+
+	if got.Load() == 0 {
+		t.Fatal("relayStreamingFailure made no hub call with a canceled job ctx; SSE error was lost")
+	}
+}
+
+func TestIsTerminalInferenceBlocker(t *testing.T) {
+	terminal := []inference.BlockerReason{
+		inference.BlockerProcessFailed,
+		inference.BlockerModelDownloadFail,
+		inference.BlockerDiskSpace,
+		inference.BlockerBinaryMissing,
+		inference.BlockerNotInstalled,
+		inference.BlockerPlatformUnsupported,
+	}
+	for _, r := range terminal {
+		if !isTerminalInferenceBlocker(r) {
+			t.Errorf("blocker %q should be terminal", r)
+		}
+	}
+	// BlockerStartupTimeout is intentionally NOT terminal: the health loop keeps
+	// probing past its startup budget (slow cold load), so we wait out our own
+	// readiness budget rather than bailing the instant it's set.
+	nonTerminal := []inference.BlockerReason{
+		inference.BlockerNone,
+		inference.BlockerStarting,
+		inference.BlockerNotStarted,
+		inference.BlockerStartupTimeout,
+	}
+	for _, r := range nonTerminal {
+		if isTerminalInferenceBlocker(r) {
+			t.Errorf("blocker %q should NOT be terminal (still making progress)", r)
+		}
+	}
+}
+
+func TestNativeInferenceReadinessBudgetEnvOverride(t *testing.T) {
+	if got := nativeInferenceReadinessBudget(func(string) string { return "" }); got != 4*time.Minute {
+		t.Fatalf("default budget = %s, want 4m", got)
+	}
+	getenv := func(key string) string {
+		if key == nativeInferenceReadyBudgetEnv {
+			return "90s"
+		}
+		return ""
+	}
+	if got := nativeInferenceReadinessBudget(getenv); got != 90*time.Second {
+		t.Fatalf("override budget = %s, want 90s", got)
+	}
+	// Garbage / non-positive falls back to default.
+	bad := func(key string) string {
+		if key == nativeInferenceReadyBudgetEnv {
+			return "nonsense"
+		}
+		return ""
+	}
+	if got := nativeInferenceReadinessBudget(bad); got != 4*time.Minute {
+		t.Fatalf("bad override budget = %s, want default 4m", got)
+	}
+}

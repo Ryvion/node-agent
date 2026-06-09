@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -254,6 +256,15 @@ func maybeApplyAutoUpdate(ctx context.Context, hubURL string, currentVersion str
 		slog.Warn("auto-update failed", "error", err, "reason", reason)
 		return false
 	}
+	// Re-check jobActive: applyAutoUpdate downloads for minutes, during which a
+	// job may have been claimed. The entry-point check is now stale. The binary
+	// has already been swapped on disk by applyAutoUpdate, so deferring the
+	// restart is safe — the new version takes effect on the next idle restart
+	// instead of killing the in-flight job (which would leave it stuck/failed).
+	if jobActive.Load() != 0 {
+		slog.Info("update applied but job claimed during download, deferring restart", "latest", latestVersion, "reason", reason)
+		return false
+	}
 	slog.Info("update applied, restarting", "reason", reason)
 	if restartErr := restartAfterAutoUpdate(); restartErr != nil {
 		slog.Warn("restart failed — update will take effect on next manual restart", "error", restartErr)
@@ -268,6 +279,7 @@ const (
 	v7ProofArtifactBytesMetadataKey = "_v7_proof_artifact_bytes"
 	legacyNativeInferenceFlagEnv    = "RYV_NODE_LEGACY_NATIVE_INFERENCE"
 	nativeInferenceJobLaunchOffEnv  = "RYV_DISABLE_NATIVE_INFERENCE_JOB_LAUNCH"
+	nativeInferenceReadyBudgetEnv   = "RYV_NATIVE_INFERENCE_READY_BUDGET"
 )
 
 var (
@@ -1897,6 +1909,15 @@ func processWork(ctx context.Context, client *hub.Client, work *hub.WorkAssignme
 			reportManagedOCIRuntimeDegraded(client, infMgr, runtimeMgr)
 		}
 		slog.Warn("job execution failed", "job_id", work.JobID, "executor_kind", engine.Kind(), "error", runErr)
+		// result == nil means the engine bailed before emitting ANY receipt
+		// (streaming relay-only paths, managed-OCI nil result, native-report
+		// early returns). The hub never learns the job failed and it stays
+		// "assigned" forever. Emit a deterministic fail receipt so the hub can
+		// fail+refund. Engines that already submitted a receipt return a
+		// non-nil snapshot and are skipped to avoid double submission.
+		if result == nil {
+			submitExecutionFailureReceipt(client, work, runtimeMgr, gpuDetected, engine.Kind(), runErr)
+		}
 		if operatorRuntimeState != nil {
 			operatorRuntimeState.finishJob(work, result, runErr)
 		}
@@ -3334,8 +3355,10 @@ func isNodeModelArtifactDownloadURL(rawURL string) bool {
 }
 
 // relayStreamingFailure sends a terminal SSE error chunk to hub-orch so the
-// buyer stream exits quickly instead of hanging until server timeout.
-func relayStreamingFailure(ctx context.Context, client *hub.Client, jobID string, runErr error) {
+// buyer stream exits quickly instead of hanging until server timeout. The job
+// context is intentionally NOT used (it is usually already canceled by the
+// time we relay a failure); a fresh background context is derived below.
+func relayStreamingFailure(_ context.Context, client *hub.Client, jobID string, runErr error) {
 	if client == nil {
 		return
 	}
@@ -3365,7 +3388,12 @@ func relayStreamingFailure(ctx context.Context, client *hub.Client, jobID string
 		payloadJSON = []byte(`{"error":{"message":"streaming inference failed","type":"node_error"}}`)
 	}
 
-	relayCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// Derive from a fresh background context, NOT the job ctx: by the time we
+	// relay a failure the job runCtx is frequently already canceled/timed-out,
+	// which would make even this error relay fail on a dead context and lose
+	// the SSE error entirely (buyer stream hangs to server timeout). Mirrors
+	// the managed-OCI abort receipt path.
+	relayCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	payload := "data: " + string(payloadJSON) + "\n\n" + "data: [DONE]\n\n"
@@ -3406,6 +3434,55 @@ func submitReceiptWithRetry(ctx context.Context, client *hub.Client, receipt hub
 	finalErr := fmt.Errorf("receipt submission failed after %d attempts: %w", maxAttempts, lastErr)
 	workLoopDiagnostics.RecordReceiptSubmitEnd(time.Since(submitStarted), finalErr)
 	return finalErr
+}
+
+// submitExecutionFailureReceipt emits a deterministic FAIL receipt to the hub
+// when an execution engine returns an error WITHOUT having delivered any
+// receipt of its own (result == nil). The hub's only failure channel is
+// SubmitReceipt — there is no fail/release endpoint — so without this the job
+// stays "assigned" forever and the node looks stuck. Mirrors
+// submitNativeEMFailure: deterministic hash, exit_code=1, 0 metering units,
+// and a fresh background context so a canceled/timed-out runCtx can't swallow
+// the failure signal.
+func submitExecutionFailureReceipt(client *hub.Client, work *hub.WorkAssignment, runtimeMgr *runtimeManager, gpuDetected bool, executorKind string, runErr error) {
+	if client == nil || work == nil || strings.TrimSpace(work.JobID) == "" {
+		return
+	}
+	msg := "job execution failed"
+	if runErr != nil {
+		if s := strings.TrimSpace(runErr.Error()); s != "" {
+			msg = s
+		}
+	}
+	if len(msg) > 512 {
+		msg = msg[:512]
+	}
+	sum := sha256.Sum256([]byte(work.JobID + ":exec_failed:" + msg))
+	hash := hex.EncodeToString(sum[:])
+	var runtimeMeta map[string]any
+	if runtimeMgr != nil {
+		runtimeMeta = runtimeMgr.ReceiptMetadata(gpuDetected)
+	}
+	metadata := receiptMetadataBase(
+		work,
+		runtimeMeta,
+		map[string]any{
+			"executor":   strings.TrimSpace(executorKind),
+			"exit_code":  1,
+			"error":      msg,
+			"error_code": "execution_failed",
+		},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := submitReceiptWithRetry(ctx, client, hub.Receipt{
+		JobID:         work.JobID,
+		ResultHashHex: hash,
+		MeteringUnits: 0,
+		Metadata:      metadata,
+	}); err != nil {
+		slog.Warn("failed to submit execution failure receipt", "job_id", work.JobID, "error", err)
+	}
 }
 
 func prepareReceiptForSubmission(receipt hub.Receipt) hub.Receipt {
