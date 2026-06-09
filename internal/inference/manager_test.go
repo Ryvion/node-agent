@@ -1065,3 +1065,46 @@ func requireStringSlice(t *testing.T, got, want []string) {
 		}
 	}
 }
+
+// TestHealthLoopKeepsProbingAfterStartupDeadline pins fix #5: a slow cold load
+// (large GGUF) can become healthy AFTER the startup budget. The old healthLoop
+// returned at the deadline and never observed the late-ready server. The fix
+// sets the blocker + keeps probing, flipping healthy on the first success.
+func TestHealthLoopKeepsProbingAfterStartupDeadline(t *testing.T) {
+	t.Setenv("RYV_INFERENCE_STARTUP_TIMEOUT_SECONDS", "1") // 1s budget (minimum)
+	healthyAt := time.Now().Add(1500 * time.Millisecond)   // healthy only AFTER the deadline
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		if time.Now().Before(healthyAt) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	mgr := &Manager{
+		dataDir: t.TempDir(),
+		port:    testServerPort(t, srv.URL),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	go mgr.healthLoop(ctx)
+
+	// Before the late-ready moment, the deadline has passed: blocker is set and
+	// the manager is still unhealthy — but the loop must NOT have given up.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if mgr.Healthy() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !mgr.Healthy() {
+		t.Fatalf("manager never became healthy after a post-deadline ready signal; blocker=%q", mgr.BlockerReason())
+	}
+}

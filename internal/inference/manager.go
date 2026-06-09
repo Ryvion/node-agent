@@ -1632,6 +1632,7 @@ func (m *Manager) healthLoop(ctx context.Context) {
 	// Initial startup: wait up to resolvedStartupTimeout for first healthy response.
 	startupBudget := resolvedStartupTimeout()
 	deadline := time.After(startupBudget)
+	deadlinePassed := false
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -1640,13 +1641,23 @@ func (m *Manager) healthLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-deadline:
-			slog.Warn("llama-server failed to become healthy within timeout",
+			// Don't give up: a slow cold load (e.g. a large Nemotron GGUF) can
+			// become healthy well after the startup budget. Surface the blocker
+			// + log once, but KEEP probing until ctx is done so a model that
+			// finishes loading at t=budget+N is still observed and flipped
+			// healthy. Returning here permanently blinded us to late-ready
+			// servers (the model was up but we'd stopped looking).
+			slog.Warn("llama-server not healthy within startup budget; continuing to probe",
 				"timeout_seconds", int(startupBudget.Seconds()))
 			m.setBlockerReason(BlockerStartupTimeout)
-			return
+			deadlinePassed = true
 		case <-ticker.C:
 			if checkHealth(ctx, client, url) {
-				slog.Info("llama-server is healthy", "url", m.ServerURL())
+				if deadlinePassed {
+					slog.Info("llama-server became healthy after startup budget", "url", m.ServerURL())
+				} else {
+					slog.Info("llama-server is healthy", "url", m.ServerURL())
+				}
 				m.setHealthy(true)
 				goto monitoring
 			}
