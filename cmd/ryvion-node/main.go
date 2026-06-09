@@ -1666,6 +1666,9 @@ func workLoop(ctx context.Context, client *hub.Client, gpus, hubURL, currentVers
 		backoff = 5 * time.Second
 
 		if work == nil {
+			// No work this cycle — reset the inter-job idle timer so this
+			// empty-queue wait is not counted as GPU-idle-between-jobs.
+			workLoopDiagnostics.RecordIdleNoWork()
 			continue
 		}
 

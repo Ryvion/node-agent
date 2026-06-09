@@ -390,9 +390,21 @@ func needsNetwork(specJSON string) bool {
 	return task == "finetune"
 }
 
+// PayloadPrefetchObserver, when non-nil, is invoked once per job after its input
+// payload(s) are downloaded into the work dir, with the total wall-clock download
+// time, total bytes, and file count. The work loop wires this to diagnostics so
+// GPU-idle-on-network is visible in the operator /diagnostics endpoint. It is nil
+// by default, so the runner carries no behavioral dependency on it.
+var PayloadPrefetchObserver func(dur time.Duration, totalBytes int64, files int)
+
 // prefetchPayloadURL parses specJSON for payload_url, training_data_url, or
 // audio_url fields and downloads them into workDir so the container (which
 // runs with --network=none) can access them as local files.
+//
+// The total download time here is GPU-idle-on-network: the engine cannot start
+// until the payload is local. We time it (and report via PayloadPrefetchObserver)
+// so the prefetch-next-job pipeline decision can be made on real numbers per job
+// kind rather than guessed.
 func prefetchPayloadURL(ctx context.Context, specJSON, workDir string) error {
 	var spec map[string]any
 	if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
@@ -405,17 +417,37 @@ func prefetchPayloadURL(ctx context.Context, specJSON, workDir string) error {
 		"input_url":         "input.bin",
 		"model_url":         "model.bin",
 	}
+	prefetchStarted := time.Now()
+	var totalBytes int64
+	var fileCount int
 	for field, filename := range downloads {
 		rawURL, ok := spec[field].(string)
 		if !ok || strings.TrimSpace(rawURL) == "" {
 			continue
 		}
 		dest := filepath.Join(workDir, filename)
+		fieldStarted := time.Now()
 		if err := downloadToFile(ctx, rawURL, dest); err != nil {
 			slog.Warn("prefetch download failed", "field", field, "url", rawURL[:min(len(rawURL), 80)], "error", err)
 			continue
 		}
-		slog.Info("prefetched input file", "field", field, "dest", filename, "size", fileSize(dest))
+		sz := fileSize(dest)
+		totalBytes += sz
+		fileCount++
+		slog.Info("prefetched input file", "field", field, "dest", filename, "size", sz, "download_ms", time.Since(fieldStarted).Milliseconds())
+	}
+	if fileCount > 0 {
+		dur := time.Since(prefetchStarted)
+		mbps := 0.0
+		if secs := dur.Seconds(); secs > 0 {
+			mbps = (float64(totalBytes) * 8 / 1e6) / secs
+		}
+		slog.Info("payload prefetch complete (gpu idle on network)",
+			"files", fileCount, "total_bytes", totalBytes,
+			"duration_ms", dur.Milliseconds(), "throughput_mbps", mbps)
+		if PayloadPrefetchObserver != nil {
+			PayloadPrefetchObserver(dur, totalBytes, fileCount)
+		}
 	}
 	return nil
 }

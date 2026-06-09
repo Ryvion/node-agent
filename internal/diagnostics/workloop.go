@@ -69,6 +69,28 @@ type WorkLoopSnapshot struct {
 	ReceiptSubmittedCount          uint64          `json:"receipt_submitted_count"`
 	ReceiptFailedCount             uint64          `json:"receipt_failed_count"`
 	RecentEvents                   []WorkLoopEvent `json:"recent_events"`
+
+	// InterJobIdle* measure the GPU gap between consecutive back-to-back jobs
+	// (previous execution end -> next execution start). The timer resets on a
+	// no-work poll so empty-queue waits are NOT counted. In Ryvion this gap is
+	// small — the heavy R2 payload download happens INSIDE execution, so watch
+	// LastPayloadPrefetch* for the real GPU-idle-on-network on batch jobs.
+	InterJobIdleLastMs  int64  `json:"inter_job_idle_last_ms"`
+	InterJobIdleMaxMs   int64  `json:"inter_job_idle_max_ms"`
+	InterJobIdleMeanMs  int64  `json:"inter_job_idle_mean_ms"`
+	InterJobIdleSamples uint64 `json:"inter_job_idle_samples"`
+
+	// LastPayloadPrefetch* measure the blob/R2 payload download performed at the
+	// start of execution (payload_url/training_data_url/input_url/model_url ->
+	// /work/). This is the GPU-idle-on-network for batch/EM/training jobs and the
+	// exact quantity a prefetch-next-job pipeline would overlap with compute.
+	// Zero for resident inference (no payload to download).
+	LastPayloadPrefetchMs    int64  `json:"last_payload_prefetch_ms"`
+	LastPayloadPrefetchBytes int64  `json:"last_payload_prefetch_bytes"`
+	LastPayloadPrefetchKind  string `json:"last_payload_prefetch_kind"`
+	PayloadPrefetchMaxMs     int64  `json:"payload_prefetch_max_ms"`
+	PayloadPrefetchMeanMs    int64  `json:"payload_prefetch_mean_ms"`
+	PayloadPrefetchSamples   uint64 `json:"payload_prefetch_samples"`
 }
 
 type WorkLoopEvent struct {
@@ -92,6 +114,11 @@ type WorkLoopDiagnostics struct {
 	lastReceiptReadyKind       string
 	lastReceiptSubmitStartedAt time.Time
 	lastReceiptSubmitJobID     string
+
+	lastExecutionEndedAt time.Time
+	interJobValid        bool
+	interJobIdleSumMs    int64
+	payloadPrefetchSumMs int64
 
 	eventLimit  int
 	events      []workLoopEventRecord
@@ -206,6 +233,24 @@ func (d *WorkLoopDiagnostics) RecordExecutionStart(jobID string) {
 	now := time.Now().UTC()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// Inter-job idle: gap between the previous execution end and this start.
+	// Only counted for genuinely back-to-back jobs — interJobValid is cleared by
+	// RecordIdleNoWork when a poll returns no work, so empty-queue waits do not
+	// inflate this number.
+	if d.interJobValid && !d.lastExecutionEndedAt.IsZero() {
+		gapMs := durationMilliseconds(now.Sub(d.lastExecutionEndedAt))
+		if gapMs < 0 {
+			gapMs = 0
+		}
+		d.snapshot.InterJobIdleLastMs = gapMs
+		if gapMs > d.snapshot.InterJobIdleMaxMs {
+			d.snapshot.InterJobIdleMaxMs = gapMs
+		}
+		d.snapshot.InterJobIdleSamples++
+		d.interJobIdleSumMs += gapMs
+		d.snapshot.InterJobIdleMeanMs = d.interJobIdleSumMs / int64(d.snapshot.InterJobIdleSamples)
+	}
+	d.interJobValid = false
 	d.lastExecutionStartedAt = now
 	d.snapshot.LastExecutionStartedAt = formatWorkLoopTime(now)
 	if cleaned := cleanWorkLoopText(jobID, maxWorkLoopIDLen); cleaned != "" {
@@ -229,7 +274,48 @@ func (d *WorkLoopDiagnostics) RecordExecutionEnd(duration time.Duration, err err
 	d.snapshot.LastExecutionDurationMs = durationMilliseconds(duration)
 	d.snapshot.LastExecutionDurationUs = durationMicroseconds(duration)
 	d.snapshot.WorkCompletedCount++
+	// Arm the inter-job idle timer; the next RecordExecutionStart measures from here.
+	d.lastExecutionEndedAt = now
+	d.interJobValid = true
 	d.recordEventLocked(now, "execution_end", d.snapshot.LastWorkJobID, d.snapshot.LastWorkKind, workLoopSpecContext(d.snapshot.LastWorkSpecTask))
+}
+
+// RecordIdleNoWork marks that a poll returned no work. It invalidates the
+// inter-job idle timer so empty-queue waits between jobs are not miscounted as
+// GPU-idle-between-jobs.
+func (d *WorkLoopDiagnostics) RecordIdleNoWork() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.interJobValid = false
+}
+
+// RecordPayloadPrefetch records the wall-clock time and bytes spent downloading
+// a job's input payload(s) from blob storage at the start of execution. For
+// batch/EM/training jobs this is the dominant GPU-idle-on-network cost and the
+// quantity a prefetch-next-job pipeline would overlap with the previous job's
+// compute. files<=0 (e.g. resident inference with no payload) is ignored.
+func (d *WorkLoopDiagnostics) RecordPayloadPrefetch(dur time.Duration, totalBytes int64, files int) {
+	if d == nil || files <= 0 {
+		return
+	}
+	ms := durationMilliseconds(dur)
+	if ms < 0 {
+		ms = 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.snapshot.LastPayloadPrefetchMs = ms
+	d.snapshot.LastPayloadPrefetchBytes = totalBytes
+	d.snapshot.LastPayloadPrefetchKind = d.snapshot.LastWorkKind
+	if ms > d.snapshot.PayloadPrefetchMaxMs {
+		d.snapshot.PayloadPrefetchMaxMs = ms
+	}
+	d.snapshot.PayloadPrefetchSamples++
+	d.payloadPrefetchSumMs += ms
+	d.snapshot.PayloadPrefetchMeanMs = d.payloadPrefetchSumMs / int64(d.snapshot.PayloadPrefetchSamples)
 }
 
 func (d *WorkLoopDiagnostics) RecordReceiptBuild(duration time.Duration) {

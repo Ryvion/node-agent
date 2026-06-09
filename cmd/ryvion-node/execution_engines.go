@@ -18,6 +18,14 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/runner"
 )
 
+func init() {
+	// Surface payload-prefetch download time (GPU-idle-on-network for batch/EM/
+	// training jobs) into work-loop diagnostics. See runner.PayloadPrefetchObserver.
+	runner.PayloadPrefetchObserver = func(dur time.Duration, totalBytes int64, files int) {
+		workLoopDiagnostics.RecordPayloadPrefetch(dur, totalBytes, files)
+	}
+}
+
 type executionContext struct {
 	client         *hub.Client
 	gpus           string

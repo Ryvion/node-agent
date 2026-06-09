@@ -637,3 +637,65 @@ func mustParseWorkLoopTestTime(t *testing.T, value string) time.Time {
 	}
 	return parsed
 }
+
+func TestWorkLoopDiagnosticsInterJobIdleCountsOnlyBackToBack(t *testing.T) {
+	recorder := NewWorkLoopDiagnostics()
+
+	// Job 1: first execution — no prior end, so no gap recorded.
+	recorder.RecordExecutionStart("job-1")
+	recorder.RecordExecutionEnd(1*time.Millisecond, nil)
+
+	// Job 2 and Job 3 follow back-to-back (no empty poll between) -> 2 gaps.
+	recorder.RecordExecutionStart("job-2")
+	recorder.RecordExecutionEnd(1*time.Millisecond, nil)
+	recorder.RecordExecutionStart("job-3")
+	recorder.RecordExecutionEnd(1*time.Millisecond, nil)
+
+	if got := recorder.Snapshot().InterJobIdleSamples; got != 2 {
+		t.Fatalf("InterJobIdleSamples after back-to-back jobs = %d, want 2", got)
+	}
+
+	// An empty-queue poll must reset the timer so the following job's gap (which
+	// includes genuine idle waiting) is NOT counted as GPU-idle-between-jobs.
+	recorder.RecordIdleNoWork()
+	recorder.RecordExecutionStart("job-4")
+	recorder.RecordExecutionEnd(1*time.Millisecond, nil)
+
+	if got := recorder.Snapshot().InterJobIdleSamples; got != 2 {
+		t.Fatalf("InterJobIdleSamples after no-work reset = %d, want 2 (empty-queue wait must not count)", got)
+	}
+}
+
+func TestWorkLoopDiagnosticsPayloadPrefetchStats(t *testing.T) {
+	recorder := NewWorkLoopDiagnostics()
+	recorder.RecordWorkSeen("job-em", "em_fdtd", "fdtd_sweep")
+
+	recorder.RecordPayloadPrefetch(8000*time.Millisecond, 10<<30, 1)
+
+	snap := recorder.Snapshot()
+	if snap.LastPayloadPrefetchMs != 8000 {
+		t.Fatalf("LastPayloadPrefetchMs = %d, want 8000", snap.LastPayloadPrefetchMs)
+	}
+	if snap.LastPayloadPrefetchBytes != 10<<30 {
+		t.Fatalf("LastPayloadPrefetchBytes = %d, want %d", snap.LastPayloadPrefetchBytes, int64(10<<30))
+	}
+	if snap.LastPayloadPrefetchKind != "em_fdtd" {
+		t.Fatalf("LastPayloadPrefetchKind = %q, want em_fdtd", snap.LastPayloadPrefetchKind)
+	}
+	if snap.PayloadPrefetchSamples != 1 || snap.PayloadPrefetchMeanMs != 8000 || snap.PayloadPrefetchMaxMs != 8000 {
+		t.Fatalf("unexpected prefetch stats after first sample: %+v", snap)
+	}
+
+	// files<=0 (resident inference, no payload) must be ignored.
+	recorder.RecordPayloadPrefetch(500*time.Millisecond, 0, 0)
+	if got := recorder.Snapshot().PayloadPrefetchSamples; got != 1 {
+		t.Fatalf("PayloadPrefetchSamples after files=0 = %d, want 1 (must be ignored)", got)
+	}
+
+	// Second real sample updates mean (avg of 8000 and 2000 = 5000); max stays 8000.
+	recorder.RecordPayloadPrefetch(2000*time.Millisecond, 1<<30, 1)
+	snap = recorder.Snapshot()
+	if snap.PayloadPrefetchSamples != 2 || snap.PayloadPrefetchMeanMs != 5000 || snap.PayloadPrefetchMaxMs != 8000 {
+		t.Fatalf("unexpected prefetch stats after second sample: samples=%d mean=%d max=%d", snap.PayloadPrefetchSamples, snap.PayloadPrefetchMeanMs, snap.PayloadPrefetchMaxMs)
+	}
+}
