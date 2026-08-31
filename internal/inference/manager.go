@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 	"github.com/Ryvion/ryvion-node/internal/runtimeexec"
 )
 
@@ -345,7 +347,8 @@ func (m *Manager) ReadyNativeChatModels(vramBytes uint64) []string {
 // link.
 //
 // Selection:
-//   - default/lean: tinyllama, ryvion-llama-3.2-3b, qwen3-8b-reasoning
+//   - default/unset: no startup download
+//   - RYV_MODEL_PREWARM_MODE=lean: tinyllama, ryvion-llama-3.2-3b, qwen3-8b-reasoning
 //   - RYV_MODEL_PREWARM_MODE=all: every hardware-eligible chat model
 //   - RYV_MODEL_PREWARM_MODE=off: no startup prewarm
 //   - RYV_PREWARM_MODELS=a,b,c: exactly those supported model IDs
@@ -1285,13 +1288,13 @@ func selectPrewarmModels(supported []string, getenv func(string) string) []strin
 	switch mode {
 	case "all":
 		return sortPrewarmByPriority(supported)
-	case "off", "none", "disabled", "0", "false":
+	case "", "off", "none", "disabled", "0", "false":
 		return nil
-	case "", "default", "lean", "small":
+	case "default", "lean", "small":
 		return selectDefaultPrewarmModels(supported)
 	default:
-		slog.Warn("prewarm: unknown mode, using lean default", "mode", mode)
-		return selectDefaultPrewarmModels(supported)
+		slog.Warn("prewarm: unknown mode, leaving startup downloads disabled", "mode", mode)
+		return nil
 	}
 }
 
@@ -1839,6 +1842,32 @@ func downloadFileWithAuthAndProgress(
 		return fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
 
+	diskBudget, err := availableDownloadBudget(filepath.Dir(dst))
+	if err != nil {
+		return err
+	}
+	cachePolicy := modelpolicy.FromEnv()
+	cacheBudget, err := modelCacheDownloadBudget(dst, cachePolicy.MaxCacheBytes)
+	if err != nil {
+		return err
+	}
+	downloadBudget := diskBudget
+	budgetReason := "operator disk reserve"
+	if cacheBudget < downloadBudget {
+		downloadBudget = cacheBudget
+		budgetReason = "model cache limit"
+	}
+	if resp.ContentLength > 0 && uint64(resp.ContentLength) > downloadBudget {
+		if budgetReason == "operator disk reserve" {
+			return validateAvailableDiskSpace(diskBudget+minFreeSpaceBytes, uint64(resp.ContentLength))
+		}
+		return fmt.Errorf(
+			"model cache capacity exceeded: download is %d MiB, only %d MiB remain under RYV_MODEL_MAX_CACHE_GB",
+			uint64(resp.ContentLength)/1024/1024,
+			cacheBudget/1024/1024,
+		)
+	}
+
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
@@ -1846,13 +1875,74 @@ func downloadFileWithAuthAndProgress(
 
 	total := resp.ContentLength
 	pw := &progressWriter{dst: f, total: total, label: filepath.Base(dst), onProgress: onProgress}
-	if _, err := io.Copy(pw, resp.Body); err != nil {
+	reader := io.Reader(resp.Body)
+	limitApplied := downloadBudget < uint64(math.MaxInt64)
+	if limitApplied {
+		reader = io.LimitReader(resp.Body, int64(downloadBudget)+1)
+	}
+	written, copyErr := io.Copy(pw, reader)
+	if copyErr != nil {
 		f.Close()
+		os.Remove(tmp)
+		return copyErr
+	}
+	if limitApplied && uint64(written) > downloadBudget {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("download aborted before exceeding the %s", budgetReason)
+	}
+	if total > 0 && written != total {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("download size mismatch: got %d bytes, expected %d", written, total)
+	}
+	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	f.Close()
-	return os.Rename(tmp, dst)
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func modelCacheDownloadBudget(dst string, maxCacheBytes uint64) (uint64, error) {
+	if maxCacheBytes == 0 {
+		return 0, fmt.Errorf("model cache is disabled by RYV_MODEL_MAX_CACHE_GB")
+	}
+	root := filepath.Dir(dst)
+	tmp := filepath.Clean(dst + ".tmp")
+	var used uint64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Clean(path) == tmp {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() <= 0 {
+			return nil
+		}
+		size := uint64(info.Size())
+		if used >= maxCacheBytes || size >= maxCacheBytes-used {
+			used = maxCacheBytes
+			return nil
+		}
+		used += size
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return maxCacheBytes, nil
+		}
+		return 0, fmt.Errorf("inspect model cache usage: %w", err)
+	}
+	return maxCacheBytes - used, nil
 }
 
 func attachModelDownloadAuth(req *http.Request, url string) {

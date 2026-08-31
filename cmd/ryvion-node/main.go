@@ -895,9 +895,6 @@ func runNode(ctx context.Context) {
 		slog.Warn("failed to load runtime contract metadata, falling back to local defaults", "error", err)
 	}
 	runtimeMgr := newRuntimeManager(version, runtimeContract)
-	if err := syncManagedRuntimeFromHub(ctx, hubURL, runtimeMgr); err != nil {
-		slog.Warn("managed runtime auto-sync failed; continuing with current runtime", "error", err)
-	}
 	if err := ensureUserImageRuntimeHelper(); err != nil {
 		slog.Warn("image runtime helper bootstrap failed; local image jobs may stay unavailable", "error", err)
 	}
@@ -975,6 +972,20 @@ func runNode(ctx context.Context) {
 		slog.Info("GPU utilization cap enabled", "max_gpu_util", flagMaxGPUUtil)
 	}
 
+	// Registration and heartbeats must not wait behind package installation.
+	// Runtime provisioning belongs to the installer/repair flow; operators who
+	// explicitly enable auto-sync still get it after the node is visible to the
+	// hub, and it runs without blocking connectivity.
+	if runtimeAutoSyncEnabled() {
+		go func() {
+			if err := syncManagedRuntimeFromHub(ctx, hubURL, runtimeMgr); err != nil && ctx.Err() == nil {
+				slog.Warn("managed runtime auto-sync failed; continuing with current runtime", "error", err)
+				return
+			}
+			requestV7CapabilityHeartbeat("runtime_auto_sync_completed")
+		}()
+	}
+
 	if caps.TEESupported {
 		slog.Info("attempting TEE attestation", "tee_type", caps.TEEType)
 		if err := client.Attest(ctx, caps); err != nil {
@@ -1013,15 +1024,10 @@ func runNode(ctx context.Context) {
 	}
 	startUserImageRuntimePrewarm(ctx, caps, detectAvailableDiskGB(), strings.TrimSpace(caps.GPUModel) != "")
 
-	// Prewarm native chat-model GGUFs in the background so the *first*
-	// buyer request to Qwen3 / GPT-OSS / Gemma doesn't trigger a 5-15 min
-	// on-demand download. Sequential, non-blocking — startup continues
-	// immediately and the heartbeat begins reporting normally. As each
-	// GGUF lands it gets surfaced via the `native-model-ready:` status
-	// token so the hub can prefer warm nodes for scheduling.
-	// Opt-out: an EM-only / bandwidth-limited operator should not pull tens of GB
-	// of chat-model GGUFs it will never serve. RYV_DISABLE_MODEL_PREWARM=1 skips
-	// it entirely (models still load on-demand if an inference job ever arrives).
+	// Model prewarming is explicit opt-in. Registration and ordinary startup
+	// must never populate an operator's disk with multi-GB GGUFs. Operators can
+	// select RYV_MODEL_PREWARM_MODE=lean|all or RYV_PREWARM_MODELS=a,b; models
+	// otherwise load only when an accepted job needs them.
 	if envFlagEnabled("RYV_DISABLE_MODEL_PREWARM") {
 		slog.Info("native model prewarm disabled (RYV_DISABLE_MODEL_PREWARM=1)")
 	} else {
@@ -3992,7 +3998,7 @@ func buildHealthReport(caps hw.CapSet, infMgr *inference.Manager, runtimeMgr *ru
 	localFluxReady := publicAIReady && localFlux2KleinReady(caps, diskGB, gpuReady)
 	localFluxFastReady := localFluxReady && localFlux2KleinFastGPUEligible(caps, gpuReady)
 	localFluxPreparing := publicAIReady && localFlux2KleinHardwareEligible(caps, gpuReady) && localFlux2KleinPreparing(caps, diskGB, gpuReady)
-	localFluxPrepareEligible := publicAIReady && localFlux2KleinPrepareEligible(caps, diskGB, gpuReady)
+	localFluxPrepareEligible := publicAIReady && modelpolicy.FromEnv().AutoDownload && localFlux2KleinPrepareEligible(caps, diskGB, gpuReady)
 
 	if gpuReady {
 		parts = append(parts, "gpu-detect:ok")
@@ -4335,41 +4341,32 @@ func detectManagedOCIBackendWithProbes(gpuDetected bool, resolve func() string, 
 }
 
 func detectAvailableDiskGB() uint64 {
-	if runtime.GOOS == "windows" {
-		wmic := resolveWindowsSystemTool("wmic")
-		if wmic == "" {
-			return 0
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, wmic, "logicaldisk", "where", "DeviceID='C:'", "get", "FreeSpace", "/value").CombinedOutput()
+	paths := []string{nodeDataRoot(), imageRuntimeRoot()}
+	var minimum uint64
+	found := false
+	for _, path := range paths {
+		available, err := inference.AvailableDiskBytes(path)
 		if err != nil {
-			return 0
+			slog.Debug("disk capacity probe failed", "path", path, "error", err)
+			continue
 		}
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(strings.ToLower(line), "freespace=") {
-				continue
-			}
-			v := strings.TrimSpace(strings.TrimPrefix(line, "FreeSpace="))
-			if bytes, err := strconv.ParseUint(v, 10, 64); err == nil {
-				return bytes / (1024 * 1024 * 1024)
-			}
+		if !found || available < minimum {
+			minimum = available
 		}
-		return 0
+		found = true
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "sh", "-lc", "df -k . | tail -1 | awk '{print $4}'").CombinedOutput()
-	if err != nil {
-		return 0
+	return minimum / (1024 * 1024 * 1024)
+}
+
+func nodeDataRoot() string {
+	if root := strings.TrimSpace(os.Getenv("RYV_DATA_DIR")); root != "" {
+		return root
 	}
-	kbRaw := strings.TrimSpace(string(out))
-	kb, err := strconv.ParseUint(kbRaw, 10, 64)
-	if err != nil {
-		return 0
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "."
 	}
-	return kb / (1024 * 1024)
+	return filepath.Join(home, ".ryvion")
 }
 
 func pythonModuleAvailable(module string) bool {
@@ -4452,28 +4449,6 @@ func resolveOCIBackendCLI() string {
 		return ""
 	}
 	return backend
-}
-
-func resolveWindowsSystemTool(name string) string {
-	if p, err := exec.LookPath(name); err == nil {
-		return p
-	}
-	if runtime.GOOS != "windows" {
-		return ""
-	}
-	candidates := []string{
-		filepath.Join(os.Getenv("SystemRoot"), "System32", name+".exe"),
-		filepath.Join(os.Getenv("WINDIR"), "System32", name+".exe"),
-	}
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
-	}
-	return ""
 }
 
 func resolveDeviceType(raw string, caps hw.CapSet) string {

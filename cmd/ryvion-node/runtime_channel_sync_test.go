@@ -2,6 +2,25 @@ package main
 
 import "testing"
 
+func TestRuntimeAutoSyncRequiresExplicitOptIn(t *testing.T) {
+	for _, raw := range []string{"", "0", "false", "off"} {
+		t.Run("disabled="+raw, func(t *testing.T) {
+			t.Setenv("RYV_RUNTIME_AUTO_SYNC", raw)
+			if runtimeAutoSyncEnabled() {
+				t.Fatalf("RYV_RUNTIME_AUTO_SYNC=%q must not provision host software", raw)
+			}
+		})
+	}
+	for _, raw := range []string{"1", "true", "yes", "on"} {
+		t.Run("enabled="+raw, func(t *testing.T) {
+			t.Setenv("RYV_RUNTIME_AUTO_SYNC", raw)
+			if !runtimeAutoSyncEnabled() {
+				t.Fatalf("RYV_RUNTIME_AUTO_SYNC=%q should explicitly enable sync", raw)
+			}
+		})
+	}
+}
+
 func TestRuntimeContractFromManifestWindows(t *testing.T) {
 	t.Setenv("ProgramFiles", `C:\Program Files`)
 	manifest := runtimeChannelManifest{

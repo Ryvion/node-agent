@@ -1,7 +1,9 @@
-//go:build !linux
+//go:build !linux && !darwin && !windows
 
 package inference
 
-func checkDiskSpace(_ string) error {
-	return nil // Disk check not supported on this platform
+import "fmt"
+
+func availableDiskBytes(_ string) (uint64, error) {
+	return 0, fmt.Errorf("disk accounting is unsupported on this platform")
 }

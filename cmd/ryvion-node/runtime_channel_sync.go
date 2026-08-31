@@ -33,10 +33,10 @@ type runtimeChannelArtifact struct {
 
 func runtimeAutoSyncEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("RYV_RUNTIME_AUTO_SYNC"))) {
-	case "0", "false", "no", "off":
-		return false
-	default:
+	case "1", "true", "yes", "on", "enabled":
 		return true
+	default:
+		return false
 	}
 }
 

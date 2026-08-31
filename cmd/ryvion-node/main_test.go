@@ -1178,8 +1178,8 @@ func TestPublicAIOptInEnabled(t *testing.T) {
 	}()
 
 	t.Setenv("RYV_PUBLIC_AI", "")
-	if !publicAIOptInEnabled() {
-		t.Fatal("expected legacy missing public AI preference to preserve default-on participation")
+	if publicAIOptInEnabled() {
+		t.Fatal("registration must not opt a new node into public workloads")
 	}
 
 	t.Setenv("RYV_PUBLIC_AI", "1")
@@ -1260,7 +1260,7 @@ func TestResolveInitialPublicAIOptInUsesSavedPreferences(t *testing.T) {
 	}
 }
 
-func TestResolveInitialPublicAIOptInTreatsLegacySavedFalseAsDefaultOn(t *testing.T) {
+func TestResolveInitialPublicAIOptInHonorsSavedFalse(t *testing.T) {
 	prevResolver := operatorConfigPathResolver
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	operatorConfigPathResolver = func() (string, error) {
@@ -1279,8 +1279,8 @@ func TestResolveInitialPublicAIOptInTreatsLegacySavedFalseAsDefaultOn(t *testing
 	if err != nil {
 		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
 	}
-	if !got {
-		t.Fatal("expected legacy saved false without opt-out marker to default public AI on")
+	if got {
+		t.Fatal("saved false must keep public AI workloads disabled")
 	}
 }
 
@@ -1332,7 +1332,7 @@ func TestResolveInitialPublicAIOptInPrefersEnvOverride(t *testing.T) {
 	}
 }
 
-func TestResolveInitialPublicAIOptInDefaultOnWithNoConfig(t *testing.T) {
+func TestResolveInitialPublicAIOptInDefaultOffWithNoConfig(t *testing.T) {
 	prevResolver := operatorConfigPathResolver
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	operatorConfigPathResolver = func() (string, error) {
@@ -1347,8 +1347,8 @@ func TestResolveInitialPublicAIOptInDefaultOnWithNoConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
 	}
-	if !got {
-		t.Fatal("expected default-on opt-in when no config and no env override is set")
+	if got {
+		t.Fatal("new nodes must remain resource-neutral until the operator opts in")
 	}
 }
 
@@ -1570,7 +1570,7 @@ func TestRuntimeManagerPrefersManagedRuntimeWrapperStatus(t *testing.T) {
 	}
 }
 
-func TestResolveInitialPublicAIOptInAutoEnablesWhenOCIDisabled(t *testing.T) {
+func TestResolveInitialPublicAIOptInStaysOffWhenOCIDisabled(t *testing.T) {
 	prevResolver := operatorConfigPathResolver
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	operatorConfigPathResolver = func() (string, error) { return configPath, nil }
@@ -1583,8 +1583,8 @@ func TestResolveInitialPublicAIOptInAutoEnablesWhenOCIDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveInitialPublicAIOptIn() error = %v", err)
 	}
-	if !got {
-		t.Fatal("expected disabled OCI lane to auto-opt the node into public AI streaming work")
+	if got {
+		t.Fatal("disabling OCI must not silently opt the node into public AI work")
 	}
 }
 

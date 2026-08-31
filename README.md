@@ -16,10 +16,13 @@ chmod +x ryvion-node
 ```
 
 The node will:
-1. Generate an Ed25519 keypair (stored in `~/.ryvion/node.key`)
+1. Generate an Ed25519 keypair (stored in `~/.ryvion/node-key`)
 2. Register with the hub and begin sending heartbeats
-3. Poll for jobs and execute them through the managed OCI runtime
-4. Submit signed receipts for completed work
+3. Report detected hardware without installing runtimes or downloading models
+4. Poll for explicitly enabled workload classes and submit signed receipts
+
+Fresh nodes are resource-neutral: public AI work, runtime auto-sync, model
+downloads, and model prewarming are disabled until the operator enables them.
 
 ## Requirements
 
@@ -37,8 +40,8 @@ All configuration is via flags or environment variables:
 | `-device` | `RYV_DEVICE_TYPE` | auto-detected | Device type: `gpu`, `cpu`, `mobile`, `iot` |
 | `-gpus` | `RYV_GPUS` | auto-detected | GPU configuration |
 | `-country` | `RYV_DECLARED_COUNTRY` | — | ISO country code for jurisdiction routing |
-| `-key` | `RYV_KEY_PATH` | `~/.ryvion/node.key` | Path to Ed25519 node key |
-| `-data` | `RYV_DATA_DIR` | `~/.ryvion/data` | Working directory for job artifacts |
+| — | `RYV_KEY_PATH` | `~/.ryvion/node-key` | Path to Ed25519 node key |
+| — | `RYV_DATA_DIR` | `~/.ryvion` | Ryvion-owned binaries and native model data |
 | `-bind-token` | `RYV_BIND_TOKEN` | — | Token to bind node to a specific account |
 | `-ui-port` | `RYV_UI_PORT` | `0` | Local status UI port (0 = disabled) |
 | — | `RYV_CONTAINER_CPUS` | — | CPU limit for containers |
@@ -46,6 +49,16 @@ All configuration is via flags or environment variables:
 | — | `RYV_JOB_TIMEOUT` | `10m` | Maximum job execution time |
 | — | `RYV_MAX_GPU_UTIL` | — | GPU utilization threshold |
 | — | `RYV_LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| — | `RYV_PUBLIC_AI` | `0` | Explicitly allow buyer-facing AI workloads |
+| — | `RYV_RUNTIME_AUTO_SYNC` | `0` | Explicitly allow background managed-runtime repair/update after registration |
+| — | `RYV_MODEL_AUTO_DOWNLOAD` | `0` | Explicitly allow hub-requested large model preparation |
+| — | `RYV_MODEL_PREWARM_MODE` | `off` | Startup model prewarm: `off`, `lean`, or `all` |
+| — | `RYV_PREWARM_MODELS` | — | Explicit comma-separated model IDs to prewarm |
+| — | `RYV_MODEL_MAX_CACHE_GB` | `50` | Maximum native managed model-cache size |
+
+Native downloads preserve at least 10 GiB of free disk on Linux, macOS, and
+Windows. The configured cache limit does not enable hub-requested automatic
+downloads; those still require `RYV_MODEL_AUTO_DOWNLOAD=1`.
 
 ## Building from source
 

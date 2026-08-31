@@ -147,6 +147,7 @@ func TestWorldGridRoleStatusTokensAdvertiseOnlySafeAsyncAndCellBoundaries(t *tes
 
 func TestBuildHealthReportDoesNotAdvertiseLocalFluxUntilCacheReady(t *testing.T) {
 	t.Setenv("RYV_PUBLIC_AI", "1")
+	t.Setenv("RYV_MODEL_AUTO_DOWNLOAD", "1")
 	t.Setenv("RYV_DISABLE_OCI", "1")
 	t.Setenv("RYV_ENABLE_RUNTIME_FIXTURES", "0")
 	root := t.TempDir()
@@ -198,6 +199,33 @@ func TestBuildHealthReportDoesNotAdvertiseLocalFluxUntilCacheReady(t *testing.T)
 		if !strings.Contains(report.Message, want) {
 			t.Fatalf("prepared model cache should contain %q, got %s", want, report.Message)
 		}
+	}
+}
+
+func TestBuildHealthReportDoesNotAuthorizeLargeModelPrepareByDefault(t *testing.T) {
+	t.Setenv("RYV_PUBLIC_AI", "1")
+	t.Setenv("RYV_MODEL_AUTO_DOWNLOAD", "")
+	t.Setenv("RYV_DISABLE_OCI", "1")
+	t.Setenv("RYV_ENABLE_RUNTIME_FIXTURES", "0")
+	root := t.TempDir()
+	t.Setenv("RYVION_IMAGE_RUNTIME_ROOT", root)
+	helper := filepath.Join(root, "ryvion-image-runtime")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RYV_FLUX2_HELPER", helper)
+	if disk := detectAvailableDiskGB(); disk < flux2Klein4BMinDiskGB {
+		t.Skipf("host test disk below local FLUX readiness threshold: %dGB", disk)
+	}
+
+	report := buildHealthReport(hw.CapSet{
+		GPUModel:  "RTX 4070 Ti Super",
+		VRAMBytes: 16 * 1024 * 1024 * 1024,
+		CPUCores:  16,
+		RAMBytes:  32 * 1024 * 1024 * 1024,
+	}, nil, newRuntimeManager("test", runtimeContractMetadata{}))
+	if strings.Contains(report.Message, "runtime:image:flux-2-klein-4b-local:eligible:1") {
+		t.Fatalf("node must not authorize an automatic multi-GB prepare job, got %s", report.Message)
 	}
 }
 

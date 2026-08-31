@@ -811,6 +811,26 @@ func TestDownloadModelFileRemovesCorruptOnDiskGGUF(t *testing.T) {
 	}
 }
 
+func TestModelCacheDownloadBudgetCountsExistingModels(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "installed.gguf"), []byte("123456"), 0o600); err != nil {
+		t.Fatalf("seed model cache: %v", err)
+	}
+	// A stale partial for this destination is truncated by the next transfer,
+	// so it must not be counted a second time against the cache quota.
+	dst := filepath.Join(cacheDir, "pending.gguf")
+	if err := os.WriteFile(dst+".tmp", []byte("stale"), 0o600); err != nil {
+		t.Fatalf("seed partial download: %v", err)
+	}
+	budget, err := modelCacheDownloadBudget(dst, 10)
+	if err != nil {
+		t.Fatalf("calculate model cache budget: %v", err)
+	}
+	if budget != 4 {
+		t.Fatalf("model cache budget = %d, want 4", budget)
+	}
+}
+
 func TestDownloadModelFileStripsNodeTokenOnRedirect(t *testing.T) {
 	t.Parallel()
 
@@ -974,7 +994,7 @@ func TestSortPrewarmByPriority(t *testing.T) {
 	}
 }
 
-func TestSelectPrewarmModelsDefaultLeanSkipsHugeModels(t *testing.T) {
+func TestSelectPrewarmModelsDefaultDoesNotDownload(t *testing.T) {
 	supported := []string{
 		"gemma-4-26b-a4b-it",
 		"gpt-oss-20b",
@@ -985,6 +1005,24 @@ func TestSelectPrewarmModelsDefaultLeanSkipsHugeModels(t *testing.T) {
 		"tinyllama",
 	}
 	got := selectPrewarmModels(supported, prewarmTestEnv(nil))
+	if len(got) != 0 {
+		t.Fatalf("registration/startup must not prewarm models by default, got %v", got)
+	}
+}
+
+func TestSelectPrewarmModelsExplicitLeanSkipsHugeModels(t *testing.T) {
+	supported := []string{
+		"gemma-4-26b-a4b-it",
+		"gpt-oss-20b",
+		"nemotron-3-nano-omni-30b-a3b",
+		"phi-4",
+		"qwen3-8b-reasoning",
+		"ryvion-llama-3.2-3b",
+		"tinyllama",
+	}
+	got := selectPrewarmModels(supported, prewarmTestEnv(map[string]string{
+		"RYV_MODEL_PREWARM_MODE": "lean",
+	}))
 	want := []string{"tinyllama", "ryvion-llama-3.2-3b", "qwen3-8b-reasoning"}
 	requireStringSlice(t, got, want)
 }

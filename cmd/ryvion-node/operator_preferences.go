@@ -198,41 +198,23 @@ func loadOperatorEnergyPolicy() operatorEnergyPolicy {
 }
 
 func resolveInitialPublicAIOptIn() (bool, error) {
-	// Default is opt-in: nodes advertise public-inference-ready unless the
-	// operator explicitly opts out via env var or operator API. Fail-open so
-	// new GPU nodes start earning streaming work without a second toggle.
-	// Only an explicit "0"/"false"/"no"/"off" via env var or
-	// public_ai_opt_out marker in the saved config disables participation.
+	// Public workloads can download models and consume CPU, GPU, memory, and
+	// disk. Participation therefore requires an explicit operator decision;
+	// merely registering a node must remain resource-neutral.
 	if raw := strings.TrimSpace(os.Getenv("RYV_PUBLIC_AI")); raw != "" {
 		return parsePublicAIOptIn(raw), nil
 	}
 	prefs, err := loadOperatorPreferences()
 	if err != nil {
-		// Default-on even when preferences fail to load: operator can still
-		// opt out via env var or operator API once the config is repaired.
-		return true, err
+		return false, err
 	}
 	if prefs.PublicAIOptOutSet && prefs.PublicAIOptOut {
 		return false, nil
 	}
-	// Saved public_ai_opt_in:true keeps explicit opt-ins working. Saved
-	// public_ai_opt_in:false from legacy installers is treated as unset —
-	// only the explicit public_ai_opt_out marker above can disable.
-	if prefs.PublicAIOptIn {
-		return true, nil
+	if prefs.PublicAIOptInSet {
+		return prefs.PublicAIOptIn, nil
 	}
-	// Default-on for any remaining state (no saved preferences, RYV_DISABLE_OCI
-	// set, or only legacy public_ai_opt_in:false present). The operator can
-	// still toggle off via the operator API.
-	_ = ociLaneDisabledFromEnv()
-	return true, nil
-}
-
-// ociLaneDisabledFromEnv mirrors the logic in runtime_manager.go without
-// importing it here (operator_preferences.go is loaded before the runtime
-// manager is constructed).
-func ociLaneDisabledFromEnv() bool {
-	return ociLaneDisabled()
+	return false, nil
 }
 
 func resolveInitialDeclaredCountry(flagValue string) (string, error) {

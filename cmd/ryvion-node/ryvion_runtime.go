@@ -21,6 +21,7 @@ import (
 	"github.com/Ryvion/ryvion-node/internal/blob"
 	"github.com/Ryvion/ryvion-node/internal/hub"
 	"github.com/Ryvion/ryvion-node/internal/hw"
+	modelpolicy "github.com/Ryvion/ryvion-node/internal/models/policy"
 )
 
 const (
@@ -576,7 +577,7 @@ func ensureUserImageRuntimeHelper() error {
 }
 
 func startUserImageRuntimePrewarm(ctx context.Context, caps hw.CapSet, diskGB uint64, gpuReady bool) {
-	if !publicAIOptInEnabled() {
+	if !publicAIOptInEnabled() || !modelpolicy.FromEnv().AutoDownload {
 		return
 	}
 	// Operator-side speculative prewarm cannot use the hub's platform artifact
